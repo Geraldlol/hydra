@@ -1,0 +1,498 @@
+{
+  "name": "vscode-hydra-room",
+  "displayName": "Hydra",
+  "description": "Three-way collaboration room for the user, Codex CLI, and Claude Code CLI inside VS Code.",
+  "version": "0.4.9",
+  "publisher": "local-tools",
+  "license": "MIT",
+  "private": false,
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/src/extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "hydraRoom.start", "title": "Hydra: Start" },
+      { "command": "hydraRoom.open", "title": "Hydra: Open Room" },
+      { "command": "hydraRoom.askBoth", "title": "Hydra: Send Message" },
+      { "command": "hydraRoom.assignBuilder", "title": "Hydra: Assign Builder" },
+      { "command": "hydraRoom.requestReview", "title": "Hydra: Request Review" },
+      { "command": "hydraRoom.runVerification", "title": "Hydra: Run Verification" },
+      { "command": "hydraRoom.openVerification", "title": "Hydra: Open Verification Log" },
+      { "command": "hydraRoom.previewNextPrompt", "title": "Hydra: Preview Next Prompt" },
+      { "command": "hydraRoom.openLastPrompt", "title": "Hydra: Open Last Prompt" },
+      { "command": "hydraRoom.acceptDefaultDecision", "title": "Hydra: Accept Default Decision" },
+      { "command": "hydraRoom.commandCenter", "title": "Hydra: Command Center" },
+      { "command": "hydraRoom.stop", "title": "Hydra: Stop Current Turn" },
+      { "command": "hydraRoom.openTranscript", "title": "Hydra: Open Transcript" },
+      { "command": "hydraRoom.archiveAndClearRoom", "title": "Hydra: Archive and Clear Room" },
+      { "command": "hydraRoom.openDecisions", "title": "Hydra: Open Decisions" },
+      { "command": "hydraRoom.openSessionBrief", "title": "Hydra: Open Session Brief" },
+      { "command": "hydraRoom.openSupportBundle", "title": "Hydra: Open Support Bundle" },
+      { "command": "hydraRoom.captureNativeCapabilities", "title": "Hydra: Capture Native Capabilities" },
+      { "command": "hydraRoom.captureNativeDataSnapshot", "title": "Hydra: Capture Native Data Snapshot" },
+      { "command": "hydraRoom.nativeAction", "title": "Hydra: Native Action" },
+      { "command": "hydraRoom.openNativeActions", "title": "Hydra: Open Native Action Log" },
+      { "command": "hydraRoom.openAgentCalls", "title": "Hydra: Open Agent Call Log" },
+      { "command": "hydraRoom.openObjective", "title": "Hydra: Open Room Objective" },
+      { "command": "hydraRoom.openNativeTerminals", "title": "Hydra: Advanced: Open Native Terminals" },
+      { "command": "hydraRoom.pokeCodexTerminal", "title": "Hydra: Poke Codex Terminal" },
+      { "command": "hydraRoom.runCodexCommand", "title": "Hydra: Run Codex Native Command" },
+      { "command": "hydraRoom.sendCodexRawTerminalLine", "title": "Hydra: Send Codex Raw Terminal Line" },
+      { "command": "hydraRoom.pokeCodexTerminalWithEditor", "title": "Hydra: Poke Codex With Editor Context" },
+      { "command": "hydraRoom.pokeCodexTerminalWithDiff", "title": "Hydra: Poke Codex With Working Tree" },
+      { "command": "hydraRoom.pokeClaudeTerminal", "title": "Hydra: Poke Claude Terminal" },
+      { "command": "hydraRoom.runClaudeCommand", "title": "Hydra: Run Claude Native Command" },
+      { "command": "hydraRoom.sendClaudeRawTerminalLine", "title": "Hydra: Send Claude Raw Terminal Line" },
+      { "command": "hydraRoom.pokeClaudeTerminalWithEditor", "title": "Hydra: Poke Claude With Editor Context" },
+      { "command": "hydraRoom.pokeClaudeTerminalWithDiff", "title": "Hydra: Poke Claude With Working Tree" },
+      { "command": "hydraRoom.pokeBothTerminals", "title": "Hydra: Poke Both Native Terminals" },
+      { "command": "hydraRoom.pokeBothTerminalsWithEditor", "title": "Hydra: Poke Both With Editor Context" },
+      { "command": "hydraRoom.pokeBothTerminalsWithDiff", "title": "Hydra: Poke Both With Working Tree" },
+      { "command": "hydraRoom.useTerminalBridge", "title": "Hydra: Advanced: Use Experimental Terminal Bridge" },
+      { "command": "hydraRoom.runTerminalBridgeSelfTest", "title": "Hydra: Advanced: Run Terminal Bridge Self-Test" },
+      { "command": "hydraRoom.showEffectiveAuthority", "title": "Hydra: Show Effective Native Authority" },
+      { "command": "hydraRoom.showTerminalBridgeHealth", "title": "Hydra: Advanced: Show Terminal Bridge Health" },
+      { "command": "hydraRoom.runDoctor", "title": "Hydra: Run Doctor" },
+      { "command": "hydraRoom.autopilotStart", "title": "Hydra: Autopilot Start" },
+      { "command": "hydraRoom.fixCodexPath", "title": "Hydra: Setup: Fix Codex CLI Path" },
+      { "command": "hydraRoom.fixClaudePath", "title": "Hydra: Setup: Fix Claude CLI Path" },
+      { "command": "hydraRoom.resetStuckTurn", "title": "Hydra: Advanced: Reset Stuck Turn" },
+      { "command": "hydraRoom.useOneShotTransport", "title": "Hydra: Advanced: Use Safe One-Shot Transport" },
+      { "command": "hydraRoom.insertPromptTemplate", "title": "Hydra: Insert Prompt Template" },
+      { "command": "hydraRoom.chooseModel", "title": "Hydra: Choose Model" },
+      { "command": "hydraRoom.changeCapabilityProfile", "title": "Hydra: Change Capability Profile" },
+      { "command": "hydraRoom.refreshCodexModels", "title": "Hydra: Refresh Codex Models" },
+      { "command": "hydraRoom.chooseEffort", "title": "Hydra: Choose Thinking Level" },
+      { "command": "hydraRoom.testTelegram", "title": "Hydra: Send Test Telegram Message" }
+    ],
+    "keybindings": [
+      { "command": "hydraRoom.stop", "key": "ctrl+alt+x", "mac": "cmd+alt+x" },
+      { "command": "hydraRoom.acceptDefaultDecision", "key": "ctrl+alt+a", "mac": "cmd+alt+a" },
+      { "command": "hydraRoom.assignBuilder", "key": "ctrl+alt+b", "mac": "cmd+alt+b" },
+      { "command": "hydraRoom.requestReview", "key": "ctrl+alt+r", "mac": "cmd+alt+r" },
+      { "command": "hydraRoom.commandCenter", "key": "ctrl+alt+h", "mac": "cmd+alt+h" },
+      { "command": "hydraRoom.insertPromptTemplate", "key": "ctrl+alt+t", "mac": "cmd+alt+t" },
+      { "command": "hydraRoom.chooseModel", "key": "ctrl+alt+m", "mac": "cmd+alt+m" },
+      { "command": "hydraRoom.chooseEffort", "key": "ctrl+alt+e", "mac": "cmd+alt+e" }
+    ],
+    "configuration": {
+      "title": "Hydra Room",
+      "properties": {
+        "hydraRoom.transcriptPath": {
+          "type": "string",
+          "default": ".hydra/transcript.md",
+          "markdownDescription": "Workspace-relative or absolute path where Hydra writes the Markdown transcript."
+        },
+        "hydraRoom.workspaceRoot": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Advanced fallback project root for Extension Development Host sessions without an open VS Code workspace. Normal users should leave this blank and open a folder in VS Code."
+        },
+        "hydraRoom.codexCommand": {
+          "type": "string",
+          "default": "codex",
+          "markdownDescription": "Executable name or wrapper script for the OpenAI Codex CLI."
+        },
+        "hydraRoom.codexExecArgsDiscussion": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["exec", "--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true", "--color", "never", "--cd", "${workspaceFolder}", "-"],
+          "markdownDescription": "Raw Codex CLI args for serialized discussion turns. `${workspaceFolder}` is expanded; the trailing `-` reads the Hydra prompt from stdin. Hydra also expands `${hydraPromptFile}`, `${hydraReplyFile}`, and `${hydraLogFile}` per request so native file/output flags can target Hydra artifacts."
+        },
+        "hydraRoom.codexExecArgsBuild": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["exec", "--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true", "--color", "never", "--cd", "${workspaceFolder}", "-"],
+          "markdownDescription": "Raw Codex CLI args for Build. Defaults to workspace-write `codex exec`; add native flags such as config profiles, model, search, MCP/plugin-related config, sandbox changes, or Hydra request-file placeholders here."
+        },
+        "hydraRoom.codexExecArgsReview": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["review", "--uncommitted", "-"],
+          "markdownDescription": "Raw Codex CLI args for Review. Defaults to Codex's native review command over staged, unstaged, and untracked changes. Hydra does not downgrade these args by phase and expands Hydra request-file placeholders."
+        },
+        "hydraRoom.codexDiscussionProfile": {
+          "type": "string",
+          "enum": ["safeDiscussion", "nativeDiscussion", "nativeBuild", "nativeReview", "fullNative", "custom"],
+          "default": "custom",
+          "markdownDescription": "Capability profile for Codex discussion turns. `custom` preserves `hydraRoom.codexExecArgsDiscussion`."
+        },
+        "hydraRoom.codexBuildProfile": {
+          "type": "string",
+          "enum": ["safeDiscussion", "nativeDiscussion", "nativeBuild", "nativeReview", "fullNative", "custom"],
+          "default": "custom",
+          "markdownDescription": "Capability profile for Codex Build turns. `custom` preserves `hydraRoom.codexExecArgsBuild`."
+        },
+        "hydraRoom.codexReviewProfile": {
+          "type": "string",
+          "enum": ["safeDiscussion", "nativeDiscussion", "nativeBuild", "nativeReview", "fullNative", "custom"],
+          "default": "custom",
+          "markdownDescription": "Capability profile for Codex Review turns. `custom` preserves `hydraRoom.codexExecArgsReview`."
+        },
+        "hydraRoom.codexCaptureLastMessage": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "When dispatching `codex exec`, automatically add Codex's native `--output-last-message` file capture and use that final answer in the room. This keeps stderr/plugin noise out of Hydra replies while preserving full diagnostics in `.hydra/agent-calls.jsonl`. Superseded by `hydraRoom.codexJson` when enabled (the JSON stream already carries the final agent message)."
+        },
+        "hydraRoom.codexJson": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "When dispatching `codex exec`, automatically request the typed event stream via `--json`, parse it through Hydra's `codexEvents` module, and use the final `agent_message` item as the reply in the room. Structured tool-call / command-execution / file-change events are summarized in `.hydra/agent-calls.jsonl`. Supersedes `hydraRoom.codexCaptureLastMessage` when both are enabled. Defaults to `false` while the surrounding Hydra UX for parsed Codex events stabilizes."
+        },
+        "hydraRoom.claudeCommand": {
+          "type": "string",
+          "default": "claude",
+          "markdownDescription": "Executable name or wrapper script for the Claude Code CLI."
+        },
+        "hydraRoom.claudeExecArgsDiscussion": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["-p", "--permission-mode", "acceptEdits", "--add-dir", "${workspaceFolder}"],
+          "markdownDescription": "Raw Claude Code CLI args for serialized discussion turns. `${workspaceFolder}` is expanded. Hydra also expands `${hydraPromptFile}`, `${hydraReplyFile}`, and `${hydraLogFile}` per request so native file/output flags can target Hydra artifacts."
+        },
+        "hydraRoom.claudeExecArgsBuild": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["-p", "--permission-mode", "acceptEdits", "--add-dir", "${workspaceFolder}"],
+          "markdownDescription": "Raw Claude Code CLI args for Build. Defaults to print mode with edit-accepting permissions; add native flags such as --ide, --tools, --mcp-config, --plugin-dir, --agent, --settings, model, effort, or Hydra request-file placeholders here."
+        },
+        "hydraRoom.claudeExecArgsReview": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["-p", "--permission-mode", "acceptEdits", "--add-dir", "${workspaceFolder}"],
+          "markdownDescription": "Raw Claude Code CLI args for Review. Add native review/tool/MCP/plugin/model flags here. Hydra does not downgrade these args by phase and expands Hydra request-file placeholders."
+        },
+        "hydraRoom.claudeDiscussionProfile": {
+          "type": "string",
+          "enum": ["safeDiscussion", "nativeDiscussion", "nativeBuild", "nativeReview", "fullNative", "custom"],
+          "default": "custom",
+          "markdownDescription": "Capability profile for Claude discussion turns. `custom` preserves `hydraRoom.claudeExecArgsDiscussion`."
+        },
+        "hydraRoom.claudeBuildProfile": {
+          "type": "string",
+          "enum": ["safeDiscussion", "nativeDiscussion", "nativeBuild", "nativeReview", "fullNative", "custom"],
+          "default": "custom",
+          "markdownDescription": "Capability profile for Claude Build turns. `custom` preserves `hydraRoom.claudeExecArgsBuild`."
+        },
+        "hydraRoom.claudeReviewProfile": {
+          "type": "string",
+          "enum": ["safeDiscussion", "nativeDiscussion", "nativeBuild", "nativeReview", "fullNative", "custom"],
+          "default": "custom",
+          "markdownDescription": "Capability profile for Claude Review turns. `custom` preserves `hydraRoom.claudeExecArgsReview`."
+        },
+        "hydraRoom.claudeStreamJson": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "When dispatching Claude print mode without an explicit output format, automatically request `--output-format stream-json --verbose`, parse the final assistant text for the room, and keep structured tool-event output in `.hydra/agent-calls.jsonl`."
+        },
+        "hydraRoom.claudeStreamJsonIncludePartialMessages": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "When `hydraRoom.claudeStreamJson` is enabled, also request Claude's partial message stream so Hydra can summarize tool-use and task lifecycle events in `.hydra/agent-calls.jsonl`."
+        },
+        "hydraRoom.claudeDebugFile": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "When `hydraRoom.claudeStreamJson` is enabled, pass Claude `--debug-file ${hydraLogFile}` so raw native debug output is captured in the per-request Hydra log artifact."
+        },
+        "hydraRoom.nativePathPrepend": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "markdownDescription": "Directories prepended to PATH/Path for every native Codex and Claude dispatch, in both one-shot and terminal-bridge transports. Supports `${workspaceFolder}` and `${env:NAME}` placeholders."
+        },
+        "hydraRoom.nativeEnv": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": { "type": "string" },
+          "markdownDescription": "Environment variables applied to every native Codex and Claude dispatch, in both one-shot and terminal-bridge transports. Values support `${workspaceFolder}` and `${env:NAME}` placeholders."
+        },
+        "hydraRoom.codexNativePathPrepend": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "markdownDescription": "Codex-only directories appended after `hydraRoom.nativePathPrepend` when constructing PATH/Path for native Codex dispatches. Supports `${workspaceFolder}` and `${env:NAME}` placeholders."
+        },
+        "hydraRoom.codexNativeEnv": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": { "type": "string" },
+          "markdownDescription": "Codex-only environment variables layered over `hydraRoom.nativeEnv` for native Codex dispatches. Values support `${workspaceFolder}` and `${env:NAME}` placeholders."
+        },
+        "hydraRoom.claudeNativePathPrepend": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "markdownDescription": "Claude-only directories appended after `hydraRoom.nativePathPrepend` when constructing PATH/Path for native Claude dispatches. Supports `${workspaceFolder}` and `${env:NAME}` placeholders."
+        },
+        "hydraRoom.claudeNativeEnv": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": { "type": "string" },
+          "markdownDescription": "Claude-only environment variables layered over `hydraRoom.nativeEnv` for native Claude dispatches. Values support `${workspaceFolder}` and `${env:NAME}` placeholders."
+        },
+        "hydraRoom.transport": {
+          "type": "string",
+          "enum": ["oneShot", "terminalBridge"],
+          "default": "oneShot",
+          "markdownDescription": "Deprecated. Hydra transport is session-only and always starts in safe one-shot mode. Use the in-room advanced button or commands to temporarily enable the experimental terminal bridge."
+        },
+        "hydraRoom.autopilotOnStart": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Run Hydra Autopilot when the room opens: Doctor checks, terminal bridge self-test, and automatic transport selection."
+        },
+        "hydraRoom.preferTerminalBridgeOnStart": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "When Autopilot passes the terminal bridge self-test, automatically use the visible native terminal bridge instead of safe one-shot transport."
+        },
+        "hydraRoom.codexTerminalCommand": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Optional startup command sent once when Hydra opens the Codex terminal. Leave blank for command-dispatch mode. `${workspaceFolder}` is expanded."
+        },
+        "hydraRoom.claudeTerminalCommand": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Optional startup command sent once when Hydra opens the Claude terminal. Leave blank for command-dispatch mode. `${workspaceFolder}` is expanded."
+        },
+        "hydraRoom.terminalStartupDelayMs": {
+          "type": "number",
+          "default": 2500,
+          "minimum": 0,
+          "markdownDescription": "Delay after starting a persistent native terminal before Hydra injects the first request."
+        },
+        "hydraRoom.terminalReplyPollMs": {
+          "type": "number",
+          "default": 500,
+          "minimum": 100,
+          "markdownDescription": "Polling interval for `.hydra/replies/*.json` when using `terminalBridge` transport."
+        },
+        "hydraRoom.terminalBridgeTimeoutMs": {
+          "type": "number",
+          "default": 45000,
+          "minimum": 5000,
+          "markdownDescription": "Maximum time to wait for terminal bridge self-tests and setup checks. Normal agent calls use the Discussion or Build/Review timeout settings."
+        },
+        "hydraRoom.contextFreshnessMs": {
+          "type": "number",
+          "default": 86400000,
+          "minimum": 0,
+          "markdownDescription": "Maximum age of transcript messages Hydra injects into agent prompts. Defaults to 24 hours; set to 0 to disable age filtering. Full history remains on disk."
+        },
+        "hydraRoom.oneShotContextTurns": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "markdownDescription": "Number of previous user turns to include in safe one-shot prompts, after freshness filtering. The current turn is always included."
+        },
+        "hydraRoom.terminalBridgeContextTurns": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "markdownDescription": "Number of previous user turns to include when injecting into visible native terminals. Defaults to 0 so terminal bridge requests behave like fresh pokes into each native CLI."
+        },
+        "hydraRoom.editorContextMaxChars": {
+          "type": "number",
+          "default": 12000,
+          "minimum": 1000,
+          "markdownDescription": "Maximum characters from the active editor selection or file attached to direct native terminal pokes."
+        },
+        "hydraRoom.firstSpeaker": {
+          "type": "string",
+          "enum": ["codex", "claude"],
+          "default": "codex",
+          "markdownDescription": "Default opener for serialized discussion turns. The webview can flip this per turn without changing the setting."
+        },
+        "hydraRoom.oneShotTimeoutMs": {
+          "type": "number",
+          "default": 600000,
+          "minimum": 1000,
+          "markdownDescription": "Maximum runtime per Build or Review agent call in milliseconds."
+        },
+        "hydraRoom.discussionTimeoutMs": {
+          "type": "number",
+          "default": 600000,
+          "minimum": 1000,
+          "markdownDescription": "Maximum runtime per Discussion opener, reactor, or closer call in milliseconds. Defaults to 10 minutes so high-reasoning agent turns have room to finish; use Stop Current Turn to cancel earlier."
+        },
+        "hydraRoom.diffMaxLines": {
+          "type": "number",
+          "default": 6000,
+          "minimum": 100,
+          "markdownDescription": "Soft cap for `git diff` output before truncation in the Review prompt."
+        },
+        "hydraRoom.verifyCommand": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Shell command Hydra runs for one-click verification. Leave blank to infer from package.json scripts: check+test, test, check, then lint."
+        },
+        "hydraRoom.verifyTimeoutMs": {
+          "type": "number",
+          "default": 600000,
+          "minimum": 1000,
+          "markdownDescription": "Maximum runtime for Hydra verification commands in milliseconds."
+        },
+        "hydraRoom.verifyMaxOutputChars": {
+          "type": "number",
+          "default": 12000,
+          "minimum": 1000,
+          "markdownDescription": "Maximum stdout/stderr characters retained from each verification run."
+        },
+        "hydraRoom.autoVerifyAfterBuild": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Automatically run Hydra verification after a successful Build phase."
+        },
+        "hydraRoom.autoAdvanceActionableDefaults": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Automatically execute actionable Decision Packet defaults when they have no blockers and require no user decision. For example, a discussion default that names a builder enters Build without requiring the user to click Accept Default."
+        },
+        "hydraRoom.autoAdvanceSendInstructionMaxConsecutive": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "markdownDescription": "Maximum number of consecutive auto-advanced send-instruction turns before Hydra pauses and waits for Accept Default. Prevents runaway discussion loops when agents keep emitting non-blocking free-form defaults. Phase-changing auto-advances (assign builder, request review, hand back) reset the counter."
+        },
+        "hydraRoom.sessionCostCapUsd": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "markdownDescription": "If greater than 0, Hydra pauses auto-advance once the session's estimated cost reaches this USD value. Cost is computed from `.hydra/usage.jsonl` using `hydraRoom.modelPrices`. Set to 0 to disable. Useful guard rail when running autonomous loops."
+        },
+        "hydraRoom.handoffWebhookUrl": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Optional HTTPS endpoint Hydra POSTs to when a new decision packet has a non-empty `Decision needed from user` field. Body is `{ event: \"hydra.decision_needed\", timestamp, workspace, agent, phase, decisionNeededFromUser, defaultNextAction, recommendation, blockers, objective }`. Use a Slack incoming webhook URL or your own paging service. For Telegram, use `hydraRoom.telegramBotToken` + `hydraRoom.telegramChatId` instead — Hydra speaks the Telegram Bot API directly. Dedupes per packet timestamp."
+        },
+        "hydraRoom.telegramBotToken": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Telegram Bot API token (the long `123456:ABC-DEF…` string from BotFather). Empty disables Telegram. **Treat as secret** — prefer User Settings over Workspace Settings so it doesn't get committed. Alternatively set the `TELEGRAM_BOT_TOKEN` environment variable and leave this blank."
+        },
+        "hydraRoom.telegramChatId": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Telegram chat id Hydra sends notifications to. Your personal chat with the bot, a group, or a channel. Find it by messaging your bot and visiting `https://api.telegram.org/bot<token>/getUpdates`. Required for Telegram notifications to fire."
+        },
+        "hydraRoom.telegramNotifyOnDecisionNeeded": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Send a Telegram message when a decision packet's `Decision needed from user` is non-empty. Requires `hydraRoom.telegramBotToken` and `hydraRoom.telegramChatId`."
+        },
+        "hydraRoom.promptTemplates": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "body": { "type": "string" }
+            },
+            "required": ["name", "body"]
+          },
+          "markdownDescription": "Saved composer templates. Run `Hydra: Insert Prompt Template` (or its keybinding `Ctrl+Alt+T`) to pick one; the body replaces the current composer text. Example: `[{ \"name\": \"Survey before code\", \"body\": \"Survey the affected files first. List what you'd change before making any edits.\" }]`."
+        },
+        "hydraRoom.claudeModel": {
+          "default": "",
+          "anyOf": [
+            { "type": "string", "description": "Model applied to every Claude phase. Empty = CLI default." },
+            {
+              "type": "object",
+              "properties": {
+                "discussion": { "type": "string" },
+                "build": { "type": "string" },
+                "review": { "type": "string" }
+              },
+              "additionalProperties": false,
+              "description": "Per-phase models for Claude. Missing phases fall back to the CLI default."
+            }
+          ],
+          "markdownDescription": "Model passed to Claude Code CLI as `--model <id>` on every dispatch. Either a single string (applied to every phase) or an object with per-phase overrides like `{ \"discussion\": \"sonnet\", \"build\": \"opus\", \"review\": \"opus\" }`. Aliases (`sonnet`, `opus`, `haiku`) or full IDs (`claude-sonnet-4-6`, `claude-opus-4-7`, `claude-haiku-4-5-20251001`) both work. Use `Hydra: Choose Model` (Ctrl+Alt+M) to change live."
+        },
+        "hydraRoom.codexModel": {
+          "default": "",
+          "anyOf": [
+            { "type": "string", "description": "Model applied to every Codex phase. Empty = CLI default." },
+            {
+              "type": "object",
+              "properties": {
+                "discussion": { "type": "string" },
+                "build": { "type": "string" },
+                "review": { "type": "string" }
+              },
+              "additionalProperties": false,
+              "description": "Per-phase models for Codex. Missing phases fall back to the CLI default."
+            }
+          ],
+          "markdownDescription": "Model passed to Codex CLI as `--model <id>` on every `exec` dispatch. Either a single string (applied to every phase) or an object with per-phase overrides. Codex CLI 0.130.0 ships: `gpt-5.5` (default), `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark` (interactive only, no API), `gpt-5.2`. Run `codex debug models` to inspect what your install actually exposes. Use `Hydra: Choose Model` (Ctrl+Alt+M) to change live."
+        },
+        "hydraRoom.claudeEffort": {
+          "default": "",
+          "anyOf": [
+            { "type": "string", "enum": ["", "low", "medium", "high", "xhigh", "max"] },
+            {
+              "type": "object",
+              "properties": {
+                "discussion": { "type": "string", "enum": ["", "low", "medium", "high", "xhigh", "max"] },
+                "build": { "type": "string", "enum": ["", "low", "medium", "high", "xhigh", "max"] },
+                "review": { "type": "string", "enum": ["", "low", "medium", "high", "xhigh", "max"] }
+              },
+              "additionalProperties": false
+            }
+          ],
+          "markdownDescription": "Reasoning/effort level passed to Claude as `--effort <level>` on every dispatch. Either a single string (applied to every phase) or an object with per-phase overrides like `{ \"discussion\": \"low\", \"build\": \"high\" }`. Levels: `low`, `medium`, `high`, `xhigh`, `max`. Leave blank to use the CLI's default. If you've already added `--effort` to `hydraRoom.claudeExecArgs*`, the explicit arg wins. Use `Hydra: Choose Thinking Level` (Ctrl+Alt+E)."
+        },
+        "hydraRoom.codexReasoning": {
+          "default": "",
+          "anyOf": [
+            { "type": "string", "enum": ["", "low", "medium", "high", "xhigh"] },
+            {
+              "type": "object",
+              "properties": {
+                "discussion": { "type": "string", "enum": ["", "low", "medium", "high", "xhigh"] },
+                "build": { "type": "string", "enum": ["", "low", "medium", "high", "xhigh"] },
+                "review": { "type": "string", "enum": ["", "low", "medium", "high", "xhigh"] }
+              },
+              "additionalProperties": false
+            }
+          ],
+          "markdownDescription": "Reasoning effort passed to Codex as `-c model_reasoning_effort=<level>` on every `exec` dispatch. Either a single string or per-phase object. Levels: `low`, `medium`, `high`, `xhigh`. Codex's supported levels can vary by model — run `Hydra: Refresh Codex Models` then check the chooser description for the model's `default_reasoning_level`. Leave blank to use the CLI's default. If `-c model_reasoning_effort=` is already in `hydraRoom.codexExecArgs*`, the explicit arg wins. Use `Hydra: Choose Thinking Level` (Ctrl+Alt+E)."
+        },
+        "hydraRoom.modelPrices": {
+          "type": "object",
+          "default": {},
+          "markdownDescription": "Per-agent token pricing for the session cost meter. Each value is USD per **million** tokens. Shape: `{ \"claude\": { \"inputPerMTok\": number, \"outputPerMTok\": number, \"cacheReadPerMTok\": number, \"cacheCreatePerMTok\": number }, \"codex\": { ... } }`. Hydra defaults to Sonnet 4.6 pricing for Claude and a GPT-5-family blend for Codex; override here to track your actual models."
+        },
+        "hydraRoom.autoRequestReviewAfterPassingVerification": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Automatically request Review after an automatic post-build verification passes. Off by default so users can inspect build output first."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "dev": "node scripts/open-dev-host.js",
+    "watch": "tsc -watch -p ./",
+    "check": "tsc --noEmit -p ./",
+    "probe:native-contract": "node scripts/native-contract-probe.js",
+    "probe:native-contract:execute": "node scripts/native-contract-probe.js --execute",
+    "copy-fixtures": "node -e \"const fs=require('node:fs');if(fs.existsSync('test/fixtures'))fs.cpSync('test/fixtures','dist/test/fixtures',{recursive:true})\"",
+    "test": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p ./ && npm run copy-fixtures && node --test --test-isolation=none dist/test/*.test.js",
+    "prepackage": "npm run test",
+    "package": "npx @vscode/vsce package --no-dependencies --allow-missing-repository"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/vscode": "^1.95.0",
+    "typescript": "^5.9.3"
+  }
+}

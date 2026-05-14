@@ -1,0 +1,262 @@
+import * as assert from "node:assert/strict";
+import { describe, test } from "node:test";
+import type { CommandCenterActionId } from "../src/commandCenter";
+import { renderHtml } from "../src/webview.html";
+
+const heads = {
+  cspSource: "vscode-resource:",
+  brand: "brand.png",
+  codex: "codex.png",
+  claude: "claude.png",
+  system: "system.png",
+  user: "user.png",
+};
+
+const boundIds = [
+  "acceptDefaultBtn",
+  "app",
+  "archiveChatBtn",
+  "archiveClearBtn",
+  "assignClaudeBtn",
+  "assignCodexBtn",
+  "authorityBtn",
+  "autopilotText",
+  "captureNativeCapabilitiesBtn",
+  "captureNativeDataSnapshotBtn",
+  "claudeAuthority",
+  "claudeCommandBtn",
+  "claudeRawLineBtn",
+  "claudeStatus",
+  "clearNativeActionsBtn",
+  "cmdOverlay",
+  "codexAuthority",
+  "codexCommandBtn",
+  "codexRawLineBtn",
+  "codexStatus",
+  "commandCenterBtn",
+  "commandList",
+  "composer",
+  "decisionBlockers",
+  "decisionBoard",
+  "decisionCount",
+  "decisionDefault",
+  "decisionNeeded",
+  "decisionPanelCount",
+  "decisionRail",
+  "decisionRecommendation",
+  "decisionRiskChip",
+  "decisionStrip",
+  "doctorBtn",
+  "fixClaudeBtn",
+  "fixCodexBtn",
+  "handBackBtn",
+  "messages",
+  "modelRail",
+  "nativeActionBoard",
+  "nativeActionBtn",
+  "nativeActionRail",
+  "nativeActionText",
+  "nativeAgentFilter",
+  "nativePanelCount",
+  "nativeStatusFilter",
+  "nativeTerminalsBtn",
+  "objectiveText",
+  "objectiveTextShim",
+  "openDecisionsBtn",
+  "openerBtn",
+  "openFolderBtn",
+  "openLastPromptBtn",
+  "openNativeActionsBtn",
+  "openNativeActionsFooterBtn",
+  "openNativeTerminalsBtn",
+  "openSessionBriefBtn",
+  "openSupportBundleBtn",
+  "openTranscriptBtn",
+  "openVerificationBtn",
+  "openWorkQueuePanelBtn",
+  "paletteInput",
+  "panelOverlay",
+  "phaseChip",
+  "pokeBothBtn",
+  "pokeBothDiffBtn",
+  "pokeBothEditorBtn",
+  "pokeClaudeBtn",
+  "pokeClaudeDiffBtn",
+  "pokeClaudeEditorBtn",
+  "pokeCodexBtn",
+  "pokeCodexDiffBtn",
+  "pokeCodexEditorBtn",
+  "previewPromptBtn",
+  "profileBtn",
+  "queuePanelCount",
+  "resetTurnBtn",
+  "retryAutopilotBtn",
+  "reviewBtn",
+  "ribbonMinimizedSummary",
+  "ribbonStack",
+  "runVerificationBtn",
+  "safeModeBtn",
+  "sendBtn",
+  "setObjectiveBtn",
+  "setupStrip",
+  "stopBtn",
+  "terminalHealthBtn",
+  "terminalPanelCount",
+  "terminalSessions",
+  "testBridgeBtn",
+  "toggleRibbonsBtn",
+  "transportChip",
+  "usageRail",
+  "verificationDetails",
+  "verificationRail",
+  "verificationStrip",
+  "verificationText",
+  "workQueueBoard",
+  "workQueueRail",
+  "workQueueText",
+] as const;
+
+const hostMessages = [
+  "acceptDefaultDecision",
+  "archiveAndClearRoom",
+  "captureNativeCapabilities",
+  "captureNativeDataSnapshot",
+  "chooseModel",
+  "changeCapabilityProfile",
+  "fixClaudePath",
+  "fixCodexPath",
+  "handBack",
+  "nativeAction",
+  "openAgentCalls",
+  "openObjective",
+  "openLastPrompt",
+  "openSessionBrief",
+  "openSupportBundle",
+  "openTranscript",
+  "openVerification",
+  "previewNextPrompt",
+  "requestReview",
+  "resetStuckTurn",
+  "runDoctor",
+  "runNativeCommand",
+  "runVerification",
+  "send",
+  "sendRawTerminalLine",
+  "setObjective",
+  "showEffectiveAuthority",
+  "showTerminalBridgeHealth",
+  "stop",
+  "useOneShotTransport",
+  "useTerminalBridge",
+] as const;
+
+const commandCenterActionCoverage: Record<CommandCenterActionId, readonly RegExp[]> = {
+  openWorkspaceFolder: [/id: "open-folder"/, /type: "openWorkspaceFolder"/],
+  stopCurrentTurn: [/id: "stop"/, /type: "stop"/],
+  acceptDefaultDecision: [/id: "accept-default"/, /type: "acceptDefaultDecision"/],
+  archiveAndClearRoom: [/id: "archive-chat"/, /type: "archiveAndClearRoom"/],
+  assignCodex: [/id: "assign-codex"/, /type: "assignBuilder", builder: "codex"/],
+  assignClaude: [/id: "assign-claude"/, /type: "assignBuilder", builder: "claude"/],
+  chooseModel: [/id: "choose-model"/, /type: "chooseModel"/],
+  changeCapabilityProfile: [/id: "change-profile"/, /type: "changeCapabilityProfile"/],
+  requestReview: [/id: "request-review"/, /type: "requestReview"/],
+  handBack: [/id: "hand-back"/, /type: "handBack"/],
+  runVerification: [/id: "verification"/, /type: "runVerification"/],
+  nativeAction: [/id: "native-action"/, /type: "nativeAction"/],
+  pokeBothTerminalsWithDiff: [/id="pokeBothDiffBtn"/, /pokeBothDiffBtn\.addEventListener\("click"/],
+  openObjective: [/id: "open-objective"/, /type: "openObjective"/],
+  openLastPrompt: [/id: "open-last-prompt"/, /type: "openLastPrompt"/],
+  openVerification: [/id: "open-verification-file"/, /type: "openVerification"/],
+  openDecisions: [/id: "open-decisions"/, /type: "openDecisions"/],
+  openSessionBrief: [/id: "session-brief"/, /type: "openSessionBrief"/],
+  openSupportBundle: [/id: "support-bundle"/, /type: "openSupportBundle"/],
+  captureNativeCapabilities: [/id: "native-snapshot"/, /type: "captureNativeCapabilities"/],
+  captureNativeDataSnapshot: [/id: "native-data"/, /type: "captureNativeDataSnapshot"/],
+  openNativeActions: [/id: "open-native-actions-file"/, /type: "openNativeActions"/],
+  openAgentCalls: [/id: "open-agent-calls"/, /type: "openAgentCalls"/],
+  openNativeTerminals: [/id: "open-terminals"/, /type: "openNativeTerminals"/],
+  useTerminalBridge: [/id: "toggle-transport"/, /"useTerminalBridge"/],
+  useOneShotTransport: [/id: "safe-mode"/, /type: "useOneShotTransport"/],
+  runDoctor: [/id: "doctor"/, /type: "runDoctor"/],
+  runAutopilotStart: [/id: "retry-auto"/, /type: "runAutopilotStart"/],
+  runTerminalBridgeSelfTest: [/id: "test-bridge"/, /type: "runTerminalBridgeSelfTest"/],
+  showTerminalBridgeHealth: [/id: "terminal-health"/, /type: "showTerminalBridgeHealth"/],
+  showEffectiveAuthority: [/id: "authority"/, /type: "showEffectiveAuthority"/],
+  fixCodexPath: [/id: "fix-codex"/, /type: "fixCodexPath"/],
+  fixClaudePath: [/id: "fix-claude"/, /type: "fixClaudePath"/],
+  resetStuckTurn: [/id: "reset-turn"/, /type: "resetStuckTurn"/],
+  openTranscript: [/id: "open-transcript"/, /type: "openTranscript"/],
+};
+
+describe("webview contract", () => {
+  const html = renderHtml("nonce", heads);
+
+  test("keeps every scripted DOM binding present in the rendered HTML", () => {
+    for (const id of boundIds) {
+      assert.match(html, new RegExp(`id="${id}"(?:\\s|>)`), `missing #${id}`);
+    }
+  });
+
+  test("keeps Command Center accessibility hooks in place", () => {
+    assert.match(html, /id="commandList" role="listbox"/);
+    assert.match(html, /id="paletteInput" role="combobox"[^>]+aria-activedescendant=""/);
+    assert.match(html, /item\.setAttribute\("role", "option"\)/);
+    assert.match(html, /item\.setAttribute\("aria-selected", "false"\)/);
+    assert.match(html, /item\.setAttribute\("aria-disabled", enabled \? "false" : "true"\)/);
+    assert.match(html, /commandCenterBtn\.focus\(\)/);
+  });
+
+  test("keeps Command Center disabled-state rendering and guards in place", () => {
+    assert.match(html, /\.command-option\[aria-disabled="true"\]/);
+    assert.match(html, /const reason = enabled \? "" : disabledReason\(action\)/);
+    assert.match(html, /class="command-why"> - /);
+    assert.match(html, /option\.getAttribute\("aria-disabled"\) === "true"/);
+    assert.match(html, /selected\.getAttribute\("aria-disabled"\) === "true"/);
+  });
+
+  test("keeps critical controls real buttons and the composer a textarea", () => {
+    assert.match(html, /<textarea id="composer"/);
+    assert.match(html, /<button id="sendBtn" type="button">/);
+    assert.match(html, /<button id="stopBtn" class="danger" type="button">/);
+    assert.doesNotMatch(html, /<button(?![^>]*\btype=)/);
+  });
+
+  test("keeps explicit responsive breakpoints for the stream-first shell", () => {
+    for (const width of [900, 720, 480]) {
+      assert.match(html, new RegExp(`@media \\(max-width: ${width}px\\)`), `missing ${width}px breakpoint`);
+    }
+  });
+
+  test("uses the current host message names for command actions", () => {
+    for (const type of hostMessages) {
+      assert.match(html, new RegExp(`(?::|\\?) "${type}"`), `missing host message ${type}`);
+    }
+  });
+
+  test("keeps operational files, setup, and model actions discoverable in Command Center", () => {
+    for (const id of [
+      "open-objective",
+      "open-agent-calls",
+      "open-verification-file",
+      "choose-model",
+      "fix-codex",
+      "fix-claude",
+    ]) {
+      assert.match(html, new RegExp(`id: "${id}"`), `missing command action ${id}`);
+    }
+  });
+
+  test("keeps every host Command Center action covered by the webview Command Center or a direct control", () => {
+    for (const [action, patterns] of Object.entries(commandCenterActionCoverage)) {
+      for (const pattern of patterns) {
+        assert.match(html, pattern, `missing webview coverage for ${action}: ${pattern}`);
+      }
+    }
+  });
+
+  test("keeps message head art anchored to one rendering site", () => {
+    assert.equal((html.match(/\.head-art \{/g) ?? []).length, 1, "missing or duplicated base head-art CSS");
+    assert.equal((html.match(/\.head-art img \{/g) ?? []).length, 1, "missing or duplicated head-art image CSS");
+    assert.equal((html.match(/className = "head-art "/g) ?? []).length, 1, "missing or duplicated head-art DOM creation");
+  });
+});

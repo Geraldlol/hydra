@@ -1,0 +1,14 @@
+﻿Usage: claude auto-mode [options] [command]
+
+Inspect auto mode classifier configuration
+
+Options:
+  -h, --help          Display help for command
+
+Commands:
+  config              Print the effective auto mode config as JSON: your
+                      settings where set, defaults otherwise
+  critique [options]  Get AI feedback on your custom auto mode rules
+  defaults            Print the default auto mode environment, allow,
+                      soft_deny, and hard_deny rules as JSON
+  help [command]      display help for command

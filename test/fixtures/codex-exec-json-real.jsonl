@@ -1,0 +1,8 @@
+{"type":"thread.started","thread_id":"019e1380-05d5-76a0-bb6a-84237a3638a7"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"\"C:\\\\WINDOWS\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe\" -Command Get-Location","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"\"C:\\\\WINDOWS\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe\" -Command 'git branch --show-current'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"\"C:\\\\WINDOWS\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe\" -Command 'git branch --show-current'","aggregated_output":"main\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"\"C:\\\\WINDOWS\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe\" -Command Get-Location","aggregated_output":"\r\nPath                    \r\n----                    \r\nC:\\Users\\geral\\Spireslap\r\n\r\n\r\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"The cwd is `C:\\Users\\geral\\Spireslap` on branch `main`."}}
+{"type":"turn.completed","usage":{"input_tokens":36303,"cached_input_tokens":24320,"output_tokens":117,"reasoning_output_tokens":0}}

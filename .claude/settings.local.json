@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(& 'C:\\\\Users\\\\geral\\\\Hydra\\\\pull-from-spireslap.ps1' -InitGit)"
+    ]
+  }
+}

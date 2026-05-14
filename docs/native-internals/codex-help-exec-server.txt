@@ -1,0 +1,33 @@
+﻿[EXPERIMENTAL] Run the standalone exec-server service
+
+Usage: codex exec-server [OPTIONS]
+
+Options:
+  -c, --config <key=value>
+          Override a configuration value that would otherwise be loaded from `~/.codex/config.toml`.
+          Use a dotted path (`foo.bar.baz`) to override nested values. The `value` portion is parsed
+          as TOML. If it fails to parse as TOML, the raw string is used as a literal.
+          
+          Examples: - `-c model="o3"` - `-c 'sandbox_permissions=["disk-full-read-access"]'` - `-c
+          shell_environment_policy.inherit=all`
+
+      --listen <URL>
+          Transport endpoint URL. Supported values: `ws://IP:PORT` (default), `stdio`, `stdio://`
+
+      --enable <FEATURE>
+          Enable a feature (repeatable). Equivalent to `-c features.<name>=true`
+
+      --remote <URL>
+          Register this exec-server as a remote executor using the given base URL
+
+      --disable <FEATURE>
+          Disable a feature (repeatable). Equivalent to `-c features.<name>=false`
+
+      --executor-id <ID>
+          Executor id to attach to when registering remotely
+
+      --name <NAME>
+          Human-readable executor name
+
+  -h, --help
+          Print help (see a summary with '-h')

@@ -1,0 +1,14 @@
+node_modules/**
+src/**
+test/**
+scripts/**
+docs/native-internals/**
+dist/test/**
+.vscode/**
+.hydra/**
+tsconfig.json
+package-lock.json
+*.map
+*.tsbuildinfo
+npm-debug.log
+*.vsix

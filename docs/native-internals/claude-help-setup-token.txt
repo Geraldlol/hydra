@@ -1,0 +1,6 @@
+﻿Usage: claude setup-token [options]
+
+Set up a long-lived authentication token (requires Claude subscription)
+
+Options:
+  -h, --help  Display help for command

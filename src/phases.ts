@@ -1,0 +1,106 @@
+export type AgentId = "codex" | "claude";
+
+export type State =
+  | { name: "Idle" }
+  | { name: "Opener"; opener: AgentId; reactor: AgentId }
+  | { name: "Reactor"; opener: AgentId; reactor: AgentId }
+  | { name: "Closer"; opener: AgentId; reactor: AgentId }
+  | { name: "ParallelDiscussion"; agents: ReadonlyArray<AgentId> }
+  | { name: "AwaitingUser" }
+  | { name: "Build"; builder: AgentId }
+  | { name: "BuildDone"; builder: AgentId }
+  | { name: "Review"; reviewer: AgentId }
+  | { name: "ReviewDone"; reviewer: AgentId; approved: boolean };
+
+export type Event =
+  | { type: "userSent"; opener: AgentId; parallel?: boolean }
+  | { type: "openerDone" }
+  | { type: "reactorDone" }
+  | { type: "closerDone" }
+  | { type: "parallelDone" }
+  | { type: "assignBuilder"; builder: AgentId }
+  | { type: "buildDone" }
+  | { type: "requestReview" }
+  | { type: "reviewDone"; approved: boolean }
+  | { type: "handBack" }
+  | { type: "stop" };
+
+const otherAgent = (a: AgentId): AgentId => (a === "codex" ? "claude" : "codex");
+
+export function isInFlight(state: State): boolean {
+  return (
+    state.name === "Opener" ||
+    state.name === "Reactor" ||
+    state.name === "Closer" ||
+    state.name === "ParallelDiscussion" ||
+    state.name === "Build" ||
+    state.name === "Review"
+  );
+}
+
+export function transition(state: State, event: Event): State {
+  if (event.type === "stop") {
+    return isInFlight(state) ? { name: "AwaitingUser" } : state;
+  }
+
+  switch (state.name) {
+    case "Idle":
+      if (event.type === "userSent" && event.parallel) return { name: "ParallelDiscussion", agents: ["codex", "claude"] };
+      if (event.type === "userSent") return { name: "Opener", opener: event.opener, reactor: otherAgent(event.opener) };
+      return state;
+    case "Opener":
+      if (event.type === "openerDone") return { name: "Reactor", opener: state.opener, reactor: state.reactor };
+      return state;
+    case "Reactor":
+      if (event.type === "reactorDone") return { name: "Closer", opener: state.opener, reactor: state.reactor };
+      return state;
+    case "Closer":
+      if (event.type === "closerDone") return { name: "AwaitingUser" };
+      return state;
+    case "ParallelDiscussion":
+      if (event.type === "parallelDone") return { name: "AwaitingUser" };
+      return state;
+    case "AwaitingUser":
+      if (event.type === "userSent" && event.parallel) return { name: "ParallelDiscussion", agents: ["codex", "claude"] };
+      if (event.type === "userSent") return { name: "Opener", opener: event.opener, reactor: otherAgent(event.opener) };
+      if (event.type === "assignBuilder")
+        return { name: "Build", builder: event.builder };
+      return state;
+    case "Build":
+      if (event.type === "buildDone")
+        return { name: "BuildDone", builder: state.builder };
+      return state;
+    case "BuildDone":
+      if (event.type === "userSent" && event.parallel) return { name: "ParallelDiscussion", agents: ["codex", "claude"] };
+      if (event.type === "userSent") return { name: "Opener", opener: event.opener, reactor: otherAgent(event.opener) };
+      if (event.type === "requestReview")
+        return { name: "Review", reviewer: otherAgent(state.builder) };
+      return state;
+    case "Review":
+      if (event.type === "reviewDone")
+        return { name: "ReviewDone", reviewer: state.reviewer, approved: event.approved };
+      return state;
+    case "ReviewDone":
+      if (event.type === "userSent" && event.parallel) return { name: "ParallelDiscussion", agents: ["codex", "claude"] };
+      if (event.type === "userSent") return { name: "Opener", opener: event.opener, reactor: otherAgent(event.opener) };
+      if (event.type === "handBack")
+        return { name: "Build", builder: otherAgent(state.reviewer) };
+      return state;
+  }
+}
+
+export function shouldRunParallelDiscussion(text: string): boolean {
+  const normalized = text.toLowerCase().replace(/\s+/g, " ").trim();
+  if (!normalized) return false;
+  const patterns = [
+    /\bboth\s+of\s+you\b/,
+    /\byou\s+both\b/,
+    /\bboth\s+(?:agents|heads)\b/,
+    /\bboth\s+(?:please\s+)?(?:do|run|look|review|think|analy[sz]e|investigate|work|take|give|tell|answer|respond|handle)\b/,
+    /\byou\s+and\s+(?:codex|claude)\s*,/,
+    /\byou\s+and\s+(?:codex|claude)\s+(?:please\s+)?(?:do|run|look|review|think|analy[sz]e|investigate|work|take|give|tell|answer|respond|handle)\b/,
+    /\b(?:codex\s+and\s+claude|claude\s+and\s+codex)\s*,/,
+    /\b(?:codex\s+and\s+claude|claude\s+and\s+codex)\s+(?:please\s+)?(?:do|run|look|review|think|analy[sz]e|investigate|work|take|give|tell|answer|respond|handle)\b/,
+  ];
+  return patterns.some((pattern) => pattern.test(normalized));
+}

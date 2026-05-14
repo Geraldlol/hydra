@@ -1,0 +1,8 @@
+﻿Usage: claude install [options] [target]
+
+Install Claude Code native build. Use [target] to specify version (stable,
+latest, or specific version)
+
+Options:
+  --force     Force installation even if already installed
+  -h, --help  Display help for command

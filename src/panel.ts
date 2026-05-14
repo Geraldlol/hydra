@@ -1,0 +1,4403 @@
+import * as cp from "node:child_process";
+import * as crypto from "node:crypto";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import * as vscode from "vscode";
+import { runAgent, AgentSpawn, RunResult } from "./agents";
+import { State, Event, AgentId, transition, isInFlight, shouldRunParallelDiscussion } from "./phases";
+import { Phase, buildPrompt, APPROVED_SENTINEL_RE, SOFT_APPROVAL_RE } from "./prompts";
+import {
+  appendMessage,
+  archiveAndResetTranscript,
+  buildPromptContext,
+  ensureGitignore,
+  ensureTranscriptFile,
+  readTranscript,
+  TranscriptMessage,
+} from "./transcript";
+import {
+  argsSettingKey,
+  profileForPhase,
+  applySpawnEnvironment,
+  buildAgentSpawn,
+  expandRequestFileSpawn,
+  hasRequestFilePlaceholders,
+  mergeNativeEnv,
+  mergeNativePathPrepend,
+  nativeCapabilitySummary,
+  resolveAgentCommand,
+  splitNativeArgs,
+  type CliProfile,
+} from "./cli";
+import { classifyAgentAuthority, validateNativeArgs, type AuthorityClassification } from "./authority";
+import {
+  evaluateFullNativeConsent,
+  resolveFullNativeConsentChoice,
+  fullNativeConsentKey,
+  FULL_NATIVE_CONSENT_RUN_ONCE,
+  FULL_NATIVE_CONSENT_ALWAYS,
+  FULL_NATIVE_CONSENT_CANCEL,
+} from "./fullNativeConsent";
+import { parseClaudeEventStream, summarizeClaudeEvents, type ClaudeStreamSummary } from "./claudeEvents";
+import { parseCodexEventStream, summarizeCodexEvents } from "./codexEvents";
+import {
+  argsForCapabilityProfile,
+  capabilityProfilePreset,
+  capabilityProfileShortLabel,
+  configurableCapabilityProfiles,
+  describeCapabilityProfile,
+  isConfigurableCapabilityProfileId,
+  profileSettingKey,
+  type CapabilityProfile,
+  type ConfigurableCapabilityProfileId,
+} from "./capabilityProfiles";
+import { buildCommandCenterActions, type CommandCenterActionId } from "./commandCenter";
+import {
+  appendDecision,
+  decisionHasNoUserBlockers,
+  detectRiskySignals,
+  isNoneValue,
+  DecisionAction,
+  DecisionPacket,
+  ensureDecisionsFile,
+  parseDecisionPacket,
+  readDecisions,
+  resolveDecisionAction,
+} from "./decisions";
+import {
+  appendNativeAction,
+  collectNativeSessionHints,
+  ensureNativeActionsFile,
+  nativeActionSummary,
+  NativeActionReceipt,
+  NativeActionStatus,
+  readNativeActions,
+  writeNativeActions,
+} from "./nativeActions";
+import {
+  nativeCapabilitiesPath,
+  readNativeIntegrationSummary,
+  renderNativeCapabilitySnapshot,
+  shouldIncludeNativeIntegrationSummary,
+  writeNativeCapabilities,
+  type NativeCapabilityProbe,
+} from "./nativeCapabilities";
+import {
+  collectNativeDataSnapshot,
+  nativeDataSnapshotPath,
+  renderNativeDataSnapshot,
+  writeNativeDataSnapshot,
+} from "./nativeDataSnapshot";
+import { NATIVE_COMMAND_CATALOG } from "./nativeCommandCatalog";
+import {
+  formatDoctorReport,
+  runHydraDoctor,
+  TRUST_SCOPED_SETTINGS,
+  trustScopeWarnings,
+  type DoctorArgsValidation,
+  type DoctorReport,
+} from "./doctor";
+import { EditorContextAttachment, truncateEditorContext } from "./editorContext";
+import { appendHydraEvent, createHydraEvent, ensureHydraEventsFile, hydraEventsPath, readHydraEvents, type HydraEventKind } from "./events";
+import { ensureObjectiveFile, objectiveAsContext, readObjective, writeObjective } from "./objective";
+import { TerminalBridge } from "./terminalBridge";
+import { buildDirectTerminalPokePrompt } from "./terminalPoke";
+import { buildTerminalPromptFile, terminalProtocolPaths } from "./terminalProtocol";
+import type { TerminalSession } from "./sessionState";
+import {
+  appendPromptEnvelope,
+  createPromptEnvelope,
+  PromptEnvelope,
+  readLatestPromptEnvelope,
+  renderPromptEnvelopePreview,
+} from "./promptPreview";
+import {
+  appendVerification,
+  captureGitHead,
+  ensureVerificationFile,
+  inferVerificationCommand,
+  readVerifications,
+  runVerificationCommand,
+  verificationAsReviewContext,
+  verificationPassed,
+  VerificationResult,
+  verificationSummary,
+} from "./verification";
+import { buildWorkQueue, type WorkQueueItem } from "./workQueue";
+import {
+  appendUsageRecord,
+  buildUsageRecord,
+  DEFAULT_PRICES,
+  loadUsageRecords,
+  parseCodexTextTokens,
+  summarizeUsage,
+  usageFromClaudeSummary,
+  usageFromCodexSummary,
+  type ModelPrices,
+  type UsageRecord,
+  type UsageSummary,
+} from "./usage";
+import {
+  loadCodexModelsSnapshot,
+  runCodexDebugModels,
+  saveCodexModelsSnapshot,
+  type CodexModelInfo,
+  type CodexModelsSnapshot,
+} from "./codexModels";
+import { buildDecisionNotificationHtml, sendTelegramMessage, type TelegramConfig } from "./telegram";
+import { readWorkspaceInstructions, workspaceInstructionsAsContext } from "./workspaceInstructions";
+import {
+  appendWorkQueueDisposition,
+  applyWorkQueueDispositions,
+  ensureWorkQueueStateFile,
+  readWorkQueueDispositions,
+  type WorkQueueDisposition,
+} from "./workQueueState";
+import { renderSessionBrief, sessionBriefPath, writeSessionBrief } from "./sessionBrief";
+import {
+  renderSupportBundle,
+  supportBundlePath,
+  supportBundleNativeDataSummary,
+  writeSupportBundle,
+  type SupportBundleNativeRuntime,
+} from "./supportBundle";
+import type { HydraStatusBarSnapshot } from "./statusBar";
+import { renderHtml, type HydraHeadAssets } from "./webview.html";
+
+interface UiMessage extends TranscriptMessage {
+  id: string;
+  pending?: boolean;
+  activity?: string;
+}
+
+const AGENT_NAMES: Record<AgentId, string> = { codex: "Codex", claude: "Claude" };
+type AgentStatusState = "idle" | "running" | "replied" | "error";
+interface AgentStatus {
+  state: AgentStatusState;
+  detail: string;
+}
+
+interface AgentAuthoritySummary {
+  authority: AuthorityClassification;
+  profile: CapabilityProfile;
+}
+
+interface NativeTerminalPokeOptions {
+  includeEditorContext?: boolean;
+  includeWorkspaceDiff?: boolean;
+}
+
+interface NativeActionPick extends vscode.QuickPickItem {
+  plainLabel: string;
+  agents: AgentId[];
+  options: NativeTerminalPokeOptions;
+  actionKind: "prompt" | "command" | "rawLine";
+  presetLine?: string;
+}
+
+interface PreparedOneShotSpawn {
+  spawn: AgentSpawn;
+  promptPath?: string;
+  replyPath?: string;
+  logPath?: string;
+  outputMode: "plain" | "claudeStreamJson" | "codexJson";
+  suppressLiveStdout: boolean;
+}
+
+export class HydraRoomPanel {
+  private static readonly viewType = "hydraRoom.panel";
+  private static instance: HydraRoomPanel | undefined;
+  private static statusBarUpdater: ((snapshot: HydraStatusBarSnapshot) => void) | undefined;
+
+  private readonly context: vscode.ExtensionContext;
+  private readonly panel: vscode.WebviewPanel;
+  private readonly disposables: vscode.Disposable[] = [];
+  private state: State = { name: "Idle" };
+  private messages: UiMessage[] = [];
+  private transcriptUri!: vscode.Uri;
+  private objectiveUri!: vscode.Uri;
+  private decisionsUri!: vscode.Uri;
+  private verificationUri!: vscode.Uri;
+  private nativeActionsUri!: vscode.Uri;
+  private eventsUri!: vscode.Uri;
+  private agentCallsUri!: vscode.Uri;
+  private nativeCapabilitiesUri!: vscode.Uri;
+  private nativeDataSnapshotUri!: vscode.Uri;
+  private workQueueUri!: vscode.Uri;
+  private sessionBriefUri!: vscode.Uri;
+  private supportBundleUri!: vscode.Uri;
+  private objective = "";
+  private workspaceInstructions = "";
+  private decisions: DecisionPacket[] = [];
+  private acceptedDefaultDecisionTimestamp: string | undefined;
+  private verifications: VerificationResult[] = [];
+  private nativeActions: NativeActionReceipt[] = [];
+  private workQueueDispositions: WorkQueueDisposition[] = [];
+  private latestDoctorReport: DoctorReport | undefined;
+  private verificationRunning = false;
+  private autopilotRunning = false;
+  private autopilotSummary = "Not run";
+  private terminalPokeInFlight = false;
+  private workspaceRoot!: string;
+  private workspaceReady = false;
+  private currentAbort: AbortController | undefined;
+  private suggestedBuilder: AgentId | undefined;
+  private autoAdvanceSendInstructionCount = 0;
+  private autoAdvanceInProgress = false;
+  private usageUri!: vscode.Uri;
+  private readonly sessionId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  private usageRecords: UsageRecord[] = [];
+  private sessionUsage: UsageSummary | undefined;
+  private codexModelsUri!: vscode.Uri;
+  private codexModelsSnapshot: CodexModelsSnapshot | undefined;
+  private terminalBridge: TerminalBridge | undefined;
+  private transport: "oneShot" | "terminalBridge" = "oneShot";
+  private agentStatuses: Record<AgentId, AgentStatus> = {
+    codex: { state: "idle", detail: "Idle" },
+    claude: { state: "idle", detail: "Idle" },
+  };
+  private gitAvailable = false;
+  private readonly initPromise: Promise<void>;
+
+  static open(context: vscode.ExtensionContext): HydraRoomPanel {
+    if (HydraRoomPanel.instance) {
+      HydraRoomPanel.instance.panel.reveal(vscode.ViewColumn.Beside);
+      return HydraRoomPanel.instance;
+    }
+    const panel = vscode.window.createWebviewPanel(
+      HydraRoomPanel.viewType,
+      "Hydra Room",
+      vscode.ViewColumn.Beside,
+      {
+        enableScripts: true,
+        retainContextWhenHidden: true,
+        localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "media")],
+      }
+    );
+    HydraRoomPanel.instance = new HydraRoomPanel(context, panel);
+    return HydraRoomPanel.instance;
+  }
+
+  static current(): HydraRoomPanel | undefined {
+    return HydraRoomPanel.instance;
+  }
+
+  static setStatusBarUpdater(updater: ((snapshot: HydraStatusBarSnapshot) => void) | undefined): void {
+    HydraRoomPanel.statusBarUpdater = updater;
+  }
+
+  ready(): Promise<void> {
+    return this.initPromise;
+  }
+
+  private hydraHeadAssets(): HydraHeadAssets {
+    const head = (name: string) =>
+      this.panel.webview.asWebviewUri(
+        vscode.Uri.joinPath(this.context.extensionUri, "media", "hydra-heads", `${name}.png`)
+      ).toString();
+    return {
+      cspSource: this.panel.webview.cspSource,
+      brand: head("guard"),
+      codex: head("codex"),
+      claude: head("claude"),
+      system: head("system"),
+      user: head("user"),
+    };
+  }
+
+  private constructor(context: vscode.ExtensionContext, panel: vscode.WebviewPanel) {
+    this.context = context;
+    this.panel = panel;
+    this.panel.webview.options = {
+      enableScripts: true,
+      localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "media")],
+    };
+    this.panel.webview.html = renderHtml(makeNonce(), this.hydraHeadAssets());
+    this.disposables.push(
+      this.panel.onDidDispose(() => this.dispose()),
+      this.panel.webview.onDidReceiveMessage((m) => void this.onWebviewMessage(m))
+    );
+    this.initPromise = this.initialize();
+  }
+
+  dispose(): void {
+    HydraRoomPanel.instance = undefined;
+    this.currentAbort?.abort();
+    // TerminalBridge is constructed inside initialize() so it isn't in the
+    // disposables array. Dispose explicitly to close cached terminals
+    // (otherwise they accumulate as ghost terminals across panel reopens).
+    this.terminalBridge?.dispose();
+    while (this.disposables.length) this.disposables.pop()?.dispose();
+  }
+
+  private async initialize(): Promise<void> {
+    const workspaceRoot = resolveWorkspaceRoot(this.context);
+    if (!workspaceRoot) {
+      this.workspaceReady = false;
+      this.messages = [{
+        id: "system-no-workspace",
+        role: "system",
+        text: "Hydra needs a project folder so it can write `.hydra/transcript.md` and run Codex/Claude from the project root. Click Open Folder, choose your project, then run Hydra: Start again.",
+        timestamp: new Date().toISOString(),
+      }];
+      this.postState();
+      return;
+    }
+
+    this.workspaceReady = true;
+    this.workspaceRoot = workspaceRoot;
+    await this.migrateLegacyDiscussionTimeoutDefault();
+    this.terminalBridge = new TerminalBridge(this.workspaceRoot, {
+      onSessionUpdate: () => this.postState(),
+    });
+    this.transcriptUri = this.resolveTranscriptUri();
+    this.objectiveUri = vscode.Uri.file(path.join(this.workspaceRoot, ".hydra", "objective.md"));
+    this.decisionsUri = vscode.Uri.file(path.join(this.workspaceRoot, ".hydra", "decisions.jsonl"));
+    this.verificationUri = vscode.Uri.file(path.join(this.workspaceRoot, ".hydra", "verification.jsonl"));
+    this.nativeActionsUri = vscode.Uri.file(path.join(this.workspaceRoot, ".hydra", "native-actions.jsonl"));
+    this.eventsUri = vscode.Uri.file(hydraEventsPath(this.workspaceRoot));
+    this.agentCallsUri = vscode.Uri.file(path.join(this.workspaceRoot, ".hydra", "agent-calls.jsonl"));
+    this.usageUri = vscode.Uri.file(path.join(this.workspaceRoot, ".hydra", "usage.jsonl"));
+    this.codexModelsUri = vscode.Uri.file(path.join(this.workspaceRoot, ".hydra", "codex-models.json"));
+    this.nativeCapabilitiesUri = vscode.Uri.file(nativeCapabilitiesPath(this.workspaceRoot));
+    this.nativeDataSnapshotUri = vscode.Uri.file(nativeDataSnapshotPath(this.workspaceRoot));
+    this.workQueueUri = vscode.Uri.file(path.join(this.workspaceRoot, ".hydra", "work-queue.jsonl"));
+    this.sessionBriefUri = vscode.Uri.file(sessionBriefPath(this.workspaceRoot));
+    this.supportBundleUri = vscode.Uri.file(supportBundlePath(this.workspaceRoot));
+    await ensureGitignore(this.workspaceRoot);
+    await ensureTranscriptFile(this.transcriptUri.fsPath);
+    await ensureObjectiveFile(this.objectiveUri.fsPath);
+    await ensureDecisionsFile(this.decisionsUri.fsPath);
+    await ensureVerificationFile(this.verificationUri.fsPath);
+    await ensureNativeActionsFile(this.nativeActionsUri.fsPath);
+    await ensureHydraEventsFile(this.eventsUri.fsPath);
+    await ensureJsonlFile(this.agentCallsUri.fsPath);
+    await ensureJsonlFile(this.usageUri.fsPath);
+    this.usageRecords = await loadUsageRecords(this.usageUri.fsPath);
+    this.sessionUsage = summarizeUsage(this.usageRecords, this.sessionId);
+    this.codexModelsSnapshot = await loadCodexModelsSnapshot(this.codexModelsUri.fsPath);
+    await ensureWorkQueueStateFile(this.workQueueUri.fsPath);
+    this.objective = await readObjective(this.objectiveUri.fsPath);
+    this.workspaceInstructions = await readWorkspaceInstructions(this.workspaceRoot);
+    this.decisions = await readDecisions(this.decisionsUri.fsPath);
+    this.verifications = await readVerifications(this.verificationUri.fsPath);
+    this.nativeActions = await readNativeActions(this.nativeActionsUri.fsPath);
+    this.workQueueDispositions = await readWorkQueueDispositions(this.workQueueUri.fsPath);
+    this.gitAvailable = await isGitWorkspace(this.workspaceRoot);
+    const existing = await readTranscript(this.transcriptUri.fsPath);
+    this.messages = existing.map((m, i) => ({ ...m, id: `prev-${i}` }));
+    this.postState();
+    if (this.autopilotOnStart()) {
+      setTimeout(() => void this.runAutopilotStart(), 0);
+    }
+  }
+
+  // ---------------- public command entry points ----------------
+
+  async sendUserMessage(text: string, opener: AgentId = this.getFirstSpeaker()): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    if (!isSendable(this.state) || isInFlight(this.state) || this.terminalPokeInFlight) return;
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    if (!this.autoAdvanceInProgress) this.autoAdvanceSendInstructionCount = 0;
+    const selectedOpener = normalizeAgentId(opener, this.getFirstSpeaker());
+    const parallel = shouldRunParallelDiscussion(trimmed);
+    // Transition state synchronously BEFORE any await. A second concurrent
+    // sendUserMessage hitting after this.ready() but during appendUserMessage
+    // would otherwise pass the guard above and orphan the first turn's
+    // currentAbort. Now the second call sees an in-flight discussion and bails at
+    // isSendable.
+    this.applyEvent({ type: "userSent", opener: selectedOpener, parallel });
+    await this.appendUserMessage(trimmed);
+    if (parallel) {
+      await this.runParallelDiscussionTurn(trimmed);
+    } else {
+      await this.runDiscussionTurn(selectedOpener, trimmed);
+    }
+  }
+
+  async stop(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    if (
+      !isInFlight(this.state) &&
+      !this.terminalPokeInFlight &&
+      !this.verificationRunning &&
+      !this.autopilotRunning
+    ) {
+      return;
+    }
+    // Aborting propagates to the active runAgent / runVerificationCommand /
+    // autopilot calls, which kill their child processes and resolve with
+    // cancelled=true. The in-flight method then observes ctrl.signal.aborted,
+    // cleans up, and posts state.
+    this.currentAbort?.abort();
+  }
+
+  async assignBuilder(builder: AgentId): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    if (this.state.name !== "AwaitingUser") return;
+    await this.appendSystemMessage(
+      `${AGENT_NAMES[builder]} assigned as builder. This is explicit user build authority; previous survey or planning defaults no longer block implementation.`
+    );
+    this.applyEvent({ type: "assignBuilder", builder });
+    await this.runBuildPhase(builder);
+  }
+
+  async requestReview(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    if (this.state.name !== "BuildDone") return;
+    if (!this.gitAvailable) {
+      await this.appendSystemMessage(
+        "Review unavailable: workspace is not a git repository. Returning to discussion — build edits remain in the working tree for manual review."
+      );
+      // Escape BuildDone directly. The phase machine has no transition out
+      // of BuildDone except via requestReview, so without this the room is
+      // stranded — Stop is a no-op in BuildDone (not an in-flight state).
+      this.state = { name: "AwaitingUser" };
+      this.postState();
+      return;
+    }
+    const reviewer: AgentId = this.state.builder === "codex" ? "claude" : "codex";
+    this.applyEvent({ type: "requestReview" });
+    await this.runReviewPhase(reviewer);
+  }
+
+  async runVerification(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    await this.runVerificationInternal("manual");
+  }
+
+  private async runVerificationInternal(reason: "manual" | "afterBuild"): Promise<VerificationResult | undefined> {
+    if (isInFlight(this.state) || this.verificationRunning) {
+      await this.appendSystemMessage("Verification is paused because Hydra is already running work.");
+      this.postState();
+      return undefined;
+    }
+
+    const command = await this.verificationCommand();
+    if (!command) {
+      await this.appendSystemMessage(
+        "Verification unavailable: set `hydraRoom.verifyCommand` or add a package.json script named `check`, `test`, or `lint`."
+      );
+      this.postState();
+      return undefined;
+    }
+
+    const ctrl = new AbortController();
+    this.currentAbort = ctrl;
+    this.verificationRunning = true;
+    this.postState();
+    await this.recordEvent("verificationStarted", `${reason === "afterBuild" ? "Auto-verification" : "Verification"} started`, {
+      command,
+      reason,
+    });
+    await this.appendSystemMessage(
+      `${reason === "afterBuild" ? "Hydra auto-verification started after build" : "Hydra verification started"}:\n${command}`
+    );
+    let verification: VerificationResult | undefined;
+    try {
+      const result = await runVerificationCommand({
+        cwd: this.workspaceRoot,
+        command,
+        timeoutMs: this.verificationTimeoutMs(),
+        maxOutputChars: this.verificationMaxOutputChars(),
+        signal: ctrl.signal,
+      });
+      if (result.cancelled) {
+        await this.appendSystemMessage("Hydra verification cancelled by user.");
+      } else {
+        // Anchor the verification to the git HEAD that was tested. A
+        // reviewer prompt can compare to current HEAD to detect a stale
+        // (or forged) verification record.
+        if (this.gitAvailable) {
+          const head = await captureGitHead(this.workspaceRoot);
+          if (head) result.headSha = head;
+        }
+        verification = result;
+        this.verifications.push(result);
+        await appendVerification(this.verificationUri.fsPath, result);
+        await this.appendSystemMessage(
+          [
+            `Hydra verification ${verificationPassed(result) ? "passed" : "failed"}.`,
+            verificationSummary(result),
+            result.stdout ? `\nStdout:\n${result.stdout}` : "",
+            result.stderr ? `\nStderr:\n${result.stderr}` : "",
+          ].filter(Boolean).join("\n")
+        );
+        await this.recordEvent("verificationFinished", `Verification ${verificationPassed(result) ? "passed" : "failed"}`, {
+          command,
+          reason,
+          exitCode: result.exitCode ?? null,
+          timedOut: result.timedOut,
+          durationMs: result.durationMs,
+        });
+      }
+    } finally {
+      this.verificationRunning = false;
+      if (this.currentAbort === ctrl) this.currentAbort = undefined;
+      this.postState();
+    }
+    return verification;
+  }
+
+  async acceptDefaultDecision(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady || isInFlight(this.state)) return;
+    const action = this.currentDecisionAction();
+    if (action.kind === "none") return;
+
+    this.acceptedDefaultDecisionTimestamp = action.sourceTimestamp;
+    this.postState();
+    await this.appendSystemMessage(`Accepted default decision: ${action.detail}`);
+    if (action.kind === "assignBuilder" && action.builder && this.state.name === "AwaitingUser") {
+      await this.assignBuilder(action.builder);
+      return;
+    }
+    if (action.kind === "requestReview" && this.state.name === "BuildDone") {
+      await this.requestReview();
+      return;
+    }
+    if (action.kind === "handBack" && this.state.name === "ReviewDone") {
+      await this.handBack();
+      return;
+    }
+    if (action.kind === "sendInstruction" && action.instruction && isSendable(this.state)) {
+      await this.sendUserMessage(action.instruction, this.getFirstSpeaker());
+      return;
+    }
+    this.postState();
+  }
+
+  async handBack(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    if (this.state.name !== "ReviewDone") return;
+    const builder: AgentId = this.state.reviewer === "codex" ? "claude" : "codex";
+    this.applyEvent({ type: "handBack" });
+    await this.runBuildPhase(builder);
+  }
+
+  async openTranscript(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    const doc = await vscode.workspace.openTextDocument(this.transcriptUri);
+    await vscode.window.showTextDocument(doc, vscode.ViewColumn.Active);
+  }
+
+  async archiveAndClearRoom(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    if (
+      isInFlight(this.state) ||
+      this.terminalPokeInFlight ||
+      this.verificationRunning ||
+      this.autopilotRunning
+    ) {
+      vscode.window.showWarningMessage("Hydra can archive the room after the current work finishes or is stopped.");
+      return;
+    }
+
+    const result = await archiveAndResetTranscript(this.transcriptUri.fsPath);
+    this.messages = [];
+    this.state = { name: "AwaitingUser" };
+    this.suggestedBuilder = undefined;
+    this.setAgentStatus("codex", "idle", "Idle");
+    this.setAgentStatus("claude", "idle", "Idle");
+
+    const archiveLabel = path.relative(this.workspaceRoot, result.archivePath).replace(/\\/g, "/");
+    await this.appendSystemMessage(
+      `Archived ${result.archivedMessages} room message${result.archivedMessages === 1 ? "" : "s"} to \`${archiveLabel}\`. Room window cleared.`
+    );
+    this.postState();
+
+    const picked = await vscode.window.showInformationMessage(
+      `Hydra archived room history to ${archiveLabel}.`,
+      "Open Archive"
+    );
+    if (picked === "Open Archive") {
+      const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(result.archivePath));
+      await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+    }
+  }
+
+  async openDecisions(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    const doc = await vscode.workspace.openTextDocument(this.decisionsUri);
+    await vscode.window.showTextDocument(doc, vscode.ViewColumn.Active);
+  }
+
+  async openVerification(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    const doc = await vscode.workspace.openTextDocument(this.verificationUri);
+    await vscode.window.showTextDocument(doc, vscode.ViewColumn.Active);
+  }
+
+  async openNativeActions(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    const doc = await vscode.workspace.openTextDocument(this.nativeActionsUri);
+    await vscode.window.showTextDocument(doc, vscode.ViewColumn.Active);
+  }
+
+  async openAgentCalls(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    await ensureJsonlFile(this.agentCallsUri.fsPath);
+    const doc = await vscode.workspace.openTextDocument(this.agentCallsUri);
+    await vscode.window.showTextDocument(doc, vscode.ViewColumn.Active);
+  }
+
+  async openObjective(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    // ensureObjectiveFile is also called during initialize, but be defensive
+    // if a user deleted it manually between init and this command firing.
+    await ensureObjectiveFile(this.objectiveUri.fsPath);
+    const doc = await vscode.workspace.openTextDocument(this.objectiveUri);
+    await vscode.window.showTextDocument(doc, vscode.ViewColumn.Active);
+  }
+
+  async openSessionBrief(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    const markdown = renderSessionBrief({
+      generatedAt: new Date().toISOString(),
+      workspaceRoot: this.workspaceRoot,
+      phaseLabel: phaseLabel(this.state),
+      transport: this.transportMode(),
+      objective: this.objective,
+      latestDecision: this.decisions[this.decisions.length - 1],
+      latestVerification: this.latestVerification(),
+      workQueue: this.currentWorkQueue(),
+      recentNativeActions: this.nativeActions.slice(-5).reverse(),
+      recentMessages: this.messages.slice(-8).map((message) => ({
+        role: message.role,
+        phase: message.phase,
+        text: message.text,
+        timestamp: message.timestamp,
+      })),
+    });
+    await writeSessionBrief(this.sessionBriefUri.fsPath, markdown);
+    await this.appendSystemMessage("Hydra session brief refreshed at `.hydra/session-brief.md`.");
+    const doc = await vscode.workspace.openTextDocument(this.sessionBriefUri);
+    await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+    this.postState();
+  }
+
+  async openSupportBundle(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    const report = this.latestDoctorReport ?? (await this.buildDoctorReport(false)).report;
+    this.latestDoctorReport = report;
+    const nativeData = await collectNativeDataSnapshot(this.workspaceRoot);
+    const markdown = renderSupportBundle({
+      generatedAt: new Date().toISOString(),
+      workspaceRoot: this.workspaceRoot,
+      phaseLabel: phaseLabel(this.state),
+      transport: this.transportMode(),
+      doctorReport: report,
+      authoritySummaries: this.currentAuthoritySummaries(),
+      nativeRuntime: await this.nativeRuntimeDiagnostics(),
+      nativeData: supportBundleNativeDataSummary(nativeData),
+      terminalSessions: this.terminalBridge?.getSessions() ?? [],
+      latestDecision: this.decisions[this.decisions.length - 1],
+      latestVerification: this.latestVerification(),
+      workQueue: this.currentWorkQueue(),
+      recentNativeActions: this.nativeActions.slice(-8).reverse(),
+      recentEvents: (await readHydraEvents(this.eventsUri.fsPath, 40)).reverse(),
+      recentMessages: this.messages.slice(-12).map((message) => ({
+        role: message.role,
+        phase: message.phase,
+        text: message.text,
+        timestamp: message.timestamp,
+        error: message.error,
+        cancelled: message.cancelled,
+      })),
+    });
+    await writeSupportBundle(this.supportBundleUri.fsPath, markdown);
+    await this.appendSystemMessage("Hydra support bundle refreshed at `.hydra/support-bundle.md`.");
+    const doc = await vscode.workspace.openTextDocument(this.supportBundleUri);
+    await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+    this.postState();
+  }
+
+  async captureNativeCapabilities(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    if (isInFlight(this.state) || this.terminalPokeInFlight) return;
+    const ctrl = new AbortController();
+    this.currentAbort = ctrl;
+    this.terminalPokeInFlight = true;
+    this.postState();
+    const probes: NativeCapabilityProbe[] = [];
+    const probeArgs: Record<AgentId, Array<{ label: string; args: string[] }>> = {
+      codex: [
+        { label: "version", args: ["--version"] },
+        { label: "help", args: ["--help"] },
+        { label: "mcp list json", args: ["mcp", "list", "--json"] },
+        { label: "plugin help", args: ["plugin", "--help"] },
+        { label: "features list", args: ["features", "list"] },
+        { label: "login status", args: ["login", "status"] },
+      ],
+      claude: [
+        { label: "version", args: ["--version"] },
+        { label: "help", args: ["--help"] },
+        { label: "mcp list", args: ["mcp", "list"] },
+        { label: "plugin list json", args: ["plugin", "list", "--json"] },
+        { label: "auth status", args: ["auth", "status"] },
+      ],
+    };
+    try {
+      await this.appendSystemMessage("Capturing native Codex and Claude capability snapshot...");
+      for (const agent of ["codex", "claude"] as AgentId[]) {
+        for (const probe of probeArgs[agent]) {
+          const started = Date.now();
+          const spawn = await this.buildNativeCommandSpawn(agent, probe.args);
+          const result = await runAgent(spawn, "", 30000, () => {}, ctrl.signal);
+          probes.push({
+            agent,
+            label: probe.label,
+            command: spawn.command,
+            args: spawn.args,
+            cwd: spawn.cwd,
+            exitCode: result.exitCode,
+            timedOut: result.timedOut,
+            durationMs: Date.now() - started,
+            output: [result.stdout, result.stderr].filter(Boolean).join("\n"),
+          });
+        }
+      }
+      const markdown = renderNativeCapabilitySnapshot({
+        generatedAt: new Date().toISOString(),
+        workspaceRoot: this.workspaceRoot,
+        probes,
+      });
+      await writeNativeCapabilities(this.nativeCapabilitiesUri.fsPath, markdown);
+      await this.appendSystemMessage("Native capability snapshot refreshed at `.hydra/native-capabilities.md`.");
+      const doc = await vscode.workspace.openTextDocument(this.nativeCapabilitiesUri);
+      await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+    } finally {
+      this.terminalPokeInFlight = false;
+      if (this.currentAbort === ctrl) this.currentAbort = undefined;
+      this.postState();
+    }
+  }
+
+  async captureNativeDataSnapshot(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    if (isInFlight(this.state) || this.terminalPokeInFlight) return;
+    this.terminalPokeInFlight = true;
+    this.postState();
+    try {
+      await this.appendSystemMessage("Capturing redacted native CLI data snapshot...");
+      const markdown = renderNativeDataSnapshot(await collectNativeDataSnapshot(this.workspaceRoot));
+      await writeNativeDataSnapshot(this.nativeDataSnapshotUri.fsPath, markdown);
+      await this.appendSystemMessage("Native data snapshot refreshed at `.hydra/native-data-snapshot.md`.");
+      const doc = await vscode.workspace.openTextDocument(this.nativeDataSnapshotUri);
+      await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+    } finally {
+      this.terminalPokeInFlight = false;
+      this.postState();
+    }
+  }
+
+  async refreshCodexModels(): Promise<void> {
+    await this.ready();
+    const cfg = vscode.workspace.getConfiguration("hydraRoom");
+    const command = cfg.get<string>("codexCommand", "codex");
+    const resolved = await resolveAgentCommand("codex", command);
+    const env = {
+      ...process.env,
+      ...mergeNativeEnv(
+        cfg.get<Record<string, string>>("nativeEnv", {}),
+        cfg.get<Record<string, string>>("codexNativeEnv", {}),
+      ),
+    };
+    const pathExtra = mergeNativePathPrepend(
+      cfg.get<string[]>("nativePathPrepend", []),
+      cfg.get<string[]>("codexNativePathPrepend", []),
+    );
+    if (pathExtra.length) {
+      const expanded = pathExtra.map((p) => p.replace(/\$\{workspaceFolder\}/g, this.workspaceRoot));
+      env.PATH = `${expanded.join(path.delimiter)}${path.delimiter}${env.PATH ?? ""}`;
+    }
+    await this.appendSystemMessage(`Refreshing Codex model catalog via \`codex debug models\`…`);
+    try {
+      const models = await runCodexDebugModels(resolved, env as NodeJS.ProcessEnv);
+      const snapshot: CodexModelsSnapshot = {
+        fetchedAt: new Date().toISOString(),
+        models,
+      };
+      await saveCodexModelsSnapshot(this.codexModelsUri.fsPath, snapshot);
+      this.codexModelsSnapshot = snapshot;
+      const listable = models.filter((m) => m.visibility === "list");
+      await this.appendSystemMessage(
+        `Codex model catalog refreshed: ${listable.length} listable model${listable.length === 1 ? "" : "s"} cached at \`.hydra/codex-models.json\`. The chooser will use this list until you refresh again.`,
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await this.appendSystemMessage(`Codex model refresh failed: ${msg}. The chooser will keep using the built-in curated list.`);
+    }
+    this.postState();
+  }
+
+  private codexPresetsForChooser(): Array<{ label: string; description: string }> {
+    const snapshot = this.codexModelsSnapshot;
+    if (snapshot && snapshot.models.length) {
+      const listable = snapshot.models.filter((m) => m.visibility === "list");
+      const sorted = [...listable].sort((a, b) => a.slug.localeCompare(b.slug, "en", { numeric: true }));
+      return sorted.map((m) => ({
+        label: m.slug,
+        description: this.codexModelDescription(m),
+      }));
+    }
+    // Fallback when the catalog has never been fetched. Matches the Codex CLI
+    // 0.130.0 ship list — refresh to replace this with live data.
+    return [
+      { label: "gpt-5.5", description: "GPT-5.5 — Codex CLI default" },
+      { label: "gpt-5.4", description: "GPT-5.4 — prior flagship" },
+      { label: "gpt-5.4-mini", description: "GPT-5.4-Mini — lighter / cheaper" },
+      { label: "gpt-5.3-codex", description: "Code-tuned 5.3" },
+      { label: "gpt-5.3-codex-spark", description: "High-reasoning code variant (interactive only — no API)" },
+      { label: "gpt-5.2", description: "GPT-5.2 — older flagship" },
+    ];
+  }
+
+  private codexModelDescription(model: CodexModelInfo): string {
+    const bits: string[] = [];
+    if (model.displayName && model.displayName !== model.slug) bits.push(model.displayName);
+    if (model.defaultReasoning) bits.push(`reasoning: ${model.defaultReasoning}`);
+    if (!model.supportedInApi) bits.push("interactive only — no API (codex exec won't work)");
+    if (model.description) bits.push(model.description.split(/[.!?]/)[0].trim());
+    return bits.join(" · ") || model.slug;
+  }
+
+  async chooseModel(): Promise<void> {
+    await this.ready();
+    const agentPick = await vscode.window.showQuickPick(
+      [
+        { label: "Claude", description: this.currentModelLabel("claude"), value: "claude" as AgentId },
+        { label: "Codex", description: this.currentModelLabel("codex"), value: "codex" as AgentId },
+      ],
+      { placeHolder: "Which agent's model do you want to change?" },
+    );
+    if (!agentPick) return;
+    const agent = agentPick.value;
+    const scopePick = await vscode.window.showQuickPick(
+      [
+        { label: "All phases", description: "One model for discussion, build, and review", value: "all" },
+        { label: "Discussion only", description: "Opener / reactor / closer turns", value: "discussion" },
+        { label: "Build only", description: "When this head is the assigned builder", value: "build" },
+        { label: "Review only", description: "When this head reviews the other's diff", value: "review" },
+      ],
+      { placeHolder: `Scope the ${agent} model change` },
+    );
+    if (!scopePick) return;
+    const scope = scopePick.value as "all" | "discussion" | "build" | "review";
+
+    const presets = agent === "claude"
+      ? [
+          { label: "sonnet", description: "Alias — current Sonnet" },
+          { label: "opus", description: "Alias — current Opus" },
+          { label: "haiku", description: "Alias — current Haiku" },
+          { label: "claude-sonnet-4-6", description: "Sonnet 4.6" },
+          { label: "claude-sonnet-4-5", description: "Sonnet 4.5 (older)" },
+          { label: "claude-opus-4-7", description: "Opus 4.7" },
+          { label: "claude-opus-4-5", description: "Opus 4.5 (older)" },
+          { label: "claude-haiku-4-5-20251001", description: "Haiku 4.5 dated build" },
+          { label: "claude-haiku-4-5", description: "Haiku 4.5 alias" },
+        ]
+      : this.codexPresetsForChooser();
+
+    const current = this.readModelSettingRaw(agent);
+    const currentForScope = this.modelForScope(agent, scope);
+    const catalogSuffix = agent === "codex" && this.codexModelsSnapshot
+      ? ` · cached ${new Date(this.codexModelsSnapshot.fetchedAt).toLocaleString()}`
+      : agent === "codex"
+        ? " · cache empty — using fallback list"
+        : "";
+    const items: Array<{ label: string; description?: string; value: string }> = [
+      { label: "(CLI default)", description: "Clear the override; let the CLI pick", value: "" },
+      ...presets.map((p) => ({ label: p.label, description: p.description, value: p.label })),
+      { label: "Custom…", description: "Type any model ID (e.g. a preview build the CLI accepts)", value: "__custom__" },
+    ];
+    if (agent === "codex") {
+      items.push({
+        label: "$(refresh) Refresh Codex catalog…",
+        description: `Run \`codex debug models\` and update the list${catalogSuffix}`,
+        value: "__refreshCodex__",
+      });
+    }
+    const pick = await vscode.window.showQuickPick(items, {
+      placeHolder: currentForScope
+        ? `Current ${scope === "all" ? "(all phases)" : scope}: ${currentForScope} — pick a new model for ${agent}`
+        : `Pick a model for ${agent} ${scope === "all" ? "(all phases)" : scope} (currently CLI default)`,
+    });
+    if (!pick) return;
+    let value = pick.value;
+    if (value === "__refreshCodex__") {
+      await this.refreshCodexModels();
+      // Re-open the chooser so the user lands on the refreshed list
+      // without re-navigating from the agent picker.
+      await this.chooseModel();
+      return;
+    }
+    if (value === "__custom__") {
+      const typed = await vscode.window.showInputBox({
+        prompt: `Custom model ID for ${agent} (${scope === "all" ? "all phases" : scope})`,
+        value: currentForScope,
+        validateInput: (v) => (v && v.length > 200 ? "Model ID is suspiciously long" : undefined),
+      });
+      if (typed === undefined) return;
+      value = typed.trim();
+    }
+
+    const nextSetting = this.applyModelChange(current, scope, value);
+    await vscode.workspace.getConfiguration("hydraRoom").update(`${agent}Model`, nextSetting, vscode.ConfigurationTarget.Workspace);
+    const detail = scope === "all" ? "all phases" : `${scope} phase`;
+    await this.appendSystemMessage(
+      value
+        ? `Model for ${agent} (${detail}) set to "${value}". Next matching dispatch will pass \`--model ${value}\`.`
+        : `Model override for ${agent} (${detail}) cleared. Falls back to whatever's set for other phases, then the CLI default.`,
+    );
+    this.postState();
+  }
+
+  /** Raw value of the setting — string, object, or undefined. */
+  private readModelSettingRaw(agent: AgentId): unknown {
+    return vscode.workspace.getConfiguration("hydraRoom").get<unknown>(`${agent}Model`);
+  }
+
+  /** Current model the user has configured for a specific scope (or "" if none). */
+  private modelForScope(agent: AgentId, scope: "all" | "discussion" | "build" | "review"): string {
+    const raw = this.readModelSettingRaw(agent);
+    if (typeof raw === "string") return scope === "all" ? raw.trim() : "";
+    if (raw && typeof raw === "object" && scope !== "all") {
+      const v = (raw as Record<string, unknown>)[scope];
+      return typeof v === "string" ? v.trim() : "";
+    }
+    return "";
+  }
+
+  /**
+   * Compute the next value for the model setting given the user's pick.
+   * "all" scope collapses to a single string; per-phase scopes always
+   * produce an object even if the previous value was a string.
+   */
+  private applyModelChange(current: unknown, scope: "all" | "discussion" | "build" | "review", value: string): unknown {
+    if (scope === "all") return value;
+    let next: Record<string, string> = {};
+    if (typeof current === "string" && current.trim()) {
+      next = { discussion: current.trim(), build: current.trim(), review: current.trim() };
+    } else if (current && typeof current === "object") {
+      for (const [k, v] of Object.entries(current as Record<string, unknown>)) {
+        if (typeof v === "string") next[k] = v;
+      }
+    }
+    if (value) next[scope] = value;
+    else delete next[scope];
+    // If every phase ends up empty, collapse to "" so the setting clears cleanly.
+    if (Object.values(next).every((v) => !v)) return "";
+    return next;
+  }
+
+  async chooseEffort(): Promise<void> {
+    await this.ready();
+    const agentPick = await vscode.window.showQuickPick(
+      [
+        { label: "Claude", description: this.currentEffortLabel("claude"), value: "claude" as AgentId },
+        { label: "Codex", description: this.currentEffortLabel("codex"), value: "codex" as AgentId },
+      ],
+      { placeHolder: "Which agent's thinking level do you want to change?" },
+    );
+    if (!agentPick) return;
+    const agent = agentPick.value;
+    const scopePick = await vscode.window.showQuickPick(
+      [
+        { label: "All phases", description: "One level for discussion, build, and review", value: "all" },
+        { label: "Discussion only", description: "Opener / reactor / closer turns", value: "discussion" },
+        { label: "Build only", description: "When this head is the assigned builder", value: "build" },
+        { label: "Review only", description: "When this head reviews the other's diff", value: "review" },
+      ],
+      { placeHolder: `Scope the ${agent} thinking level change` },
+    );
+    if (!scopePick) return;
+    const scope = scopePick.value as "all" | "discussion" | "build" | "review";
+
+    // Claude supports an extra "max" level above xhigh; Codex caps at xhigh.
+    const baseLevels = [
+      { label: "low", description: "Fast, less deliberation" },
+      { label: "medium", description: "Balanced (CLI default for most models)" },
+      { label: "high", description: "Greater reasoning depth" },
+      { label: "xhigh", description: "Extra-high — slower, more thorough" },
+    ];
+    const claudeMax = { label: "max", description: "Claude-only — maximum effort" };
+    const presets = agent === "claude" ? [...baseLevels, claudeMax] : baseLevels;
+    const currentRaw = this.readEffortSettingRaw(agent);
+    const currentForScope = this.effortForScope(agent, scope);
+    const items: Array<{ label: string; description?: string; value: string }> = [
+      { label: "(CLI default)", description: "Clear the override; let the CLI/model pick", value: "" },
+      ...presets.map((p) => ({ label: p.label, description: p.description, value: p.label })),
+    ];
+    const pick = await vscode.window.showQuickPick(items, {
+      placeHolder: currentForScope
+        ? `Current ${scope === "all" ? "(all phases)" : scope}: ${currentForScope} — pick a thinking level for ${agent}`
+        : `Pick a thinking level for ${agent} ${scope === "all" ? "(all phases)" : scope} (currently CLI default)`,
+    });
+    if (!pick) return;
+    const next = this.applyEffortChange(currentRaw, scope, pick.value);
+    const settingKey = agent === "claude" ? "claudeEffort" : "codexReasoning";
+    await vscode.workspace.getConfiguration("hydraRoom").update(settingKey, next, vscode.ConfigurationTarget.Workspace);
+    const detail = scope === "all" ? "all phases" : `${scope} phase`;
+    const flag = agent === "claude" ? `--effort ${pick.value}` : `-c model_reasoning_effort="${pick.value}"`;
+    await this.appendSystemMessage(
+      pick.value
+        ? `Thinking level for ${agent} (${detail}) set to "${pick.value}". Next matching dispatch will pass \`${flag}\`.`
+        : `Thinking level override for ${agent} (${detail}) cleared.`,
+    );
+    this.postState();
+  }
+
+  private readEffortSettingRaw(agent: AgentId): unknown {
+    const key = agent === "claude" ? "claudeEffort" : "codexReasoning";
+    return vscode.workspace.getConfiguration("hydraRoom").get<unknown>(key);
+  }
+
+  private effortForScope(agent: AgentId, scope: "all" | "discussion" | "build" | "review"): string {
+    const raw = this.readEffortSettingRaw(agent);
+    if (typeof raw === "string") return scope === "all" ? raw.trim() : "";
+    if (raw && typeof raw === "object" && scope !== "all") {
+      const v = (raw as Record<string, unknown>)[scope];
+      return typeof v === "string" ? v.trim() : "";
+    }
+    return "";
+  }
+
+  private applyEffortChange(current: unknown, scope: "all" | "discussion" | "build" | "review", value: string): unknown {
+    if (scope === "all") return value;
+    let next: Record<string, string> = {};
+    if (typeof current === "string" && current.trim()) {
+      next = { discussion: current.trim(), build: current.trim(), review: current.trim() };
+    } else if (current && typeof current === "object") {
+      for (const [k, v] of Object.entries(current as Record<string, unknown>)) {
+        if (typeof v === "string") next[k] = v;
+      }
+    }
+    if (value) next[scope] = value;
+    else delete next[scope];
+    if (Object.values(next).every((v) => !v)) return "";
+    return next;
+  }
+
+  private currentEffortLabel(agent: AgentId): string {
+    const raw = this.readEffortSettingRaw(agent);
+    if (typeof raw === "string" && raw.trim()) return `currently: ${raw.trim()}`;
+    if (raw && typeof raw === "object") {
+      const obj = raw as Record<string, unknown>;
+      const parts: string[] = [];
+      for (const k of ["discussion", "build", "review"]) {
+        const v = obj[k];
+        if (typeof v === "string" && v.trim()) parts.push(`${k[0]}=${v.trim()}`);
+      }
+      if (parts.length) return `currently: ${parts.join(", ")}`;
+    }
+    return "currently: CLI default";
+  }
+
+  private effortSummaryForRail(agent: AgentId): string {
+    const raw = this.readEffortSettingRaw(agent);
+    if (typeof raw === "string") {
+      const v = raw.trim();
+      return v;
+    }
+    if (raw && typeof raw === "object") {
+      const obj = raw as Record<string, unknown>;
+      const d = typeof obj.discussion === "string" ? obj.discussion.trim() : "";
+      const b = typeof obj.build === "string" ? obj.build.trim() : "";
+      const r = typeof obj.review === "string" ? obj.review.trim() : "";
+      const values = [d, b, r].filter(Boolean);
+      if (values.length === 0) return "";
+      if (d && d === b && d === r) return d;
+      const parts: string[] = [];
+      if (d) parts.push(`d=${d}`);
+      if (b) parts.push(`b=${b}`);
+      if (r) parts.push(`r=${r}`);
+      return parts.join("/");
+    }
+    return "";
+  }
+
+  private profileSummaryForRail(agent: AgentId): { text: string; title: string } {
+    const cfg = vscode.workspace.getConfiguration("hydraRoom");
+    const phases: Array<{ key: CliProfile; label: string }> = [
+      { key: "discussion", label: "Discussion" },
+      { key: "build", label: "Build" },
+      { key: "review", label: "Review" },
+    ];
+    const labels = phases.map((phase) => {
+      const configured = cfg.get<string>(profileSettingKey(agent, phase.key), "custom");
+      const id = isConfigurableCapabilityProfileId(configured) ? configured : "custom";
+      const preset = capabilityProfilePreset(id);
+      return {
+        short: capabilityProfileShortLabel(id),
+        title: `${phase.label}: ${preset?.label ?? "Custom"}`,
+      };
+    });
+    return {
+      text: labels.map((label) => label.short).join("/"),
+      title: labels.map((label) => label.title).join(", "),
+    };
+  }
+
+  /**
+   * Compact string for the rail chip. "default" when nothing set;
+   * single model name when same across phases; "d=…/b=…/r=…" when mixed.
+   */
+  private modelSummaryForRail(agent: AgentId): string {
+    const raw = this.readModelSettingRaw(agent);
+    if (typeof raw === "string") {
+      const v = raw.trim();
+      return v || "default";
+    }
+    if (raw && typeof raw === "object") {
+      const obj = raw as Record<string, unknown>;
+      const d = typeof obj.discussion === "string" ? obj.discussion.trim() : "";
+      const b = typeof obj.build === "string" ? obj.build.trim() : "";
+      const r = typeof obj.review === "string" ? obj.review.trim() : "";
+      const values = [d, b, r].filter(Boolean);
+      if (values.length === 0) return "default";
+      if (d && d === b && d === r) return d;
+      const parts: string[] = [];
+      if (d) parts.push(`d=${d}`);
+      if (b) parts.push(`b=${b}`);
+      if (r) parts.push(`r=${r}`);
+      return parts.join("/");
+    }
+    return "default";
+  }
+
+  private currentModelLabel(agent: AgentId): string {
+    const raw = this.readModelSettingRaw(agent);
+    if (typeof raw === "string" && raw.trim()) return `currently: ${raw.trim()}`;
+    if (raw && typeof raw === "object") {
+      const obj = raw as Record<string, unknown>;
+      const parts: string[] = [];
+      for (const k of ["discussion", "build", "review"]) {
+        const v = obj[k];
+        if (typeof v === "string" && v.trim()) parts.push(`${k[0]}=${v.trim()}`);
+      }
+      if (parts.length) return `currently: ${parts.join(", ")}`;
+    }
+    return "currently: CLI default";
+  }
+
+  async insertPromptTemplate(): Promise<void> {
+    await this.ready();
+    const raw = vscode.workspace.getConfiguration("hydraRoom").get<unknown>("promptTemplates");
+    const templates: Array<{ name: string; body: string }> = [];
+    if (Array.isArray(raw)) {
+      for (const entry of raw) {
+        if (entry && typeof entry === "object") {
+          const e = entry as { name?: unknown; body?: unknown };
+          if (typeof e.name === "string" && typeof e.body === "string" && e.name.trim() && e.body.trim()) {
+            templates.push({ name: e.name, body: e.body });
+          }
+        }
+      }
+    }
+    if (templates.length === 0) {
+      const action = await vscode.window.showInformationMessage(
+        "No prompt templates configured. Add some under hydraRoom.promptTemplates in settings.",
+        "Open Settings",
+      );
+      if (action === "Open Settings") {
+        await vscode.commands.executeCommand("workbench.action.openSettings", "hydraRoom.promptTemplates");
+      }
+      return;
+    }
+    const pick = await vscode.window.showQuickPick(
+      templates.map((t) => ({ label: t.name, detail: t.body.length > 120 ? `${t.body.slice(0, 117)}…` : t.body, body: t.body })),
+      { placeHolder: "Pick a prompt template to load into the composer" },
+    );
+    if (!pick) return;
+    this.panel.webview.postMessage({ type: "setComposerText", text: pick.body });
+    this.panel.reveal(vscode.ViewColumn.Beside);
+  }
+
+  async showCommandCenter(): Promise<void> {
+    await this.ready();
+    const actions = buildCommandCenterActions({
+      workspaceReady: this.workspaceReady,
+      canStop: isInFlight(this.state) || this.terminalPokeInFlight || this.verificationRunning || this.autopilotRunning,
+      canAcceptDefault: this.workspaceReady && !isInFlight(this.state) && !this.terminalPokeInFlight && this.currentDecisionAction().kind !== "none",
+      canAssignBuilder: this.workspaceReady && this.state.name === "AwaitingUser",
+      canRequestReview: this.workspaceReady && this.state.name === "BuildDone" && this.gitAvailable,
+      canHandBack: this.workspaceReady && this.state.name === "ReviewDone" && !this.state.approved,
+      canRunVerification: this.workspaceReady && !isInFlight(this.state) && !this.terminalPokeInFlight && !this.verificationRunning,
+      canPokeNativeTerminals: this.workspaceReady && !isInFlight(this.state) && !this.terminalPokeInFlight,
+      needsCodexPath: checkFailed(this.latestDoctorReport, "codex-command"),
+      needsClaudePath: checkFailed(this.latestDoctorReport, "claude-command"),
+      transport: this.transportMode(),
+      workQueueCount: this.workspaceReady ? this.currentWorkQueue().length : 0,
+      nativeActionsCount: this.nativeActions.length,
+    });
+    const pick = await vscode.window.showQuickPick(
+      actions.map((item) => ({
+        ...item,
+        alwaysShow: true,
+      })),
+      {
+        title: "Hydra Command Center",
+        placeHolder: "Pick the next room action",
+        ignoreFocusOut: true,
+      }
+    );
+    if (!pick) return;
+    await this.runCommandCenterAction(pick.id);
+  }
+
+  private async runCommandCenterAction(action: CommandCenterActionId): Promise<void> {
+    switch (action) {
+      case "openWorkspaceFolder":
+        await this.openWorkspaceFolder();
+        return;
+      case "stopCurrentTurn":
+        await this.stop();
+        return;
+      case "acceptDefaultDecision":
+        await this.acceptDefaultDecision();
+        return;
+      case "archiveAndClearRoom":
+        await this.archiveAndClearRoom();
+        return;
+      case "assignCodex":
+        await this.assignBuilder("codex");
+        return;
+      case "assignClaude":
+        await this.assignBuilder("claude");
+        return;
+      case "chooseModel":
+        await this.chooseModel();
+        return;
+      case "requestReview":
+        await this.requestReview();
+        return;
+      case "handBack":
+        await this.handBack();
+        return;
+      case "runVerification":
+        await this.runVerification();
+        return;
+      case "nativeAction":
+        await this.showNativeActionPicker();
+        return;
+      case "pokeBothTerminalsWithDiff":
+        await this.pokeNativeTerminals(["codex", "claude"], "", { includeWorkspaceDiff: true });
+        return;
+      case "openObjective":
+        await this.openObjective();
+        return;
+      case "openVerification":
+        await this.openVerification();
+        return;
+      case "openDecisions":
+        await this.openDecisions();
+        return;
+      case "openSessionBrief":
+        await this.openSessionBrief();
+        return;
+      case "openSupportBundle":
+        await this.openSupportBundle();
+        return;
+      case "captureNativeCapabilities":
+        await this.captureNativeCapabilities();
+        return;
+      case "captureNativeDataSnapshot":
+        await this.captureNativeDataSnapshot();
+        return;
+      case "openNativeActions":
+        await this.openNativeActions();
+        return;
+      case "openAgentCalls":
+        await this.openAgentCalls();
+        return;
+      case "openNativeTerminals":
+        await this.openNativeTerminals();
+        return;
+      case "useTerminalBridge":
+        await this.useTerminalBridge();
+        return;
+      case "useOneShotTransport":
+        await this.useOneShotTransport();
+        return;
+      case "runDoctor":
+        await this.runDoctor();
+        return;
+      case "runAutopilotStart":
+        await this.runAutopilotStart();
+        return;
+      case "runTerminalBridgeSelfTest":
+        await this.runTerminalBridgeSelfTest();
+        return;
+      case "showTerminalBridgeHealth":
+        await this.showTerminalBridgeHealth();
+        return;
+      case "showEffectiveAuthority":
+        await this.showEffectiveAuthority();
+        return;
+      case "changeCapabilityProfile":
+        await this.changeCapabilityProfile();
+        return;
+      case "fixCodexPath":
+        await this.fixAgentCommand("codex");
+        return;
+      case "fixClaudePath":
+        await this.fixAgentCommand("claude");
+        return;
+      case "resetStuckTurn":
+        await this.resetStuckTurn();
+        return;
+      case "openTranscript":
+        await this.openTranscript();
+        return;
+      case "openLastPrompt":
+        await this.openLastPrompt();
+        return;
+    }
+  }
+
+  async previewNextPrompt(draftText = "", opener: AgentId = this.getFirstSpeaker()): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady || isInFlight(this.state)) return;
+    const envelope = await this.buildNextPromptPreviewEnvelope(draftText, opener);
+    const doc = await vscode.workspace.openTextDocument({
+      language: "markdown",
+      content: renderPromptEnvelopePreview(envelope),
+    });
+    await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+  }
+
+  async openLastPrompt(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    const envelope = await readLatestPromptEnvelope(this.workspaceRoot);
+    if (!envelope) {
+      vscode.window.showInformationMessage("Hydra has not written any prompt envelopes yet.");
+      return;
+    }
+    const doc = await vscode.workspace.openTextDocument({
+      language: "markdown",
+      content: renderPromptEnvelopePreview(envelope),
+    });
+    await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+  }
+
+  async setObjective(text: string): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    this.objective = trimmed;
+    await writeObjective(this.objectiveUri.fsPath, this.objective);
+    await this.appendSystemMessage(
+      `Room objective pinned. This is context only; press Send when you want Codex and Claude to answer.\n\n${this.objective}`
+    );
+    this.postState();
+  }
+
+  async openNativeTerminals(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    await this.terminalBridge?.openAll();
+    vscode.window.showInformationMessage("Hydra native terminals opened.");
+    this.postState();
+  }
+
+  async pokeNativeTerminal(
+    agent: AgentId,
+    text: string,
+    options: NativeTerminalPokeOptions | boolean = {}
+  ): Promise<void> {
+    await this.pokeNativeTerminals([agent], text, options);
+  }
+
+  async runNativeCliCommand(agent: AgentId, argsLine: string): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    if (isInFlight(this.state) || this.terminalPokeInFlight) return;
+    const rawArgs = splitNativeArgs(argsLine.trim());
+    if (rawArgs.length === 0) return;
+
+    const actionId = `na-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
+    let status: NativeActionStatus = "failed";
+    const ctrl = new AbortController();
+    this.currentAbort = ctrl;
+    this.terminalPokeInFlight = true;
+    const commandLine = `${agent} ${rawArgs.join(" ")}`;
+    try {
+      await this.appendUserMessage(`[Native ${AGENT_NAMES[agent]} command]\n\n${commandLine}`);
+      const messageId = this.openPendingMessage(agent, "opener");
+      const spawn = await this.buildNativeCommandSpawn(agent, rawArgs);
+      const result = await this.runAgentTransport(
+        agent,
+        "opener",
+        spawn,
+        "",
+        messageId,
+        this.agentTimeoutMs("build"),
+        ctrl.signal,
+        this.transportMode() === "terminalBridge"
+      );
+      await this.finalizePendingMessage(messageId, result);
+      status = ctrl.signal.aborted ? "cancelled" : didAgentFail(result) ? "failed" : "completed";
+    } finally {
+      await this.recordNativeAction({
+        id: actionId,
+        agents: [agent],
+        instruction: commandLine,
+        includeEditorContext: false,
+        includeWorkspaceDiff: false,
+        promptEnvelopeIds: [],
+        status,
+      });
+      this.terminalPokeInFlight = false;
+      this.currentAbort = undefined;
+      this.postState();
+    }
+  }
+
+  async sendRawTerminalLine(agent: AgentId, line: string): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    if (isInFlight(this.state) || this.terminalPokeInFlight) return;
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    if (!this.terminalBridge) {
+      await this.appendSystemMessage("Raw terminal line unavailable: terminal bridge is not initialized.");
+      this.postState();
+      return;
+    }
+
+    const actionId = `na-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
+    let status: NativeActionStatus = "failed";
+    this.terminalPokeInFlight = true;
+    try {
+      await this.appendUserMessage(`[Raw ${AGENT_NAMES[agent]} terminal line]\n\n${trimmed}`);
+      await this.terminalBridge.sendRawLine(agent, trimmed);
+      await this.appendSystemMessage(`Sent raw line to ${AGENT_NAMES[agent]} terminal. Continue interaction in the visible terminal if the CLI is interactive.`);
+      status = "completed";
+    } finally {
+      await this.recordNativeAction({
+        id: actionId,
+        agents: [agent],
+        instruction: `[raw terminal] ${trimmed}`,
+        includeEditorContext: false,
+        includeWorkspaceDiff: false,
+        promptEnvelopeIds: [],
+        status,
+      });
+      this.terminalPokeInFlight = false;
+      this.postState();
+    }
+  }
+
+  async pokeNativeTerminals(
+    agents: AgentId[],
+    text: string,
+    options: NativeTerminalPokeOptions | boolean = {}
+  ): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    if (isInFlight(this.state) || this.terminalPokeInFlight) return;
+    const targetAgents = uniqueAgents(agents);
+    if (targetAgents.length === 0) return;
+    const pokeOptions = normalizePokeOptions(options);
+    const editorContext = pokeOptions.includeEditorContext ? this.activeEditorContext() : undefined;
+    if (pokeOptions.includeEditorContext && !editorContext) {
+      await this.appendSystemMessage("No active editor context is available. Open a file or select text, then try the native terminal poke again.");
+      this.postState();
+      return;
+    }
+    let workspaceDiff: string | undefined;
+    if (pokeOptions.includeWorkspaceDiff) {
+      if (!this.gitAvailable) {
+        await this.appendSystemMessage("Working-tree poke unavailable: workspace is not a git repository.");
+        this.postState();
+        return;
+      }
+      const diff = await captureGitDiff(this.workspaceRoot, this.diffMaxLines());
+      if (diff === null) {
+        await this.appendSystemMessage("Working-tree poke unavailable: git diff failed.");
+        this.postState();
+        return;
+      }
+      workspaceDiff = diff.trim() || "[git working tree clean]";
+    }
+    const instruction = text.trim() || defaultPokeInstruction(editorContext, workspaceDiff);
+    if (!instruction) return;
+    if (!this.terminalBridge) {
+      await this.appendSystemMessage("Native terminal poke unavailable: terminal bridge is not initialized.");
+      this.postState();
+      return;
+    }
+
+    const actionId = `na-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
+    const promptEnvelopeIds: string[] = [];
+    let status: NativeActionStatus = "failed";
+    const ctrl = new AbortController();
+    this.currentAbort = ctrl;
+    this.terminalPokeInFlight = true;
+    try {
+      const targetLabel = targetAgents.length === 2
+        ? "Codex and Claude terminals"
+        : `${AGENT_NAMES[targetAgents[0]]} terminal`;
+      const attachmentSummary = [
+        editorContext
+          ? `Attached editor context: ${editorContext.label} (${editorContext.selected ? "selection" : "active file"}, ${editorContext.text.length} chars${editorContext.truncated ? " truncated" : ""})`
+          : "",
+        workspaceDiff !== undefined
+          ? `Attached working-tree diff: ${workspaceDiff.length} chars`
+          : "",
+      ].filter(Boolean).join("\n");
+      const attachmentBlock = attachmentSummary ? `\n\n${attachmentSummary}` : "";
+      await this.appendUserMessage(`[Direct to ${targetLabel}]${attachmentBlock}\n\n${instruction}`);
+      await this.terminalBridge.openAll();
+      const calls: Promise<{ text: string; result: RunResult }>[] = [];
+      for (const agent of targetAgents) {
+        const envelope = await this.buildDirectTerminalPokeEnvelope(agent, instruction, editorContext, workspaceDiff);
+        promptEnvelopeIds.push(envelope.id);
+        await this.persistPromptEnvelope(envelope);
+        const messageId = this.openPendingMessage(agent, "opener");
+        const pending = this.messages.find((m) => m.id === messageId);
+        if (pending) pending.activity = `${AGENT_NAMES[agent]} native terminal poke running...`;
+        calls.push(this.callAgent(agent, "opener", envelope.renderedPrompt, messageId, ctrl.signal, true));
+      }
+      this.postState();
+      const results = await Promise.all(calls);
+      status = ctrl.signal.aborted
+        ? "cancelled"
+        : results.some(({ result }) => didAgentFail(result))
+          ? "failed"
+          : "completed";
+    } finally {
+      await this.recordNativeAction({
+        id: actionId,
+        agents: targetAgents,
+        instruction,
+        includeEditorContext: !!pokeOptions.includeEditorContext,
+        includeWorkspaceDiff: !!pokeOptions.includeWorkspaceDiff,
+        editorContext,
+        workspaceDiff,
+        promptEnvelopeIds,
+        status,
+      });
+      this.terminalPokeInFlight = false;
+      this.currentAbort = undefined;
+      this.postState();
+    }
+  }
+
+  async showNativeActionPicker(draftText = ""): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    if (isInFlight(this.state) || this.terminalPokeInFlight) return;
+
+    const pick = await vscode.window.showQuickPick(nativeActionPicks(), {
+      title: "Hydra: Native Action",
+      placeHolder: "Choose who gets the direct native-terminal instruction and what context to attach.",
+      matchOnDescription: true,
+      matchOnDetail: true,
+    });
+    if (!pick) return;
+
+    let instruction = pick.presetLine ?? draftText.trim();
+    if (!instruction) {
+      const input = await vscode.window.showInputBox({
+        title: `Hydra: ${pick.plainLabel}`,
+        prompt: pick.actionKind === "command"
+          ? `Native args/subcommand to run after ${AGENT_NAMES[pick.agents[0]]}'s configured executable. Example: doctor or mcp list.`
+          : pick.actionKind === "rawLine"
+          ? `Raw PowerShell line to send to the visible ${AGENT_NAMES[pick.agents[0]]} terminal. Use this for interactive native CLI flows.`
+          : pick.options.includeEditorContext || pick.options.includeWorkspaceDiff
+          ? "Optional instruction. Leave blank to use only the attached context."
+          : "Instruction to send to the selected native terminal endpoint.",
+        ignoreFocusOut: true,
+      });
+      if (input === undefined) return;
+      instruction = input;
+    }
+
+    if (pick.actionKind === "command") {
+      await this.runNativeCliCommand(pick.agents[0], instruction);
+    } else if (pick.actionKind === "rawLine") {
+      await this.sendRawTerminalLine(pick.agents[0], instruction);
+    } else {
+      await this.pokeNativeTerminals(pick.agents, instruction, pick.options);
+    }
+  }
+
+  async rerunNativeAction(id: string): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    if (isInFlight(this.state) || this.terminalPokeInFlight) return;
+    const receipt = this.nativeActions.find((action) => action.id === id);
+    if (!receipt) {
+      await this.appendSystemMessage(`Native action unavailable: no receipt found for ${id}.`);
+      this.postState();
+      return;
+    }
+    await this.pokeNativeTerminals(receipt.agents, receipt.instruction, {
+      includeEditorContext: receipt.includeEditorContext,
+      includeWorkspaceDiff: receipt.includeWorkspaceDiff,
+    });
+  }
+
+  async clearNativeActions(ids: string[]): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    if (this.terminalPokeInFlight) {
+      await this.appendSystemMessage("Native actions cannot be cleared while a native terminal action is running.");
+      this.postState();
+      return;
+    }
+    const targetIds = new Set(ids.map((id) => id.trim()).filter(Boolean));
+    if (targetIds.size === 0) return;
+    const previous = this.nativeActions;
+    const next = previous.filter((action) => !targetIds.has(action.id));
+    const removed = previous.length - next.length;
+    if (removed === 0) return;
+
+    this.nativeActions = next;
+    try {
+      await writeNativeActions(this.nativeActionsUri.fsPath, next);
+    } catch (err) {
+      this.nativeActions = previous;
+      const message = err instanceof Error ? err.message : String(err);
+      await this.appendSystemMessage(`Native actions failed to clear: ${message}`);
+    }
+    this.postState();
+  }
+
+  async discussLatestVerificationFailure(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady || isInFlight(this.state) || this.terminalPokeInFlight) return;
+    const latest = this.latestVerification();
+    if (!latest || verificationPassed(latest) || !isSendable(this.state)) return;
+    await this.sendUserMessage(
+      [
+        "Diagnose and fix the latest Hydra verification failure.",
+        "",
+        verificationAsReviewContext(latest),
+      ].join("\n"),
+      this.getFirstSpeaker()
+    );
+  }
+
+  async dismissWorkQueueItem(id: string): Promise<void> {
+    await this.recordWorkQueueDisposition({
+      id,
+      kind: "dismissed",
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  async snoozeWorkQueueItem(id: string, minutes = 60): Promise<void> {
+    const now = Date.now();
+    await this.recordWorkQueueDisposition({
+      id,
+      kind: "snoozed",
+      timestamp: new Date(now).toISOString(),
+      until: new Date(now + Math.max(1, minutes) * 60 * 1000).toISOString(),
+    });
+  }
+
+  private async recordNativeAction(input: {
+    id: string;
+    agents: AgentId[];
+    instruction: string;
+    includeEditorContext: boolean;
+    includeWorkspaceDiff: boolean;
+    editorContext?: EditorContextAttachment;
+    workspaceDiff?: string;
+    promptEnvelopeIds: string[];
+    status: NativeActionStatus;
+  }): Promise<void> {
+    const receipt: NativeActionReceipt = {
+      id: input.id,
+      timestamp: new Date().toISOString(),
+      agents: input.agents,
+      instruction: input.instruction,
+      includeEditorContext: input.includeEditorContext,
+      includeWorkspaceDiff: input.includeWorkspaceDiff,
+      editorContext: input.editorContext
+        ? {
+          label: input.editorContext.label,
+          selected: input.editorContext.selected,
+          startLine: input.editorContext.startLine,
+          endLine: input.editorContext.endLine,
+          chars: input.editorContext.text.length,
+          originalChars: input.editorContext.originalChars,
+          truncated: input.editorContext.truncated,
+        }
+        : undefined,
+      workspaceDiffChars: input.workspaceDiff?.length,
+      promptEnvelopeIds: input.promptEnvelopeIds,
+      nativeSessionHints: await collectNativeSessionHints(this.workspaceRoot, input.agents),
+      status: input.status,
+    };
+    this.nativeActions.push(receipt);
+    try {
+      await appendNativeAction(this.nativeActionsUri.fsPath, receipt);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      try {
+        await this.appendSystemMessage(`Native action receipt failed to write: ${message}`);
+      } catch {
+        // Keep cleanup paths from being blocked by a secondary receipt warning.
+      }
+    }
+  }
+
+  private async recordWorkQueueDisposition(disposition: WorkQueueDisposition): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    this.workQueueDispositions.push(disposition);
+    try {
+      await appendWorkQueueDisposition(this.workQueueUri.fsPath, disposition);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await this.appendSystemMessage(`Work queue state failed to write: ${message}`);
+    }
+    this.postState();
+  }
+
+  async useTerminalBridge(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    if (this.transportMode() === "terminalBridge") {
+      await this.terminalBridge?.openAll();
+      vscode.window.showInformationMessage("Hydra is already using the experimental terminal bridge.");
+      await this.runTerminalBridgeSelfTest();
+      return;
+    }
+    this.transport = "terminalBridge";
+    await this.terminalBridge?.openAll();
+    await this.appendSystemMessage(
+      "Experimental terminal bridge enabled. Hydra is running a self-test before using it for agent turns."
+    );
+    this.postState();
+    await this.runTerminalBridgeSelfTest();
+  }
+
+  async runTerminalBridgeSelfTest(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    if (!this.terminalBridge) {
+      await this.appendSystemMessage("Terminal bridge self-test failed: terminal bridge is not initialized.");
+      this.transport = "oneShot";
+      this.postState();
+      return;
+    }
+    await this.terminalBridge.openAll();
+    const result = await this.terminalBridge.selfTest(this.terminalBridgeTimeoutMs());
+    if (!result.ok) this.transport = "oneShot";
+    await this.appendSystemMessage(
+      [
+        result.message,
+        `Log: ${result.logPath}`,
+        `Reply: ${result.replyPath}`,
+        `Checks: logBomFree=${result.checks.logBomFree}, replyStartsWithJsonObject=${result.checks.replyStartsWithJsonObject}, outputNotDuplicated=${result.checks.outputNotDuplicated}, replyParsed=${result.checks.replyParsed}`,
+        result.ok
+          ? "Future agent calls will be injected into visible native terminals and read from `.hydra/replies/*.json`."
+          : "Hydra switched back to Safe One-Shot transport.",
+      ].join("\n")
+    );
+    this.postState();
+  }
+
+  async showTerminalBridgeHealth(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    await this.appendSystemMessage(formatTerminalBridgeHealth(this.terminalBridge?.getSessions() ?? []));
+    this.postState();
+  }
+
+  async showEffectiveAuthority(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    await this.appendSystemMessage(formatEffectiveAuthority(this.currentAuthoritySummaries()));
+    this.postState();
+  }
+
+  async changeCapabilityProfile(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+
+    const agentPick = await vscode.window.showQuickPick(
+      [
+        { label: "Codex", agent: "codex" as AgentId },
+        { label: "Claude", agent: "claude" as AgentId },
+      ],
+      { placeHolder: "Choose the native CLI to configure" }
+    );
+    if (!agentPick) return;
+
+    const scopePick = await vscode.window.showQuickPick(
+      [
+        { label: "Discussion", profile: "discussion" as const, detail: "Opener, reactor, closer, and parallel discussion turns" },
+        { label: "Build", profile: "build" as const, detail: "Builder turns that may edit files" },
+        { label: "Review", profile: "review" as const, detail: "Review turns over the current diff" },
+      ],
+      { placeHolder: `Choose the ${agentPick.label} phase profile` }
+    );
+    if (!scopePick) return;
+
+    const cfg = vscode.workspace.getConfiguration("hydraRoom");
+    const current = cfg.get<string>(profileSettingKey(agentPick.agent, scopePick.profile), "custom");
+    const profilePick = await vscode.window.showQuickPick(
+      configurableCapabilityProfiles().map((profile) => ({
+        label: profile.label,
+        description: profile.id === current ? "current" : profile.warningLevel,
+        detail: profile.detail,
+        profileId: profile.id,
+      })),
+      { placeHolder: `Choose ${agentPick.label} ${scopePick.label} capability profile` }
+    );
+    if (!profilePick) return;
+
+    const profileId = profilePick.profileId as ConfigurableCapabilityProfileId;
+    const settingKey = profileSettingKey(agentPick.agent, scopePick.profile);
+    await cfg.update(settingKey, profileId, vscode.ConfigurationTarget.Global);
+
+    const phase: Phase = scopePick.profile === "build" ? "build" : scopePick.profile === "review" ? "review" : "opener";
+    const spawn = this.buildSpawn(agentPick.agent, phase);
+    await this.appendSystemMessage(
+      [
+        `${agentPick.label} ${scopePick.label} profile changed to ${profilePick.label}.`,
+        `Effective command: ${spawn.command} ${spawn.args.join(" ")}`.trim(),
+      ].join("\n")
+    );
+    this.postState();
+  }
+
+  async useOneShotTransport(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    if (this.transportMode() === "oneShot") {
+      vscode.window.showInformationMessage("Hydra is already using safe one-shot transport.");
+      this.postState();
+      return;
+    }
+    this.transport = "oneShot";
+    await this.appendSystemMessage("Safe one-shot transport enabled. Hydra will call Codex and Claude directly instead of injecting into native terminals.");
+    this.postState();
+  }
+
+  async runAutopilotStart(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady || this.autopilotRunning) return;
+    if (isInFlight(this.state)) {
+      await this.appendSystemMessage("Hydra Autopilot skipped because a turn is already running.");
+      this.postState();
+      return;
+    }
+
+    const ctrl = new AbortController();
+    this.currentAbort = ctrl;
+    this.autopilotRunning = true;
+    this.autopilotSummary = "Checking workspace, native CLIs, and terminal bridge";
+    this.postState();
+    try {
+      const preferBridge = this.preferTerminalBridgeOnStart();
+      const { report } = await this.buildDoctorReport(true);
+      if (ctrl.signal.aborted) {
+        await this.appendSystemMessage("Hydra Autopilot cancelled by user.");
+        return;
+      }
+      this.latestDoctorReport = report;
+      const codexReady = checkPassed(report, "codex-command");
+      const claudeReady = checkPassed(report, "claude-command");
+      const bridgeReady = checkPassed(report, "terminal-bridge");
+      const coreReady =
+        checkPassed(report, "workspace") &&
+        checkPassed(report, "hydra-writable") &&
+        codexReady &&
+        claudeReady;
+
+      if (coreReady && preferBridge && bridgeReady) {
+        this.transport = "terminalBridge";
+        await this.terminalBridge?.openAll();
+        this.autopilotSummary = "Ready: native terminal bridge";
+      } else if (coreReady) {
+        this.transport = "oneShot";
+        this.autopilotSummary = bridgeReady
+          ? "Ready: safe one-shot"
+          : "Ready: safe one-shot; terminal bridge self-test failed";
+      } else {
+        this.transport = "oneShot";
+        this.autopilotSummary = "Needs setup";
+      }
+
+      if (ctrl.signal.aborted) {
+        await this.appendSystemMessage("Hydra Autopilot cancelled by user.");
+        return;
+      }
+      await this.appendSystemMessage(formatAutopilotReport(report, this.autopilotSummary));
+    } finally {
+      this.autopilotRunning = false;
+      if (this.currentAbort === ctrl) this.currentAbort = undefined;
+      this.postState();
+    }
+  }
+
+  async runDoctor(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) {
+      // No transcriptUri yet, so we can't appendSystemMessage. Pushing
+      // directly to this.messages would break the single-source-of-truth
+      // invariant (in-memory entry with no disk record disappears on
+      // panel close). Surface via the VS Code error toast instead.
+      vscode.window.showErrorMessage(
+        "Hydra Doctor: open a workspace folder first."
+      );
+      return;
+    }
+    if (isInFlight(this.state)) {
+      await this.appendSystemMessage("Hydra Doctor is paused because a turn is running. Stop or reset the turn, then run Doctor again.");
+      this.postState();
+      return;
+    }
+
+    const { report, bridgeOk } = await this.buildDoctorReport(true);
+    this.latestDoctorReport = report;
+    if (!bridgeOk && this.transportMode() === "terminalBridge") {
+      this.transport = "oneShot";
+    }
+    await this.appendSystemMessage(formatDoctorReport(report));
+    this.postState();
+  }
+
+  async fixAgentCommand(agent: AgentId): Promise<void> {
+    await this.ready();
+    const picked = await vscode.window.showOpenDialog({
+      canSelectFiles: true,
+      canSelectFolders: false,
+      canSelectMany: false,
+      openLabel: `Use as ${AGENT_NAMES[agent]} CLI`,
+      title: `Select ${AGENT_NAMES[agent]} CLI executable or wrapper`,
+    });
+    const file = picked?.[0]?.fsPath;
+    if (!file) return;
+    await vscode.workspace
+      .getConfiguration("hydraRoom")
+      .update(`${agent}Command`, file, vscode.ConfigurationTarget.Global);
+    await this.appendSystemMessage(
+      `${AGENT_NAMES[agent]} CLI path saved to User settings: ${file}\nHydra Autopilot is rechecking the room.`
+    );
+    await this.runAutopilotStart();
+  }
+
+  async resetStuckTurn(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    this.currentAbort?.abort();
+    let changed = false;
+    for (const message of this.messages) {
+      if (!message.pending) continue;
+      changed = true;
+      message.pending = false;
+      message.cancelled = true;
+      message.activity = undefined;
+      if (message.text.length > 0 && !message.text.endsWith("\n")) message.text += "\n";
+      message.text += "[cancelled by Hydra reset]";
+      await appendMessage(this.transcriptUri.fsPath, {
+        role: message.role,
+        text: message.text,
+        timestamp: message.timestamp,
+        phase: message.phase,
+        cancelled: true,
+      });
+    }
+    this.currentAbort = undefined;
+    if (isInFlight(this.state)) this.applyEvent({ type: "stop" });
+    this.setAgentStatus("codex", "idle", "Idle");
+    this.setAgentStatus("claude", "idle", "Idle");
+    await this.appendSystemMessage(
+      changed
+        ? "Hydra reset the stuck turn. Pending agent bubbles were marked cancelled and control returned to you."
+        : "Hydra reset requested, but no pending agent bubble was active."
+    );
+    this.postState();
+  }
+
+  async openWorkspaceFolder(): Promise<void> {
+    await this.ready();
+    const picked = await vscode.window.showOpenDialog({
+      canSelectFiles: false,
+      canSelectFolders: true,
+      canSelectMany: false,
+      openLabel: "Open Folder for Hydra",
+      title: "Hydra needs a workspace folder",
+    });
+    if (picked?.[0]) {
+      await vscode.commands.executeCommand("vscode.openFolder", picked[0], false);
+    }
+  }
+
+  // ---------------- phase orchestration ----------------
+
+  private async runDiscussionTurn(opener: AgentId, currentUserMessage: string): Promise<void> {
+    const ctrl = new AbortController();
+    this.currentAbort = ctrl;
+    this.suggestedBuilder = undefined;
+
+    const reactor = otherAgent(opener);
+    const openerTranscript = this.buildPromptContext("opener");
+    const openerEnvelope = await this.buildPromptEnvelope({
+      agent: opener,
+      otherAgent: reactor,
+      phase: "opener",
+      transcript: openerTranscript,
+      currentUserMessage,
+    });
+    await this.persistPromptEnvelope(openerEnvelope);
+    const openerId = this.openPendingMessage(opener, "opener");
+    this.postState();
+
+    const openerResult = await this.callAgent(opener, "opener", openerEnvelope.renderedPrompt, openerId, ctrl.signal);
+
+    if (ctrl.signal.aborted || didAgentFail(openerResult.result)) {
+      this.applyEvent({ type: "stop" });
+      this.currentAbort = undefined;
+      this.postState();
+      return;
+    }
+
+    this.applyEvent({ type: "openerDone" });
+
+    // Build the reactor prompt only after the opener has finalized into
+    // the transcript. This ordering is what makes the second head actually
+    // respond to the first instead of reading a stale snapshot.
+    const transcriptAfterOpener = this.buildPromptContext("reactor");
+    const reactorEnvelope = await this.buildPromptEnvelope({
+      agent: reactor,
+      otherAgent: opener,
+      phase: "reactor",
+      transcript: transcriptAfterOpener,
+      currentUserMessage,
+    });
+    await this.persistPromptEnvelope(reactorEnvelope);
+    const reactorId = this.openPendingMessage(reactor, "reactor");
+    this.postState();
+
+    const reactorResult = await this.callAgent(reactor, "reactor", reactorEnvelope.renderedPrompt, reactorId, ctrl.signal);
+
+    if (ctrl.signal.aborted || didAgentFail(reactorResult.result)) {
+      this.applyEvent({ type: "stop" });
+      this.currentAbort = undefined;
+      this.postState();
+      return;
+    }
+
+    this.applyEvent({ type: "reactorDone" });
+
+    // Build the closer prompt only after the reactor has finalized into the
+    // transcript. The opener owns this short final turn so critique becomes an
+    // action decision instead of a dangling handoff.
+    const transcriptAfterReactor = this.buildPromptContext("closer");
+    const closerEnvelope = await this.buildPromptEnvelope({
+      agent: opener,
+      otherAgent: reactor,
+      phase: "closer",
+      transcript: transcriptAfterReactor,
+      currentUserMessage,
+    });
+    await this.persistPromptEnvelope(closerEnvelope);
+    const closerId = this.openPendingMessage(opener, "closer");
+    this.postState();
+
+    const closerResult = await this.callAgent(opener, "closer", closerEnvelope.renderedPrompt, closerId, ctrl.signal);
+
+    if (ctrl.signal.aborted || didAgentFail(closerResult.result)) {
+      this.applyEvent({ type: "stop" });
+      this.currentAbort = undefined;
+      this.postState();
+      return;
+    }
+
+    // Consensus-driver heuristic. If the reactor expressed soft approval
+    // ("I'd approve...") and the closer did not retract, the opener drove
+    // consensus and is the natural builder suggestion. If the closer also
+    // signals approval (mutual) or neither does (still divergent), suggest
+    // nothing — the user picks freely.
+    const reactorApproves = SOFT_APPROVAL_RE.test(reactorResult.text);
+    const closerApproves = SOFT_APPROVAL_RE.test(closerResult.text);
+    if (reactorApproves && !closerApproves) {
+      this.suggestedBuilder = opener;
+    } else if (closerApproves && !reactorApproves) {
+      this.suggestedBuilder = reactor;
+    } else {
+      this.suggestedBuilder = undefined;
+    }
+    this.applyEvent({ type: "closerDone" });
+    this.currentAbort = undefined;
+    this.postState();
+    await this.autoAdvanceActionableDefault("discussion");
+  }
+
+  private async runParallelDiscussionTurn(currentUserMessage: string): Promise<void> {
+    const ctrl = new AbortController();
+    this.currentAbort = ctrl;
+    this.suggestedBuilder = undefined;
+
+    const agents: AgentId[] = ["codex", "claude"];
+    const transcript = this.buildPromptContext("parallel");
+    const calls: Promise<{ text: string; result: RunResult }>[] = [];
+    for (const agent of agents) {
+      const envelope = await this.buildPromptEnvelope({
+        agent,
+        otherAgent: otherAgent(agent),
+        phase: "parallel",
+        transcript,
+        currentUserMessage,
+      });
+      await this.persistPromptEnvelope(envelope);
+      const messageId = this.openPendingMessage(agent, "parallel");
+      calls.push(this.callAgent(agent, "parallel", envelope.renderedPrompt, messageId, ctrl.signal));
+    }
+    this.postState();
+
+    const results = await Promise.all(calls);
+    if (ctrl.signal.aborted || results.some(({ result }) => didAgentFail(result))) {
+      this.applyEvent({ type: "stop" });
+    } else {
+      this.applyEvent({ type: "parallelDone" });
+    }
+    this.currentAbort = undefined;
+    this.postState();
+    await this.autoAdvanceActionableDefault("parallel discussion");
+  }
+
+  private async runBuildPhase(builder: AgentId): Promise<void> {
+    const ctrl = new AbortController();
+    this.currentAbort = ctrl;
+    // Snapshot the transcript BEFORE opening the pending bubble, otherwise the
+    // builder's own empty entry would appear at the tail of its prompt context.
+    const transcriptForPrompt = this.buildPromptContext("build");
+    const otherAgent: AgentId = builder === "codex" ? "claude" : "codex";
+    const buildEnvelope = await this.buildPromptEnvelope({
+      agent: builder,
+      otherAgent,
+      phase: "build",
+      transcript: transcriptForPrompt,
+    });
+    await this.persistPromptEnvelope(buildEnvelope);
+    const buildId = this.openPendingMessage(builder, "build");
+    this.postState();
+    const result = await this.callAgent(builder, "build", buildEnvelope.renderedPrompt, buildId, ctrl.signal);
+
+    if (ctrl.signal.aborted || didAgentFail(result.result)) {
+      this.applyEvent({ type: "stop" });
+    } else {
+      this.applyEvent({ type: "buildDone" });
+    }
+    this.currentAbort = undefined;
+    this.postState();
+    if (!ctrl.signal.aborted && !didAgentFail(result.result)) {
+      await this.afterSuccessfulBuild();
+    }
+  }
+
+  private async afterSuccessfulBuild(): Promise<void> {
+    if (!this.autoVerifyAfterBuild()) return;
+    const result = await this.runVerificationInternal("afterBuild");
+    if (
+      verificationPassed(result) &&
+      this.autoRequestReviewAfterPassingVerification() &&
+      this.state.name === "BuildDone"
+    ) {
+      await this.appendSystemMessage("Hydra auto-review started because verification passed after build.");
+      await this.requestReview();
+    }
+  }
+
+  private autoAdvanceExplainer(): string {
+    const latest = this.decisions[this.decisions.length - 1];
+    if (!latest) return "";
+    const truncate = (s: string | undefined, n: number) => {
+      const v = (s ?? "").replace(/\s+/g, " ").trim();
+      if (!v) return "(none)";
+      return v.length > n ? `${v.slice(0, n - 1).trimEnd()}…` : v;
+    };
+    return [
+      "\n  why: ",
+      `${latest.agent}${latest.phase ? ` ${latest.phase}` : ""} @ ${latest.timestamp}`,
+      ` · default="${truncate(latest.defaultNextAction, 80)}"`,
+      ` · needs-user=${truncate(latest.decisionNeededFromUser, 30)}`,
+      ` · blockers=${truncate(latest.blockers, 30)}`,
+    ].join("");
+  }
+
+  private async autoAdvanceActionableDefault(source: string): Promise<void> {
+    if (!this.autoAdvanceActionableDefaults()) return;
+    if (!this.workspaceReady || isInFlight(this.state) || this.terminalPokeInFlight || this.verificationRunning) return;
+    const latest = this.decisions[this.decisions.length - 1];
+    if (!decisionHasNoUserBlockers(latest)) return;
+    if (this.sessionCostCapExceeded()) {
+      await this.appendSystemMessage(
+        `Hydra auto-advance paused: session cost ${this.sessionUsage ? `$${this.sessionUsage.costUsd.toFixed(4)}` : "(unknown)"} reached hydraRoom.sessionCostCapUsd ($${this.sessionCostCapUsd().toFixed(2)}). Lift the cap, manually click Accept Default, or send a new message to continue.`,
+      );
+      return;
+    }
+
+    const action = this.currentDecisionAction();
+    if (action.kind === "assignBuilder" && action.builder && this.state.name === "AwaitingUser") {
+      this.autoAdvanceSendInstructionCount = 0;
+      this.acceptedDefaultDecisionTimestamp = action.sourceTimestamp;
+      await this.appendSystemMessage(
+        `Hydra auto-advanced after ${source}: ${action.detail}${this.autoAdvanceExplainer()}`
+      );
+      await this.assignBuilder(action.builder);
+      return;
+    }
+    if (action.kind === "requestReview" && this.state.name === "BuildDone") {
+      this.autoAdvanceSendInstructionCount = 0;
+      this.acceptedDefaultDecisionTimestamp = action.sourceTimestamp;
+      await this.appendSystemMessage(
+        `Hydra auto-advanced after ${source}: ${action.detail}${this.autoAdvanceExplainer()}`
+      );
+      await this.requestReview();
+      return;
+    }
+    if (action.kind === "handBack" && this.state.name === "ReviewDone") {
+      this.autoAdvanceSendInstructionCount = 0;
+      this.acceptedDefaultDecisionTimestamp = action.sourceTimestamp;
+      await this.appendSystemMessage(
+        `Hydra auto-advanced after ${source}: ${action.detail}${this.autoAdvanceExplainer()}`
+      );
+      await this.handBack();
+      return;
+    }
+    if (action.kind === "sendInstruction" && action.instruction && isSendable(this.state)) {
+      const cap = this.autoAdvanceSendInstructionMaxConsecutive();
+      if (this.autoAdvanceSendInstructionCount >= cap) {
+        await this.appendSystemMessage(
+          `Hydra auto-advance paused after ${cap} consecutive send-instruction turn(s). Click Accept Default to continue or send a new message.`
+        );
+        return;
+      }
+      this.autoAdvanceSendInstructionCount += 1;
+      this.acceptedDefaultDecisionTimestamp = action.sourceTimestamp;
+      await this.appendSystemMessage(
+        `Hydra auto-advanced after ${source} (send-instruction ${this.autoAdvanceSendInstructionCount}/${cap}): ${action.detail}${this.autoAdvanceExplainer()}`
+      );
+      this.autoAdvanceInProgress = true;
+      try {
+        await this.sendUserMessage(action.instruction, this.getFirstSpeaker());
+      } finally {
+        this.autoAdvanceInProgress = false;
+      }
+    }
+  }
+
+  private async runReviewPhase(reviewer: AgentId): Promise<void> {
+    const ctrl = new AbortController();
+    this.currentAbort = ctrl;
+    // Snapshot the transcript BEFORE opening the pending bubble, otherwise the
+    // reviewer's own empty entry would appear at the tail of its prompt context.
+    const transcriptForPrompt = this.buildPromptContext("review");
+    const reviewId = this.openPendingMessage(reviewer, "review");
+    this.postState();
+
+    const diff = await captureGitDiff(this.workspaceRoot, this.diffMaxLines());
+    if (diff === null) {
+      // git was available at init but failed now — treat as a recoverable error,
+      // mark the pending review bubble, and bail out without calling runAgent.
+      const m = this.messages.find((x) => x.id === reviewId);
+      if (m) {
+        m.pending = false;
+        m.error = true;
+        m.text = "[git diff failed; cannot review]";
+        await appendMessage(this.transcriptUri.fsPath, {
+          role: m.role, text: m.text, timestamp: m.timestamp, phase: m.phase, error: true,
+        });
+      }
+      this.applyEvent({ type: "reviewDone", approved: false });
+      this.currentAbort = undefined;
+      this.postState();
+      return;
+    }
+    const otherAgent: AgentId = reviewer === "codex" ? "claude" : "codex";
+    // Capture current HEAD so the review prompt can flag verification
+    // records made against a different commit than what's now being reviewed.
+    const currentHead = this.gitAvailable ? await captureGitHead(this.workspaceRoot) : undefined;
+    const reviewEnvelope = await this.buildPromptEnvelope({
+      agent: reviewer,
+      otherAgent,
+      phase: "review",
+      transcript: transcriptForPrompt,
+      diff,
+      verification: verificationAsReviewContext(this.latestVerification(), currentHead),
+    });
+    await this.persistPromptEnvelope(reviewEnvelope);
+    const result = await this.callAgent(reviewer, "review", reviewEnvelope.renderedPrompt, reviewId, ctrl.signal);
+
+    if (ctrl.signal.aborted) {
+      this.applyEvent({ type: "stop" });
+    } else {
+      const approved = APPROVED_SENTINEL_RE.test(result.text);
+      this.applyEvent({ type: "reviewDone", approved });
+    }
+    this.currentAbort = undefined;
+    this.postState();
+  }
+
+  // ---------------- agent call helper ----------------
+
+  private async callAgent(
+    agent: AgentId,
+    phase: Phase,
+    prompt: string,
+    messageId: string,
+    signal: AbortSignal,
+    forceTerminalBridge = false
+  ): Promise<{ text: string; result: RunResult }> {
+    const timeout = this.agentTimeoutMs(phase);
+    const stopActivity = this.startPendingActivity(messageId, agent, phase, timeout);
+    let spawn: AgentSpawn;
+    try {
+      spawn = this.buildSpawn(agent, phase);
+      spawn = { ...spawn, command: await resolveAgentCommand(agent, spawn.command) };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await this.appendAgentCallTrace({
+        id: makeTraceId(agent, phase),
+        event: "resolveFailed",
+        timestamp: new Date().toISOString(),
+        agent,
+        phase,
+        transport: this.transportMode(),
+        promptChars: prompt.length,
+        promptSha256: sha256(prompt),
+        error: message,
+      });
+      const result: RunResult = {
+        stdout: "",
+        stderr: message,
+        exitCode: null,
+        timedOut: false,
+        cancelled: false,
+      };
+      await this.finalizePendingMessage(messageId, result);
+      stopActivity();
+      const finalized = this.messages.find((x) => x.id === messageId);
+      return { text: finalized?.text ?? "", result };
+    }
+    const consent = await this.ensureFullNativeConsent(agent, phase, spawn);
+    if (!consent.allowed) {
+      const message = consent.message ?? `Hydra cancelled the ${agent} ${phase} call because full native authority was not confirmed.`;
+      await this.appendAgentCallTrace({
+        id: makeTraceId(agent, phase),
+        event: "fullNativeConsentDenied",
+        timestamp: new Date().toISOString(),
+        agent,
+        phase,
+        transport: this.transportMode(),
+        promptChars: prompt.length,
+        promptSha256: sha256(prompt),
+      });
+      const result: RunResult = {
+        stdout: "",
+        stderr: message,
+        exitCode: null,
+        timedOut: false,
+        cancelled: true,
+      };
+      await this.finalizePendingMessage(messageId, result);
+      stopActivity();
+      const finalized = this.messages.find((x) => x.id === messageId);
+      return { text: finalized?.text ?? "", result };
+    }
+    try {
+      const result = await this.runAgentTransport(agent, phase, spawn, prompt, messageId, timeout, signal, forceTerminalBridge);
+      await this.finalizePendingMessage(messageId, result);
+      const finalized = this.messages.find((x) => x.id === messageId);
+      return { text: finalized?.text ?? "", result };
+    } finally {
+      stopActivity();
+    }
+  }
+
+  private async ensureFullNativeConsent(
+    agent: AgentId,
+    phase: Phase,
+    spawn: AgentSpawn
+  ): Promise<{ allowed: boolean; message?: string }> {
+    const authority = classifyAgentAuthority(agent, phase, spawn.args);
+    const stateKey = fullNativeConsentKey(agent);
+    const alreadyConsented = this.context.workspaceState.get<boolean>(stateKey, false);
+    const decision = evaluateFullNativeConsent({
+      agent,
+      authorityLevel: authority.level,
+      alreadyConsented,
+    });
+    if (decision.kind === "allow") return { allowed: true };
+
+    const choice = await vscode.window.showWarningMessage(
+      `Run ${agent} with full native authority? This bypasses sandbox approvals; the CLI can read, edit, and run commands without further prompts.`,
+      { modal: true, detail: `${authority.label} — ${authority.detail}` },
+      FULL_NATIVE_CONSENT_RUN_ONCE,
+      FULL_NATIVE_CONSENT_ALWAYS,
+      FULL_NATIVE_CONSENT_CANCEL
+    );
+    const resolution = resolveFullNativeConsentChoice(choice);
+    if (resolution.kind === "allow") {
+      if (resolution.persist) {
+        await this.context.workspaceState.update(stateKey, true);
+        await this.appendSystemMessage(
+          `Full native authority approved for ${agent} in this workspace. Hydra will not prompt again until consent is revoked.`
+        );
+      } else {
+        await this.appendSystemMessage(
+          `Full native authority approved for one ${agent} call.`
+        );
+      }
+      return { allowed: true };
+    }
+    const message = `Hydra cancelled the ${agent} ${phase} call because full native authority was not confirmed.`;
+    await this.appendSystemMessage(message);
+    return { allowed: false, message };
+  }
+
+  private async runAgentTransport(
+    agent: AgentId,
+    phase: Phase,
+    spawn: AgentSpawn,
+    prompt: string,
+    messageId: string,
+    timeout: number,
+    signal: AbortSignal,
+    forceTerminalBridge = false
+  ): Promise<RunResult> {
+    const traceId = makeTraceId(agent, phase);
+    const startedAt = Date.now();
+    try {
+      if (forceTerminalBridge || this.transportMode() === "terminalBridge") {
+        if (!this.terminalBridge) {
+          return agentCallFailureResult("Terminal bridge is not available because no workspace terminal was initialized.");
+        }
+        await this.appendAgentCallTrace({
+          id: traceId,
+          event: "started",
+          timestamp: new Date(startedAt).toISOString(),
+          agent,
+          phase,
+          transport: "terminalBridge",
+          cwd: spawn.cwd,
+          command: spawn.command,
+          args: spawn.args,
+          envKeys: Object.keys(spawn.env ?? {}).sort(),
+          timeoutMs: timeout,
+          promptChars: prompt.length,
+          promptSha256: sha256(prompt),
+        });
+        const result = await this.terminalBridge.callAgent(
+          agent,
+          phase,
+          spawn,
+          prompt,
+          timeout,
+          signal
+        );
+        const m = this.messages.find((x) => x.id === messageId);
+        if (m && result.stdout) {
+          m.text += result.stdout;
+          this.panel.webview.postMessage({ type: "chunk", messageId, text: result.stdout });
+        }
+        await this.appendAgentCallTrace(completedAgentCallTrace(traceId, agent, phase, "terminalBridge", startedAt, result));
+        await this.extractAndRecordUsage({ agent, phase, requestId: traceId, result, outputMode: "passthrough" });
+        return result;
+      }
+
+      const prepared = await this.prepareOneShotRequestFiles(agent, phase, spawn, prompt);
+      spawn = prepared.spawn;
+      await this.appendAgentCallTrace({
+        id: traceId,
+        event: "started",
+        timestamp: new Date(startedAt).toISOString(),
+        agent,
+        phase,
+        transport: "oneShot",
+        cwd: spawn.cwd,
+        command: spawn.command,
+        args: spawn.args,
+        envKeys: Object.keys(spawn.env ?? {}).sort(),
+        timeoutMs: timeout,
+        promptChars: prompt.length,
+        promptSha256: sha256(prompt),
+        requestFiles: requestFileTrace(prepared),
+        outputMode: prepared.outputMode,
+      });
+      const result = await runAgent(spawn, prompt, timeout, (chunk) => {
+        if (prepared.suppressLiveStdout) return;
+        const m = this.messages.find((x) => x.id === messageId);
+        if (m) m.text += chunk;
+        this.panel.webview.postMessage({ type: "chunk", messageId, text: chunk });
+      }, signal);
+      const normalized = await this.normalizeOneShotResult(prepared, result);
+      if (prepared.outputMode === "claudeStreamJson") {
+        await this.appendAgentCallTrace({
+          id: traceId,
+          event: "streamSummary",
+          timestamp: new Date().toISOString(),
+          agent,
+          phase,
+          transport: "oneShot",
+          summary: summarizeClaudeEvents(parseClaudeEventStream(result.stdout)),
+        });
+      } else if (prepared.outputMode === "codexJson") {
+        await this.appendAgentCallTrace({
+          id: traceId,
+          event: "streamSummary",
+          timestamp: new Date().toISOString(),
+          agent,
+          phase,
+          transport: "oneShot",
+          summary: summarizeCodexEvents(parseCodexEventStream(result.stdout)),
+        });
+      }
+      if (normalized.stdout !== result.stdout) {
+        const m = this.messages.find((x) => x.id === messageId);
+        if (m) {
+          m.text = normalized.stdout;
+          this.panel.webview.postMessage({ type: "replaceMessageText", messageId, text: normalized.stdout });
+        }
+      }
+      await this.appendAgentCallTrace(completedAgentCallTrace(traceId, agent, phase, "oneShot", startedAt, normalized));
+      await this.extractAndRecordUsage({ agent, phase, requestId: traceId, result: normalized, outputMode: prepared.outputMode });
+      return normalized;
+    } catch (err) {
+      const result = agentCallFailureResult(err instanceof Error ? err.message : String(err));
+      await this.appendAgentCallTrace(completedAgentCallTrace(traceId, agent, phase, this.transportMode(), startedAt, result));
+      return result;
+    }
+  }
+
+  private async prepareOneShotRequestFiles(
+    agent: AgentId,
+    phase: Phase,
+    spawn: AgentSpawn,
+    prompt: string
+  ): Promise<PreparedOneShotSpawn> {
+    const codexJson = this.shouldUseCodexJson(agent, spawn);
+    // codexJson supersedes codexCaptureLastMessage: the --json stream
+    // already carries the final agent_message item, so the extra
+    // --output-last-message file is redundant when codexJson is on.
+    const codexLastMessage = !codexJson && this.shouldCaptureCodexLastMessage(agent, spawn);
+    const claudeStreamJson = this.shouldUseClaudeStreamJson(agent, spawn);
+    const needsRequestFiles = hasRequestFilePlaceholders(spawn) || codexLastMessage || this.shouldCreateClaudeRequestFiles(agent, spawn);
+    if (!needsRequestFiles) {
+      let preparedSpawn = spawn;
+      if (claudeStreamJson) preparedSpawn = this.withClaudeStreamJsonArgs(preparedSpawn);
+      if (codexJson) preparedSpawn = this.withCodexJsonArgs(preparedSpawn);
+      const outputMode = claudeStreamJson ? "claudeStreamJson" : codexJson ? "codexJson" : "plain";
+      return {
+        spawn: preparedSpawn,
+        outputMode,
+        // codexJson stdout is JSONL noise on its own; suppress live render
+        // and let normalizeOneShotResult substitute the final agent message.
+        suppressLiveStdout: claudeStreamJson || codexJson,
+      };
+    }
+    const requestId = `${Date.now()}-${crypto.randomUUID()}`;
+    const paths = terminalProtocolPaths(this.workspaceRoot, requestId, agent, phase);
+    await fs.mkdir(path.dirname(paths.promptPath), { recursive: true });
+    await fs.mkdir(path.dirname(paths.replyPath), { recursive: true });
+    await fs.mkdir(path.dirname(paths.logPath), { recursive: true });
+    await fs.writeFile(paths.promptPath, buildTerminalPromptFile(agent, phase, prompt, paths.replyPath), "utf8");
+    await fs.writeFile(paths.logPath, "", "utf8");
+    let preparedSpawn = expandRequestFileSpawn(spawn, {
+      hydraPromptFile: paths.promptPath,
+      hydraReplyFile: paths.replyPath,
+      hydraLogFile: paths.logPath,
+    });
+    if (codexLastMessage) {
+      preparedSpawn = this.withCodexLastMessageArgs(preparedSpawn, paths.replyPath);
+    }
+    if (codexJson) {
+      preparedSpawn = this.withCodexJsonArgs(preparedSpawn);
+    }
+    if (claudeStreamJson) {
+      preparedSpawn = this.withClaudeStreamJsonArgs(preparedSpawn, paths.logPath);
+    }
+    const outputMode = claudeStreamJson ? "claudeStreamJson" : codexJson ? "codexJson" : "plain";
+    return {
+      spawn: preparedSpawn,
+      promptPath: paths.promptPath,
+      replyPath: paths.replyPath,
+      logPath: paths.logPath,
+      outputMode,
+      suppressLiveStdout: claudeStreamJson || codexJson,
+    };
+  }
+
+  private shouldCaptureCodexLastMessage(agent: AgentId, spawn: AgentSpawn): boolean {
+    if (agent !== "codex") return false;
+    if (spawn.args[0] !== "exec") return false;
+    if (spawn.args.includes("--output-last-message") || spawn.args.includes("-o")) return false;
+    return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("codexCaptureLastMessage", true);
+  }
+
+  private withCodexLastMessageArgs(spawn: AgentSpawn, replyPath: string): AgentSpawn {
+    return { ...spawn, args: insertBeforeStdinDash(spawn.args, ["--output-last-message", replyPath]) };
+  }
+
+  private shouldUseCodexJson(agent: AgentId, spawn: AgentSpawn): boolean {
+    if (agent !== "codex") return false;
+    if (spawn.args[0] !== "exec") return false;
+    if (spawn.args.includes("--json") || spawn.args.includes("--experimental-json")) return false;
+    return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("codexJson", false);
+  }
+
+  private withCodexJsonArgs(spawn: AgentSpawn): AgentSpawn {
+    return { ...spawn, args: insertBeforeStdinDash(spawn.args, ["--json"]) };
+  }
+
+  private shouldUseClaudeStreamJson(agent: AgentId, spawn: AgentSpawn): boolean {
+    if (agent !== "claude") return false;
+    if (!spawn.args.includes("-p") && !spawn.args.includes("--print")) return false;
+    if (spawn.args.includes("--output-format")) return false;
+    return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("claudeStreamJson", true);
+  }
+
+  private shouldCreateClaudeRequestFiles(agent: AgentId, spawn: AgentSpawn): boolean {
+    if (!this.shouldUseClaudeStreamJson(agent, spawn)) return false;
+    return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("claudeDebugFile", true);
+  }
+
+  /**
+   * Resolve the model string the user has configured for this agent + phase.
+   * The setting accepts either a single string (applies to every phase) or
+   * an object keyed by profile (discussion / build / review). Empty means
+   * "let the CLI pick its default."
+   */
+  private modelForPhase(agent: AgentId, phase: Phase): string {
+    const raw = vscode.workspace.getConfiguration("hydraRoom").get<unknown>(`${agent}Model`);
+    if (typeof raw === "string") return raw.trim();
+    if (raw && typeof raw === "object") {
+      const profile = profileForPhase(phase);
+      const entry = (raw as Record<string, unknown>)[profile];
+      if (typeof entry === "string") return entry.trim();
+    }
+    return "";
+  }
+
+  private withModelArgs(spawn: AgentSpawn, agent: AgentId, phase: Phase): AgentSpawn {
+    const model = this.modelForPhase(agent, phase);
+    if (!model) return spawn;
+    // Respect any explicit --model / -m the user already put in their
+    // *ExecArgs* setting. The chooser is a convenience layer; the raw arg
+    // wins so power users can lock a specific model per phase.
+    if (spawn.args.includes("--model") || spawn.args.includes("-m")) return spawn;
+    // For Codex, --model is only valid as a flag of the `exec` subcommand.
+    // If the user routed Codex through some other subcommand we leave it
+    // alone rather than risk a bad arg.
+    if (agent === "codex" && spawn.args[0] !== "exec") return spawn;
+    return { ...spawn, args: insertBeforeStdinDash(spawn.args, ["--model", model]) };
+  }
+
+  /**
+   * Resolve the reasoning/effort level configured for this agent + phase.
+   * `claudeEffort` and `codexReasoning` use the same string-or-object shape
+   * as the model settings.
+   */
+  private effortForPhase(agent: AgentId, phase: Phase): string {
+    const key = agent === "claude" ? "claudeEffort" : "codexReasoning";
+    const raw = vscode.workspace.getConfiguration("hydraRoom").get<unknown>(key);
+    if (typeof raw === "string") return raw.trim();
+    if (raw && typeof raw === "object") {
+      const profile = profileForPhase(phase);
+      const entry = (raw as Record<string, unknown>)[profile];
+      if (typeof entry === "string") return entry.trim();
+    }
+    return "";
+  }
+
+  private withEffortArgs(spawn: AgentSpawn, agent: AgentId, phase: Phase): AgentSpawn {
+    const level = this.effortForPhase(agent, phase);
+    if (!level) return spawn;
+    if (agent === "claude") {
+      // Claude's print mode accepts --effort <level>. If the user already
+      // pinned one in *ExecArgs* we don't override.
+      if (spawn.args.includes("--effort")) return spawn;
+      return { ...spawn, args: insertBeforeStdinDash(spawn.args, ["--effort", level]) };
+    }
+    // Codex: only valid for `exec`. The flag goes through -c (config override)
+    // because Codex doesn't expose a direct --reasoning-effort on exec.
+    if (spawn.args[0] !== "exec") return spawn;
+    if (spawn.args.some((a) => a.startsWith("model_reasoning_effort="))) return spawn;
+    return {
+      ...spawn,
+      args: insertBeforeStdinDash(spawn.args, ["-c", `model_reasoning_effort="${level}"`]),
+    };
+  }
+
+  private withClaudeStreamJsonArgs(spawn: AgentSpawn, logPath?: string): AgentSpawn {
+    const args = [...spawn.args, "--output-format", "stream-json"];
+    if (!args.includes("--verbose")) args.push("--verbose");
+    const cfg = vscode.workspace.getConfiguration("hydraRoom");
+    if (cfg.get<boolean>("claudeStreamJsonIncludePartialMessages", true) && !args.includes("--include-partial-messages")) {
+      args.push("--include-partial-messages");
+    }
+    if (logPath && cfg.get<boolean>("claudeDebugFile", true) && !args.includes("--debug-file")) {
+      args.push("--debug-file", logPath);
+    }
+    return { ...spawn, args };
+  }
+
+  private async normalizeOneShotResult(prepared: PreparedOneShotSpawn, result: RunResult): Promise<RunResult> {
+    let stdout = result.stdout;
+    if (prepared.outputMode === "claudeStreamJson") {
+      const text = summarizeClaudeEvents(parseClaudeEventStream(result.stdout)).lastAssistantText;
+      stdout = (text ?? "").trimEnd() || result.stdout;
+    } else if (prepared.outputMode === "codexJson") {
+      const text = summarizeCodexEvents(parseCodexEventStream(result.stdout)).lastAgentMessage;
+      stdout = (text ?? "").trimEnd() || result.stdout;
+    }
+    if (prepared.replyPath) {
+      try {
+        const replyText = (await fs.readFile(prepared.replyPath, "utf8")).trimEnd();
+        if (replyText.trim()) stdout = replyText;
+      } catch {
+        // Older CLIs and failed runs may not produce a native reply file.
+      }
+    }
+    return { ...result, stdout };
+  }
+
+  private buildSpawn(agent: AgentId, phase: Phase): AgentSpawn {
+    const cfg = vscode.workspace.getConfiguration("hydraRoom");
+    const command = cfg.get<string>(`${agent}Command`, agent);
+    const argsKey = argsSettingKey(agent, phase);
+    const cliProfile = profileForPhase(phase);
+    const configuredProfile = cfg.get<string>(profileSettingKey(agent, cliProfile), "custom");
+    const presetArgs = isConfigurableCapabilityProfileId(configuredProfile)
+      ? argsForCapabilityProfile(agent, configuredProfile)
+      : undefined;
+    const rawArgs = presetArgs ?? cfg.get<string[]>(argsKey, []);
+    let spawn = buildAgentSpawn(agent, phase, command, rawArgs, this.workspaceRoot);
+    spawn = this.withModelArgs(spawn, agent, phase);
+    spawn = this.withEffortArgs(spawn, agent, phase);
+    return applySpawnEnvironment(
+      spawn,
+      this.workspaceRoot,
+      mergeNativeEnv(
+        cfg.get<Record<string, string>>("nativeEnv", {}),
+        cfg.get<Record<string, string>>(`${agent}NativeEnv`, {})
+      ),
+      mergeNativePathPrepend(
+        cfg.get<string[]>("nativePathPrepend", []),
+        cfg.get<string[]>(`${agent}NativePathPrepend`, [])
+      )
+    );
+  }
+
+  private async buildNativeCommandSpawn(agent: AgentId, rawArgs: string[]): Promise<AgentSpawn> {
+    const cfg = vscode.workspace.getConfiguration("hydraRoom");
+    const command = cfg.get<string>(`${agent}Command`, agent);
+    let spawn = buildAgentSpawn(agent, "opener", command, rawArgs, this.workspaceRoot);
+    spawn = applySpawnEnvironment(
+      spawn,
+      this.workspaceRoot,
+      mergeNativeEnv(
+        cfg.get<Record<string, string>>("nativeEnv", {}),
+        cfg.get<Record<string, string>>(`${agent}NativeEnv`, {})
+      ),
+      mergeNativePathPrepend(
+        cfg.get<string[]>("nativePathPrepend", []),
+        cfg.get<string[]>(`${agent}NativePathPrepend`, [])
+      )
+    );
+    try {
+      return { ...spawn, command: await resolveAgentCommand(agent, spawn.command) };
+    } catch {
+      return spawn;
+    }
+  }
+
+  private async nativeRuntimeDiagnostics(): Promise<SupportBundleNativeRuntime[]> {
+    const phases: Phase[] = ["opener", "build", "review"];
+    const diagnostics: SupportBundleNativeRuntime[] = [];
+    for (const agent of ["codex", "claude"] as AgentId[]) {
+      for (const phase of phases) {
+        const spawn = this.buildSpawn(agent, phase);
+        let command = spawn.command;
+        try {
+          command = await resolveAgentCommand(agent, spawn.command);
+        } catch {
+          // The bundle should remain useful when a native binary is missing:
+          // Doctor reports the failure, while this section records intent.
+        }
+        const envKeys = Object.keys(spawn.env ?? {}).sort((a, b) => a.localeCompare(b));
+        diagnostics.push({
+          agent,
+          phase,
+          command,
+          args: spawn.args,
+          cwd: spawn.cwd,
+          envKeys,
+          pathOverride: envKeys.some((key) => key.toLowerCase() === "path"),
+        });
+      }
+    }
+    return diagnostics;
+  }
+
+  private latestVerification(): VerificationResult | undefined {
+    return this.verifications[this.verifications.length - 1];
+  }
+
+  private async buildPromptEnvelope(input: {
+    agent: AgentId;
+    otherAgent: AgentId;
+    phase: Phase;
+    transcript: string;
+    diff?: string;
+    verification?: string;
+    currentUserMessage?: string;
+  }): Promise<PromptEnvelope> {
+    const renderedPrompt = buildPrompt({
+      agent: input.agent,
+      otherAgent: input.otherAgent,
+      phase: input.phase,
+      transcript: input.transcript,
+      diff: input.diff,
+      verification: input.verification,
+      nativeCapabilities: await this.nativeCapabilityPromptContext(input.agent, [
+        input.currentUserMessage,
+        this.objective,
+        input.transcript,
+        input.diff,
+        input.verification,
+      ]),
+    });
+    const spawn = this.buildSpawn(input.agent, input.phase);
+    const authority = classifyAgentAuthority(input.agent, input.phase, spawn.args);
+    const profile = describeCapabilityProfile(input.agent, input.phase, spawn.args, authority);
+    let command = spawn.command;
+    try {
+      command = await resolveAgentCommand(input.agent, spawn.command);
+    } catch {
+      // Preview should still work even when the CLI is missing; Doctor owns
+      // command repair and the actual call path surfaces spawn failures.
+    }
+    return createPromptEnvelope({
+      id: `${Date.now()}-${crypto.randomBytes(3).toString("hex")}-${input.agent}-${input.phase}`,
+      agent: input.agent,
+      otherAgent: input.otherAgent,
+      phase: input.phase,
+      transport: this.transportMode(),
+      cwd: spawn.cwd,
+      command,
+      args: spawn.args,
+      authority: `${authority.label} - ${authority.detail}`,
+      authorityLevel: authority.level,
+      capabilityProfile: profile.id,
+      capabilityProfileLabel: profile.label,
+      capabilityProfileDetail: profile.detail,
+      objective: this.objective,
+      currentUserMessage: input.currentUserMessage,
+      latestDecisionDefault: this.decisions[this.decisions.length - 1]?.defaultNextAction,
+      latestVerificationSummary: verificationSummary(this.latestVerification()),
+      renderedPrompt,
+    });
+  }
+
+  private async nativeCapabilityPromptContext(agent: AgentId, taskContext: Array<string | undefined>): Promise<string> {
+    const base = nativeCapabilitySummary(agent);
+    if (!shouldIncludeNativeIntegrationSummary(...taskContext)) return base;
+    const integration = await readNativeIntegrationSummary(this.nativeCapabilitiesUri.fsPath);
+    if (!integration) return base;
+    return [
+      base,
+      "",
+      "Latest native integration probe summary from `.hydra/native-capabilities.md`:",
+      integration,
+    ].join("\n");
+  }
+
+  private async buildDirectTerminalPokeEnvelope(
+    agent: AgentId,
+    instruction: string,
+    editorContext?: EditorContextAttachment,
+    workspaceDiff?: string
+  ): Promise<PromptEnvelope> {
+    const phase: Phase = "opener";
+    const other = otherAgent(agent);
+    const renderedPrompt = buildDirectTerminalPokePrompt({
+      agent,
+      otherAgent: other,
+      roomContext: this.buildPromptContext(phase, "terminalBridge"),
+      instruction,
+      editorContext,
+      workspaceDiff,
+      latestDecisionDefault: this.decisions[this.decisions.length - 1]?.defaultNextAction,
+      latestVerificationSummary: verificationSummary(this.latestVerification()),
+    });
+    const spawn = this.buildSpawn(agent, phase);
+    const authority = classifyAgentAuthority(agent, phase, spawn.args);
+    const profile = describeCapabilityProfile(agent, phase, spawn.args, authority);
+    let command = spawn.command;
+    try {
+      command = await resolveAgentCommand(agent, spawn.command);
+    } catch {
+      // The actual terminal call owns command failure; the envelope should
+      // still show the user's intended native CLI endpoint.
+    }
+    return createPromptEnvelope({
+      id: `${Date.now()}-${crypto.randomBytes(3).toString("hex")}-${agent}-terminal-poke`,
+      agent,
+      otherAgent: other,
+      phase,
+      transport: "terminalBridge",
+      cwd: spawn.cwd,
+      command,
+      args: spawn.args,
+      authority: `${authority.label} - ${authority.detail}`,
+      authorityLevel: authority.level,
+      capabilityProfile: profile.id,
+      capabilityProfileLabel: profile.label,
+      capabilityProfileDetail: profile.detail,
+      objective: this.objective,
+      currentUserMessage: instruction,
+      latestDecisionDefault: this.decisions[this.decisions.length - 1]?.defaultNextAction,
+      latestVerificationSummary: verificationSummary(this.latestVerification()),
+      renderedPrompt,
+    });
+  }
+
+  private async persistPromptEnvelope(envelope: PromptEnvelope): Promise<void> {
+    try {
+      await appendPromptEnvelope(this.workspaceRoot, envelope);
+    } catch {
+      // Prompt indexing is audit metadata; do not fail the user turn if the
+      // prompt directory is temporarily unavailable. Doctor covers .hydra I/O.
+    }
+  }
+
+  private async appendAgentCallTrace(record: Record<string, unknown>): Promise<void> {
+    try {
+      await fs.mkdir(path.dirname(this.agentCallsUri.fsPath), { recursive: true });
+      await fs.appendFile(this.agentCallsUri.fsPath, `${JSON.stringify(record)}\n`, "utf8");
+    } catch {
+      // Flight recording is diagnostic metadata. Never fail the user's agent
+      // call because the trace file is temporarily unavailable.
+    }
+  }
+
+  private modelPrices(): { agentDefaults: Record<AgentId, ModelPrices>; modelOverrides: Record<string, ModelPrices> } {
+    const raw = vscode.workspace.getConfiguration("hydraRoom").get<Record<string, unknown>>("modelPrices");
+    const agentDefaults: Record<AgentId, ModelPrices> = {
+      claude: { ...DEFAULT_PRICES.claude },
+      codex: { ...DEFAULT_PRICES.codex },
+    };
+    const modelOverrides: Record<string, ModelPrices> = {};
+    if (raw && typeof raw === "object") {
+      for (const [key, value] of Object.entries(raw)) {
+        if (!value || typeof value !== "object") continue;
+        const v = value as Partial<ModelPrices>;
+        if (key === "claude" || key === "codex") {
+          agentDefaults[key] = { ...agentDefaults[key], ...v };
+        } else {
+          modelOverrides[key.toLowerCase()] = { ...DEFAULT_PRICES.claude, ...v };
+        }
+      }
+    }
+    return { agentDefaults, modelOverrides };
+  }
+
+  private async recordUsage(input: {
+    agent: AgentId;
+    phase: Phase;
+    requestId?: string;
+    model?: string;
+    source: UsageRecord["source"];
+    tokens: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreateTokens: number; reasoningTokens: number };
+  }): Promise<void> {
+    const { agentDefaults, modelOverrides } = this.modelPrices();
+    const record = buildUsageRecord({
+      sessionId: this.sessionId,
+      agent: input.agent,
+      phase: input.phase,
+      requestId: input.requestId,
+      model: input.model,
+      source: input.source,
+      tokens: input.tokens,
+      prices: agentDefaults,
+      modelPriceOverrides: modelOverrides,
+    });
+    try {
+      await appendUsageRecord(this.usageUri.fsPath, record);
+    } catch {
+      // Usage tracking is best-effort. A write failure must not break a turn.
+    }
+    this.usageRecords.push(record);
+    this.sessionUsage = summarizeUsage(this.usageRecords, this.sessionId);
+    this.postState();
+  }
+
+  private async extractAndRecordUsage(args: {
+    agent: AgentId;
+    phase: Phase;
+    requestId?: string;
+    result: RunResult;
+    outputMode?: "plain" | "claudeStreamJson" | "codexJson" | "passthrough";
+  }): Promise<void> {
+    if (args.result.cancelled || args.result.timedOut) return;
+    const { agent, phase, requestId, result, outputMode } = args;
+    const model = this.modelForPhase(agent, phase) || undefined;
+    if (agent === "claude" && outputMode === "claudeStreamJson") {
+      const summary = summarizeClaudeEvents(parseClaudeEventStream(result.stdout));
+      const tokens = usageFromClaudeSummary(summary.usage);
+      if (tokens) {
+        await this.recordUsage({ agent, phase, requestId, model, source: "claudeStreamJson", tokens });
+        return;
+      }
+    }
+    if (agent === "codex" && outputMode === "codexJson") {
+      const summary = summarizeCodexEvents(parseCodexEventStream(result.stdout));
+      const tokens = usageFromCodexSummary(summary.usage);
+      if (tokens) {
+        await this.recordUsage({ agent, phase, requestId, model, source: "codexJson", tokens });
+        return;
+      }
+    }
+    if (agent === "codex") {
+      const total = parseCodexTextTokens(result.stdout);
+      if (total !== undefined && total > 0) {
+        // Plain-text Codex doesn't split input vs output; bill conservatively
+        // as output to avoid undercounting cost. User can refine with
+        // hydraRoom.modelPrices if they want a blended rate.
+        await this.recordUsage({
+          agent,
+          phase,
+          requestId,
+          model,
+          source: "codexTextTokens",
+          tokens: { inputTokens: 0, outputTokens: total, cacheReadTokens: 0, cacheCreateTokens: 0, reasoningTokens: 0 },
+        });
+      }
+    }
+  }
+
+  private async buildNextPromptPreviewEnvelope(draftText: string, opener: AgentId): Promise<PromptEnvelope> {
+    if (this.state.name === "BuildDone" && this.gitAvailable) {
+      const reviewer: AgentId = this.state.builder === "codex" ? "claude" : "codex";
+      const diff = await captureGitDiff(this.workspaceRoot, this.diffMaxLines());
+      return await this.buildPromptEnvelope({
+        agent: reviewer,
+        otherAgent: this.state.builder,
+        phase: "review",
+        transcript: this.buildPromptContext("review"),
+        diff: diff ?? "[git diff failed; preview cannot include diff]",
+        verification: verificationAsReviewContext(this.latestVerification()),
+      });
+    }
+
+    if (this.state.name === "ReviewDone" && !this.state.approved && !draftText.trim()) {
+      const builder: AgentId = this.state.reviewer === "codex" ? "claude" : "codex";
+      return await this.buildPromptEnvelope({
+        agent: builder,
+        otherAgent: this.state.reviewer,
+        phase: "build",
+        transcript: this.buildPromptContext("build"),
+      });
+    }
+
+    const selectedOpener = normalizeAgentId(opener, this.getFirstSpeaker());
+    const reactor = otherAgent(selectedOpener);
+    const trimmed = draftText.trim();
+    const previewMessages = trimmed
+      ? [
+          ...this.messages,
+          {
+            role: "user" as const,
+            text: trimmed,
+            timestamp: new Date().toISOString(),
+          },
+        ]
+      : this.messages;
+    const phase: Phase = shouldRunParallelDiscussion(trimmed) ? "parallel" : "opener";
+    return await this.buildPromptEnvelope({
+      agent: selectedOpener,
+      otherAgent: reactor,
+      phase,
+      transcript: this.buildPromptContextFromMessages(previewMessages, phase),
+      currentUserMessage: trimmed,
+    });
+  }
+
+  private async verificationCommand(): Promise<string | undefined> {
+    const configured = vscode.workspace.getConfiguration("hydraRoom").get<string>("verifyCommand", "").trim();
+    if (configured) return configured;
+    return await inferVerificationCommand(this.workspaceRoot);
+  }
+
+  private currentDecisionAction(): DecisionAction {
+    const latest = this.decisions[this.decisions.length - 1];
+    if (latest && latest.timestamp === this.acceptedDefaultDecisionTimestamp) {
+      return { kind: "none", label: "Default Accepted", detail: "The latest decision default has already been accepted." };
+    }
+    const action = resolveDecisionAction(latest, this.state.name);
+    if (action.kind === "assignBuilder" && this.state.name !== "AwaitingUser") {
+      return {
+        kind: "sendInstruction",
+        label: "Accept Default",
+        detail: "Builder assignment is only automatic while Hydra is awaiting user input.",
+        instruction: latest ? `Accepted default next action:\n\n${latest.defaultNextAction}` : undefined,
+        sourceTimestamp: action.sourceTimestamp,
+      };
+    }
+    if (action.kind === "requestReview" && this.state.name !== "BuildDone") {
+      return {
+        kind: "sendInstruction",
+        label: "Accept Default",
+        detail: "Review can only be requested after a build; Hydra will send the default as an instruction.",
+        instruction: latest ? `Accepted default next action:\n\n${latest.defaultNextAction}` : undefined,
+        sourceTimestamp: action.sourceTimestamp,
+      };
+    }
+    if (action.kind === "handBack" && this.state.name !== "ReviewDone") {
+      return {
+        kind: "sendInstruction",
+        label: "Accept Default",
+        detail: "Hand back is only automatic after review; Hydra will send the default as an instruction.",
+        instruction: latest ? `Accepted default next action:\n\n${latest.defaultNextAction}` : undefined,
+        sourceTimestamp: action.sourceTimestamp,
+      };
+    }
+    return action;
+  }
+
+  private currentWorkQueue(): WorkQueueItem[] {
+    const items = buildWorkQueue({
+      decisionAction: this.currentDecisionAction(),
+      latestVerification: this.latestVerification(),
+      nativeActions: this.nativeActions,
+      maxItems: 12,
+    });
+    return applyWorkQueueDispositions(items, this.workQueueDispositions).slice(0, 6);
+  }
+
+  private currentAuthoritySummaries(): Record<AgentId, AgentAuthoritySummary> {
+    return {
+      codex: this.authoritySummaryForAgent("codex"),
+      claude: this.authoritySummaryForAgent("claude"),
+    };
+  }
+
+  private authoritySummaryForAgent(agent: AgentId): AgentAuthoritySummary {
+    const phase = this.authorityPhaseForAgent(agent);
+    const spawn = this.buildSpawn(agent, phase);
+    const authority = classifyAgentAuthority(agent, phase, spawn.args);
+    const profile = describeCapabilityProfile(agent, phase, spawn.args, authority);
+    return { authority, profile };
+  }
+
+  private authorityPhaseForAgent(agent: AgentId): Phase {
+    switch (this.state.name) {
+      case "Build":
+        return this.state.builder === agent ? "build" : "opener";
+      case "BuildDone":
+        return otherAgent(this.state.builder) === agent ? "review" : "build";
+      case "Review":
+        return this.state.reviewer === agent ? "review" : "opener";
+      case "ReviewDone":
+        return this.state.reviewer === agent ? "review" : "build";
+      case "ParallelDiscussion":
+        return "parallel";
+      default:
+        return "opener";
+    }
+  }
+
+  private activeEditorContext(): EditorContextAttachment | undefined {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) return undefined;
+    const document = editor.document;
+    if (document.isClosed) return undefined;
+    // Workspace-boundary check. Without this, a file opened in a split
+    // editor from outside the workspace root (e.g. ~/.ssh/id_rsa, or any
+    // sensitive file the user has open elsewhere) would flow into the
+    // prompt envelope and persist to .hydra/prompts/index.jsonl. Hydra's
+    // attachment scope is the current workspace only.
+    if (!this.isInsideWorkspace(document.uri)) return undefined;
+
+    const selected = !editor.selection.isEmpty;
+    const rawText = selected ? document.getText(editor.selection) : document.getText();
+    const trimmed = rawText.trim();
+    if (!trimmed) return undefined;
+
+    const truncated = truncateEditorContext(rawText, this.editorContextMaxChars());
+    return {
+      label: this.editorContextLabel(document),
+      languageId: document.languageId,
+      selected,
+      startLine: selected ? editor.selection.start.line + 1 : 1,
+      endLine: selected ? editor.selection.end.line + 1 : Math.max(1, document.lineCount),
+      text: truncated.text,
+      originalChars: truncated.originalChars,
+      truncated: truncated.truncated,
+    };
+  }
+
+  private isInsideWorkspace(uri: vscode.Uri): boolean {
+    if (uri.scheme !== "file") return false;
+    if (!this.workspaceRoot) return false;
+    const filePath = uri.fsPath;
+    const root = this.workspaceRoot;
+    if (filePath === root) return true;
+    // Normalize separators so the prefix check works on Windows.
+    const normalizedFile = filePath.replace(/\\/g, "/").toLowerCase();
+    const normalizedRoot = root.replace(/\\/g, "/").toLowerCase();
+    const rootWithSep = normalizedRoot.endsWith("/") ? normalizedRoot : `${normalizedRoot}/`;
+    return normalizedFile.startsWith(rootWithSep);
+  }
+
+  private editorContextLabel(document: vscode.TextDocument): string {
+    if (document.uri.scheme === "file") {
+      return vscode.workspace.asRelativePath(document.uri, false);
+    }
+    return document.uri.toString();
+  }
+
+  private async buildDoctorReport(includeTerminalBridge: boolean): Promise<{ report: DoctorReport; bridgeOk: boolean }> {
+    const cfg = vscode.workspace.getConfiguration("hydraRoom");
+    const codexCommand = cfg.get<string>("codexCommand", "codex") || "codex";
+    const claudeCommand = cfg.get<string>("claudeCommand", "claude") || "claude";
+    const [codexResolvedRaw, claudeResolvedRaw] = await Promise.all([
+      resolveAgentCommand("codex", codexCommand),
+      resolveAgentCommand("claude", claudeCommand),
+    ]);
+    // resolveAgentCommand echoes the bare name back when nothing was found.
+    // The doctor contract is "undefined when not found", so collapse the
+    // bare-name-echo case to undefined here instead of letting commandCheck
+    // re-derive it.
+    const collapseUnresolved = (configured: string, resolved: string): string | undefined => {
+      if (!resolved) return undefined;
+      if (resolved === configured && !resolved.includes("/") && !resolved.includes("\\")) return undefined;
+      return resolved;
+    };
+    const codexResolvedCommand = collapseUnresolved(codexCommand, codexResolvedRaw);
+    const claudeResolvedCommand = collapseUnresolved(claudeCommand, claudeResolvedRaw);
+    const bridgeResult = includeTerminalBridge && this.terminalBridge
+      ? await this.terminalBridge.selfTest(this.terminalBridgeTimeoutMs())
+      : undefined;
+    const argsValidation = collectArgsValidation(cfg);
+    const report = await runHydraDoctor({
+      workspaceRoot: this.workspaceRoot,
+      gitAvailable: this.gitAvailable,
+      codexCommand,
+      codexResolvedCommand,
+      claudeCommand,
+      claudeResolvedCommand,
+      trustWarnings: this.collectTrustScopeWarnings(),
+      terminalBridge: bridgeResult ? { ok: bridgeResult.ok, message: bridgeResult.message } : undefined,
+      argsValidation,
+    });
+    return { report, bridgeOk: bridgeResult?.ok ?? false };
+  }
+
+  private collectTrustScopeWarnings(): string[] {
+    const cfg = vscode.workspace.getConfiguration("hydraRoom");
+    return trustScopeWarnings(TRUST_SCOPED_SETTINGS.map((key) => {
+      const inspection = cfg.inspect(key);
+      return {
+        key,
+        workspaceValue: inspection?.workspaceValue,
+        workspaceFolderValue: inspection?.workspaceFolderValue,
+      };
+    }));
+  }
+
+  private transportMode(): "oneShot" | "terminalBridge" {
+    return this.transport;
+  }
+
+  private agentTimeoutMs(phase?: Phase): number {
+    if (phase === "opener" || phase === "reactor" || phase === "closer" || phase === "parallel") {
+      const configured = vscode.workspace.getConfiguration("hydraRoom").get<number>("discussionTimeoutMs", 600000);
+      return configured === 120000 ? 600000 : configured;
+    }
+    return vscode.workspace.getConfiguration("hydraRoom").get<number>("oneShotTimeoutMs", 600000);
+  }
+
+  private async migrateLegacyDiscussionTimeoutDefault(): Promise<void> {
+    const cfg = vscode.workspace.getConfiguration("hydraRoom");
+    const inspected = cfg.inspect<number>("discussionTimeoutMs");
+    const updates: Array<[vscode.ConfigurationTarget, number | undefined]> = [];
+    if (inspected?.globalValue === 120000) updates.push([vscode.ConfigurationTarget.Global, inspected.globalValue]);
+    if (inspected?.workspaceValue === 120000) updates.push([vscode.ConfigurationTarget.Workspace, inspected.workspaceValue]);
+    if (inspected?.workspaceFolderValue === 120000) updates.push([vscode.ConfigurationTarget.WorkspaceFolder, inspected.workspaceFolderValue]);
+    for (const [target] of updates) {
+      try {
+        await cfg.update("discussionTimeoutMs", 600000, target);
+      } catch {
+        // If VS Code refuses to write a scope, agentTimeoutMs still coerces the
+        // old default at runtime so the room does not fall back to 2 minutes.
+      }
+    }
+  }
+
+  private terminalBridgeTimeoutMs(): number {
+    return vscode.workspace.getConfiguration("hydraRoom").get<number>("terminalBridgeTimeoutMs", 45000);
+  }
+
+  private autopilotOnStart(): boolean {
+    return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("autopilotOnStart", true);
+  }
+
+  private preferTerminalBridgeOnStart(): boolean {
+    return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("preferTerminalBridgeOnStart", true);
+  }
+
+  private diffMaxLines(): number {
+    return vscode.workspace.getConfiguration("hydraRoom").get<number>("diffMaxLines", 6000);
+  }
+
+  private verificationTimeoutMs(): number {
+    return vscode.workspace.getConfiguration("hydraRoom").get<number>("verifyTimeoutMs", 600000);
+  }
+
+  private verificationMaxOutputChars(): number {
+    return vscode.workspace.getConfiguration("hydraRoom").get<number>("verifyMaxOutputChars", 12000);
+  }
+
+  private autoVerifyAfterBuild(): boolean {
+    return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("autoVerifyAfterBuild", true);
+  }
+
+  private autoRequestReviewAfterPassingVerification(): boolean {
+    return vscode.workspace
+      .getConfiguration("hydraRoom")
+      .get<boolean>("autoRequestReviewAfterPassingVerification", false);
+  }
+
+  private autoAdvanceActionableDefaults(): boolean {
+    return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("autoAdvanceActionableDefaults", true);
+  }
+
+  private sessionCostCapUsd(): number {
+    const raw = vscode.workspace.getConfiguration("hydraRoom").get<number>("sessionCostCapUsd", 0);
+    return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : 0;
+  }
+
+  private sessionCostCapExceeded(): boolean {
+    const cap = this.sessionCostCapUsd();
+    if (cap <= 0) return false;
+    return (this.sessionUsage?.costUsd ?? 0) >= cap;
+  }
+
+  private autoAdvanceSendInstructionMaxConsecutive(): number {
+    const raw = vscode.workspace.getConfiguration("hydraRoom").get<number>("autoAdvanceSendInstructionMaxConsecutive", 3);
+    return Math.max(1, Math.floor(raw));
+  }
+
+  private buildPromptContext(phase: Phase, transport: "oneShot" | "terminalBridge" = this.transportMode()): string {
+    return this.buildPromptContextFromMessages(this.messages, phase, transport);
+  }
+
+  private buildPromptContextFromMessages(
+    messages: TranscriptMessage[],
+    phase: Phase,
+    transport: "oneShot" | "terminalBridge" = this.transportMode()
+  ): string {
+    const contextTurns = transport === "terminalBridge"
+      ? this.terminalBridgeContextTurns()
+      : this.oneShotContextTurns();
+    const contextTitle = transport === "terminalBridge"
+      ? "--- Current terminal poke context ---"
+      : "--- Bounded transcript window ---";
+    return [
+      objectiveAsContext(this.objective),
+      "",
+      workspaceInstructionsAsContext(this.workspaceInstructions),
+      "",
+      contextTitle,
+      buildPromptContext(messages, phase, contextTurns, this.contextFreshnessMs()),
+    ].join("\n");
+  }
+
+  private oneShotContextTurns(): number {
+    return vscode.workspace.getConfiguration("hydraRoom").get<number>("oneShotContextTurns", 2);
+  }
+
+  private terminalBridgeContextTurns(): number {
+    return vscode.workspace.getConfiguration("hydraRoom").get<number>("terminalBridgeContextTurns", 0);
+  }
+
+  private editorContextMaxChars(): number {
+    return vscode.workspace.getConfiguration("hydraRoom").get<number>("editorContextMaxChars", 12000);
+  }
+
+  private contextFreshnessMs(): number {
+    return vscode.workspace.getConfiguration("hydraRoom").get<number>("contextFreshnessMs", 24 * 60 * 60 * 1000);
+  }
+
+  // ---------------- message lifecycle ----------------
+
+  private openPendingMessage(role: AgentId, phase: Phase): string {
+    const id = `m-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+    const msg: UiMessage = {
+      id,
+      role,
+      text: "",
+      timestamp: new Date().toISOString(),
+      phase,
+      pending: true,
+    };
+    this.messages.push(msg);
+    this.setAgentStatus(role, "running", `${phase} running`);
+    return id;
+  }
+
+  private startPendingActivity(
+    messageId: string,
+    agent: AgentId,
+    phase: Phase,
+    timeoutMs: number
+  ): () => void {
+    const startedAt = Date.now();
+    const update = () => {
+      const message = this.messages.find((x) => x.id === messageId);
+      if (!message?.pending) return;
+      const elapsedMs = Date.now() - startedAt;
+      const elapsed = formatElapsed(elapsedMs);
+      const timeout = formatElapsed(timeoutMs);
+      const label = AGENT_NAMES[agent];
+      message.activity = `${label} is still running ${phase} (${elapsed}; timeout ${timeout}). Use Stop current turn if this is not useful.`;
+      this.setAgentStatus(agent, "running", `${phase} running ${elapsed}`);
+      this.postState();
+    };
+    const handle = setInterval(update, 5000);
+    update();
+    return () => clearInterval(handle);
+  }
+
+  private async finalizePendingMessage(messageId: string, result: RunResult): Promise<void> {
+    const m = this.messages.find((x) => x.id === messageId);
+    if (!m) return;
+    if (!m.pending && m.cancelled) return;
+    m.pending = false;
+    const timedOutDiscussion =
+      result.timedOut && (m.phase === "opener" || m.phase === "reactor" || m.phase === "closer" || m.phase === "parallel");
+    if (result.cancelled || timedOutDiscussion) {
+      m.cancelled = true;
+      if (m.text.length > 0 && !m.text.endsWith("\n")) m.text += "\n";
+      m.text += result.cancelled
+        ? "[cancelled by user]"
+        : `[cancelled: timed out after ${result.timeoutMs ?? this.agentTimeoutMs()}ms]`;
+    } else if (result.timedOut) {
+      m.error = true;
+      m.text += `\n[timed out after ${result.timeoutMs ?? this.agentTimeoutMs()}ms]`;
+    } else if (result.exitCode !== 0) {
+      // exitCode === null without timedOut/cancelled means the spawn itself failed
+      // (e.g. CLI not on PATH). Surface that as an error rather than [no output].
+      m.error = true;
+      const code = result.exitCode === null ? "spawn-failed" : String(result.exitCode);
+      m.text += `\n[exit ${code}]${result.stderr ? "\n" + result.stderr : ""}`;
+    }
+    if (m.text.trim() === "") m.text = "[no output]";
+    if (m.role === "codex" || m.role === "claude") {
+      this.setAgentStatus(
+        m.role,
+        m.error || m.cancelled ? "error" : "replied",
+        m.cancelled ? `${m.phase ?? "turn"} cancelled` : m.error ? `${m.phase ?? "turn"} error` : `${m.phase ?? "turn"} replied`
+      );
+    }
+    await this.captureDecisionPacket(m);
+    await appendMessage(this.transcriptUri.fsPath, {
+      role: m.role,
+      text: m.text,
+      timestamp: m.timestamp,
+      phase: m.phase,
+      error: m.error,
+      cancelled: m.cancelled,
+    });
+  }
+
+  private async captureDecisionPacket(message: UiMessage): Promise<void> {
+    if (message.role !== "codex" && message.role !== "claude") return;
+    if (message.error || message.cancelled) return;
+    const packet = parseDecisionPacket(message.text, {
+      agent: message.role,
+      phase: message.phase,
+      sourceMessageTimestamp: message.timestamp,
+    });
+    if (!packet) return;
+    // Append to disk first; only mutate the in-memory array if the write
+    // succeeds. Previous order pushed before await — a thrown appendDecision
+    // would split RAM and disk, and the next session reload would silently
+    // reverse the captured decision.
+    await appendDecision(this.decisionsUri.fsPath, packet);
+    this.decisions.push(packet);
+    void this.maybeFireHandoffWebhook(packet);
+  }
+
+  private handoffNotifiedPacketTimestamps = new Set<string>();
+
+  private telegramConfig(): TelegramConfig | undefined {
+    const cfg = vscode.workspace.getConfiguration("hydraRoom");
+    const settingToken = cfg.get<string>("telegramBotToken", "").trim();
+    const envToken = (process.env.TELEGRAM_BOT_TOKEN ?? "").trim();
+    const botToken = settingToken || envToken;
+    const chatId = cfg.get<string>("telegramChatId", "").trim();
+    if (!botToken || !chatId) return undefined;
+    return { botToken, chatId };
+  }
+
+  async sendTestTelegramMessage(): Promise<void> {
+    await this.ready();
+    const cfg = this.telegramConfig();
+    if (!cfg) {
+      const action = await vscode.window.showWarningMessage(
+        "Telegram isn't configured. Set hydraRoom.telegramBotToken and hydraRoom.telegramChatId (or TELEGRAM_BOT_TOKEN env + chat id).",
+        "Open Settings",
+      );
+      if (action === "Open Settings") {
+        await vscode.commands.executeCommand("workbench.action.openSettings", "hydraRoom.telegram");
+      }
+      return;
+    }
+    const text = [
+      "<b>Hydra test ping</b>",
+      `<i>${this.workspaceRoot}</i>`,
+      "",
+      "If you see this, decision-needed notifications will reach you here.",
+    ].join("\n");
+    const result = await sendTelegramMessage(cfg, text);
+    if (result.ok) {
+      await this.appendSystemMessage(`Telegram test message sent (message_id=${result.messageId ?? "?"}).`);
+    } else {
+      await this.appendSystemMessage(`Telegram test failed${result.status ? ` (HTTP ${result.status})` : ""}: ${result.error ?? "unknown error"}`);
+    }
+  }
+
+  private async maybeFireHandoffWebhook(packet: DecisionPacket): Promise<void> {
+    const needs = packet.decisionNeededFromUser?.trim();
+    if (!needs || isNoneValue(needs)) return;
+    if (this.handoffNotifiedPacketTimestamps.has(packet.timestamp)) return;
+    this.handoffNotifiedPacketTimestamps.add(packet.timestamp);
+    // Both transports run in parallel; one can fail without affecting the other.
+    await Promise.all([
+      this.fireWebhookForDecision(packet, needs),
+      this.fireTelegramForDecision(packet, needs),
+    ]);
+  }
+
+  private async fireWebhookForDecision(packet: DecisionPacket, needs: string): Promise<void> {
+    const url = vscode.workspace.getConfiguration("hydraRoom").get<string>("handoffWebhookUrl", "").trim();
+    if (!url) return;
+    if (!/^https?:\/\//i.test(url)) return;
+    const payload = {
+      event: "hydra.decision_needed",
+      timestamp: packet.timestamp,
+      workspace: this.workspaceRoot,
+      agent: packet.agent,
+      phase: packet.phase,
+      decisionNeededFromUser: needs,
+      defaultNextAction: packet.defaultNextAction,
+      recommendation: packet.recommendation,
+      blockers: packet.blockers,
+      objective: this.objective,
+    };
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        await this.appendSystemMessage(`Handoff webhook returned HTTP ${res.status}; agent decision needs user attention.`);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await this.appendSystemMessage(`Handoff webhook failed (${msg}); decision needs user attention regardless.`);
+    }
+  }
+
+  private async fireTelegramForDecision(packet: DecisionPacket, needs: string): Promise<void> {
+    if (!vscode.workspace.getConfiguration("hydraRoom").get<boolean>("telegramNotifyOnDecisionNeeded", true)) return;
+    const cfg = this.telegramConfig();
+    if (!cfg) return;
+    const html = buildDecisionNotificationHtml({
+      agent: packet.agent,
+      phase: packet.phase,
+      workspace: this.workspaceRoot,
+      decisionNeededFromUser: needs,
+      defaultNextAction: packet.defaultNextAction,
+      recommendation: packet.recommendation,
+      blockers: packet.blockers,
+      timestamp: packet.timestamp,
+    });
+    const result = await sendTelegramMessage(cfg, html);
+    if (!result.ok) {
+      await this.appendSystemMessage(`Telegram notify failed${result.status ? ` (HTTP ${result.status})` : ""}: ${result.error ?? "unknown"}.`);
+    }
+  }
+
+  private setAgentStatus(agent: AgentId, state: AgentStatusState, detail: string): void {
+    this.agentStatuses[agent] = { state, detail };
+  }
+
+  private async appendUserMessage(text: string): Promise<void> {
+    const id = `u-${Date.now()}`;
+    const msg: UiMessage = {
+      id,
+      role: "user",
+      text,
+      timestamp: new Date().toISOString(),
+    };
+    this.messages.push(msg);
+    await appendMessage(this.transcriptUri.fsPath, {
+      role: "user",
+      text,
+      timestamp: msg.timestamp,
+    });
+    this.postState();
+  }
+
+  private async appendSystemMessage(text: string): Promise<void> {
+    const id = `s-${Date.now()}`;
+    const msg: UiMessage = {
+      id,
+      role: "system",
+      text,
+      timestamp: new Date().toISOString(),
+    };
+    this.messages.push(msg);
+    await appendMessage(this.transcriptUri.fsPath, {
+      role: "system",
+      text,
+      timestamp: msg.timestamp,
+    });
+  }
+
+  private async recordEvent(
+    kind: HydraEventKind,
+    detail: string,
+    data?: Record<string, string | number | boolean | null>
+  ): Promise<void> {
+    try {
+      await appendHydraEvent(this.eventsUri.fsPath, createHydraEvent({ kind, detail, data }));
+    } catch {
+      // Event logging is diagnostic-only. It should never block the room.
+    }
+  }
+
+  // ---------------- webview I/O ----------------
+
+  private async onWebviewMessage(msg: any): Promise<void> {
+    try {
+      switch (msg.type) {
+        case "ready":
+          // Wait for init so the first state push reflects loaded transcript and gitAvailable.
+          await this.ready();
+          this.postState();
+          break;
+        case "send":
+          await this.sendUserMessage(msg.text, normalizeAgentId(msg.opener, this.getFirstSpeaker()));
+          break;
+        case "setObjective":
+          await this.setObjective(msg.text);
+          break;
+        case "stop":
+          await this.stop();
+          break;
+        case "assignBuilder":
+          await this.assignBuilder(msg.builder);
+          break;
+        case "requestReview":
+          await this.requestReview();
+          break;
+        case "runVerification":
+          await this.runVerification();
+          break;
+        case "openVerification":
+          await this.openVerification();
+          break;
+        case "openNativeActions":
+          await this.openNativeActions();
+          break;
+        case "openAgentCalls":
+          await this.openAgentCalls();
+          break;
+        case "clearNativeAction":
+          await this.clearNativeActions([msg.id ?? ""]);
+          break;
+        case "clearNativeActions":
+          await this.clearNativeActions(Array.isArray(msg.ids) ? msg.ids : []);
+          break;
+        case "openObjective":
+          await this.openObjective();
+          break;
+        case "openSessionBrief":
+          await this.openSessionBrief();
+          break;
+        case "openSupportBundle":
+          await this.openSupportBundle();
+          break;
+        case "captureNativeCapabilities":
+          await this.captureNativeCapabilities();
+          break;
+        case "captureNativeDataSnapshot":
+          await this.captureNativeDataSnapshot();
+          break;
+        case "showCommandCenter":
+          await this.showCommandCenter();
+          break;
+        case "previewNextPrompt":
+          await this.previewNextPrompt(msg.text ?? "", normalizeAgentId(msg.opener, this.getFirstSpeaker()));
+          break;
+        case "openLastPrompt":
+          await this.openLastPrompt();
+          break;
+        case "acceptDefaultDecision":
+          await this.acceptDefaultDecision();
+          break;
+        case "handBack":
+          await this.handBack();
+          break;
+        case "openTranscript":
+          await this.openTranscript();
+          break;
+        case "archiveAndClearRoom":
+          await this.archiveAndClearRoom();
+          break;
+        case "openDecisions":
+          await this.openDecisions();
+          break;
+        case "chooseModel":
+          await this.chooseModel();
+          break;
+        case "openNativeTerminals":
+          await this.openNativeTerminals();
+          break;
+        case "pokeNativeTerminal":
+          await this.pokeNativeTerminal(
+            normalizeAgentId(msg.agent, this.getFirstSpeaker()),
+            msg.text ?? "",
+            {
+              includeEditorContext: !!msg.includeEditorContext,
+              includeWorkspaceDiff: !!msg.includeWorkspaceDiff,
+            }
+          );
+          break;
+        case "runNativeCommand":
+          await this.runNativeCliCommand(
+            normalizeAgentId(msg.agent, this.getFirstSpeaker()),
+            msg.text ?? ""
+          );
+          break;
+        case "sendRawTerminalLine":
+          await this.sendRawTerminalLine(
+            normalizeAgentId(msg.agent, this.getFirstSpeaker()),
+            msg.text ?? ""
+          );
+          break;
+        case "pokeNativeTerminals":
+          await this.pokeNativeTerminals(["codex", "claude"], msg.text ?? "", {
+            includeEditorContext: !!msg.includeEditorContext,
+            includeWorkspaceDiff: !!msg.includeWorkspaceDiff,
+          });
+          break;
+        case "nativeAction":
+          await this.showNativeActionPicker(msg.text ?? "");
+          break;
+        case "rerunNativeAction":
+          await this.rerunNativeAction(String(msg.id ?? ""));
+          break;
+        case "discussVerification":
+          await this.discussLatestVerificationFailure();
+          break;
+        case "dismissWorkQueueItem":
+          await this.dismissWorkQueueItem(String(msg.id ?? ""));
+          break;
+        case "snoozeWorkQueueItem":
+          await this.snoozeWorkQueueItem(String(msg.id ?? ""));
+          break;
+        case "useTerminalBridge":
+          await this.useTerminalBridge();
+          break;
+        case "useOneShotTransport":
+          await this.useOneShotTransport();
+          break;
+        case "runTerminalBridgeSelfTest":
+          await this.runTerminalBridgeSelfTest();
+          break;
+        case "showTerminalBridgeHealth":
+          await this.showTerminalBridgeHealth();
+          break;
+        case "showEffectiveAuthority":
+          await this.showEffectiveAuthority();
+          break;
+        case "changeCapabilityProfile":
+          await this.changeCapabilityProfile();
+          break;
+        case "runDoctor":
+          await this.runDoctor();
+          break;
+        case "runAutopilotStart":
+          await this.runAutopilotStart();
+          break;
+        case "fixCodexPath":
+          await this.fixAgentCommand("codex");
+          break;
+        case "fixClaudePath":
+          await this.fixAgentCommand("claude");
+          break;
+        case "resetStuckTurn":
+          await this.resetStuckTurn();
+          break;
+        case "openWorkspaceFolder":
+          await this.openWorkspaceFolder();
+          break;
+      }
+    } catch (err) {
+      // Init failures (e.g. no workspace folder open) reach here as a rejected
+      // initPromise. Surface clearly instead of silently dead panel.
+      const message = err instanceof Error ? err.message : String(err);
+      vscode.window.showErrorMessage(`Hydra Room: ${message}`);
+    }
+  }
+
+  private postState(): void {
+    const workQueue = this.workspaceReady ? this.currentWorkQueue() : [];
+    const canStop =
+      isInFlight(this.state) ||
+      this.terminalPokeInFlight ||
+      this.verificationRunning ||
+      this.autopilotRunning;
+    const authoritySummaries = this.workspaceReady ? this.currentAuthoritySummaries() : unavailableAuthoritySummaries();
+    HydraRoomPanel.statusBarUpdater?.({
+      workspaceReady: this.workspaceReady,
+      phaseLabel: phaseLabel(this.state),
+      transport: this.transportMode(),
+      workQueueCount: workQueue.length,
+      canStop,
+      verificationRunning: this.verificationRunning,
+      autopilotRunning: this.autopilotRunning,
+    });
+    // postMessage throws if the webview has been disposed mid-flight
+    // (e.g. user closed the panel while a phase was running). Swallow that
+    // here — there's nothing left to update.
+    const latestDecision = this.decisions[this.decisions.length - 1];
+    const latestDecisionAccepted = !!latestDecision && latestDecision.timestamp === this.acceptedDefaultDecisionTimestamp;
+    try {
+      this.panel.webview.postMessage({
+        type: "state",
+        messages: this.messages,
+        phaseLabel: phaseLabel(this.state),
+        isIdle: this.state.name === "Idle",
+        canSend: this.workspaceReady && isSendable(this.state) && !this.terminalPokeInFlight,
+        canStop,
+        canPokeNativeTerminals: this.workspaceReady && !isInFlight(this.state) && !this.terminalPokeInFlight,
+        canClearNativeActions: this.workspaceReady && !this.terminalPokeInFlight,
+        canAssignBuilder: this.workspaceReady && this.state.name === "AwaitingUser",
+        canRequestReview: this.workspaceReady && this.state.name === "BuildDone" && this.gitAvailable,
+        canRunVerification: this.workspaceReady && !isInFlight(this.state) && !this.terminalPokeInFlight && !this.verificationRunning,
+        canPreviewPrompt: this.workspaceReady && !isInFlight(this.state) && !this.terminalPokeInFlight,
+        canArchiveRoom: this.workspaceReady && !canStop,
+        canHandBack: this.workspaceReady && this.state.name === "ReviewDone" && !this.state.approved,
+        canOpenFolder: !this.workspaceReady,
+        suggestedBuilder: this.state.name === "AwaitingUser" ? this.suggestedBuilder : undefined,
+        firstSpeaker: this.getFirstSpeaker(),
+        transport: this.transportMode(),
+        objective: this.objective,
+        agentStatuses: this.agentStatuses,
+        authoritySummaries,
+        terminalSessions: this.terminalBridge?.getSessions() ?? [],
+        sessionUsage: this.sessionUsage,
+        models: {
+          claude: this.modelSummaryForRail("claude"),
+          codex: this.modelSummaryForRail("codex"),
+        },
+        capabilityProfiles: {
+          claude: this.profileSummaryForRail("claude"),
+          codex: this.profileSummaryForRail("codex"),
+        },
+        efforts: {
+          claude: this.effortSummaryForRail("claude"),
+          codex: this.effortSummaryForRail("codex"),
+        },
+        latestDecision,
+        latestDecisionAccepted,
+        latestDecisionRisky: latestDecisionAccepted ? { risky: false, reasons: [] } : detectRiskySignals(latestDecision),
+        recentDecisions: this.decisions.slice(-5).reverse(),
+        decisionsCount: this.decisions.length,
+        decisionAction: this.currentDecisionAction(),
+        canAcceptDefault: this.workspaceReady && !isInFlight(this.state) && !this.terminalPokeInFlight && this.currentDecisionAction().kind !== "none",
+        latestVerification: this.latestVerification(),
+        verificationSummary: verificationSummary(this.latestVerification()),
+        verificationRunning: this.verificationRunning,
+        latestNativeAction: this.nativeActions[this.nativeActions.length - 1],
+        nativeActionSummary: nativeActionSummary(this.nativeActions[this.nativeActions.length - 1]),
+        recentNativeActions: this.nativeActions.slice(-10).reverse(),
+        nativeActionsCount: this.nativeActions.length,
+        workQueue,
+        latestDoctorReport: this.latestDoctorReport,
+        autopilotRunning: this.autopilotRunning,
+        autopilotSummary: this.autopilotSummary,
+        needsCodexPath: checkFailed(this.latestDoctorReport, "codex-command"),
+        needsClaudePath: checkFailed(this.latestDoctorReport, "claude-command"),
+      });
+    } catch {
+      // panel disposed; nothing to do
+    }
+  }
+
+  private applyEvent(event: Event): void {
+    this.state = transition(this.state, event);
+  }
+
+  private resolveTranscriptUri(): vscode.Uri {
+    const configured = vscode.workspace
+      .getConfiguration("hydraRoom")
+      .get<string>("transcriptPath", ".hydra/transcript.md");
+    if (path.isAbsolute(configured)) return vscode.Uri.file(configured);
+    return vscode.Uri.file(path.join(this.workspaceRoot, configured));
+  }
+
+  private getFirstSpeaker(): AgentId {
+    const configured = vscode.workspace
+      .getConfiguration("hydraRoom")
+      .get<string>("firstSpeaker", "codex");
+    return normalizeAgentId(configured, "codex");
+  }
+}
+
+// ---------------- pure helpers ----------------
+
+function isSendable(state: State): boolean {
+  // Quiescent states (nothing in flight, no agent owes a reply) accept
+  // a freeform user message. From BuildDone or ReviewDone the message
+  // routes through transition() into Opener/ParallelDiscussion so the
+  // user isn't forced to pick Request Review / Hand Back / Reset just
+  // to ask a follow-up.
+  return (
+    state.name === "Idle" ||
+    state.name === "AwaitingUser" ||
+    state.name === "BuildDone" ||
+    state.name === "ReviewDone"
+  );
+}
+
+function phaseLabel(state: State): string {
+  switch (state.name) {
+    case "Idle": return "Idle";
+    case "Opener": return `Discussion - ${AGENT_NAMES[state.opener]} opening`;
+    case "Reactor": return `Discussion - ${AGENT_NAMES[state.reactor]} reacting`;
+    case "Closer": return `Discussion - ${AGENT_NAMES[state.opener]} closing`;
+    case "ParallelDiscussion": return "Discussion - Codex and Claude running in parallel";
+    case "AwaitingUser": return "Awaiting your reply";
+    case "Build": return `Build — ${AGENT_NAMES[state.builder]} is editing`;
+    case "BuildDone": return `Build done — request review`;
+    case "Review": return `Review — ${AGENT_NAMES[state.reviewer]} is reading the diff`;
+    case "ReviewDone":
+      return state.approved
+        ? "Review approved — you can push when ready"
+        : "Review raised blockers — reply or hand back";
+  }
+}
+
+function otherAgent(agent: AgentId): AgentId {
+  return agent === "codex" ? "claude" : "codex";
+}
+
+function normalizeAgentId(value: unknown, fallback: AgentId): AgentId {
+  return value === "codex" || value === "claude" ? value : fallback;
+}
+
+async function ensureJsonlFile(filePath: string): Promise<void> {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  try {
+    await fs.stat(filePath);
+  } catch {
+    await fs.writeFile(filePath, "", "utf8");
+  }
+}
+
+function makeTraceId(agent: AgentId, phase: Phase): string {
+  return `${Date.now()}-${crypto.randomBytes(3).toString("hex")}-${agent}-${phase}`;
+}
+
+function sha256(value: string): string {
+  return crypto.createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function requestFileTrace(prepared: PreparedOneShotSpawn): Record<string, string> | undefined {
+  const trace: Record<string, string> = {};
+  if (prepared.promptPath) trace.prompt = prepared.promptPath;
+  if (prepared.replyPath) trace.reply = prepared.replyPath;
+  if (prepared.logPath) trace.log = prepared.logPath;
+  return Object.keys(trace).length > 0 ? trace : undefined;
+}
+
+function completedAgentCallTrace(
+  id: string,
+  agent: AgentId,
+  phase: Phase,
+  transport: "oneShot" | "terminalBridge",
+  startedAt: number,
+  result: RunResult
+): Record<string, unknown> {
+  return {
+    id,
+    event: "completed",
+    timestamp: new Date().toISOString(),
+    agent,
+    phase,
+    transport,
+    durationMs: Date.now() - startedAt,
+    exitCode: result.exitCode,
+    timedOut: result.timedOut,
+    cancelled: result.cancelled,
+    timeoutMs: result.timeoutMs,
+    stdoutChars: result.stdout.length,
+    stderrChars: result.stderr.length,
+    stderrPreview: result.stderr ? truncateForTrace(result.stderr, 1200) : undefined,
+  };
+}
+
+function truncateForTrace(value: string, maxChars: number): string {
+  return value.length <= maxChars ? value : `${value.slice(0, maxChars)}\n[truncated ${value.length - maxChars} chars]`;
+}
+
+function insertBeforeStdinDash(args: string[], insertion: string[]): string[] {
+  const next = [...args];
+  const dashIndex = next.lastIndexOf("-");
+  if (dashIndex >= 0) {
+    next.splice(dashIndex, 0, ...insertion);
+    return next;
+  }
+  return [...next, ...insertion];
+}
+
+function uniqueAgents(agents: AgentId[]): AgentId[] {
+  const seen = new Set<AgentId>();
+  const result: AgentId[] = [];
+  for (const agent of agents) {
+    if (seen.has(agent)) continue;
+    seen.add(agent);
+    result.push(agent);
+  }
+  return result;
+}
+
+function nativeActionPicks(): NativeActionPick[] {
+  return [
+    nativeActionPick("Codex", ["codex"], {}, "Direct instruction to Codex's native CLI"),
+    nativeActionPick("Claude", ["claude"], {}, "Direct instruction to Claude's native CLI"),
+    nativeActionPick("Both", ["codex", "claude"], {}, "Same direct instruction to both native CLIs in parallel"),
+    nativeActionPick("Codex Command", ["codex"], {}, "Run exact Codex native args/subcommand and capture stdout", "command"),
+    nativeActionPick("Claude Command", ["claude"], {}, "Run exact Claude native args/subcommand and capture stdout", "command"),
+    nativeActionPick("Codex Raw Terminal Line", ["codex"], {}, "Send a raw line to the visible Codex terminal for interactive flows", "rawLine"),
+    nativeActionPick("Claude Raw Terminal Line", ["claude"], {}, "Send a raw line to the visible Claude terminal for interactive flows", "rawLine"),
+    ...NATIVE_COMMAND_CATALOG.map((item) => nativeActionPick(
+      item.label,
+      [item.agent],
+      {},
+      item.detail,
+      item.mode,
+      item.line,
+      item.description
+    )),
+    nativeActionPick("Codex + Editor", ["codex"], { includeEditorContext: true }, "Attach active selection or active file"),
+    nativeActionPick("Claude + Editor", ["claude"], { includeEditorContext: true }, "Attach active selection or active file"),
+    nativeActionPick("Both + Editor", ["codex", "claude"], { includeEditorContext: true }, "Attach active selection or active file"),
+    nativeActionPick("Codex + Diff", ["codex"], { includeWorkspaceDiff: true }, "Attach working-tree diff plus untracked files"),
+    nativeActionPick("Claude + Diff", ["claude"], { includeWorkspaceDiff: true }, "Attach working-tree diff plus untracked files"),
+    nativeActionPick("Both + Diff", ["codex", "claude"], { includeWorkspaceDiff: true }, "Attach working-tree diff plus untracked files"),
+  ];
+}
+
+function nativeActionPick(
+  plainLabel: string,
+  agents: AgentId[],
+  options: NativeTerminalPokeOptions,
+  detail: string,
+  actionKind: "prompt" | "command" | "rawLine" = "prompt",
+  presetLine?: string,
+  description?: string
+): NativeActionPick {
+  return {
+    label: plainLabel,
+    plainLabel,
+    agents,
+    options,
+    actionKind,
+    presetLine,
+    description: description ?? (agents.length === 2 ? "Codex + Claude" : AGENT_NAMES[agents[0]]),
+    detail,
+  };
+}
+
+function normalizePokeOptions(options: NativeTerminalPokeOptions | boolean): NativeTerminalPokeOptions {
+  if (typeof options === "boolean") return { includeEditorContext: options };
+  return options;
+}
+
+function defaultPokeInstruction(
+  editorContext: EditorContextAttachment | undefined,
+  workspaceDiff: string | undefined
+): string {
+  if (editorContext && workspaceDiff !== undefined) {
+    return "Use the attached editor context and working-tree diff.";
+  }
+  if (editorContext) {
+    return `Use the attached ${editorContext.selected ? "selection" : "active file"} context.`;
+  }
+  if (workspaceDiff !== undefined) {
+    return "Use the attached working-tree diff.";
+  }
+  return "";
+}
+
+function didAgentFail(result: RunResult): boolean {
+  return result.cancelled || result.timedOut || result.exitCode !== 0;
+}
+
+function agentCallFailureResult(message: string): RunResult {
+  return {
+    stdout: "",
+    stderr: message,
+    exitCode: null,
+    timedOut: false,
+    cancelled: false,
+  };
+}
+
+function checkPassed(report: DoctorReport | undefined, id: string): boolean {
+  return report?.checks.some((check) => check.id === id && check.status === "pass") ?? false;
+}
+
+function checkFailed(report: DoctorReport | undefined, id: string): boolean {
+  return report?.checks.some((check) => check.id === id && check.status === "fail") ?? false;
+}
+
+// Read each user-configured args slot (codex/claude × discussion/build/review)
+// and run validateNativeArgs against it. Doctor consumes the rows and turns
+// any non-empty warning lists into a "Native CLI args" check. Cheap
+// (six config reads + six pure validations) and runs once per Doctor pass.
+function collectArgsValidation(cfg: vscode.WorkspaceConfiguration): DoctorArgsValidation[] {
+  const profiles: Array<{ profile: string; key: (agent: AgentId) => string }> = [
+    { profile: "discussion", key: (agent) => `${agent}ExecArgsDiscussion` },
+    { profile: "build", key: (agent) => `${agent}ExecArgsBuild` },
+    { profile: "review", key: (agent) => `${agent}ExecArgsReview` },
+  ];
+  const rows: DoctorArgsValidation[] = [];
+  for (const agent of ["codex", "claude"] as AgentId[]) {
+    for (const { profile, key } of profiles) {
+      const args = cfg.get<string[]>(key(agent), []);
+      rows.push({ agent, profile, warnings: validateNativeArgs(agent, args) });
+    }
+  }
+  return rows;
+}
+
+function formatAutopilotReport(report: DoctorReport, summary: string): string {
+  return [
+    `Hydra Autopilot: ${summary}`,
+    formatDoctorReport(report),
+    summary === "Needs setup"
+      ? "Use the Fix Codex Path / Fix Claude Path buttons if a native CLI check failed."
+      : "The room is ready. Send one message when you want Codex and Claude to work.",
+  ].join("\n\n");
+}
+
+function formatTerminalBridgeHealth(sessions: TerminalSession[]): string {
+  const lines = ["Terminal Bridge Health"];
+  for (const session of sessions) {
+    lines.push(
+      "",
+      `${AGENT_NAMES[session.agent]}: ${session.state}`,
+      `Detail: ${session.detail}`,
+      `Command: ${session.currentCommand ?? "none"}`,
+      `Phase: ${session.currentPhase ?? "none"}`,
+      `Last activity: ${session.lastActivityAt ?? "none"}`,
+      `Prompt: ${session.lastPromptPath ?? "none"}`,
+      `Reply: ${session.lastReplyPath ?? "none"}`,
+      `Log: ${session.lastLogPath ?? "none"}`,
+      `Error: ${session.lastError ?? "none"}`
+    );
+  }
+  return lines.join("\n");
+}
+
+function formatEffectiveAuthority(summaries: Record<AgentId, AgentAuthoritySummary>): string {
+  const lines = ["Effective Native CLI Authority"];
+  for (const agent of ["codex", "claude"] as AgentId[]) {
+    const summary = summaries[agent];
+    lines.push(
+      "",
+      `${AGENT_NAMES[agent]}: ${summary.authority.label}`,
+      `Profile: ${summary.profile.label}`,
+      `Detail: ${summary.authority.detail}`,
+      `Profile detail: ${summary.profile.detail}`
+    );
+    // Each warning gets its own bulleted line so multi-warning output
+    // (e.g. when validateNativeArgs flags several arg issues at once)
+    // stays scannable instead of running together as one wall of text.
+    if (summary.authority.warnings.length === 0) {
+      lines.push("Warnings: none");
+    } else if (summary.authority.warnings.length === 1) {
+      lines.push(`Warnings: ${summary.authority.warnings[0]}`);
+    } else {
+      lines.push("Warnings:");
+      for (const warning of summary.authority.warnings) {
+        lines.push(`  - ${warning}`);
+      }
+    }
+  }
+  return lines.join("\n");
+}
+
+function unavailableAuthoritySummaries(): Record<AgentId, AgentAuthoritySummary> {
+  return {
+    codex: unavailableAuthoritySummary("codex"),
+    claude: unavailableAuthoritySummary("claude"),
+  };
+}
+
+function unavailableAuthoritySummary(agent: AgentId): AgentAuthoritySummary {
+  return {
+    authority: {
+      level: "unknown",
+      label: "Unavailable",
+      detail: "Open a workspace folder before Hydra can resolve native CLI authority.",
+      warnings: [],
+    },
+    profile: {
+      id: "custom",
+      label: "Unavailable",
+      detail: `${AGENT_NAMES[agent]} CLI authority is unavailable until a workspace folder is open.`,
+    },
+  };
+}
+
+function formatElapsed(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes === 0) return `${seconds}s`;
+  return `${minutes}m ${seconds.toString().padStart(2, "0")}s`;
+}
+
+function resolveWorkspaceRoot(context: vscode.ExtensionContext): string | undefined {
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  if (folder) return folder.uri.fsPath;
+  const envRoot = process.env.HYDRA_WORKSPACE_ROOT?.trim();
+  if (envRoot) return envRoot;
+  const configured = vscode.workspace.getConfiguration("hydraRoom").get<string>("workspaceRoot", "").trim();
+  if (configured) return path.isAbsolute(configured) ? configured : path.resolve(configured);
+  return inferDevelopmentWorkspaceRoot(context);
+}
+
+function inferDevelopmentWorkspaceRoot(context: vscode.ExtensionContext): string | undefined {
+  if (context.extensionMode !== vscode.ExtensionMode.Development) return undefined;
+  const extensionRoot = context.extensionUri.fsPath;
+  const extensionName = path.basename(extensionRoot);
+  const parent = path.dirname(extensionRoot);
+  if (extensionName === "vscode-hydra-room" && path.basename(parent) === "tools") {
+    return path.dirname(parent);
+  }
+  return undefined;
+}
+
+async function captureGitDiff(cwd: string, maxLines: number): Promise<string | null> {
+  const tracked = await runGit(cwd, ["diff", "--no-ext-diff", "--no-color", "HEAD"]);
+  if (!tracked || tracked.code !== 0) return null;
+
+  const untracked = await runGit(cwd, ["ls-files", "--others", "--exclude-standard"]);
+  if (!untracked || untracked.code !== 0) return null;
+
+  const lines: string[] = [];
+  appendLimitedLines(lines, tracked.out, maxLines);
+  const files = untracked.out.split(/\r?\n/).filter((line) => line.length > 0);
+  for (const file of files) {
+    if (lines.length >= maxLines) break;
+    const diff = await synthesizeUntrackedFileDiff(cwd, file);
+    appendLimitedLines(lines, diff, maxLines);
+  }
+  return lines.join("\n");
+}
+
+async function runGit(cwd: string, args: string[]): Promise<{ code: number | null; out: string } | null> {
+  return new Promise((resolve) => {
+    const child = cp.spawn("git", args, { cwd, windowsHide: true });
+    let out = "";
+    let settled = false;
+    const finish = (value: { code: number | null; out: string } | null) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    child.stdout.on("data", (b: Buffer) => (out += b.toString("utf8")));
+    child.on("error", () => finish(null));
+    child.on("close", (code) => finish({ code, out }));
+  });
+}
+
+async function synthesizeUntrackedFileDiff(cwd: string, relativeFile: string): Promise<string> {
+  const gitPath = relativeFile.replace(/\\/g, "/");
+  const absolute = path.join(cwd, relativeFile);
+  let buffer: Buffer;
+  try {
+    buffer = await fs.readFile(absolute);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return `diff --git a/${gitPath} b/${gitPath}\nnew file mode 100644\n--- /dev/null\n+++ b/${gitPath}\n@@\n+[Hydra could not read untracked file: ${message}]`;
+  }
+
+  if (buffer.includes(0)) {
+    return `diff --git a/${gitPath} b/${gitPath}\nnew file mode 100644\n--- /dev/null\n+++ b/${gitPath}\n@@\n+[Binary untracked file omitted from Hydra review prompt]`;
+  }
+
+  const body = buffer
+    .toString("utf8")
+    .split(/\r?\n/)
+    .map((line) => `+${line}`)
+    .join("\n");
+  return `diff --git a/${gitPath} b/${gitPath}\nnew file mode 100644\n--- /dev/null\n+++ b/${gitPath}\n@@\n${body}`;
+}
+
+function appendLimitedLines(target: string[], text: string, maxLines: number): void {
+  if (!text) return;
+  const source = text.split(/\r?\n/);
+  const remaining = Math.max(0, maxLines - target.length);
+  target.push(...source.slice(0, remaining));
+  if (source.length > remaining && target.length <= maxLines) {
+    target.push(`[... truncated, ${source.length - remaining} more lines ...]`);
+  }
+}
+
+async function isGitWorkspace(cwd: string): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const child = cp.spawn("git", ["rev-parse", "--is-inside-work-tree"], { cwd, windowsHide: true });
+    let settled = false;
+    child.on("error", () => { if (!settled) { settled = true; resolve(false); } });
+    child.on("close", (code) => { if (!settled) { settled = true; resolve(code === 0); } });
+  });
+}
+
+function makeNonce(): string {
+  return crypto.randomBytes(16).toString("base64url");
+}

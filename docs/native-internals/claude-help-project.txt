@@ -1,0 +1,11 @@
+﻿Usage: claude project [options] [command]
+
+Manage Claude Code project state
+
+Options:
+  -h, --help              Display help for command
+
+Commands:
+  help [command]          display help for command
+  purge [options] [path]  Delete all Claude Code state for a project
+                          (transcripts, tasks, file history, config entry)
