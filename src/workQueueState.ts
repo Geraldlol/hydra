@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { ensureFile, readJsonlGuarded, serializePerFile } from "./fileQueue";
 import type { WorkQueueItem } from "./workQueue";
 
 export type WorkQueueDispositionKind = "dismissed" | "snoozed";
@@ -16,49 +17,18 @@ export function workQueueStatePath(workspaceRoot: string): string {
 }
 
 export async function ensureWorkQueueStateFile(filePath: string): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  try {
-    await fs.stat(filePath);
-  } catch {
-    await fs.writeFile(filePath, "", "utf8");
-  }
+  await ensureFile(filePath);
 }
 
-// Per-file write serializer. Concurrent appendFile calls on the same path
-// can interleave bytes; the parser silently drops the corrupted line, so a
-// dismiss/snooze disposition would just disappear with no error visible.
-const fileWriteChains: Map<string, Promise<void>> = new Map();
-
 export async function appendWorkQueueDisposition(filePath: string, disposition: WorkQueueDisposition): Promise<void> {
-  const previous = fileWriteChains.get(filePath) ?? Promise.resolve();
-  const next = previous.then(async () => {
+  await serializePerFile(filePath, async () => {
     await fs.mkdir(path.dirname(filePath), { recursive: true });
     await fs.appendFile(filePath, `${JSON.stringify(disposition)}\n`, "utf8");
   });
-  fileWriteChains.set(filePath, next.catch(() => undefined));
-  await next;
 }
 
 export async function readWorkQueueDispositions(filePath: string): Promise<WorkQueueDisposition[]> {
-  let text: string;
-  try {
-    text = await fs.readFile(filePath, "utf8");
-  } catch {
-    return [];
-  }
-
-  const dispositions: WorkQueueDisposition[] = [];
-  for (const line of text.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (isWorkQueueDisposition(parsed)) dispositions.push(parsed);
-    } catch {
-      // Keep Hydra resilient if users inspect or hand-edit the JSONL.
-    }
-  }
-  return dispositions;
+  return readJsonlGuarded(filePath, isWorkQueueDisposition);
 }
 
 export function applyWorkQueueDispositions(

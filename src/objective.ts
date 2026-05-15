@@ -1,15 +1,11 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { atomicWriteFile, ensureFile } from "./fileQueue";
 
 const OBJECTIVE_HEADER = "# Hydra Room Objective";
 
 export async function ensureObjectiveFile(filePath: string): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  try {
-    await fs.stat(filePath);
-  } catch {
-    await fs.writeFile(filePath, `${OBJECTIVE_HEADER}\n\n`, "utf8");
-  }
+  await ensureFile(filePath, `${OBJECTIVE_HEADER}\n\n`);
 }
 
 export async function readObjective(filePath: string): Promise<string> {
@@ -21,17 +17,13 @@ export async function readObjective(filePath: string): Promise<string> {
 }
 
 export async function writeObjective(filePath: string, objective: string): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
   // Strip the header from incoming text first. Without this, an objective
   // round-tripped through readObjective \u2192 writeObjective grows by one
   // header copy per cycle if the user typed something starting with
   // "# Hydra Room Objective" or if the parser is ever called twice.
   const sanitized = parseObjective(objective);
   const body = sanitized ? `${sanitized}\n` : "";
-  // Atomic write so concurrent edits can't corrupt the file mid-flush.
-  const tmp = `${filePath}.tmp`;
-  await fs.writeFile(tmp, `${OBJECTIVE_HEADER}\n\n${body}`, "utf8");
-  await fs.rename(tmp, filePath);
+  await atomicWriteFile(filePath, `${OBJECTIVE_HEADER}\n\n${body}`);
 }
 
 export function parseObjective(text: string): string {

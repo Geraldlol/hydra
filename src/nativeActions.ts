@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { ensureFile, readJsonlGuarded } from "./fileQueue";
 import type { AgentId } from "./phases";
 
 export type NativeActionStatus = "completed" | "cancelled" | "failed";
@@ -45,12 +46,7 @@ export function nativeActionsPath(workspaceRoot: string): string {
 }
 
 export async function ensureNativeActionsFile(filePath: string): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  try {
-    await fs.stat(filePath);
-  } catch {
-    await fs.writeFile(filePath, "", "utf8");
-  }
+  await ensureFile(filePath);
 }
 
 export async function appendNativeAction(filePath: string, receipt: NativeActionReceipt): Promise<void> {
@@ -83,25 +79,7 @@ export async function collectNativeSessionHints(
 }
 
 export async function readNativeActions(filePath: string): Promise<NativeActionReceipt[]> {
-  let text: string;
-  try {
-    text = await fs.readFile(filePath, "utf8");
-  } catch {
-    return [];
-  }
-
-  const receipts: NativeActionReceipt[] = [];
-  for (const line of text.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (isNativeActionReceipt(parsed)) receipts.push(parsed);
-    } catch {
-      // Keep Hydra resilient if users inspect or hand-edit the JSONL.
-    }
-  }
-  return receipts;
+  return readJsonlGuarded(filePath, isNativeActionReceipt);
 }
 
 export function nativeActionSummary(receipt: NativeActionReceipt | undefined): string {

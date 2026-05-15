@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { atomicWriteFile } from "./fileQueue";
 import type { AgentId } from "./phases";
 import type { Phase } from "./prompts";
 
@@ -101,15 +102,10 @@ export function terminalSessionPath(workspaceRoot: string, agent: AgentId): stri
 }
 
 export async function writeTerminalSession(workspaceRoot: string, session: TerminalSession): Promise<void> {
-  await fs.mkdir(terminalSessionDir(workspaceRoot), { recursive: true });
-  // Atomic write: tmp + rename. Plain writeFile truncates first; a crash
-  // between truncation and write produces a corrupt empty file with no
-  // recovery path. fs.rename over an existing file is atomic on both
-  // POSIX and modern Windows.
-  const target = terminalSessionPath(workspaceRoot, session.agent);
-  const tmp = `${target}.tmp`;
-  await fs.writeFile(tmp, `${JSON.stringify(session, null, 2)}\n`, "utf8");
-  await fs.rename(tmp, target);
+  await atomicWriteFile(
+    terminalSessionPath(workspaceRoot, session.agent),
+    `${JSON.stringify(session, null, 2)}\n`
+  );
 }
 
 export function formatCommandForSession(command: string, args: string[]): string {

@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { atomicWriteFile } from "./fileQueue";
 import type { DecisionPacket } from "./decisions";
 import type { AgentId } from "./phases";
 import type { Phase } from "./prompts";
@@ -33,12 +34,7 @@ export function sessionBriefPath(workspaceRoot: string): string {
 }
 
 export async function writeSessionBrief(filePath: string, markdown: string): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  // Atomic write so two concurrent openSessionBrief calls (e.g. user
-  // double-clicks) can't interleave bytes.
-  const tmp = `${filePath}.tmp`;
-  await fs.writeFile(tmp, markdown, "utf8");
-  await fs.rename(tmp, filePath);
+  await atomicWriteFile(filePath, markdown);
 }
 
 export function renderSessionBrief(input: SessionBriefInput): string {

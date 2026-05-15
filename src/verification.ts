@@ -2,6 +2,7 @@ import * as cp from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { stripAnsi } from "./agents";
+import { ensureFile, readJsonlGuarded, serializePerFile } from "./fileQueue";
 
 export interface VerificationResult {
   timestamp: string;
@@ -29,46 +30,18 @@ export interface VerificationRunOptions {
 }
 
 export async function ensureVerificationFile(filePath: string): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  try {
-    await fs.stat(filePath);
-  } catch {
-    await fs.writeFile(filePath, "", "utf8");
-  }
+  await ensureFile(filePath);
 }
 
-// Per-file serializer guards against concurrent appends interleaving bytes.
-const verificationWriteChains: Map<string, Promise<void>> = new Map();
-
 export async function appendVerification(filePath: string, result: VerificationResult): Promise<void> {
-  const previous = verificationWriteChains.get(filePath) ?? Promise.resolve();
-  const next = previous.then(async () => {
+  await serializePerFile(filePath, async () => {
     await fs.mkdir(path.dirname(filePath), { recursive: true });
     await fs.appendFile(filePath, `${JSON.stringify(result)}\n`, "utf8");
   });
-  verificationWriteChains.set(filePath, next.catch(() => undefined));
-  await next;
 }
 
 export async function readVerifications(filePath: string): Promise<VerificationResult[]> {
-  let text: string;
-  try {
-    text = await fs.readFile(filePath, "utf8");
-  } catch {
-    return [];
-  }
-  const results: VerificationResult[] = [];
-  for (const line of text.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (isVerificationResult(parsed)) results.push(parsed);
-    } catch {
-      // Keep Hydra resilient if users inspect or hand-edit the JSONL.
-    }
-  }
-  return results;
+  return readJsonlGuarded(filePath, isVerificationResult);
 }
 
 export async function inferVerificationCommand(workspaceRoot: string): Promise<string | undefined> {

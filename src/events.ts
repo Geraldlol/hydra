@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { ensureFile, readJsonlGuarded } from "./fileQueue";
 import type { AgentId } from "./phases";
 import type { Phase } from "./prompts";
 
@@ -24,12 +25,7 @@ export function hydraEventsPath(workspaceRoot: string): string {
 }
 
 export async function ensureHydraEventsFile(filePath: string): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  try {
-    await fs.stat(filePath);
-  } catch {
-    await fs.writeFile(filePath, "", "utf8");
-  }
+  await ensureFile(filePath);
 }
 
 export async function appendHydraEvent(filePathOrWorkspaceRoot: string, event: HydraEvent): Promise<void> {
@@ -41,25 +37,7 @@ export async function appendHydraEvent(filePathOrWorkspaceRoot: string, event: H
 }
 
 export async function readHydraEvents(filePath: string, limit = 50): Promise<HydraEvent[]> {
-  let text: string;
-  try {
-    text = await fs.readFile(filePath, "utf8");
-  } catch {
-    return [];
-  }
-
-  const events: HydraEvent[] = [];
-  for (const line of text.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (isHydraEvent(parsed)) events.push(parsed);
-    } catch {
-      // Keep diagnostics resilient if the user hand-edits the JSONL file.
-    }
-  }
-  return limit > 0 ? events.slice(-limit) : events;
+  return readJsonlGuarded(filePath, isHydraEvent, { limit });
 }
 
 export function createHydraEvent(input: Omit<HydraEvent, "timestamp">, now: Date = new Date()): HydraEvent {

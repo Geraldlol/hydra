@@ -99,6 +99,7 @@ import {
 } from "./doctor";
 import { EditorContextAttachment, truncateEditorContext } from "./editorContext";
 import { appendHydraEvent, createHydraEvent, ensureHydraEventsFile, hydraEventsPath, readHydraEvents, type HydraEventKind } from "./events";
+import { ensureFile } from "./fileQueue";
 import { ensureObjectiveFile, objectiveAsContext, readObjective, writeObjective } from "./objective";
 import { TerminalBridge } from "./terminalBridge";
 import { buildDirectTerminalPokePrompt } from "./terminalPoke";
@@ -4030,12 +4031,7 @@ function normalizeAgentId(value: unknown, fallback: AgentId): AgentId {
 }
 
 async function ensureJsonlFile(filePath: string): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  try {
-    await fs.stat(filePath);
-  } catch {
-    await fs.writeFile(filePath, "", "utf8");
-  }
+  await ensureFile(filePath);
 }
 
 function makeTraceId(agent: AgentId, phase: Phase): string {

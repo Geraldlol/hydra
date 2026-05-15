@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { ensureFile, readJsonlGuarded, serializePerFile } from "./fileQueue";
 import type { AgentId } from "./phases";
 import type { Phase } from "./prompts";
 
@@ -54,47 +55,18 @@ const REQUIRED_FIELDS: PacketField[] = [
 ];
 
 export async function ensureDecisionsFile(filePath: string): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  try {
-    await fs.stat(filePath);
-  } catch {
-    await fs.writeFile(filePath, "", "utf8");
-  }
+  await ensureFile(filePath);
 }
 
-// Per-file serializer prevents concurrent jsonl appends from interleaving
-// bytes — a corrupted line would be silently dropped by readDecisions.
-const decisionWriteChains: Map<string, Promise<void>> = new Map();
-
 export async function appendDecision(filePath: string, packet: DecisionPacket): Promise<void> {
-  const previous = decisionWriteChains.get(filePath) ?? Promise.resolve();
-  const next = previous.then(async () => {
+  await serializePerFile(filePath, async () => {
     await fs.mkdir(path.dirname(filePath), { recursive: true });
     await fs.appendFile(filePath, `${JSON.stringify(packet)}\n`, "utf8");
   });
-  decisionWriteChains.set(filePath, next.catch(() => undefined));
-  await next;
 }
 
 export async function readDecisions(filePath: string): Promise<DecisionPacket[]> {
-  let text: string;
-  try {
-    text = await fs.readFile(filePath, "utf8");
-  } catch {
-    return [];
-  }
-  const packets: DecisionPacket[] = [];
-  for (const line of text.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (isDecisionPacket(parsed)) packets.push(parsed);
-    } catch {
-      // Keep the room resilient if a user manually edits the JSONL file.
-    }
-  }
-  return packets;
+  return readJsonlGuarded(filePath, isDecisionPacket);
 }
 
 export function parseDecisionPacket(text: string, meta: DecisionPacketMeta): DecisionPacket | undefined {

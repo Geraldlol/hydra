@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { ensureFile, serializePerFile } from "./fileQueue";
 import { Phase } from "./prompts";
 
 export type MessageRole = "user" | "codex" | "claude" | "system";
@@ -51,14 +52,8 @@ export function serializeMessage(msg: TranscriptMessage): string {
   return `## ${msg.timestamp} ${label}${phaseSuffix}${tagSuffix}\n\n${msg.text}\n`;
 }
 
-// Per-file write serializer so two concurrent appendMessage calls on the
-// same transcript can't interleave bytes or both decide they're the
-// "first write" and double-up the header.
-const transcriptWriteChains: Map<string, Promise<void>> = new Map();
-
 export async function appendMessage(filePath: string, msg: TranscriptMessage): Promise<void> {
-  const previous = transcriptWriteChains.get(filePath) ?? Promise.resolve();
-  const next = previous.then(async () => {
+  await serializePerFile(filePath, async () => {
     await fs.mkdir(path.dirname(filePath), { recursive: true });
     let exists = true;
     try {
@@ -69,25 +64,17 @@ export async function appendMessage(filePath: string, msg: TranscriptMessage): P
     const prefix = exists ? "\n" : "# Hydra Room Transcript\n\n";
     await fs.appendFile(filePath, prefix + serializeMessage(msg), "utf8");
   });
-  transcriptWriteChains.set(filePath, next.catch(() => undefined));
-  await next;
 }
 
 export async function ensureTranscriptFile(filePath: string): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  try {
-    await fs.stat(filePath);
-  } catch {
-    await fs.writeFile(filePath, "# Hydra Room Transcript\n\n", "utf8");
-  }
+  await ensureFile(filePath, "# Hydra Room Transcript\n\n");
 }
 
 export async function archiveAndResetTranscript(
   filePath: string,
   now: Date = new Date()
 ): Promise<TranscriptArchiveResult> {
-  const previous = transcriptWriteChains.get(filePath) ?? Promise.resolve();
-  const next = previous.then(async () => {
+  return serializePerFile(filePath, async () => {
     await fs.mkdir(path.dirname(filePath), { recursive: true });
     let current = "";
     try {
@@ -109,8 +96,6 @@ export async function archiveAndResetTranscript(
       archivedChars: current.length,
     };
   });
-  transcriptWriteChains.set(filePath, next.then(() => undefined, () => undefined));
-  return await next;
 }
 
 export async function readTranscript(filePath: string): Promise<TranscriptMessage[]> {
