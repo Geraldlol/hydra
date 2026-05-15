@@ -6,3 +6,4 @@ out/
 *.vsix
 .hydra/
 .npm-cache/
+.claude/
