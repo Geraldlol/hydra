@@ -40,39 +40,53 @@ export function stripAnsi(value: string): string {
  * passes args through cmd.exe's argument parser — which would mangle
  * special characters unless we quote them ourselves.
  */
-function quoteForCmd(arg: string): string {
+export function quoteForCmd(arg: string): string {
   if (arg === "") return '""';
   // cmd.exe special chars: & | < > ^ " plus whitespace
   if (!/[\s"&|<>^()%!]/.test(arg)) return arg;
   return `"${arg.replace(/"/g, '""')}"`;
 }
 
-function isWindowsBatchCommand(command: string): boolean {
+export function isWindowsBatchCommand(command: string): boolean {
   return process.platform === "win32" && /\.(?:cmd|bat)$/i.test(command);
+}
+
+/**
+ * Spawn a Windows `.cmd`/`.bat` shim through cmd.exe with proper quoting.
+ *
+ * Use this when isWindowsBatchCommand(command) is true. Direct cp.spawn on
+ * a batch file is blocked by Node's CVE-2024-27980 mitigation, and
+ * shell:true delegates quoting to cmd.exe's own parser which mangles
+ * special characters.
+ *
+ * The outer double-quote wrap (`"${line}"`) is required because cmd /s /c
+ * strips the FIRST and LAST quote on its command line (cmd quote-handling
+ * rule 2, kicks in whenever /s is set). Without the outer pair, the
+ * closing quote on the last quoted arg gets eaten and any path with
+ * spaces gets split — e.g. cwd `C:\Users\…\Peerstar Salesforce Dev`
+ * surfaces as `error: unexpected argument 'Dev"' found`.
+ *
+ * windowsVerbatimArguments tells Node not to re-quote our pre-quoted
+ * string when it passes it to CreateProcess.
+ */
+export function spawnViaCmdShim(
+  command: string,
+  args: string[],
+  options: Omit<cp.SpawnOptions, "windowsVerbatimArguments" | "shell">
+): cp.ChildProcess {
+  const line = [command, ...args].map(quoteForCmd).join(" ");
+  const wrapped = `"${line}"`;
+  return cp.spawn("cmd.exe", ["/d", "/s", "/c", wrapped], {
+    ...options,
+    windowsVerbatimArguments: true,
+  });
 }
 
 function spawnAgentChild(spawn: AgentSpawn): cp.ChildProcess {
   if (isWindowsBatchCommand(spawn.command)) {
-    // Wrap through cmd.exe so Node's CVE-2024-27980 guard doesn't reject
-    // the .cmd shim. Manual quoting keeps args verbatim across the cmd
-    // boundary instead of relying on shell:true's auto-rewrite.
-    //
-    // The outer double-quote wrap is required because `cmd /s /c` strips
-    // the FIRST and LAST quote on its command line (rule 2 of cmd's quote
-    // handling — kicks in whenever /s is set). Without the outer pair, our
-    // closing quote on the last quoted arg gets eaten and any path with
-    // spaces gets split, producing errors like:
-    //     error: unexpected argument 'Dev"' found
-    // when the cwd is e.g. `C:\Users\…\Peerstar Salesforce Dev`.
-    //
-    // windowsVerbatimArguments tells Node not to re-quote our pre-quoted
-    // string when it passes it to CreateProcess.
-    const line = [spawn.command, ...spawn.args].map(quoteForCmd).join(" ");
-    const wrapped = `"${line}"`;
-    return cp.spawn("cmd.exe", ["/d", "/s", "/c", wrapped], {
+    return spawnViaCmdShim(spawn.command, spawn.args, {
       cwd: spawn.cwd,
       windowsHide: true,
-      windowsVerbatimArguments: true,
       env: { ...process.env, ...(spawn.env ?? {}) },
     });
   }

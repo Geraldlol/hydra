@@ -1,16 +1,6 @@
 import { describe, test } from "node:test";
 import * as assert from "node:assert/strict";
-
-// We can't directly import the un-exported helpers from agents.ts without
-// touching the module's public surface, so this suite verifies the SAME
-// quoting rules through a local copy. If you change the helpers in
-// agents.ts or codexModels.ts, mirror the change here.
-
-function quoteForCmd(arg: string): string {
-  if (arg === "") return '""';
-  if (!/[\s"&|<>^()%!]/.test(arg)) return arg;
-  return `"${arg.replace(/"/g, '""')}"`;
-}
+import { quoteForCmd } from "../src/agents";
 
 describe("Windows cmd.exe argument quoting", () => {
   test("plain args pass through unquoted", () => {

@@ -1,6 +1,7 @@
 import * as cp from "node:child_process";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
+import { isWindowsBatchCommand, spawnViaCmdShim } from "./agents";
 
 export interface CodexModelInfo {
   slug: string;
@@ -105,25 +106,14 @@ export function runCodexDebugModels(command: string, env: NodeJS.ProcessEnv, tim
 }
 
 /**
- * Spawn a Codex child process, wrapping .cmd/.bat shims through cmd.exe to
- * dodge Node's CVE-2024-27980 mitigation (which throws EINVAL for direct
- * batch-file spawns). Mirrors the logic in agents.ts.
+ * Spawn a Codex child process, wrapping .cmd/.bat shims through cmd.exe
+ * via the shared spawnViaCmdShim helper (see agents.ts).
  */
 function spawnCodexChild(command: string, args: string[], env: NodeJS.ProcessEnv): cp.ChildProcess {
-  if (process.platform === "win32" && /\.(?:cmd|bat)$/i.test(command)) {
-    const quote = (a: string): string => {
-      if (a === "") return '""';
-      if (!/[\s"&|<>^()%!]/.test(a)) return a;
-      return `"${a.replace(/"/g, '""')}"`;
-    };
-    // Outer-wrap + windowsVerbatimArguments: see comment in agents.ts
-    // spawnAgentChild for why cmd /s /c needs the double-wrap trick.
-    const line = [command, ...args].map(quote).join(" ");
-    const wrapped = `"${line}"`;
-    return cp.spawn("cmd.exe", ["/d", "/s", "/c", wrapped], {
+  if (isWindowsBatchCommand(command)) {
+    return spawnViaCmdShim(command, args, {
       env,
       windowsHide: true,
-      windowsVerbatimArguments: true,
     });
   }
   return cp.spawn(command, args, {
