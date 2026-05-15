@@ -83,11 +83,13 @@
       "title": "Hydra Room",
       "properties": {
         "hydraRoom.transcriptPath": {
+          "scope": "application",
           "type": "string",
           "default": ".hydra/transcript.md",
           "markdownDescription": "Workspace-relative or absolute path where Hydra writes the Markdown transcript."
         },
         "hydraRoom.workspaceRoot": {
+          "scope": "application",
           "type": "string",
           "default": "",
           "markdownDescription": "Advanced fallback project root for Extension Development Host sessions without an open VS Code workspace. Normal users should leave this blank and open a folder in VS Code."
@@ -503,6 +505,8 @@
       "supported": "limited",
       "description": "Hydra spawns Codex and Claude with workspace-write authority and runs a configured verify command. In untrusted workspaces, Hydra ignores workspace-scoped settings for CLI paths, args, env, terminal startup, verify command, handoff webhook, and Telegram credentials so a hostile repo cannot redirect those sinks.",
       "restrictedConfigurations": [
+        "hydraRoom.transcriptPath",
+        "hydraRoom.workspaceRoot",
         "hydraRoom.codexCommand",
         "hydraRoom.codexExecArgsDiscussion",
         "hydraRoom.codexExecArgsBuild",
