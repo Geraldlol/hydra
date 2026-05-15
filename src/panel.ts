@@ -146,6 +146,7 @@ import { chooseEffortInteractively } from "./effortChooser";
 import { chooseModelInteractively, refreshCodexModelCatalog, type ModelChooserDeps } from "./modelChooser";
 import { summarizePhasedSetting } from "./phasedSetting";
 import { modelForPhase, withEffortArgs, withModelArgs } from "./agentArgs";
+import type { WebviewMessage } from "./webviewMessages";
 import {
   shouldCaptureCodexLastMessage,
   shouldUseCodexJson,
@@ -3281,7 +3282,7 @@ export class HydraRoomPanel {
 
   // ---------------- webview I/O ----------------
 
-  private async onWebviewMessage(msg: any): Promise<void> {
+  private async onWebviewMessage(msg: WebviewMessage): Promise<void> {
     try {
       switch (msg.type) {
         case "ready":

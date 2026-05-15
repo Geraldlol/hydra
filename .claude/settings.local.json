@@ -10,7 +10,8 @@
       "PowerShell(npm run *)",
       "Bash(npm run *)",
       "Bash(gh auth *)",
-      "Bash(gh repo *)"
+      "Bash(gh repo *)",
+      "Bash(git push *)"
     ]
   }
 }
