@@ -135,6 +135,236 @@ describe("transition()", () => {
   });
 });
 
+describe("transition exhaustive sweep", () => {
+  type SweepState =
+    | { name: "Idle" }
+    | { name: "Opener"; opener: "codex"; reactor: "claude" }
+    | { name: "Reactor"; opener: "codex"; reactor: "claude" }
+    | { name: "Closer"; opener: "codex"; reactor: "claude" }
+    | { name: "ParallelDiscussion"; agents: ReadonlyArray<"codex" | "claude"> }
+    | { name: "AwaitingUser" }
+    | { name: "Build"; builder: "codex" }
+    | { name: "BuildDone"; builder: "codex" }
+    | { name: "Review"; reviewer: "claude" }
+    | { name: "ReviewDone"; reviewer: "claude"; approved: boolean };
+
+  type SweepEvent =
+    | { type: "userSent"; opener: "codex"; parallel?: false }
+    | { type: "userSent"; opener: "codex"; parallel: true }
+    | { type: "openerDone" }
+    | { type: "reactorDone" }
+    | { type: "closerDone" }
+    | { type: "parallelDone" }
+    | { type: "assignBuilder"; builder: "claude" }
+    | { type: "buildDone" }
+    | { type: "requestReview" }
+    | { type: "reviewDone"; approved: boolean }
+    | { type: "handBack" }
+    | { type: "stop" };
+
+  const states: ReadonlyArray<SweepState> = [
+    { name: "Idle" },
+    { name: "Opener", opener: "codex", reactor: "claude" },
+    { name: "Reactor", opener: "codex", reactor: "claude" },
+    { name: "Closer", opener: "codex", reactor: "claude" },
+    { name: "ParallelDiscussion", agents: ["codex", "claude"] },
+    { name: "AwaitingUser" },
+    { name: "Build", builder: "codex" },
+    { name: "BuildDone", builder: "codex" },
+    { name: "Review", reviewer: "claude" },
+    { name: "ReviewDone", reviewer: "claude", approved: false },
+  ];
+
+  const events: ReadonlyArray<SweepEvent> = [
+    { type: "userSent", opener: "codex" },
+    { type: "userSent", opener: "codex", parallel: true },
+    { type: "openerDone" },
+    { type: "reactorDone" },
+    { type: "closerDone" },
+    { type: "parallelDone" },
+    { type: "assignBuilder", builder: "claude" },
+    { type: "buildDone" },
+    { type: "requestReview" },
+    { type: "reviewDone", approved: true },
+    { type: "handBack" },
+    { type: "stop" },
+  ];
+
+  type Expected = "identity" | { name: string };
+
+  // Per-event expectations for each state.
+  // - "identity" means transition returns the input state (no-op / rejected event).
+  // - { name: "X" } means the transition lands in a state whose discriminator is X.
+  const expectations: Record<string, Record<string, Expected>> = {
+    Idle: {
+      "userSent": { name: "Opener" },
+      "userSent:parallel": { name: "ParallelDiscussion" },
+      "openerDone": "identity",
+      "reactorDone": "identity",
+      "closerDone": "identity",
+      "parallelDone": "identity",
+      "assignBuilder": "identity",
+      "buildDone": "identity",
+      "requestReview": "identity",
+      "reviewDone": "identity",
+      "handBack": "identity",
+      "stop": "identity",
+    },
+    Opener: {
+      "userSent": "identity",
+      "userSent:parallel": "identity",
+      "openerDone": { name: "Reactor" },
+      "reactorDone": "identity",
+      "closerDone": "identity",
+      "parallelDone": "identity",
+      "assignBuilder": "identity",
+      "buildDone": "identity",
+      "requestReview": "identity",
+      "reviewDone": "identity",
+      "handBack": "identity",
+      "stop": { name: "AwaitingUser" },
+    },
+    Reactor: {
+      "userSent": "identity",
+      "userSent:parallel": "identity",
+      "openerDone": "identity",
+      "reactorDone": { name: "Closer" },
+      "closerDone": "identity",
+      "parallelDone": "identity",
+      "assignBuilder": "identity",
+      "buildDone": "identity",
+      "requestReview": "identity",
+      "reviewDone": "identity",
+      "handBack": "identity",
+      "stop": { name: "AwaitingUser" },
+    },
+    Closer: {
+      "userSent": "identity",
+      "userSent:parallel": "identity",
+      "openerDone": "identity",
+      "reactorDone": "identity",
+      "closerDone": { name: "AwaitingUser" },
+      "parallelDone": "identity",
+      "assignBuilder": "identity",
+      "buildDone": "identity",
+      "requestReview": "identity",
+      "reviewDone": "identity",
+      "handBack": "identity",
+      "stop": { name: "AwaitingUser" },
+    },
+    ParallelDiscussion: {
+      "userSent": "identity",
+      "userSent:parallel": "identity",
+      "openerDone": "identity",
+      "reactorDone": "identity",
+      "closerDone": "identity",
+      "parallelDone": { name: "AwaitingUser" },
+      "assignBuilder": "identity",
+      "buildDone": "identity",
+      "requestReview": "identity",
+      "reviewDone": "identity",
+      "handBack": "identity",
+      "stop": { name: "AwaitingUser" },
+    },
+    AwaitingUser: {
+      "userSent": { name: "Opener" },
+      "userSent:parallel": { name: "ParallelDiscussion" },
+      "openerDone": "identity",
+      "reactorDone": "identity",
+      "closerDone": "identity",
+      "parallelDone": "identity",
+      "assignBuilder": { name: "Build" },
+      "buildDone": "identity",
+      "requestReview": "identity",
+      "reviewDone": "identity",
+      "handBack": "identity",
+      "stop": "identity",
+    },
+    Build: {
+      "userSent": "identity",
+      "userSent:parallel": "identity",
+      "openerDone": "identity",
+      "reactorDone": "identity",
+      "closerDone": "identity",
+      "parallelDone": "identity",
+      "assignBuilder": "identity",
+      "buildDone": { name: "BuildDone" },
+      "requestReview": "identity",
+      "reviewDone": "identity",
+      "handBack": "identity",
+      "stop": { name: "AwaitingUser" },
+    },
+    BuildDone: {
+      "userSent": { name: "Opener" },
+      "userSent:parallel": { name: "ParallelDiscussion" },
+      "openerDone": "identity",
+      "reactorDone": "identity",
+      "closerDone": "identity",
+      "parallelDone": "identity",
+      "assignBuilder": "identity",
+      "buildDone": "identity",
+      "requestReview": { name: "Review" },
+      "reviewDone": "identity",
+      "handBack": "identity",
+      "stop": "identity",
+    },
+    Review: {
+      "userSent": "identity",
+      "userSent:parallel": "identity",
+      "openerDone": "identity",
+      "reactorDone": "identity",
+      "closerDone": "identity",
+      "parallelDone": "identity",
+      "assignBuilder": "identity",
+      "buildDone": "identity",
+      "requestReview": "identity",
+      "reviewDone": { name: "ReviewDone" },
+      "handBack": "identity",
+      "stop": { name: "AwaitingUser" },
+    },
+    ReviewDone: {
+      "userSent": { name: "Opener" },
+      "userSent:parallel": { name: "ParallelDiscussion" },
+      "openerDone": "identity",
+      "reactorDone": "identity",
+      "closerDone": "identity",
+      "parallelDone": "identity",
+      "assignBuilder": "identity",
+      "buildDone": "identity",
+      "requestReview": "identity",
+      "reviewDone": "identity",
+      "handBack": { name: "Build" },
+      "stop": "identity",
+    },
+  };
+
+  const eventKey = (e: SweepEvent): string =>
+    e.type === "userSent" && e.parallel ? "userSent:parallel" : e.type;
+
+  const cases: Array<{ from: SweepState; event: SweepEvent; expected: Expected }> = [];
+  for (const from of states) {
+    for (const event of events) {
+      const expected = expectations[from.name][eventKey(event)];
+      cases.push({ from, event, expected });
+    }
+  }
+
+  for (const { from, event, expected } of cases) {
+    const label =
+      expected === "identity"
+        ? `${from.name} + ${eventKey(event)} -> identity (no-op)`
+        : `${from.name} + ${eventKey(event)} -> ${expected.name}`;
+    test(label, () => {
+      const result = transition(from, event);
+      if (expected === "identity") {
+        assert.equal(result, from, `expected reference-equal identity for ${from.name} + ${eventKey(event)}`);
+      } else {
+        assert.equal(result.name, expected.name, `expected ${expected.name} for ${from.name} + ${eventKey(event)}, got ${result.name}`);
+      }
+    });
+  }
+});
+
 describe("shouldRunParallelDiscussion()", () => {
   test("detects explicit both-agent requests", () => {
     assert.equal(shouldRunParallelDiscussion("okay both of you do xyz"), true);
