@@ -1,4 +1,6 @@
 import * as assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { describe, test } from "node:test";
 import type { CommandCenterActionId } from "../src/commandCenter";
 import { renderHtml } from "../src/webview.html";
@@ -189,7 +191,14 @@ const commandCenterActionCoverage: Record<CommandCenterActionId, readonly RegExp
 };
 
 describe("webview contract", () => {
-  const html = renderHtml("nonce", heads);
+  const html = renderHtml("nonce", heads, "vscode-resource:/media/webview.js");
+  // The script body lives in media/webview.js (loaded externally via the
+  // scriptUri above). Most contract assertions below check JS patterns
+  // that now sit in that file, so we concatenate HTML + JS into a single
+  // "rendered surface" string for the regex matchers. The DOM-binding
+  // test below still uses just `html` because IDs are HTML attributes.
+  const scriptBody = fs.readFileSync(path.join(process.cwd(), "media", "webview.js"), "utf8");
+  const surface = `${html}\n${scriptBody}`;
 
   test("keeps every scripted DOM binding present in the rendered HTML", () => {
     for (const id of boundIds) {
@@ -200,18 +209,18 @@ describe("webview contract", () => {
   test("keeps Command Center accessibility hooks in place", () => {
     assert.match(html, /id="commandList" role="listbox"/);
     assert.match(html, /id="paletteInput" role="combobox"[^>]+aria-activedescendant=""/);
-    assert.match(html, /item\.setAttribute\("role", "option"\)/);
-    assert.match(html, /item\.setAttribute\("aria-selected", "false"\)/);
-    assert.match(html, /item\.setAttribute\("aria-disabled", enabled \? "false" : "true"\)/);
-    assert.match(html, /commandCenterBtn\.focus\(\)/);
+    assert.match(surface, /item\.setAttribute\("role", "option"\)/);
+    assert.match(surface, /item\.setAttribute\("aria-selected", "false"\)/);
+    assert.match(surface, /item\.setAttribute\("aria-disabled", enabled \? "false" : "true"\)/);
+    assert.match(surface, /commandCenterBtn\.focus\(\)/);
   });
 
   test("keeps Command Center disabled-state rendering and guards in place", () => {
     assert.match(html, /\.command-option\[aria-disabled="true"\]/);
-    assert.match(html, /const reason = enabled \? "" : disabledReason\(action\)/);
-    assert.match(html, /class="command-why"> - /);
-    assert.match(html, /option\.getAttribute\("aria-disabled"\) === "true"/);
-    assert.match(html, /selected\.getAttribute\("aria-disabled"\) === "true"/);
+    assert.match(surface, /const reason = enabled \? "" : disabledReason\(action\)/);
+    assert.match(surface, /class="command-why"> - /);
+    assert.match(surface, /option\.getAttribute\("aria-disabled"\) === "true"/);
+    assert.match(surface, /selected\.getAttribute\("aria-disabled"\) === "true"/);
   });
 
   test("keeps critical controls real buttons and the composer a textarea", () => {
@@ -229,7 +238,7 @@ describe("webview contract", () => {
 
   test("uses the current host message names for command actions", () => {
     for (const type of hostMessages) {
-      assert.match(html, new RegExp(`(?::|\\?) "${type}"`), `missing host message ${type}`);
+      assert.match(surface, new RegExp(`(?::|\\?) "${type}"`), `missing host message ${type}`);
     }
   });
 
@@ -242,14 +251,14 @@ describe("webview contract", () => {
       "fix-codex",
       "fix-claude",
     ]) {
-      assert.match(html, new RegExp(`id: "${id}"`), `missing command action ${id}`);
+      assert.match(surface, new RegExp(`id: "${id}"`), `missing command action ${id}`);
     }
   });
 
   test("keeps every host Command Center action covered by the webview Command Center or a direct control", () => {
     for (const [action, patterns] of Object.entries(commandCenterActionCoverage)) {
       for (const pattern of patterns) {
-        assert.match(html, pattern, `missing webview coverage for ${action}: ${pattern}`);
+        assert.match(surface, pattern, `missing webview coverage for ${action}: ${pattern}`);
       }
     }
   });
@@ -257,6 +266,6 @@ describe("webview contract", () => {
   test("keeps message head art anchored to one rendering site", () => {
     assert.equal((html.match(/\.head-art \{/g) ?? []).length, 1, "missing or duplicated base head-art CSS");
     assert.equal((html.match(/\.head-art img \{/g) ?? []).length, 1, "missing or duplicated head-art image CSS");
-    assert.equal((html.match(/className = "head-art "/g) ?? []).length, 1, "missing or duplicated head-art DOM creation");
+    assert.equal((scriptBody.match(/className = "head-art "/g) ?? []).length, 1, "missing or duplicated head-art DOM creation");
   });
 });

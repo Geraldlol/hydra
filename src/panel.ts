@@ -326,7 +326,10 @@ export class HydraRoomPanel {
       enableScripts: true,
       localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "media")],
     };
-    this.panel.webview.html = renderHtml(makeNonce(), this.hydraHeadAssets());
+    const scriptUri = this.panel.webview
+      .asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "webview.js"))
+      .toString();
+    this.panel.webview.html = renderHtml(makeNonce(), this.hydraHeadAssets(), scriptUri);
     this.disposables.push(
       this.panel.onDidDispose(() => this.dispose()),
       this.panel.webview.onDidReceiveMessage((m) => void this.onWebviewMessage(m))
