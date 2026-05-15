@@ -9,22 +9,38 @@ import { renderHydraStatusBar, type HydraStatusBarSnapshot } from "./statusBar";
 // produce a user-visible message, matching the webview-side guard in panel.ts.
 function withErrorReporting(fn: () => Promise<void>): () => Promise<void> {
   return () =>
-    fn().catch((err: unknown) => {
+    fn().catch(async (err: unknown) => {
       const msg = err instanceof Error ? err.message : String(err);
-      vscode.window.showErrorMessage(`Hydra Room: ${msg}`);
+      const action = await vscode.window.showErrorMessage(
+        `Hydra Room hit an error: ${msg}`,
+        "Run Doctor",
+      );
+      if (action === "Run Doctor") {
+        await vscode.commands.executeCommand("hydraRoom.runDoctor");
+      }
     });
 }
 
 // Same idea but for synchronous handlers — catches a synchronous throw
 // from HydraRoomPanel.open (which is sync; its async init runs separately
-// behind ready()) and surfaces it as a user-visible error.
+// behind ready()) and surfaces it as a user-visible error. We still kick
+// off the toast asynchronously (awaiting the Thenable) so the user has a
+// one-click path into the Doctor when something blew up at command time.
 function withSyncErrorReporting(fn: () => void): () => void {
   return () => {
     try {
       fn();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      vscode.window.showErrorMessage(`Hydra Room: ${msg}`);
+      void (async () => {
+        const action = await vscode.window.showErrorMessage(
+          `Hydra Room hit an error: ${msg}`,
+          "Run Doctor",
+        );
+        if (action === "Run Doctor") {
+          await vscode.commands.executeCommand("hydraRoom.runDoctor");
+        }
+      })();
     }
   };
 }

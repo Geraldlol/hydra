@@ -185,6 +185,15 @@ interface UiMessage extends TranscriptMessage {
 }
 
 const AGENT_NAMES: Record<AgentId, string> = { codex: "Codex", claude: "Claude" };
+
+// Surfaced when a code path tries to use the native terminal bridge before
+// it has initialized (panel just opened, workspace not trusted, etc.). One
+// shared phrasing so the three call sites stay in sync and the user always
+// sees an actionable next step (reopen panel or fall back to one-shot).
+const TERMINAL_BRIDGE_NOT_READY =
+  "Native terminal action unavailable: terminal bridge has not started. " +
+  "Reopen the Hydra panel, or run \"Hydra: Use One-Shot Transport\" (Command Palette) to bypass the bridge.";
+
 type AgentStatusState = "idle" | "running" | "replied" | "error";
 interface AgentStatus {
   state: AgentStatusState;
@@ -1175,7 +1184,7 @@ export class HydraRoomPanel {
     const trimmed = line.trim();
     if (!trimmed) return;
     if (!this.terminalBridge) {
-      await this.appendSystemMessage("Raw terminal line unavailable: terminal bridge is not initialized.");
+      await this.appendSystemMessage(TERMINAL_BRIDGE_NOT_READY);
       this.postState();
       return;
     }
@@ -1238,7 +1247,7 @@ export class HydraRoomPanel {
     const instruction = text.trim() || defaultPokeInstruction(editorContext, workspaceDiff);
     if (!instruction) return;
     if (!this.terminalBridge) {
-      await this.appendSystemMessage("Native terminal poke unavailable: terminal bridge is not initialized.");
+      await this.appendSystemMessage(TERMINAL_BRIDGE_NOT_READY);
       this.postState();
       return;
     }
@@ -1495,7 +1504,7 @@ export class HydraRoomPanel {
     await this.ready();
     if (!this.workspaceReady) return;
     if (!this.terminalBridge) {
-      await this.appendSystemMessage("Terminal bridge self-test failed: terminal bridge is not initialized.");
+      await this.appendSystemMessage(TERMINAL_BRIDGE_NOT_READY);
       this.transport = "oneShot";
       this.postState();
       return;
@@ -1753,98 +1762,126 @@ export class HydraRoomPanel {
     this.currentAbort = ctrl;
     this.suggestedBuilder = undefined;
 
+    // Track pending message ids opened in this method so a synchronous throw
+    // mid-await (template render, ENOSPC on persist, etc.) can finalize each
+    // bubble's spinner. The happy-path branches NULL these as they're consumed.
     const reactor = otherAgent(opener);
-    const openerTranscript = this.buildPromptContext("opener");
-    const openerEnvelope = await this.buildPromptEnvelope({
-      agent: opener,
-      otherAgent: reactor,
-      phase: "opener",
-      transcript: openerTranscript,
-      currentUserMessage,
-    });
-    await this.persistPromptEnvelope(openerEnvelope);
-    const openerId = this.openPendingMessage(opener, "opener");
-    this.postState();
+    let openerId: string | undefined;
+    let reactorId: string | undefined;
+    let closerId: string | undefined;
+    try {
+      const openerTranscript = this.buildPromptContext("opener");
+      const openerEnvelope = await this.buildPromptEnvelope({
+        agent: opener,
+        otherAgent: reactor,
+        phase: "opener",
+        transcript: openerTranscript,
+        currentUserMessage,
+      });
+      await this.persistPromptEnvelope(openerEnvelope);
+      openerId = this.openPendingMessage(opener, "opener");
+      this.postState();
 
-    const openerResult = await this.callAgent(opener, "opener", openerEnvelope.renderedPrompt, openerId, ctrl.signal);
+      const openerResult = await this.callAgent(opener, "opener", openerEnvelope.renderedPrompt, openerId, ctrl.signal);
+      openerId = undefined; // callAgent finalized the pending bubble.
 
-    if (ctrl.signal.aborted || didAgentFail(openerResult.result)) {
-      this.applyEvent({ type: "stop" });
+      if (ctrl.signal.aborted || didAgentFail(openerResult.result)) {
+        this.applyEvent({ type: "stop" });
+        this.currentAbort = undefined;
+        this.postState();
+        return;
+      }
+
+      this.applyEvent({ type: "openerDone" });
+
+      // Build the reactor prompt only after the opener has finalized into
+      // the transcript. This ordering is what makes the second head actually
+      // respond to the first instead of reading a stale snapshot.
+      const transcriptAfterOpener = this.buildPromptContext("reactor");
+      const reactorEnvelope = await this.buildPromptEnvelope({
+        agent: reactor,
+        otherAgent: opener,
+        phase: "reactor",
+        transcript: transcriptAfterOpener,
+        currentUserMessage,
+      });
+      await this.persistPromptEnvelope(reactorEnvelope);
+      reactorId = this.openPendingMessage(reactor, "reactor");
+      this.postState();
+
+      const reactorResult = await this.callAgent(reactor, "reactor", reactorEnvelope.renderedPrompt, reactorId, ctrl.signal);
+      reactorId = undefined;
+
+      if (ctrl.signal.aborted || didAgentFail(reactorResult.result)) {
+        this.applyEvent({ type: "stop" });
+        this.currentAbort = undefined;
+        this.postState();
+        return;
+      }
+
+      this.applyEvent({ type: "reactorDone" });
+
+      // Build the closer prompt only after the reactor has finalized into the
+      // transcript. The opener owns this short final turn so critique becomes an
+      // action decision instead of a dangling handoff.
+      const transcriptAfterReactor = this.buildPromptContext("closer");
+      const closerEnvelope = await this.buildPromptEnvelope({
+        agent: opener,
+        otherAgent: reactor,
+        phase: "closer",
+        transcript: transcriptAfterReactor,
+        currentUserMessage,
+      });
+      await this.persistPromptEnvelope(closerEnvelope);
+      closerId = this.openPendingMessage(opener, "closer");
+      this.postState();
+
+      const closerResult = await this.callAgent(opener, "closer", closerEnvelope.renderedPrompt, closerId, ctrl.signal);
+      closerId = undefined;
+
+      if (ctrl.signal.aborted || didAgentFail(closerResult.result)) {
+        this.applyEvent({ type: "stop" });
+        this.currentAbort = undefined;
+        this.postState();
+        return;
+      }
+
+      // Consensus-driver heuristic. If the reactor expressed soft approval
+      // ("I'd approve...") and the closer did not retract, the opener drove
+      // consensus and is the natural builder suggestion. If the closer also
+      // signals approval (mutual) or neither does (still divergent), suggest
+      // nothing — the user picks freely.
+      const reactorApproves = SOFT_APPROVAL_RE.test(reactorResult.text);
+      const closerApproves = SOFT_APPROVAL_RE.test(closerResult.text);
+      if (reactorApproves && !closerApproves) {
+        this.suggestedBuilder = opener;
+      } else if (closerApproves && !reactorApproves) {
+        this.suggestedBuilder = reactor;
+      } else {
+        this.suggestedBuilder = undefined;
+      }
+      this.applyEvent({ type: "closerDone" });
       this.currentAbort = undefined;
       this.postState();
-      return;
+      await this.autoAdvanceActionableDefault("discussion");
+    } finally {
+      // Safety net: only fires if a synchronous throw escaped the try block.
+      // Happy-path and early-return branches already cleared currentAbort and
+      // posted state; the guards below make this a no-op in those cases.
+      const stillPending = [openerId, reactorId, closerId].filter(
+        (id): id is string => typeof id === "string",
+      );
+      if (stillPending.length > 0) {
+        const failure = agentCallFailureResult("Hydra turn aborted before this agent could finish (internal error).");
+        for (const id of stillPending) {
+          await this.finalizePendingMessage(id, failure);
+        }
+      }
+      if (this.currentAbort === ctrl) {
+        this.currentAbort = undefined;
+        this.postState();
+      }
     }
-
-    this.applyEvent({ type: "openerDone" });
-
-    // Build the reactor prompt only after the opener has finalized into
-    // the transcript. This ordering is what makes the second head actually
-    // respond to the first instead of reading a stale snapshot.
-    const transcriptAfterOpener = this.buildPromptContext("reactor");
-    const reactorEnvelope = await this.buildPromptEnvelope({
-      agent: reactor,
-      otherAgent: opener,
-      phase: "reactor",
-      transcript: transcriptAfterOpener,
-      currentUserMessage,
-    });
-    await this.persistPromptEnvelope(reactorEnvelope);
-    const reactorId = this.openPendingMessage(reactor, "reactor");
-    this.postState();
-
-    const reactorResult = await this.callAgent(reactor, "reactor", reactorEnvelope.renderedPrompt, reactorId, ctrl.signal);
-
-    if (ctrl.signal.aborted || didAgentFail(reactorResult.result)) {
-      this.applyEvent({ type: "stop" });
-      this.currentAbort = undefined;
-      this.postState();
-      return;
-    }
-
-    this.applyEvent({ type: "reactorDone" });
-
-    // Build the closer prompt only after the reactor has finalized into the
-    // transcript. The opener owns this short final turn so critique becomes an
-    // action decision instead of a dangling handoff.
-    const transcriptAfterReactor = this.buildPromptContext("closer");
-    const closerEnvelope = await this.buildPromptEnvelope({
-      agent: opener,
-      otherAgent: reactor,
-      phase: "closer",
-      transcript: transcriptAfterReactor,
-      currentUserMessage,
-    });
-    await this.persistPromptEnvelope(closerEnvelope);
-    const closerId = this.openPendingMessage(opener, "closer");
-    this.postState();
-
-    const closerResult = await this.callAgent(opener, "closer", closerEnvelope.renderedPrompt, closerId, ctrl.signal);
-
-    if (ctrl.signal.aborted || didAgentFail(closerResult.result)) {
-      this.applyEvent({ type: "stop" });
-      this.currentAbort = undefined;
-      this.postState();
-      return;
-    }
-
-    // Consensus-driver heuristic. If the reactor expressed soft approval
-    // ("I'd approve...") and the closer did not retract, the opener drove
-    // consensus and is the natural builder suggestion. If the closer also
-    // signals approval (mutual) or neither does (still divergent), suggest
-    // nothing — the user picks freely.
-    const reactorApproves = SOFT_APPROVAL_RE.test(reactorResult.text);
-    const closerApproves = SOFT_APPROVAL_RE.test(closerResult.text);
-    if (reactorApproves && !closerApproves) {
-      this.suggestedBuilder = opener;
-    } else if (closerApproves && !reactorApproves) {
-      this.suggestedBuilder = reactor;
-    } else {
-      this.suggestedBuilder = undefined;
-    }
-    this.applyEvent({ type: "closerDone" });
-    this.currentAbort = undefined;
-    this.postState();
-    await this.autoAdvanceActionableDefault("discussion");
   }
 
   private async runParallelDiscussionTurn(currentUserMessage: string): Promise<void> {
@@ -1852,61 +1889,99 @@ export class HydraRoomPanel {
     this.currentAbort = ctrl;
     this.suggestedBuilder = undefined;
 
-    const agents: AgentId[] = ["codex", "claude"];
-    const transcript = this.buildPromptContext("parallel");
-    const calls: Promise<{ text: string; result: RunResult }>[] = [];
-    for (const agent of agents) {
-      const envelope = await this.buildPromptEnvelope({
-        agent,
-        otherAgent: otherAgent(agent),
-        phase: "parallel",
-        transcript,
-        currentUserMessage,
-      });
-      await this.persistPromptEnvelope(envelope);
-      const messageId = this.openPendingMessage(agent, "parallel");
-      calls.push(this.callAgent(agent, "parallel", envelope.renderedPrompt, messageId, ctrl.signal));
-    }
-    this.postState();
+    // Track every pending bubble opened in the prep loop so we can finalize
+    // them in the finally block if buildPromptEnvelope/persistPromptEnvelope
+    // throws between opening one and dispatching the callAgent that owns it.
+    const openedIds: string[] = [];
+    let promiseStarted = false;
+    try {
+      const agents: AgentId[] = ["codex", "claude"];
+      const transcript = this.buildPromptContext("parallel");
+      const calls: Promise<{ text: string; result: RunResult }>[] = [];
+      for (const agent of agents) {
+        const envelope = await this.buildPromptEnvelope({
+          agent,
+          otherAgent: otherAgent(agent),
+          phase: "parallel",
+          transcript,
+          currentUserMessage,
+        });
+        await this.persistPromptEnvelope(envelope);
+        const messageId = this.openPendingMessage(agent, "parallel");
+        openedIds.push(messageId);
+        calls.push(this.callAgent(agent, "parallel", envelope.renderedPrompt, messageId, ctrl.signal));
+      }
+      this.postState();
+      // Once Promise.all is awaited, callAgent finalizes each bubble. Any
+      // throw inside Promise.all itself would still leave bubbles pending,
+      // but callAgent has its own try/finally — so once we start awaiting,
+      // ownership transfers to those calls and we don't double-finalize.
+      promiseStarted = true;
 
-    const results = await Promise.all(calls);
-    if (ctrl.signal.aborted || results.some(({ result }) => didAgentFail(result))) {
-      this.applyEvent({ type: "stop" });
-    } else {
-      this.applyEvent({ type: "parallelDone" });
+      const results = await Promise.all(calls);
+      if (ctrl.signal.aborted || results.some(({ result }) => didAgentFail(result))) {
+        this.applyEvent({ type: "stop" });
+      } else {
+        this.applyEvent({ type: "parallelDone" });
+      }
+      this.currentAbort = undefined;
+      this.postState();
+      await this.autoAdvanceActionableDefault("parallel discussion");
+    } finally {
+      if (!promiseStarted && openedIds.length > 0) {
+        // Threw during prep — those bubbles never had a callAgent assigned.
+        const failure = agentCallFailureResult("Hydra parallel turn aborted before this agent could be dispatched (internal error).");
+        for (const id of openedIds) {
+          await this.finalizePendingMessage(id, failure);
+        }
+      }
+      if (this.currentAbort === ctrl) {
+        this.currentAbort = undefined;
+        this.postState();
+      }
     }
-    this.currentAbort = undefined;
-    this.postState();
-    await this.autoAdvanceActionableDefault("parallel discussion");
   }
 
   private async runBuildPhase(builder: AgentId): Promise<void> {
     const ctrl = new AbortController();
     this.currentAbort = ctrl;
-    // Snapshot the transcript BEFORE opening the pending bubble, otherwise the
-    // builder's own empty entry would appear at the tail of its prompt context.
-    const transcriptForPrompt = this.buildPromptContext("build");
-    const otherAgent: AgentId = builder === "codex" ? "claude" : "codex";
-    const buildEnvelope = await this.buildPromptEnvelope({
-      agent: builder,
-      otherAgent,
-      phase: "build",
-      transcript: transcriptForPrompt,
-    });
-    await this.persistPromptEnvelope(buildEnvelope);
-    const buildId = this.openPendingMessage(builder, "build");
-    this.postState();
-    const result = await this.callAgent(builder, "build", buildEnvelope.renderedPrompt, buildId, ctrl.signal);
+    let buildId: string | undefined;
+    try {
+      // Snapshot the transcript BEFORE opening the pending bubble, otherwise the
+      // builder's own empty entry would appear at the tail of its prompt context.
+      const transcriptForPrompt = this.buildPromptContext("build");
+      const otherAgent: AgentId = builder === "codex" ? "claude" : "codex";
+      const buildEnvelope = await this.buildPromptEnvelope({
+        agent: builder,
+        otherAgent,
+        phase: "build",
+        transcript: transcriptForPrompt,
+      });
+      await this.persistPromptEnvelope(buildEnvelope);
+      buildId = this.openPendingMessage(builder, "build");
+      this.postState();
+      const result = await this.callAgent(builder, "build", buildEnvelope.renderedPrompt, buildId, ctrl.signal);
+      buildId = undefined; // callAgent finalized the pending bubble.
 
-    if (ctrl.signal.aborted || didAgentFail(result.result)) {
-      this.applyEvent({ type: "stop" });
-    } else {
-      this.applyEvent({ type: "buildDone" });
-    }
-    this.currentAbort = undefined;
-    this.postState();
-    if (!ctrl.signal.aborted && !didAgentFail(result.result)) {
-      await this.afterSuccessfulBuild();
+      if (ctrl.signal.aborted || didAgentFail(result.result)) {
+        this.applyEvent({ type: "stop" });
+      } else {
+        this.applyEvent({ type: "buildDone" });
+      }
+      this.currentAbort = undefined;
+      this.postState();
+      if (!ctrl.signal.aborted && !didAgentFail(result.result)) {
+        await this.afterSuccessfulBuild();
+      }
+    } finally {
+      if (buildId) {
+        const failure = agentCallFailureResult("Hydra build turn aborted before the builder could finish (internal error).");
+        await this.finalizePendingMessage(buildId, failure);
+      }
+      if (this.currentAbort === ctrl) {
+        this.currentAbort = undefined;
+        this.postState();
+      }
     }
   }
 
@@ -2005,53 +2080,68 @@ export class HydraRoomPanel {
   private async runReviewPhase(reviewer: AgentId): Promise<void> {
     const ctrl = new AbortController();
     this.currentAbort = ctrl;
-    // Snapshot the transcript BEFORE opening the pending bubble, otherwise the
-    // reviewer's own empty entry would appear at the tail of its prompt context.
-    const transcriptForPrompt = this.buildPromptContext("review");
-    const reviewId = this.openPendingMessage(reviewer, "review");
-    this.postState();
+    let reviewId: string | undefined;
+    let reviewIdFinalized = false;
+    try {
+      // Snapshot the transcript BEFORE opening the pending bubble, otherwise the
+      // reviewer's own empty entry would appear at the tail of its prompt context.
+      const transcriptForPrompt = this.buildPromptContext("review");
+      reviewId = this.openPendingMessage(reviewer, "review");
+      this.postState();
 
-    const diff = await captureGitDiff(this.workspaceRoot, this.diffMaxLines());
-    if (diff === null) {
-      // git was available at init but failed now — treat as a recoverable error,
-      // mark the pending review bubble, and bail out without calling runAgent.
-      const m = this.messages.find((x) => x.id === reviewId);
-      if (m) {
-        m.pending = false;
-        m.error = true;
-        m.text = "[git diff failed; cannot review]";
-        await appendMessage(this.transcriptUri.fsPath, {
-          role: m.role, text: m.text, timestamp: m.timestamp, phase: m.phase, error: true,
-        });
+      const diff = await captureGitDiff(this.workspaceRoot, this.diffMaxLines());
+      if (diff === null) {
+        // git was available at init but failed now — treat as a recoverable error,
+        // mark the pending review bubble, and bail out without calling runAgent.
+        const m = this.messages.find((x) => x.id === reviewId);
+        if (m) {
+          m.pending = false;
+          m.error = true;
+          m.text = "[git diff failed; cannot review]";
+          await appendMessage(this.transcriptUri.fsPath, {
+            role: m.role, text: m.text, timestamp: m.timestamp, phase: m.phase, error: true,
+          });
+        }
+        reviewIdFinalized = true;
+        this.applyEvent({ type: "reviewDone", approved: false });
+        this.currentAbort = undefined;
+        this.postState();
+        return;
       }
-      this.applyEvent({ type: "reviewDone", approved: false });
+      const otherAgent: AgentId = reviewer === "codex" ? "claude" : "codex";
+      // Capture current HEAD so the review prompt can flag verification
+      // records made against a different commit than what's now being reviewed.
+      const currentHead = this.gitAvailable ? await captureGitHead(this.workspaceRoot) : undefined;
+      const reviewEnvelope = await this.buildPromptEnvelope({
+        agent: reviewer,
+        otherAgent,
+        phase: "review",
+        transcript: transcriptForPrompt,
+        diff,
+        verification: verificationAsReviewContext(this.latestVerification(), currentHead),
+      });
+      await this.persistPromptEnvelope(reviewEnvelope);
+      const result = await this.callAgent(reviewer, "review", reviewEnvelope.renderedPrompt, reviewId, ctrl.signal);
+      reviewIdFinalized = true;
+
+      if (ctrl.signal.aborted) {
+        this.applyEvent({ type: "stop" });
+      } else {
+        const approved = APPROVED_SENTINEL_RE.test(result.text);
+        this.applyEvent({ type: "reviewDone", approved });
+      }
       this.currentAbort = undefined;
       this.postState();
-      return;
+    } finally {
+      if (reviewId && !reviewIdFinalized) {
+        const failure = agentCallFailureResult("Hydra review turn aborted before the reviewer could finish (internal error).");
+        await this.finalizePendingMessage(reviewId, failure);
+      }
+      if (this.currentAbort === ctrl) {
+        this.currentAbort = undefined;
+        this.postState();
+      }
     }
-    const otherAgent: AgentId = reviewer === "codex" ? "claude" : "codex";
-    // Capture current HEAD so the review prompt can flag verification
-    // records made against a different commit than what's now being reviewed.
-    const currentHead = this.gitAvailable ? await captureGitHead(this.workspaceRoot) : undefined;
-    const reviewEnvelope = await this.buildPromptEnvelope({
-      agent: reviewer,
-      otherAgent,
-      phase: "review",
-      transcript: transcriptForPrompt,
-      diff,
-      verification: verificationAsReviewContext(this.latestVerification(), currentHead),
-    });
-    await this.persistPromptEnvelope(reviewEnvelope);
-    const result = await this.callAgent(reviewer, "review", reviewEnvelope.renderedPrompt, reviewId, ctrl.signal);
-
-    if (ctrl.signal.aborted) {
-      this.applyEvent({ type: "stop" });
-    } else {
-      const approved = APPROVED_SENTINEL_RE.test(result.text);
-      this.applyEvent({ type: "reviewDone", approved });
-    }
-    this.currentAbort = undefined;
-    this.postState();
   }
 
   // ---------------- agent call helper ----------------
@@ -3164,7 +3254,15 @@ export class HydraRoomPanel {
     if (result.ok) {
       await this.appendSystemMessage(`Telegram test message sent (message_id=${result.messageId ?? "?"}).`);
     } else {
-      await this.appendSystemMessage(`Telegram test failed${result.status ? ` (HTTP ${result.status})` : ""}: ${result.error ?? "unknown error"}`);
+      const detail = `Telegram test failed${result.status ? ` (HTTP ${result.status})` : ""}: ${result.error ?? "unknown error"}. Double-check hydraRoom.telegramBotToken and hydraRoom.telegramChatId.`;
+      // Keep the transcript record so the user can find the failure later, AND
+      // pop a toast with an action button so they can jump straight into the
+      // setting that needs fixing.
+      await this.appendSystemMessage(detail);
+      const choice = await vscode.window.showErrorMessage(detail, "Open Settings");
+      if (choice === "Open Settings") {
+        await vscode.commands.executeCommand("workbench.action.openSettings", "hydraRoom.telegram");
+      }
     }
   }
 
@@ -3184,7 +3282,12 @@ export class HydraRoomPanel {
     const url = vscode.workspace.getConfiguration("hydraRoom").get<string>("handoffWebhookUrl", "").trim();
     if (!url) return;
     if (!/^https:\/\//i.test(url)) {
-      await this.appendSystemMessage("Handoff webhook ignored: hydraRoom.handoffWebhookUrl must be an https:// URL.");
+      const detail = "Handoff webhook ignored: hydraRoom.handoffWebhookUrl must be an https:// URL.";
+      await this.appendSystemMessage(detail);
+      const choice = await vscode.window.showErrorMessage(detail, "Open Settings");
+      if (choice === "Open Settings") {
+        await vscode.commands.executeCommand("workbench.action.openSettings", "hydraRoom.handoffWebhookUrl");
+      }
       return;
     }
     const payload = {
@@ -3206,11 +3309,21 @@ export class HydraRoomPanel {
         body: JSON.stringify(payload),
       });
       if (!res.ok) {
-        await this.appendSystemMessage(`Handoff webhook returned HTTP ${res.status}; agent decision needs user attention.`);
+        const detail = `Handoff webhook returned HTTP ${res.status}; agent decision needs user attention. Check hydraRoom.handoffWebhookUrl.`;
+        await this.appendSystemMessage(detail);
+        const choice = await vscode.window.showErrorMessage(detail, "Open Settings");
+        if (choice === "Open Settings") {
+          await vscode.commands.executeCommand("workbench.action.openSettings", "hydraRoom.handoffWebhookUrl");
+        }
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      await this.appendSystemMessage(`Handoff webhook failed (${msg}); decision needs user attention regardless.`);
+      const detail = `Handoff webhook failed (${msg}); decision needs user attention regardless. Check hydraRoom.handoffWebhookUrl.`;
+      await this.appendSystemMessage(detail);
+      const choice = await vscode.window.showErrorMessage(detail, "Open Settings");
+      if (choice === "Open Settings") {
+        await vscode.commands.executeCommand("workbench.action.openSettings", "hydraRoom.handoffWebhookUrl");
+      }
     }
   }
 
@@ -3230,7 +3343,12 @@ export class HydraRoomPanel {
     });
     const result = await sendTelegramMessage(cfg, html);
     if (!result.ok) {
-      await this.appendSystemMessage(`Telegram notify failed${result.status ? ` (HTTP ${result.status})` : ""}: ${result.error ?? "unknown"}.`);
+      const detail = `Telegram notify failed${result.status ? ` (HTTP ${result.status})` : ""}: ${result.error ?? "unknown"}. Check hydraRoom.telegramBotToken and hydraRoom.telegramChatId.`;
+      await this.appendSystemMessage(detail);
+      const choice = await vscode.window.showErrorMessage(detail, "Open Settings");
+      if (choice === "Open Settings") {
+        await vscode.commands.executeCommand("workbench.action.openSettings", "hydraRoom.telegram");
+      }
     }
   }
 
@@ -3453,9 +3571,17 @@ export class HydraRoomPanel {
       }
     } catch (err) {
       // Init failures (e.g. no workspace folder open) reach here as a rejected
-      // initPromise. Surface clearly instead of silently dead panel.
+      // initPromise. Surface clearly instead of silently dead panel, and offer
+      // a one-click hop into the Doctor since most catch-all reachers here are
+      // setup problems (workspace, CLI path, transcript permissions).
       const message = err instanceof Error ? err.message : String(err);
-      vscode.window.showErrorMessage(`Hydra Room: ${message}`);
+      const action = await vscode.window.showErrorMessage(
+        `Hydra Room hit an error: ${message}`,
+        "Run Doctor",
+      );
+      if (action === "Run Doctor") {
+        await vscode.commands.executeCommand("hydraRoom.runDoctor");
+      }
     }
   }
 
