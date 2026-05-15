@@ -145,6 +145,18 @@ import {
 import { chooseEffortInteractively } from "./effortChooser";
 import { chooseModelInteractively, refreshCodexModelCatalog, type ModelChooserDeps } from "./modelChooser";
 import { summarizePhasedSetting } from "./phasedSetting";
+import { modelForPhase, withEffortArgs, withModelArgs } from "./agentArgs";
+import {
+  shouldCaptureCodexLastMessage,
+  shouldUseCodexJson,
+  withCodexJsonArgs,
+  withCodexLastMessageArgs,
+} from "./codexTransport";
+import {
+  shouldCreateClaudeRequestFiles,
+  shouldUseClaudeStreamJson,
+  withClaudeStreamJsonArgs,
+} from "./claudeTransport";
 import { buildDecisionNotificationHtml, sendTelegramMessage, type TelegramConfig } from "./telegram";
 import { readWorkspaceInstructions, workspaceInstructionsAsContext } from "./workspaceInstructions";
 import {
@@ -2275,17 +2287,20 @@ export class HydraRoomPanel {
     spawn: AgentSpawn,
     prompt: string
   ): Promise<PreparedOneShotSpawn> {
-    const codexJson = this.shouldUseCodexJson(agent, spawn);
+    const codexJson = agent === "codex" && shouldUseCodexJson(spawn);
     // codexJson supersedes codexCaptureLastMessage: the --json stream
     // already carries the final agent_message item, so the extra
     // --output-last-message file is redundant when codexJson is on.
-    const codexLastMessage = !codexJson && this.shouldCaptureCodexLastMessage(agent, spawn);
-    const claudeStreamJson = this.shouldUseClaudeStreamJson(agent, spawn);
-    const needsRequestFiles = hasRequestFilePlaceholders(spawn) || codexLastMessage || this.shouldCreateClaudeRequestFiles(agent, spawn);
+    const codexLastMessage = agent === "codex" && !codexJson && shouldCaptureCodexLastMessage(spawn);
+    const claudeStreamJson = agent === "claude" && shouldUseClaudeStreamJson(spawn);
+    const needsRequestFiles =
+      hasRequestFilePlaceholders(spawn) ||
+      codexLastMessage ||
+      (agent === "claude" && shouldCreateClaudeRequestFiles(spawn));
     if (!needsRequestFiles) {
       let preparedSpawn = spawn;
-      if (claudeStreamJson) preparedSpawn = this.withClaudeStreamJsonArgs(preparedSpawn);
-      if (codexJson) preparedSpawn = this.withCodexJsonArgs(preparedSpawn);
+      if (claudeStreamJson) preparedSpawn = withClaudeStreamJsonArgs(preparedSpawn);
+      if (codexJson) preparedSpawn = withCodexJsonArgs(preparedSpawn);
       const outputMode = claudeStreamJson ? "claudeStreamJson" : codexJson ? "codexJson" : "plain";
       return {
         spawn: preparedSpawn,
@@ -2307,15 +2322,9 @@ export class HydraRoomPanel {
       hydraReplyFile: paths.replyPath,
       hydraLogFile: paths.logPath,
     });
-    if (codexLastMessage) {
-      preparedSpawn = this.withCodexLastMessageArgs(preparedSpawn, paths.replyPath);
-    }
-    if (codexJson) {
-      preparedSpawn = this.withCodexJsonArgs(preparedSpawn);
-    }
-    if (claudeStreamJson) {
-      preparedSpawn = this.withClaudeStreamJsonArgs(preparedSpawn, paths.logPath);
-    }
+    if (codexLastMessage) preparedSpawn = withCodexLastMessageArgs(preparedSpawn, paths.replyPath);
+    if (codexJson) preparedSpawn = withCodexJsonArgs(preparedSpawn);
+    if (claudeStreamJson) preparedSpawn = withClaudeStreamJsonArgs(preparedSpawn, paths.logPath);
     const outputMode = claudeStreamJson ? "claudeStreamJson" : codexJson ? "codexJson" : "plain";
     return {
       spawn: preparedSpawn,
@@ -2325,120 +2334,6 @@ export class HydraRoomPanel {
       outputMode,
       suppressLiveStdout: claudeStreamJson || codexJson,
     };
-  }
-
-  private shouldCaptureCodexLastMessage(agent: AgentId, spawn: AgentSpawn): boolean {
-    if (agent !== "codex") return false;
-    if (spawn.args[0] !== "exec") return false;
-    if (spawn.args.includes("--output-last-message")) return false;
-    return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("codexCaptureLastMessage", true);
-  }
-
-  private withCodexLastMessageArgs(spawn: AgentSpawn, replyPath: string): AgentSpawn {
-    return { ...spawn, args: insertBeforeStdinDash(spawn.args, ["--output-last-message", replyPath]) };
-  }
-
-  private shouldUseCodexJson(agent: AgentId, spawn: AgentSpawn): boolean {
-    if (agent !== "codex") return false;
-    if (spawn.args[0] !== "exec") return false;
-    if (spawn.args.includes("--json") || spawn.args.includes("--experimental-json")) return false;
-    return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("codexJson", false);
-  }
-
-  private withCodexJsonArgs(spawn: AgentSpawn): AgentSpawn {
-    return { ...spawn, args: insertBeforeStdinDash(spawn.args, ["--json"]) };
-  }
-
-  private shouldUseClaudeStreamJson(agent: AgentId, spawn: AgentSpawn): boolean {
-    if (agent !== "claude") return false;
-    if (!spawn.args.includes("-p") && !spawn.args.includes("--print")) return false;
-    if (spawn.args.includes("--output-format")) return false;
-    return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("claudeStreamJson", true);
-  }
-
-  private shouldCreateClaudeRequestFiles(agent: AgentId, spawn: AgentSpawn): boolean {
-    if (!this.shouldUseClaudeStreamJson(agent, spawn)) return false;
-    return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("claudeDebugFile", true);
-  }
-
-  /**
-   * Resolve the model string the user has configured for this agent + phase.
-   * The setting accepts either a single string (applies to every phase) or
-   * an object keyed by profile (discussion / build / review). Empty means
-   * "let the CLI pick its default."
-   */
-  private modelForPhase(agent: AgentId, phase: Phase): string {
-    const raw = vscode.workspace.getConfiguration("hydraRoom").get<unknown>(`${agent}Model`);
-    if (typeof raw === "string") return raw.trim();
-    if (raw && typeof raw === "object") {
-      const profile = profileForPhase(phase);
-      const entry = (raw as Record<string, unknown>)[profile];
-      if (typeof entry === "string") return entry.trim();
-    }
-    return "";
-  }
-
-  private withModelArgs(spawn: AgentSpawn, agent: AgentId, phase: Phase): AgentSpawn {
-    const model = this.modelForPhase(agent, phase);
-    if (!model) return spawn;
-    // Respect any explicit --model / -m the user already put in their
-    // *ExecArgs* setting. The chooser is a convenience layer; the raw arg
-    // wins so power users can lock a specific model per phase.
-    if (spawn.args.includes("--model") || spawn.args.includes("-m")) return spawn;
-    // For Codex, --model is only valid as a flag of the `exec` subcommand.
-    // If the user routed Codex through some other subcommand we leave it
-    // alone rather than risk a bad arg.
-    if (agent === "codex" && spawn.args[0] !== "exec") return spawn;
-    return { ...spawn, args: insertBeforeStdinDash(spawn.args, ["--model", model]) };
-  }
-
-  /**
-   * Resolve the reasoning/effort level configured for this agent + phase.
-   * `claudeEffort` and `codexReasoning` use the same string-or-object shape
-   * as the model settings.
-   */
-  private effortForPhase(agent: AgentId, phase: Phase): string {
-    const key = agent === "claude" ? "claudeEffort" : "codexReasoning";
-    const raw = vscode.workspace.getConfiguration("hydraRoom").get<unknown>(key);
-    if (typeof raw === "string") return raw.trim();
-    if (raw && typeof raw === "object") {
-      const profile = profileForPhase(phase);
-      const entry = (raw as Record<string, unknown>)[profile];
-      if (typeof entry === "string") return entry.trim();
-    }
-    return "";
-  }
-
-  private withEffortArgs(spawn: AgentSpawn, agent: AgentId, phase: Phase): AgentSpawn {
-    const level = this.effortForPhase(agent, phase);
-    if (!level) return spawn;
-    if (agent === "claude") {
-      // Claude's print mode accepts --effort <level>. If the user already
-      // pinned one in *ExecArgs* we don't override.
-      if (spawn.args.includes("--effort")) return spawn;
-      return { ...spawn, args: insertBeforeStdinDash(spawn.args, ["--effort", level]) };
-    }
-    // Codex: only valid for `exec`. The flag goes through -c (config override)
-    // because Codex doesn't expose a direct --reasoning-effort on exec.
-    if (spawn.args[0] !== "exec") return spawn;
-    if (spawn.args.some((a) => a.startsWith("model_reasoning_effort="))) return spawn;
-    return {
-      ...spawn,
-      args: insertBeforeStdinDash(spawn.args, ["-c", `model_reasoning_effort="${level}"`]),
-    };
-  }
-
-  private withClaudeStreamJsonArgs(spawn: AgentSpawn, logPath?: string): AgentSpawn {
-    const args = [...spawn.args, "--output-format", "stream-json"];
-    if (!args.includes("--verbose")) args.push("--verbose");
-    const cfg = vscode.workspace.getConfiguration("hydraRoom");
-    if (cfg.get<boolean>("claudeStreamJsonIncludePartialMessages", true) && !args.includes("--include-partial-messages")) {
-      args.push("--include-partial-messages");
-    }
-    if (logPath && cfg.get<boolean>("claudeDebugFile", true) && !args.includes("--debug-file")) {
-      args.push("--debug-file", logPath);
-    }
-    return { ...spawn, args };
   }
 
   private async normalizeOneShotResult(prepared: PreparedOneShotSpawn, result: RunResult): Promise<RunResult> {
@@ -2472,8 +2367,8 @@ export class HydraRoomPanel {
       : undefined;
     const rawArgs = presetArgs ?? cfg.get<string[]>(argsKey, []);
     let spawn = buildAgentSpawn(agent, phase, command, rawArgs, this.workspaceRoot);
-    spawn = this.withModelArgs(spawn, agent, phase);
-    spawn = this.withEffortArgs(spawn, agent, phase);
+    spawn = withModelArgs(spawn, agent, phase);
+    spawn = withEffortArgs(spawn, agent, phase);
     return applySpawnEnvironment(
       spawn,
       this.workspaceRoot,
@@ -2741,7 +2636,7 @@ export class HydraRoomPanel {
   }): Promise<void> {
     if (args.result.cancelled || args.result.timedOut) return;
     const { agent, phase, requestId, result, outputMode } = args;
-    const model = this.modelForPhase(agent, phase) || undefined;
+    const model = modelForPhase(agent, phase) || undefined;
     if (agent === "claude" && outputMode === "claudeStreamJson") {
       const summary = summarizeClaudeEvents(parseClaudeEventStream(result.stdout));
       const tokens = usageFromClaudeSummary(summary.usage);
@@ -3755,16 +3650,6 @@ function completedAgentCallTrace(
 
 function truncateForTrace(value: string, maxChars: number): string {
   return value.length <= maxChars ? value : `${value.slice(0, maxChars)}\n[truncated ${value.length - maxChars} chars]`;
-}
-
-function insertBeforeStdinDash(args: string[], insertion: string[]): string[] {
-  const next = [...args];
-  const dashIndex = next.lastIndexOf("-");
-  if (dashIndex >= 0) {
-    next.splice(dashIndex, 0, ...insertion);
-    return next;
-  }
-  return [...next, ...insertion];
 }
 
 function uniqueAgents(agents: AgentId[]): AgentId[] {

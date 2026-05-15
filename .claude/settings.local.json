@@ -8,7 +8,9 @@
       "Bash(npm test *)",
       "Bash(grep -B1 -E \"^[^/]*[^/]: *\\\\}$\")",
       "PowerShell(npm run *)",
-      "Bash(npm run *)"
+      "Bash(npm run *)",
+      "Bash(gh auth *)",
+      "Bash(gh repo *)"
     ]
   }
 }

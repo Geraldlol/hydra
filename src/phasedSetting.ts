@@ -7,6 +7,26 @@
 
 export type PhaseScope = "all" | "discussion" | "build" | "review";
 
+/**
+ * Resolve the value to use during a specific phase. Differs from
+ * phasedSettingForScope: when the setting is a single string, this returns
+ * that string for any phase (the "applies globally" interpretation the
+ * dispatcher needs), whereas phasedSettingForScope gates strings to
+ * scope === "all" (the chooser's "is there a specific override?"
+ * interpretation).
+ */
+export function effectivePhasedSetting(
+  raw: unknown,
+  phase: "discussion" | "build" | "review",
+): string {
+  if (typeof raw === "string") return raw.trim();
+  if (raw && typeof raw === "object") {
+    const entry = (raw as Record<string, unknown>)[phase];
+    if (typeof entry === "string") return entry.trim();
+  }
+  return "";
+}
+
 /** Resolve the configured value for a specific scope; "" if unset. */
 export function phasedSettingForScope(raw: unknown, scope: PhaseScope): string {
   if (typeof raw === "string") return scope === "all" ? raw.trim() : "";
