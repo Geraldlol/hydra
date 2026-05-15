@@ -46,7 +46,7 @@ The extension code, user settings, and the workspace folder are *semi-trusted*; 
 
 ### Phase state machine
 
-`src/phases.ts` is the canonical state machine. A serialized turn is `Idle → Opener → Reactor → Closer → AwaitingUser`. A turn that addresses both agents ("both of you", "Codex and Claude…") shortcuts to `ParallelDiscussion`. After `AwaitingUser`, `assignBuilder` → `Build` → `BuildDone` → `requestReview` → `Review` → `ReviewDone` → `handBack` cycles back to Build. `panel.ts:applyEvent` is the single mutation site for state; never mutate `this.state` directly elsewhere.
+`src/phases.ts` is the canonical state machine. A serialized turn is `Idle → Opener → Reactor → Closer → AwaitingUser`. A turn that addresses both agents ("both of you", "Codex and Claude…") shortcuts to `ParallelDiscussion`. After `AwaitingUser`, `assignBuilder` → `Build` → `BuildDone` → `requestReview` → `Review` → `ReviewDone` → `handBack` cycles back to Build. `transition()` in `src/phases.ts` is the canonical event handler; `panel.ts:applyEvent` is the only call site that uses it. Two ad-hoc resets to `AwaitingUser` in panel.ts (the `resetStuckTurn` and `archiveAndClearRoom` flows) intentionally bypass the state machine; new phase logic should always route through `transition()`.
 
 ### Transport layer (two modes)
 
@@ -96,7 +96,7 @@ These were locked in by the security audit in commits `cc977f9`, `40cf52a`, `4f7
 ## Conventions
 
 - **Comments**: project style is to write a `Why:` comment when the WHY is non-obvious (a workaround for a CVE mitigation, a subtle race, a setting that's load-bearing for some other invariant). Do NOT comment on what the code does when the names already say it.
-- **Error swallowing**: when you write `catch {}`, leave a one-line comment explaining what error you're swallowing and why it's safe (e.g., `// ENOENT on first run`, `// terminal already disposed`, `// JSONL hand-edit resilience`). The codebase has ~69 of these and every one is justified — keep that ratio.
+- **Error swallowing**: when you write `catch {}`, leave a one-line comment explaining what error you're swallowing and why it's safe (e.g., `// ENOENT on first run`, `// terminal already disposed`, `// JSONL hand-edit resilience`). The codebase has many of these and every one is justified by a nearby comment — keep that ratio.
 - **No new `: any`** — `panel.ts:onWebviewMessage` was the last one and it's now typed via the `WebviewMessage` discriminated union in `src/webviewMessages.ts`. New webview message types go there first.
 - **`docs/native-internals/`** is the reverse-engineered spec for Codex and Claude CLI internals (wire protocols, system prompts, tool catalogs). The arg-validation logic in `src/authority.ts` cites these documents — keep the citations accurate when updating.
 
