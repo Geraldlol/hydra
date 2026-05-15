@@ -3,7 +3,9 @@ dist/
 *.tsbuildinfo
 out/
 .vscode-test/
+.vscode/
 *.vsix
 .hydra/
 .npm-cache/
 .claude/
+debug.log
