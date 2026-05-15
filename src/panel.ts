@@ -140,11 +140,11 @@ import {
 } from "./usage";
 import {
   loadCodexModelsSnapshot,
-  runCodexDebugModels,
-  saveCodexModelsSnapshot,
-  type CodexModelInfo,
   type CodexModelsSnapshot,
 } from "./codexModels";
+import { chooseEffortInteractively } from "./effortChooser";
+import { chooseModelInteractively, refreshCodexModelCatalog, type ModelChooserDeps } from "./modelChooser";
+import { summarizePhasedSetting } from "./phasedSetting";
 import { buildDecisionNotificationHtml, sendTelegramMessage, type TelegramConfig } from "./telegram";
 import { readWorkspaceInstructions, workspaceInstructionsAsContext } from "./workspaceInstructions";
 import {
@@ -812,328 +812,40 @@ export class HydraRoomPanel {
 
   async refreshCodexModels(): Promise<void> {
     await this.ready();
-    const cfg = vscode.workspace.getConfiguration("hydraRoom");
-    const command = cfg.get<string>("codexCommand", "codex");
-    const resolved = await resolveAgentCommand("codex", command);
-    const env = {
-      ...process.env,
-      ...mergeNativeEnv(
-        cfg.get<Record<string, string>>("nativeEnv", {}),
-        cfg.get<Record<string, string>>("codexNativeEnv", {}),
-      ),
-    };
-    const pathExtra = mergeNativePathPrepend(
-      cfg.get<string[]>("nativePathPrepend", []),
-      cfg.get<string[]>("codexNativePathPrepend", []),
-    );
-    if (pathExtra.length) {
-      const expanded = pathExtra.map((p) => p.replace(/\$\{workspaceFolder\}/g, this.workspaceRoot));
-      env.PATH = `${expanded.join(path.delimiter)}${path.delimiter}${env.PATH ?? ""}`;
-    }
-    await this.appendSystemMessage(`Refreshing Codex model catalog via \`codex debug models\`…`);
-    try {
-      const models = await runCodexDebugModels(resolved, env as NodeJS.ProcessEnv);
-      const snapshot: CodexModelsSnapshot = {
-        fetchedAt: new Date().toISOString(),
-        models,
-      };
-      await saveCodexModelsSnapshot(this.codexModelsUri.fsPath, snapshot);
-      this.codexModelsSnapshot = snapshot;
-      const listable = models.filter((m) => m.visibility === "list");
-      await this.appendSystemMessage(
-        `Codex model catalog refreshed: ${listable.length} listable model${listable.length === 1 ? "" : "s"} cached at \`.hydra/codex-models.json\`. The chooser will use this list until you refresh again.`,
-      );
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      await this.appendSystemMessage(`Codex model refresh failed: ${msg}. The chooser will keep using the built-in curated list.`);
-    }
-    this.postState();
-  }
-
-  private codexPresetsForChooser(): Array<{ label: string; description: string }> {
-    const snapshot = this.codexModelsSnapshot;
-    if (snapshot && snapshot.models.length) {
-      const listable = snapshot.models.filter((m) => m.visibility === "list");
-      const sorted = [...listable].sort((a, b) => a.slug.localeCompare(b.slug, "en", { numeric: true }));
-      return sorted.map((m) => ({
-        label: m.slug,
-        description: this.codexModelDescription(m),
-      }));
-    }
-    // Fallback when the catalog has never been fetched. Matches the Codex CLI
-    // 0.130.0 ship list — refresh to replace this with live data.
-    return [
-      { label: "gpt-5.5", description: "GPT-5.5 — Codex CLI default" },
-      { label: "gpt-5.4", description: "GPT-5.4 — prior flagship" },
-      { label: "gpt-5.4-mini", description: "GPT-5.4-Mini — lighter / cheaper" },
-      { label: "gpt-5.3-codex", description: "Code-tuned 5.3" },
-      { label: "gpt-5.3-codex-spark", description: "High-reasoning code variant (interactive only — no API)" },
-      { label: "gpt-5.2", description: "GPT-5.2 — older flagship" },
-    ];
-  }
-
-  private codexModelDescription(model: CodexModelInfo): string {
-    const bits: string[] = [];
-    if (model.displayName && model.displayName !== model.slug) bits.push(model.displayName);
-    if (model.defaultReasoning) bits.push(`reasoning: ${model.defaultReasoning}`);
-    if (!model.supportedInApi) bits.push("interactive only — no API (codex exec won't work)");
-    if (model.description) bits.push(model.description.split(/[.!?]/)[0].trim());
-    return bits.join(" · ") || model.slug;
+    await refreshCodexModelCatalog(this.modelChooserDeps());
   }
 
   async chooseModel(): Promise<void> {
     await this.ready();
-    const agentPick = await vscode.window.showQuickPick(
-      [
-        { label: "Claude", description: this.currentModelLabel("claude"), value: "claude" as AgentId },
-        { label: "Codex", description: this.currentModelLabel("codex"), value: "codex" as AgentId },
-      ],
-      { placeHolder: "Which agent's model do you want to change?" },
-    );
-    if (!agentPick) return;
-    const agent = agentPick.value;
-    const scopePick = await vscode.window.showQuickPick(
-      [
-        { label: "All phases", description: "One model for discussion, build, and review", value: "all" },
-        { label: "Discussion only", description: "Opener / reactor / closer turns", value: "discussion" },
-        { label: "Build only", description: "When this head is the assigned builder", value: "build" },
-        { label: "Review only", description: "When this head reviews the other's diff", value: "review" },
-      ],
-      { placeHolder: `Scope the ${agent} model change` },
-    );
-    if (!scopePick) return;
-    const scope = scopePick.value as "all" | "discussion" | "build" | "review";
-
-    const presets = agent === "claude"
-      ? [
-          { label: "sonnet", description: "Alias — current Sonnet" },
-          { label: "opus", description: "Alias — current Opus" },
-          { label: "haiku", description: "Alias — current Haiku" },
-          { label: "claude-sonnet-4-6", description: "Sonnet 4.6" },
-          { label: "claude-sonnet-4-5", description: "Sonnet 4.5 (older)" },
-          { label: "claude-opus-4-7", description: "Opus 4.7" },
-          { label: "claude-opus-4-5", description: "Opus 4.5 (older)" },
-          { label: "claude-haiku-4-5-20251001", description: "Haiku 4.5 dated build" },
-          { label: "claude-haiku-4-5", description: "Haiku 4.5 alias" },
-        ]
-      : this.codexPresetsForChooser();
-
-    const current = this.readModelSettingRaw(agent);
-    const currentForScope = this.modelForScope(agent, scope);
-    const catalogSuffix = agent === "codex" && this.codexModelsSnapshot
-      ? ` · cached ${new Date(this.codexModelsSnapshot.fetchedAt).toLocaleString()}`
-      : agent === "codex"
-        ? " · cache empty — using fallback list"
-        : "";
-    const items: Array<{ label: string; description?: string; value: string }> = [
-      { label: "(CLI default)", description: "Clear the override; let the CLI pick", value: "" },
-      ...presets.map((p) => ({ label: p.label, description: p.description, value: p.label })),
-      { label: "Custom…", description: "Type any model ID (e.g. a preview build the CLI accepts)", value: "__custom__" },
-    ];
-    if (agent === "codex") {
-      items.push({
-        label: "$(refresh) Refresh Codex catalog…",
-        description: `Run \`codex debug models\` and update the list${catalogSuffix}`,
-        value: "__refreshCodex__",
-      });
-    }
-    const pick = await vscode.window.showQuickPick(items, {
-      placeHolder: currentForScope
-        ? `Current ${scope === "all" ? "(all phases)" : scope}: ${currentForScope} — pick a new model for ${agent}`
-        : `Pick a model for ${agent} ${scope === "all" ? "(all phases)" : scope} (currently CLI default)`,
-    });
-    if (!pick) return;
-    let value = pick.value;
-    if (value === "__refreshCodex__") {
-      await this.refreshCodexModels();
-      // Re-open the chooser so the user lands on the refreshed list
-      // without re-navigating from the agent picker.
-      await this.chooseModel();
-      return;
-    }
-    if (value === "__custom__") {
-      const typed = await vscode.window.showInputBox({
-        prompt: `Custom model ID for ${agent} (${scope === "all" ? "all phases" : scope})`,
-        value: currentForScope,
-        validateInput: (v) => (v && v.length > 200 ? "Model ID is suspiciously long" : undefined),
-      });
-      if (typed === undefined) return;
-      value = typed.trim();
-    }
-
-    const nextSetting = this.applyModelChange(current, scope, value);
-    await vscode.workspace.getConfiguration("hydraRoom").update(`${agent}Model`, nextSetting, vscode.ConfigurationTarget.Workspace);
-    const detail = scope === "all" ? "all phases" : `${scope} phase`;
-    await this.appendSystemMessage(
-      value
-        ? `Model for ${agent} (${detail}) set to "${value}". Next matching dispatch will pass \`--model ${value}\`.`
-        : `Model override for ${agent} (${detail}) cleared. Falls back to whatever's set for other phases, then the CLI default.`,
-    );
-    this.postState();
-  }
-
-  /** Raw value of the setting — string, object, or undefined. */
-  private readModelSettingRaw(agent: AgentId): unknown {
-    return vscode.workspace.getConfiguration("hydraRoom").get<unknown>(`${agent}Model`);
-  }
-
-  /** Current model the user has configured for a specific scope (or "" if none). */
-  private modelForScope(agent: AgentId, scope: "all" | "discussion" | "build" | "review"): string {
-    const raw = this.readModelSettingRaw(agent);
-    if (typeof raw === "string") return scope === "all" ? raw.trim() : "";
-    if (raw && typeof raw === "object" && scope !== "all") {
-      const v = (raw as Record<string, unknown>)[scope];
-      return typeof v === "string" ? v.trim() : "";
-    }
-    return "";
-  }
-
-  /**
-   * Compute the next value for the model setting given the user's pick.
-   * "all" scope collapses to a single string; per-phase scopes always
-   * produce an object even if the previous value was a string.
-   */
-  private applyModelChange(current: unknown, scope: "all" | "discussion" | "build" | "review", value: string): unknown {
-    if (scope === "all") return value;
-    let next: Record<string, string> = {};
-    if (typeof current === "string" && current.trim()) {
-      next = { discussion: current.trim(), build: current.trim(), review: current.trim() };
-    } else if (current && typeof current === "object") {
-      for (const [k, v] of Object.entries(current as Record<string, unknown>)) {
-        if (typeof v === "string") next[k] = v;
-      }
-    }
-    if (value) next[scope] = value;
-    else delete next[scope];
-    // If every phase ends up empty, collapse to "" so the setting clears cleanly.
-    if (Object.values(next).every((v) => !v)) return "";
-    return next;
+    await chooseModelInteractively(this.modelChooserDeps());
   }
 
   async chooseEffort(): Promise<void> {
     await this.ready();
-    const agentPick = await vscode.window.showQuickPick(
-      [
-        { label: "Claude", description: this.currentEffortLabel("claude"), value: "claude" as AgentId },
-        { label: "Codex", description: this.currentEffortLabel("codex"), value: "codex" as AgentId },
-      ],
-      { placeHolder: "Which agent's thinking level do you want to change?" },
-    );
-    if (!agentPick) return;
-    const agent = agentPick.value;
-    const scopePick = await vscode.window.showQuickPick(
-      [
-        { label: "All phases", description: "One level for discussion, build, and review", value: "all" },
-        { label: "Discussion only", description: "Opener / reactor / closer turns", value: "discussion" },
-        { label: "Build only", description: "When this head is the assigned builder", value: "build" },
-        { label: "Review only", description: "When this head reviews the other's diff", value: "review" },
-      ],
-      { placeHolder: `Scope the ${agent} thinking level change` },
-    );
-    if (!scopePick) return;
-    const scope = scopePick.value as "all" | "discussion" | "build" | "review";
-
-    // Claude supports an extra "max" level above xhigh; Codex caps at xhigh.
-    const baseLevels = [
-      { label: "low", description: "Fast, less deliberation" },
-      { label: "medium", description: "Balanced (CLI default for most models)" },
-      { label: "high", description: "Greater reasoning depth" },
-      { label: "xhigh", description: "Extra-high — slower, more thorough" },
-    ];
-    const claudeMax = { label: "max", description: "Claude-only — maximum effort" };
-    const presets = agent === "claude" ? [...baseLevels, claudeMax] : baseLevels;
-    const currentRaw = this.readEffortSettingRaw(agent);
-    const currentForScope = this.effortForScope(agent, scope);
-    const items: Array<{ label: string; description?: string; value: string }> = [
-      { label: "(CLI default)", description: "Clear the override; let the CLI/model pick", value: "" },
-      ...presets.map((p) => ({ label: p.label, description: p.description, value: p.label })),
-    ];
-    const pick = await vscode.window.showQuickPick(items, {
-      placeHolder: currentForScope
-        ? `Current ${scope === "all" ? "(all phases)" : scope}: ${currentForScope} — pick a thinking level for ${agent}`
-        : `Pick a thinking level for ${agent} ${scope === "all" ? "(all phases)" : scope} (currently CLI default)`,
+    await chooseEffortInteractively({
+      appendSystemMessage: (text) => this.appendSystemMessage(text),
+      postState: () => this.postState(),
     });
-    if (!pick) return;
-    const next = this.applyEffortChange(currentRaw, scope, pick.value);
-    const settingKey = agent === "claude" ? "claudeEffort" : "codexReasoning";
-    await vscode.workspace.getConfiguration("hydraRoom").update(settingKey, next, vscode.ConfigurationTarget.Workspace);
-    const detail = scope === "all" ? "all phases" : `${scope} phase`;
-    const flag = agent === "claude" ? `--effort ${pick.value}` : `-c model_reasoning_effort="${pick.value}"`;
-    await this.appendSystemMessage(
-      pick.value
-        ? `Thinking level for ${agent} (${detail}) set to "${pick.value}". Next matching dispatch will pass \`${flag}\`.`
-        : `Thinking level override for ${agent} (${detail}) cleared.`,
-    );
-    this.postState();
   }
 
-  private readEffortSettingRaw(agent: AgentId): unknown {
-    const key = agent === "claude" ? "claudeEffort" : "codexReasoning";
-    return vscode.workspace.getConfiguration("hydraRoom").get<unknown>(key);
-  }
-
-  private effortForScope(agent: AgentId, scope: "all" | "discussion" | "build" | "review"): string {
-    const raw = this.readEffortSettingRaw(agent);
-    if (typeof raw === "string") return scope === "all" ? raw.trim() : "";
-    if (raw && typeof raw === "object" && scope !== "all") {
-      const v = (raw as Record<string, unknown>)[scope];
-      return typeof v === "string" ? v.trim() : "";
-    }
-    return "";
-  }
-
-  private applyEffortChange(current: unknown, scope: "all" | "discussion" | "build" | "review", value: string): unknown {
-    if (scope === "all") return value;
-    let next: Record<string, string> = {};
-    if (typeof current === "string" && current.trim()) {
-      next = { discussion: current.trim(), build: current.trim(), review: current.trim() };
-    } else if (current && typeof current === "object") {
-      for (const [k, v] of Object.entries(current as Record<string, unknown>)) {
-        if (typeof v === "string") next[k] = v;
-      }
-    }
-    if (value) next[scope] = value;
-    else delete next[scope];
-    if (Object.values(next).every((v) => !v)) return "";
-    return next;
-  }
-
-  private currentEffortLabel(agent: AgentId): string {
-    const raw = this.readEffortSettingRaw(agent);
-    if (typeof raw === "string" && raw.trim()) return `currently: ${raw.trim()}`;
-    if (raw && typeof raw === "object") {
-      const obj = raw as Record<string, unknown>;
-      const parts: string[] = [];
-      for (const k of ["discussion", "build", "review"]) {
-        const v = obj[k];
-        if (typeof v === "string" && v.trim()) parts.push(`${k[0]}=${v.trim()}`);
-      }
-      if (parts.length) return `currently: ${parts.join(", ")}`;
-    }
-    return "currently: CLI default";
+  private modelChooserDeps(): ModelChooserDeps {
+    return {
+      workspaceRoot: this.workspaceRoot,
+      codexModelsPath: this.codexModelsUri.fsPath,
+      getCodexModelsSnapshot: () => this.codexModelsSnapshot,
+      setCodexModelsSnapshot: (snapshot) => {
+        this.codexModelsSnapshot = snapshot;
+      },
+      appendSystemMessage: (text) => this.appendSystemMessage(text),
+      postState: () => this.postState(),
+    };
   }
 
   private effortSummaryForRail(agent: AgentId): string {
-    const raw = this.readEffortSettingRaw(agent);
-    if (typeof raw === "string") {
-      const v = raw.trim();
-      return v;
-    }
-    if (raw && typeof raw === "object") {
-      const obj = raw as Record<string, unknown>;
-      const d = typeof obj.discussion === "string" ? obj.discussion.trim() : "";
-      const b = typeof obj.build === "string" ? obj.build.trim() : "";
-      const r = typeof obj.review === "string" ? obj.review.trim() : "";
-      const values = [d, b, r].filter(Boolean);
-      if (values.length === 0) return "";
-      if (d && d === b && d === r) return d;
-      const parts: string[] = [];
-      if (d) parts.push(`d=${d}`);
-      if (b) parts.push(`b=${b}`);
-      if (r) parts.push(`r=${r}`);
-      return parts.join("/");
-    }
-    return "";
+    const key = agent === "claude" ? "claudeEffort" : "codexReasoning";
+    return summarizePhasedSetting(
+      vscode.workspace.getConfiguration("hydraRoom").get<unknown>(key),
+    );
   }
 
   private profileSummaryForRail(agent: AgentId): { text: string; title: string } {
@@ -1158,46 +870,11 @@ export class HydraRoomPanel {
     };
   }
 
-  /**
-   * Compact string for the rail chip. "default" when nothing set;
-   * single model name when same across phases; "d=…/b=…/r=…" when mixed.
-   */
   private modelSummaryForRail(agent: AgentId): string {
-    const raw = this.readModelSettingRaw(agent);
-    if (typeof raw === "string") {
-      const v = raw.trim();
-      return v || "default";
-    }
-    if (raw && typeof raw === "object") {
-      const obj = raw as Record<string, unknown>;
-      const d = typeof obj.discussion === "string" ? obj.discussion.trim() : "";
-      const b = typeof obj.build === "string" ? obj.build.trim() : "";
-      const r = typeof obj.review === "string" ? obj.review.trim() : "";
-      const values = [d, b, r].filter(Boolean);
-      if (values.length === 0) return "default";
-      if (d && d === b && d === r) return d;
-      const parts: string[] = [];
-      if (d) parts.push(`d=${d}`);
-      if (b) parts.push(`b=${b}`);
-      if (r) parts.push(`r=${r}`);
-      return parts.join("/");
-    }
-    return "default";
-  }
-
-  private currentModelLabel(agent: AgentId): string {
-    const raw = this.readModelSettingRaw(agent);
-    if (typeof raw === "string" && raw.trim()) return `currently: ${raw.trim()}`;
-    if (raw && typeof raw === "object") {
-      const obj = raw as Record<string, unknown>;
-      const parts: string[] = [];
-      for (const k of ["discussion", "build", "review"]) {
-        const v = obj[k];
-        if (typeof v === "string" && v.trim()) parts.push(`${k[0]}=${v.trim()}`);
-      }
-      if (parts.length) return `currently: ${parts.join(", ")}`;
-    }
-    return "currently: CLI default";
+    return summarizePhasedSetting(
+      vscode.workspace.getConfiguration("hydraRoom").get<unknown>(`${agent}Model`),
+      { fallback: "default" },
+    );
   }
 
   async insertPromptTemplate(): Promise<void> {
