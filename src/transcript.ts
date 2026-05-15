@@ -36,6 +36,13 @@ const LABEL_TO_ROLE: Record<string, MessageRole> = {
 
 const HEADER_RE = /^## (\S+) (You|Codex|Claude|System)(?: \(([^)]+)\))?(?: \[([^\]]+)\])?\s*$/;
 
+// Why: Long autonomous sessions can grow the transcript file without bound,
+// eventually slowing reads/edits and bloating memory when the transcript is
+// loaded for context. Auto-archive at 25 MiB keeps the active transcript
+// bounded while preserving full history in the archive dir. Flagged as a
+// Low-severity audit item (unbounded transcript growth).
+export const MAX_TRANSCRIPT_BYTES = 25 * 1024 * 1024;
+
 const VALID_PHASES: ReadonlySet<string> = new Set<Phase>(["opener", "reactor", "closer", "parallel", "build", "review"]);
 const LEGACY_PHASE_ALIASES: Readonly<Record<string, Phase>> = {
   round1: "opener",
@@ -63,6 +70,45 @@ export async function appendMessage(filePath: string, msg: TranscriptMessage): P
     }
     const prefix = exists ? "\n" : "# Hydra Room Transcript\n\n";
     await fs.appendFile(filePath, prefix + serializeMessage(msg), "utf8");
+
+    // Auto-archive once the transcript crosses the size threshold. We run
+    // inline (without re-entering serializePerFile, which would deadlock on
+    // the same path) so the archive lands atomically with respect to other
+    // writers waiting on the chain.
+    try {
+      const stats = await fs.stat(filePath);
+      if (stats.size > MAX_TRANSCRIPT_BYTES) {
+        await archiveAndResetTranscriptUnsafe(filePath, new Date());
+      }
+    } catch {
+      // Swallow archive failures (e.g. read-only archive dir): the user
+      // message has already been persisted to the active transcript, and a
+      // future append will retry. Better to keep recording than to fail the
+      // append on rotation trouble.
+    }
+  });
+}
+
+// Test-only helper: lets tests verify the auto-archive trigger without
+// having to inflate a real transcript past MAX_TRANSCRIPT_BYTES. Skips the
+// outer serializePerFile wrapper (so callers must not already hold the
+// per-file lock). Returns true when an archive happened.
+export async function maybeAutoArchive(filePath: string, maxBytes: number): Promise<boolean> {
+  return serializePerFile(filePath, async () => {
+    let size = 0;
+    try {
+      const stats = await fs.stat(filePath);
+      size = stats.size;
+    } catch {
+      return false;
+    }
+    if (size <= maxBytes) return false;
+    try {
+      await archiveAndResetTranscriptUnsafe(filePath, new Date());
+      return true;
+    } catch {
+      return false;
+    }
   });
 }
 
@@ -74,28 +120,38 @@ export async function archiveAndResetTranscript(
   filePath: string,
   now: Date = new Date()
 ): Promise<TranscriptArchiveResult> {
-  return serializePerFile(filePath, async () => {
-    await fs.mkdir(path.dirname(filePath), { recursive: true });
-    let current = "";
-    try {
-      current = await fs.readFile(filePath, "utf8");
-    } catch {
-      current = "# Hydra Room Transcript\n\n";
-    }
+  return serializePerFile(filePath, () => archiveAndResetTranscriptUnsafe(filePath, now));
+}
 
-    const archiveDir = path.join(path.dirname(filePath), "archive");
-    await fs.mkdir(archiveDir, { recursive: true });
-    const archivePath = path.join(archiveDir, `transcript-${archiveTimestamp(now)}.md`);
-    const archiveBody = current.trim() ? current : "# Hydra Room Transcript\n\n";
-    await fs.writeFile(archivePath, archiveBody.endsWith("\n") ? archiveBody : `${archiveBody}\n`, "utf8");
-    await fs.writeFile(filePath, "# Hydra Room Transcript\n\n", "utf8");
+// Same archive/reset logic as `archiveAndResetTranscript`, but assumes the
+// caller already holds the serializePerFile lock for `filePath`. Calling
+// this without holding the lock can race with concurrent writes; call the
+// wrapper above instead. Exists so `appendMessage` can auto-archive inline
+// without re-entering the per-file mutex (which would deadlock).
+async function archiveAndResetTranscriptUnsafe(
+  filePath: string,
+  now: Date
+): Promise<TranscriptArchiveResult> {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  let current = "";
+  try {
+    current = await fs.readFile(filePath, "utf8");
+  } catch {
+    current = "# Hydra Room Transcript\n\n";
+  }
 
-    return {
-      archivePath,
-      archivedMessages: parseTranscript(current).length,
-      archivedChars: current.length,
-    };
-  });
+  const archiveDir = path.join(path.dirname(filePath), "archive");
+  await fs.mkdir(archiveDir, { recursive: true });
+  const archivePath = path.join(archiveDir, `transcript-${archiveTimestamp(now)}.md`);
+  const archiveBody = current.trim() ? current : "# Hydra Room Transcript\n\n";
+  await fs.writeFile(archivePath, archiveBody.endsWith("\n") ? archiveBody : `${archiveBody}\n`, "utf8");
+  await fs.writeFile(filePath, "# Hydra Room Transcript\n\n", "utf8");
+
+  return {
+    archivePath,
+    archivedMessages: parseTranscript(current).length,
+    archivedChars: current.length,
+  };
 }
 
 export async function readTranscript(filePath: string): Promise<TranscriptMessage[]> {

@@ -7,6 +7,7 @@ import {
   appendMessage,
   archiveAndResetTranscript,
   buildPromptContext,
+  maybeAutoArchive,
   readTranscript,
   parseTranscript,
   serializeMessage,
@@ -255,6 +256,46 @@ describe("transcript", () => {
     assert.equal(messages.length, 2);
     assert.equal(messages[0].phase, "opener");
     assert.equal(messages[1].phase, "reactor");
+  });
+
+  test("auto-archives when transcript file exceeds size threshold", async () => {
+    const dir = await makeTmpDir();
+    const file = path.join(dir, ".hydra", "transcript.md");
+
+    // Seed the transcript with a couple of messages.
+    await appendMessage(file, { role: "user", text: "hello", timestamp: "2026-05-08T14:00:00Z" });
+    await appendMessage(file, {
+      role: "codex",
+      text: "padding ".repeat(64),
+      timestamp: "2026-05-08T14:00:01Z",
+      phase: "opener",
+    });
+
+    const before = await fs.readFile(file, "utf8");
+    assert.ok(before.length > 64, "seed should produce a non-trivial transcript");
+
+    // Use a tiny threshold so the existing seeded transcript trips it. This
+    // verifies the auto-archive trigger without writing 25 MB of test data.
+    const rotated = await maybeAutoArchive(file, 16);
+    assert.equal(rotated, true);
+
+    // Active transcript is reset to the header.
+    const active = await fs.readFile(file, "utf8");
+    assert.equal(active, "# Hydra Room Transcript\n\n");
+
+    // Exactly one archive file was created, containing the prior content.
+    const archiveDir = path.join(dir, ".hydra", "archive");
+    const archives = await fs.readdir(archiveDir);
+    assert.equal(archives.length, 1);
+    const archived = await fs.readFile(path.join(archiveDir, archives[0]), "utf8");
+    assert.match(archived, /hello/);
+    assert.match(archived, /padding/);
+
+    // A subsequent append goes to the fresh transcript and round-trips.
+    await appendMessage(file, { role: "user", text: "after rotate", timestamp: "2026-05-08T14:00:02Z" });
+    const messages = await readTranscript(file);
+    assert.equal(messages.length, 1);
+    assert.equal(messages[0].text, "after rotate");
   });
 
   test("parseTranscript accepts parallel discussion phase", () => {
