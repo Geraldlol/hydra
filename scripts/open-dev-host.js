@@ -3,7 +3,15 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const extensionPath = path.resolve(__dirname, "..");
-const workspacePath = path.resolve(extensionPath, "..", "..");
+// Hydra used to live at <Spireslap>/tools/vscode-hydra-room, where the
+// dev-host workspace was the Spireslap repo root two levels up. Since
+// the standalone Hydra pull, the extension IS the repo root, so we
+// open it as its own dev workspace (.hydra/ already lives here).
+// Override via DEV_HOST_WORKSPACE if you want to test against a
+// different folder.
+const workspacePath = process.env.DEV_HOST_WORKSPACE
+  ? path.resolve(process.env.DEV_HOST_WORKSPACE)
+  : extensionPath;
 const codeCmd = resolveCodeCommand();
 
 function psQuote(value) {
