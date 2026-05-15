@@ -295,6 +295,11 @@ export function summarizeClaudeEvents(events: Array<ClaudeEvent | null>): Claude
 
   summary.toolUses = dedupeToolUses(summary.toolUses).slice(0, 100);
   summary.taskNotifications = summary.taskNotifications.slice(-100);
+  // Keep the first 100 denials: they capture the initial denial pattern;
+  // anything past that is usually the same rule firing repeatedly. The
+  // `permissionDenials` counter above stays unbounded so callers still see
+  // the true total even after the records array is capped.
+  summary.permissionDenialRecords = summary.permissionDenialRecords.slice(0, 100);
   if (!summary.lastAssistantText && deltaTextChunks.length > 0) {
     summary.lastAssistantText = deltaTextChunks.join("");
   }

@@ -179,6 +179,30 @@ describe("summarizeClaudeEvents", () => {
     });
   });
 
+  test("caps permissionDenialRecords at 100 while preserving the total count", () => {
+    // Spread 150 denials across three envelopes (50 each) to exercise the
+    // cross-envelope accumulation path. Each denial carries a synthetic
+    // index in its tool name so we can verify which records survived.
+    const makeEnvelope = (start: number, count: number): string => {
+      const denials = Array.from({ length: count }, (_, i) => {
+        const idx = start + i;
+        return `{"tool":"Tool${idx}","decisionReason":{"type":"rule"}}`;
+      }).join(",");
+      return `{"type":"result","subtype":"success","permission_denials":[${denials}]}`;
+    };
+    const rawJsonl = [makeEnvelope(0, 50), makeEnvelope(50, 50), makeEnvelope(100, 50)].join("\n");
+    const summary = summarizeClaudeEvents(parseClaudeEventStream(rawJsonl));
+
+    // The records array is capped at 100; the counter still reports the true total.
+    assert.equal(summary.permissionDenialRecords.length, 100);
+    assert.equal(summary.permissionDenials, 150);
+    // We keep the first 100 (initial pattern), not the last 100.
+    assert.equal(summary.permissionDenialRecords[0].tool, "Tool0");
+    assert.equal(summary.permissionDenialRecords[99].tool, "Tool99");
+    // The by-reason buckets still reflect every denial seen.
+    assert.equal(summary.permissionDenialsByReason.rule, 150);
+  });
+
   test("formatClaudeStreamSummary surfaces permission denial breakdown", () => {
     const events = parseClaudeEventStream(
       '{"type":"result","subtype":"success","permission_denials":[' +
