@@ -194,6 +194,20 @@ The latest verification result is shown in the room, persisted to `.hydra/verifi
 
 Hydra also runs verification automatically after a successful Build phase by default (`hydraRoom.autoVerifyAfterBuild`). If you want the room to move straight from a passing automatic verification into Review, enable `hydraRoom.autoRequestReviewAfterPassingVerification`.
 
+## Security
+
+Hydra spawns Codex and Claude with workspace-write authority and network access out of the box:
+
+- Codex discussion/build args grant `--sandbox workspace-write` plus `sandbox_workspace_write.network_access=true`. Codex can edit files in the workspace and call out over the network during agent turns.
+- Claude discussion/build/review args use `--permission-mode acceptEdits`. Claude applies file edits without per-tool confirmation.
+
+These defaults are productive for self-trusted projects, but they mean a prompt-injected agent — for example via a hostile `CLAUDE.md`, `AGENTS.md`, `.codex/instructions.md`, or `.github/copilot-instructions.md` that Hydra reads into the prompt — can edit local files and exfiltrate over the network. When you open a workspace you don't fully trust:
+
+1. Decline VS Code's Workspace Trust prompt. Hydra declares `capabilities.untrustedWorkspaces` as `limited`, so the sensitive settings (CLI command paths, exec args, verify command, handoff webhook, Telegram credentials, transcript path, native env/PATH) are silently ignored from workspace `.vscode/settings.json`. A hostile repo cannot redirect the agent spawn or exfiltration sinks.
+2. Switch to a tighter capability profile before sending a turn. Run `Hydra: Change Capability Profile` (Command Palette or the in-room button) and pick `Safe Discussion` (Codex: `--sandbox read-only`, Claude: `--permission-mode default`). Or set `hydraRoom.codexDiscussionProfile` / `hydraRoom.claudeDiscussionProfile` to `safeDiscussion` in User Settings to make safe discussion the default.
+
+Use `Hydra: Show Effective Native Authority` and `Hydra: Preview Next Prompt` to inspect what authority the next call will run with and what content it will receive. `Full Native` profiles (`--dangerously-bypass-approvals-and-sandbox`, `--dangerously-skip-permissions`, etc.) trigger a one-shot or persistent consent modal before dispatch; `unknown/custom` arg combinations are not gated, so the prompt preview is your inspection point for those.
+
 ## Packaging
 
 ```powershell
