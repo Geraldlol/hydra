@@ -544,8 +544,8 @@
     "package": "npx @vscode/vsce package --no-dependencies --allow-missing-repository"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
-    "@types/vscode": "^1.95.0",
-    "typescript": "^5.9.3"
+    "@types/node": "^25.8.0",
+    "@types/vscode": "^1.120.0",
+    "typescript": "^6.0.3"
   }
 }
