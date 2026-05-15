@@ -6,6 +6,10 @@ docs/native-internals/**
 dist/test/**
 .vscode/**
 .hydra/**
+.claude/**
+.npm-cache/**
+.git/**
+.gitignore
 tsconfig.json
 package-lock.json
 *.map
