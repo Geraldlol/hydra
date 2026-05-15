@@ -27,6 +27,35 @@ describe("native data snapshot", () => {
     });
   });
 
+  test("redacts extended secret key patterns", () => {
+    assert.deepEqual(redactedJson({
+      privateKey: "PEM",
+      private_key: "PEM",
+      sshKey: "rsa",
+      ssh_key: "rsa",
+      passphrase: "open",
+      signature: "abc",
+      cookie: "session",
+      // Non-secret cousins should pass through unchanged.
+      cookieName: "tasty",
+      privateKeyId: "id",
+      ok: "visible",
+    }), {
+      privateKey: "[REDACTED]",
+      private_key: "[REDACTED]",
+      sshKey: "[REDACTED]",
+      ssh_key: "[REDACTED]",
+      passphrase: "[REDACTED]",
+      signature: "[REDACTED]",
+      cookie: "[REDACTED]",
+      // Substring match still redacts these — that's the intentional fail-closed
+      // behavior: better to over-redact a benign field than leak a near-miss.
+      cookieName: "[REDACTED]",
+      privateKeyId: "[REDACTED]",
+      ok: "visible",
+    });
+  });
+
   test("renders redacted native data summaries", () => {
     const markdown = renderNativeDataSnapshot({
       generatedAt: "2026-05-10T12:00:00.000Z",

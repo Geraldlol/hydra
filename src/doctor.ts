@@ -57,7 +57,12 @@ export interface TrustedSettingInspection {
   workspaceFolderValue?: unknown;
 }
 
+// Must stay in sync with package.json `capabilities.untrustedWorkspaces.restrictedConfigurations`.
+// VS Code silently rejects workspace overrides for these settings (scope:"application"),
+// but Doctor still surfaces a warning so the user sees the rejection in the UX.
 export const TRUST_SCOPED_SETTINGS = [
+  "transcriptPath",
+  "workspaceRoot",
   "codexCommand",
   "claudeCommand",
   "codexExecArgsDiscussion",
@@ -66,8 +71,18 @@ export const TRUST_SCOPED_SETTINGS = [
   "claudeExecArgsDiscussion",
   "claudeExecArgsBuild",
   "claudeExecArgsReview",
+  "nativePathPrepend",
+  "nativeEnv",
+  "codexNativePathPrepend",
+  "codexNativeEnv",
+  "claudeNativePathPrepend",
+  "claudeNativeEnv",
   "codexTerminalCommand",
   "claudeTerminalCommand",
+  "verifyCommand",
+  "handoffWebhookUrl",
+  "telegramBotToken",
+  "telegramChatId",
 ] as const;
 
 export async function runHydraDoctor(input: DoctorInput): Promise<DoctorReport> {

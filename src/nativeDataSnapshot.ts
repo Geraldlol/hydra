@@ -288,7 +288,7 @@ function list(values: string[]): string {
 }
 
 function isSensitiveKey(key: string): boolean {
-  return /(access|refresh|api[_-]?key|apikey|token|secret|password|credential|authorization|bearer)/i.test(key);
+  return /(access|refresh|api[_-]?key|apikey|token|secret|password|passphrase|credential|authorization|bearer|private[_-]?key|ssh[_-]?key|signature|cookie)/i.test(key);
 }
 
 async function readText(filePath: string): Promise<string> {

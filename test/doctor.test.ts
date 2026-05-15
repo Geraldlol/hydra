@@ -164,4 +164,30 @@ describe("Hydra Doctor", () => {
     assert.match(warnings[0], /codexCommand/);
     assert.match(warnings[1], /workspace-folder/);
   });
+
+  test("TRUST_SCOPED_SETTINGS covers every package.json restricted setting", () => {
+    // These mirror package.json capabilities.untrustedWorkspaces.restrictedConfigurations.
+    // If a setting is added there, this list must grow too so Doctor surfaces the warning.
+    const expected = [
+      "transcriptPath",
+      "workspaceRoot",
+      "verifyCommand",
+      "handoffWebhookUrl",
+      "telegramBotToken",
+      "telegramChatId",
+      "nativeEnv",
+      "codexNativeEnv",
+      "claudeNativeEnv",
+      "nativePathPrepend",
+      "codexNativePathPrepend",
+      "claudeNativePathPrepend",
+    ];
+    for (const key of expected) {
+      assert.equal(
+        TRUST_SCOPED_SETTINGS.includes(key as typeof TRUST_SCOPED_SETTINGS[number]),
+        true,
+        `TRUST_SCOPED_SETTINGS missing ${key} — re-sync with restrictedConfigurations`
+      );
+    }
+  });
 });
