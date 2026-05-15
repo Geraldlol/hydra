@@ -23,16 +23,16 @@ npm run probe:native-contract     # dry-run inspection of the native Codex/Claud
 Tests compile to `dist/test/<name>.test.js`. To run one suite:
 
 ```powershell
-tsc -p . && node --test --test-isolation=none dist/test/phasedSetting.test.js
+tsc -p . && node --test dist/test/phasedSetting.test.js
 ```
 
 To run one named test within a suite, use `--test-name-pattern`:
 
 ```powershell
-tsc -p . && node --test --test-isolation=none --test-name-pattern "rejects malicious env-var names" dist/test/terminalProtocol.test.js
+tsc -p . && node --test --test-name-pattern "rejects malicious env-var names" dist/test/terminalProtocol.test.js
 ```
 
-`--test-isolation=none` matches the project default and avoids the per-suite child-process overhead.
+The project uses Node's default per-file process isolation — each test file gets its own process, which keeps the `node_modules/vscode/` stub state per-file.
 
 ### Dev host
 

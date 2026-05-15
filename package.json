@@ -539,7 +539,7 @@
     "probe:native-contract:execute": "node scripts/native-contract-probe.js --execute",
     "copy-fixtures": "node -e \"const fs=require('node:fs');if(fs.existsSync('test/fixtures'))fs.cpSync('test/fixtures','dist/test/fixtures',{recursive:true})\"",
     "setup-vscode-stub": "node scripts/setup-vscode-stub.js",
-    "test": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p ./ && npm run copy-fixtures && npm run setup-vscode-stub && node --test --test-isolation=none dist/test/*.test.js",
+    "test": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p ./ && npm run copy-fixtures && npm run setup-vscode-stub && node --test dist/test/*.test.js",
     "prepackage": "npm run test",
     "package": "npx @vscode/vsce package --no-dependencies --allow-missing-repository"
   },
