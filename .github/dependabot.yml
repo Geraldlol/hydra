@@ -8,6 +8,18 @@ updates:
       npm-deps:
         patterns:
           - "*"
+    # Major bumps on these three are deliberate decisions, not auto-PRs:
+    #   @types/node  — pinned to ^20 to match VS Code 1.95's Node 20 runtime
+    #   @types/vscode — must stay aligned with the engines.vscode range
+    #   typescript    — major TS upgrades touch compilation surface
+    # Patch and minor bumps still flow through normally.
+    ignore:
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/vscode"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: "/"
