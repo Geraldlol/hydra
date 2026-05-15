@@ -64,7 +64,11 @@ describe("terminal bridge protocol", () => {
     assert.match(out, /Reply captured/);
     assert.match(out, /\$__hydraPromptText = \[System\.IO\.File\]::ReadAllText\(\$__hydraPrompt\)/);
     assert.match(out, /\$__hydraCommandLeaf = \[System\.IO\.Path\]::GetFileNameWithoutExtension\(\$__hydraCommand\)\.ToLowerInvariant\(\)/);
-    assert.match(out, /\$__hydraArgs \+= @\('--output-last-message', \$__hydraLastMessage\)/);
+    assert.match(out, /\$__hydraList = \[System\.Collections\.Generic\.List\[string\]\]::new\(\)/);
+    assert.match(out, /\$__hydraDashIndex = \$__hydraList\.LastIndexOf\('-'\)/);
+    assert.match(out, /\$__hydraList\.Insert\(\$__hydraDashIndex, '--output-last-message'\)/);
+    assert.match(out, /\$__hydraArgs = \$__hydraList\.ToArray\(\)/);
+    assert.doesNotMatch(out, /-contains '-o'/);
     assert.match(out, /\$ErrorActionPreference = 'Continue'/);
     assert.match(out, /\$__hydraPromptText \| & \$__hydraCommand @__hydraArgs 2>&1 \| ForEach-Object/);
     assert.match(out, /\$__hydraChunk = __HydraObjectText \$_/);

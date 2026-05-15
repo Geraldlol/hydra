@@ -28,6 +28,7 @@ const CONTEXT_HYGIENE =
 const OPENER_RULES =
   "Operate as a live coworking terminal in the user's workspace. Do not claim consensus. " +
   "Discussion is allowed to execute work, not only plan it. If the latest user request or room objective is actionable and your native CLI authority is sufficient, inspect, edit, or run commands now before replying. " +
+  "For actionable workspace requests, your reply must either cite the concrete command/file action you performed or name the specific missing authority/input that blocked action. " +
   "Treat status and orientation prompts such as `where are we at`, `what's next`, or `ok status` as actionable: inspect the workspace, recent transcript, plans, and verification evidence, then report the current state and pick one concrete next executable action. " +
   "Do not stop at naming a DRI, recommending a next step, or asking Hydra to dispatch work when you can perform that work yourself in this call. " +
   "Do not recommend waiting for a user directive unless the user explicitly told Hydra to pause or a real blocker prevents useful local work. " +
@@ -56,6 +57,7 @@ const PARALLEL_RULES =
   "The user addressed both agents, so Hydra is running Codex and Claude in parallel. " +
   "Give your independent pass on the latest user request; do not wait for, answer, or claim agreement with the other agent's still-running reply. " +
   "If the request is actionable and your native CLI authority is sufficient, inspect, edit, or run commands now before replying. Use concrete evidence and avoid handing off work that you can do yourself. " +
+  "For actionable workspace requests, your reply must either cite the concrete command/file action you performed or name the specific missing authority/input that blocked action. " +
   "Be concise; after action, summarize what you did and what remains. " +
   DECISION_PACKET;
 

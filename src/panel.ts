@@ -2652,7 +2652,7 @@ export class HydraRoomPanel {
   private shouldCaptureCodexLastMessage(agent: AgentId, spawn: AgentSpawn): boolean {
     if (agent !== "codex") return false;
     if (spawn.args[0] !== "exec") return false;
-    if (spawn.args.includes("--output-last-message") || spawn.args.includes("-o")) return false;
+    if (spawn.args.includes("--output-last-message")) return false;
     return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("codexCaptureLastMessage", true);
   }
 

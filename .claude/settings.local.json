@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "PowerShell(& 'C:\\\\Users\\\\geral\\\\Hydra\\\\pull-from-spireslap.ps1' -InitGit)"
+      "PowerShell(& 'C:\\\\Users\\\\geral\\\\Hydra\\\\pull-from-spireslap.ps1' -InitGit)",
+      "PowerShell(Set-Location C:\\\\Users\\\\geral\\\\Hydra; git log --oneline 2>&1 | Select-Object -First 5; Write-Output \"---STATUS---\"; git status --short | Select-Object -First 10; Write-Output \"...\"; \\(git status --short | Measure-Object\\).Count)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }

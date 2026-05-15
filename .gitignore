@@ -5,3 +5,4 @@ out/
 .vscode-test/
 *.vsix
 .hydra/
+.npm-cache/

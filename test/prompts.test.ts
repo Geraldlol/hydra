@@ -24,6 +24,7 @@ describe("buildPrompt()", () => {
     assert.match(out, /Operate as a live coworking terminal/);
     assert.match(out, /Discussion is allowed to execute work, not only plan it/);
     assert.match(out, /inspect, edit, or run commands now before replying/);
+    assert.match(out, /cite the concrete command\/file action you performed/);
     assert.match(out, /Treat status and orientation prompts/);
     assert.match(out, /pick one concrete next executable action/);
     assert.match(out, /Do not stop at naming a DRI/);
@@ -120,6 +121,7 @@ describe("buildPrompt()", () => {
     assert.match(out, /do not wait for, answer, or claim agreement/);
     assert.match(out, /inspect, edit, or run commands now before replying/);
     assert.match(out, /avoid handing off work that you can do yourself/);
+    assert.match(out, /cite the concrete command\/file action you performed/);
     assert.match(out, /Decision Packet/);
   });
 
