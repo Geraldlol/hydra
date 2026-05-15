@@ -9,7 +9,9 @@ dist/test/**
 .claude/**
 .npm-cache/**
 .git/**
+.github/**
 .gitignore
+CLAUDE.md
 tsconfig.json
 package-lock.json
 *.map
