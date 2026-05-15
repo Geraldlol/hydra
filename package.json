@@ -93,23 +93,27 @@
           "markdownDescription": "Advanced fallback project root for Extension Development Host sessions without an open VS Code workspace. Normal users should leave this blank and open a folder in VS Code."
         },
         "hydraRoom.codexCommand": {
+          "scope": "application",
           "type": "string",
           "default": "codex",
           "markdownDescription": "Executable name or wrapper script for the OpenAI Codex CLI."
         },
         "hydraRoom.codexExecArgsDiscussion": {
+          "scope": "application",
           "type": "array",
           "items": { "type": "string" },
           "default": ["exec", "--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true", "--color", "never", "--cd", "${workspaceFolder}", "-"],
           "markdownDescription": "Raw Codex CLI args for serialized discussion turns. `${workspaceFolder}` is expanded; the trailing `-` reads the Hydra prompt from stdin. Hydra also expands `${hydraPromptFile}`, `${hydraReplyFile}`, and `${hydraLogFile}` per request so native file/output flags can target Hydra artifacts."
         },
         "hydraRoom.codexExecArgsBuild": {
+          "scope": "application",
           "type": "array",
           "items": { "type": "string" },
           "default": ["exec", "--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true", "--color", "never", "--cd", "${workspaceFolder}", "-"],
           "markdownDescription": "Raw Codex CLI args for Build. Defaults to workspace-write `codex exec`; add native flags such as config profiles, model, search, MCP/plugin-related config, sandbox changes, or Hydra request-file placeholders here."
         },
         "hydraRoom.codexExecArgsReview": {
+          "scope": "application",
           "type": "array",
           "items": { "type": "string" },
           "default": ["review", "--uncommitted", "-"],
@@ -144,23 +148,27 @@
           "markdownDescription": "When dispatching `codex exec`, automatically request the typed event stream via `--json`, parse it through Hydra's `codexEvents` module, and use the final `agent_message` item as the reply in the room. Structured tool-call / command-execution / file-change events are summarized in `.hydra/agent-calls.jsonl`. Supersedes `hydraRoom.codexCaptureLastMessage` when both are enabled. Defaults to `false` while the surrounding Hydra UX for parsed Codex events stabilizes."
         },
         "hydraRoom.claudeCommand": {
+          "scope": "application",
           "type": "string",
           "default": "claude",
           "markdownDescription": "Executable name or wrapper script for the Claude Code CLI."
         },
         "hydraRoom.claudeExecArgsDiscussion": {
+          "scope": "application",
           "type": "array",
           "items": { "type": "string" },
           "default": ["-p", "--permission-mode", "acceptEdits", "--add-dir", "${workspaceFolder}"],
           "markdownDescription": "Raw Claude Code CLI args for serialized discussion turns. `${workspaceFolder}` is expanded. Hydra also expands `${hydraPromptFile}`, `${hydraReplyFile}`, and `${hydraLogFile}` per request so native file/output flags can target Hydra artifacts."
         },
         "hydraRoom.claudeExecArgsBuild": {
+          "scope": "application",
           "type": "array",
           "items": { "type": "string" },
           "default": ["-p", "--permission-mode", "acceptEdits", "--add-dir", "${workspaceFolder}"],
           "markdownDescription": "Raw Claude Code CLI args for Build. Defaults to print mode with edit-accepting permissions; add native flags such as --ide, --tools, --mcp-config, --plugin-dir, --agent, --settings, model, effort, or Hydra request-file placeholders here."
         },
         "hydraRoom.claudeExecArgsReview": {
+          "scope": "application",
           "type": "array",
           "items": { "type": "string" },
           "default": ["-p", "--permission-mode", "acceptEdits", "--add-dir", "${workspaceFolder}"],
@@ -200,36 +208,42 @@
           "markdownDescription": "When `hydraRoom.claudeStreamJson` is enabled, pass Claude `--debug-file ${hydraLogFile}` so raw native debug output is captured in the per-request Hydra log artifact."
         },
         "hydraRoom.nativePathPrepend": {
+          "scope": "application",
           "type": "array",
           "items": { "type": "string" },
           "default": [],
           "markdownDescription": "Directories prepended to PATH/Path for every native Codex and Claude dispatch, in both one-shot and terminal-bridge transports. Supports `${workspaceFolder}` and `${env:NAME}` placeholders."
         },
         "hydraRoom.nativeEnv": {
+          "scope": "application",
           "type": "object",
           "default": {},
           "additionalProperties": { "type": "string" },
           "markdownDescription": "Environment variables applied to every native Codex and Claude dispatch, in both one-shot and terminal-bridge transports. Values support `${workspaceFolder}` and `${env:NAME}` placeholders."
         },
         "hydraRoom.codexNativePathPrepend": {
+          "scope": "application",
           "type": "array",
           "items": { "type": "string" },
           "default": [],
           "markdownDescription": "Codex-only directories appended after `hydraRoom.nativePathPrepend` when constructing PATH/Path for native Codex dispatches. Supports `${workspaceFolder}` and `${env:NAME}` placeholders."
         },
         "hydraRoom.codexNativeEnv": {
+          "scope": "application",
           "type": "object",
           "default": {},
           "additionalProperties": { "type": "string" },
           "markdownDescription": "Codex-only environment variables layered over `hydraRoom.nativeEnv` for native Codex dispatches. Values support `${workspaceFolder}` and `${env:NAME}` placeholders."
         },
         "hydraRoom.claudeNativePathPrepend": {
+          "scope": "application",
           "type": "array",
           "items": { "type": "string" },
           "default": [],
           "markdownDescription": "Claude-only directories appended after `hydraRoom.nativePathPrepend` when constructing PATH/Path for native Claude dispatches. Supports `${workspaceFolder}` and `${env:NAME}` placeholders."
         },
         "hydraRoom.claudeNativeEnv": {
+          "scope": "application",
           "type": "object",
           "default": {},
           "additionalProperties": { "type": "string" },
@@ -252,11 +266,13 @@
           "markdownDescription": "When Autopilot passes the terminal bridge self-test, automatically use the visible native terminal bridge instead of safe one-shot transport."
         },
         "hydraRoom.codexTerminalCommand": {
+          "scope": "application",
           "type": "string",
           "default": "",
           "markdownDescription": "Optional startup command sent once when Hydra opens the Codex terminal. Leave blank for command-dispatch mode. `${workspaceFolder}` is expanded."
         },
         "hydraRoom.claudeTerminalCommand": {
+          "scope": "application",
           "type": "string",
           "default": "",
           "markdownDescription": "Optional startup command sent once when Hydra opens the Claude terminal. Leave blank for command-dispatch mode. `${workspaceFolder}` is expanded."
@@ -328,6 +344,7 @@
           "markdownDescription": "Soft cap for `git diff` output before truncation in the Review prompt."
         },
         "hydraRoom.verifyCommand": {
+          "scope": "application",
           "type": "string",
           "default": "",
           "markdownDescription": "Shell command Hydra runs for one-click verification. Leave blank to infer from package.json scripts: check+test, test, check, then lint."
@@ -367,16 +384,19 @@
           "markdownDescription": "If greater than 0, Hydra pauses auto-advance once the session's estimated cost reaches this USD value. Cost is computed from `.hydra/usage.jsonl` using `hydraRoom.modelPrices`. Set to 0 to disable. Useful guard rail when running autonomous loops."
         },
         "hydraRoom.handoffWebhookUrl": {
+          "scope": "application",
           "type": "string",
           "default": "",
           "markdownDescription": "Optional HTTPS endpoint Hydra POSTs to when a new decision packet has a non-empty `Decision needed from user` field. Body is `{ event: \"hydra.decision_needed\", timestamp, workspace, agent, phase, decisionNeededFromUser, defaultNextAction, recommendation, blockers, objective }`. Use a Slack incoming webhook URL or your own paging service. For Telegram, use `hydraRoom.telegramBotToken` + `hydraRoom.telegramChatId` instead — Hydra speaks the Telegram Bot API directly. Dedupes per packet timestamp."
         },
         "hydraRoom.telegramBotToken": {
+          "scope": "application",
           "type": "string",
           "default": "",
           "markdownDescription": "Telegram Bot API token (the long `123456:ABC-DEF…` string from BotFather). Empty disables Telegram. **Treat as secret** — prefer User Settings over Workspace Settings so it doesn't get committed. Alternatively set the `TELEGRAM_BOT_TOKEN` environment variable and leave this blank."
         },
         "hydraRoom.telegramChatId": {
+          "scope": "application",
           "type": "string",
           "default": "",
           "markdownDescription": "Telegram chat id Hydra sends notifications to. Your personal chat with the bot, a group, or a channel. Find it by messaging your bot and visiting `https://api.telegram.org/bot<token>/getUpdates`. Required for Telegram notifications to fire."
@@ -476,6 +496,34 @@
           "markdownDescription": "Automatically request Review after an automatic post-build verification passes. Off by default so users can inspect build output first."
         }
       }
+    }
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Hydra spawns Codex and Claude with workspace-write authority and runs a configured verify command. In untrusted workspaces, Hydra ignores workspace-scoped settings for CLI paths, args, env, terminal startup, verify command, handoff webhook, and Telegram credentials so a hostile repo cannot redirect those sinks.",
+      "restrictedConfigurations": [
+        "hydraRoom.codexCommand",
+        "hydraRoom.codexExecArgsDiscussion",
+        "hydraRoom.codexExecArgsBuild",
+        "hydraRoom.codexExecArgsReview",
+        "hydraRoom.claudeCommand",
+        "hydraRoom.claudeExecArgsDiscussion",
+        "hydraRoom.claudeExecArgsBuild",
+        "hydraRoom.claudeExecArgsReview",
+        "hydraRoom.nativePathPrepend",
+        "hydraRoom.nativeEnv",
+        "hydraRoom.codexNativePathPrepend",
+        "hydraRoom.codexNativeEnv",
+        "hydraRoom.claudeNativePathPrepend",
+        "hydraRoom.claudeNativeEnv",
+        "hydraRoom.codexTerminalCommand",
+        "hydraRoom.claudeTerminalCommand",
+        "hydraRoom.verifyCommand",
+        "hydraRoom.handoffWebhookUrl",
+        "hydraRoom.telegramBotToken",
+        "hydraRoom.telegramChatId"
+      ]
     }
   },
   "scripts": {

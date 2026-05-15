@@ -99,9 +99,15 @@ export function buildPowerShellDispatchCommand(
   ].join("; ");
 }
 
+// Reject env var names that aren't POSIX-style identifiers. Anything outside
+// [A-Za-z_][A-Za-z0-9_]* could break out of the `$env:KEY = '...'` statement
+// in the generated PowerShell and execute arbitrary code — e.g. a key like
+// "FOO; iex 'malicious'" becomes a statement separator + new command.
+const SAFE_ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
 function environmentStatements(env: Record<string, string | undefined>): string[] {
   return Object.entries(env)
-    .filter(([key, value]) => key.trim() && value !== undefined)
+    .filter(([key, value]) => value !== undefined && SAFE_ENV_KEY.test(key))
     .map(([key, value]) => `$env:${key} = ${quotePowerShell(value ?? "")}`);
 }
 

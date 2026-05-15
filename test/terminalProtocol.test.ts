@@ -119,6 +119,33 @@ describe("terminal bridge protocol", () => {
     assert.match(out, /\$env:DOTNET_ROOT = .*;\s*\$ErrorActionPreference = 'Stop'/);
   });
 
+  test("dispatch command rejects malicious env-var names that would break out of the $env:KEY = '...' statement", () => {
+    const out = buildPowerShellDispatchCommand(
+      {
+        command: "codex",
+        args: ["exec", "-"],
+        cwd: "C:\\repo",
+        env: {
+          GOOD_VAR: "ok",
+          "BAD; iex 'Write-Host PWNED'; #": "x",
+          "1STARTS_WITH_DIGIT": "x",
+          "HAS-DASH": "x",
+          "": "x",
+          "HAS SPACE": "x",
+        },
+      },
+      "C:\\repo\\.hydra\\prompts\\p.md",
+      "C:\\repo\\.hydra\\replies\\r.json",
+      "C:\\repo\\.hydra\\logs\\r.log"
+    );
+    assert.match(out, /\$env:GOOD_VAR = 'ok'/);
+    assert.doesNotMatch(out, /iex/);
+    assert.doesNotMatch(out, /PWNED/);
+    assert.doesNotMatch(out, /\$env:1STARTS_WITH_DIGIT/);
+    assert.doesNotMatch(out, /HAS-DASH/);
+    assert.doesNotMatch(out, /HAS SPACE/);
+  });
+
   test("dispatch command supports terminal bridge synthetic echo without external node", () => {
     const out = buildPowerShellDispatchCommand(
       {

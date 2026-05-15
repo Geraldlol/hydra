@@ -3606,7 +3606,10 @@ export class HydraRoomPanel {
   private async fireWebhookForDecision(packet: DecisionPacket, needs: string): Promise<void> {
     const url = vscode.workspace.getConfiguration("hydraRoom").get<string>("handoffWebhookUrl", "").trim();
     if (!url) return;
-    if (!/^https?:\/\//i.test(url)) return;
+    if (!/^https:\/\//i.test(url)) {
+      await this.appendSystemMessage("Handoff webhook ignored: hydraRoom.handoffWebhookUrl must be an https:// URL.");
+      return;
+    }
     const payload = {
       event: "hydra.decision_needed",
       timestamp: packet.timestamp,
