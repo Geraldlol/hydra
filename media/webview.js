@@ -51,6 +51,7 @@ const stopBtn = document.getElementById("stopBtn");
 const archiveChatBtn = document.getElementById("archiveChatBtn");
 const assignCodexBtn = document.getElementById("assignCodexBtn");
 const assignClaudeBtn = document.getElementById("assignClaudeBtn");
+const assignBothBtn = document.getElementById("assignBothBtn");
 const reviewBtn = document.getElementById("reviewBtn");
 const handBackBtn = document.getElementById("handBackBtn");
 const nativeTerminalsBtn = document.getElementById("nativeTerminalsBtn");
@@ -138,6 +139,7 @@ const ACTIONS = [
   { id: "accept-default", group: "Workflow", name: "Accept Default", what: "Run the latest decision default", run: () => acceptDefaultBtn.click(), enabled: () => !acceptDefaultBtn.disabled },
   { id: "assign-codex", group: "Workflow", name: "Assign Builder: Codex", what: "Let Codex edit files", run: () => assignCodexBtn.click(), enabled: () => !assignCodexBtn.classList.contains("hidden") && !assignCodexBtn.disabled },
   { id: "assign-claude", group: "Workflow", name: "Assign Builder: Claude", what: "Let Claude edit files", run: () => assignClaudeBtn.click(), enabled: () => !assignClaudeBtn.classList.contains("hidden") && !assignClaudeBtn.disabled },
+  { id: "assign-both", group: "Workflow", name: "Assign Builders: Both", what: "Run Codex and Claude as parallel Build workers", run: () => assignBothBtn.click(), enabled: () => !assignBothBtn.classList.contains("hidden") && !assignBothBtn.disabled },
   { id: "request-review", group: "Workflow", name: "Request Review", what: "Ask the non-builder to review the diff", run: () => reviewBtn.click(), enabled: () => !reviewBtn.classList.contains("hidden") && !reviewBtn.disabled },
   { id: "hand-back", group: "Workflow", name: "Hand Back to Builder", what: "Return review feedback to the builder", run: () => handBackBtn.click(), enabled: () => !handBackBtn.classList.contains("hidden") && !handBackBtn.disabled },
   { id: "reset-turn", group: "Workflow", name: "Reset Stuck Turn", what: "Recover from a stuck state", run: () => resetTurnBtn.click(), enabled: () => !resetTurnBtn.classList.contains("hidden") && !resetTurnBtn.disabled },
@@ -165,6 +167,7 @@ const ACTIONS = [
   { id: "open-transcript", group: "Files", name: "Open Transcript", what: "Open the Hydra transcript", run: () => openTranscriptBtn.click(), enabled: () => !openTranscriptBtn.disabled },
   { id: "session-brief", group: "Files", name: "Session Brief", what: "Open the current session brief", run: () => openSessionBriefBtn.click(), enabled: () => !openSessionBriefBtn.disabled },
   { id: "choose-model", group: "Settings", name: "Choose Model", what: "Pick Codex or Claude model overrides", run: () => vscode.postMessage({ type: "chooseModel" }), enabled: () => !lastState.canOpenFolder },
+  { id: "choose-effort", group: "Settings", name: "Choose Thinking Level", what: "Pick Codex reasoning or Claude effort overrides", run: () => vscode.postMessage({ type: "chooseEffort" }), enabled: () => !lastState.canOpenFolder },
   { id: "change-profile", group: "Settings", name: "Change Capability Profile", what: "Pick safe, native build, review, full-native, or custom CLI profiles", run: () => profileBtn.click(), enabled: () => !profileBtn.disabled },
   { id: "fix-codex", group: "Setup", name: "Fix Codex Path", what: "Update the configured Codex CLI command", run: () => fixCodexBtn.click(), enabled: () => !!lastState.needsCodexPath },
   { id: "fix-claude", group: "Setup", name: "Fix Claude Path", what: "Update the configured Claude CLI command", run: () => fixClaudeBtn.click(), enabled: () => !!lastState.needsClaudePath },
@@ -227,6 +230,7 @@ composer.addEventListener("keydown", (e) => {
 stopBtn.addEventListener("click", () => vscode.postMessage({ type: "stop" }));
 assignCodexBtn.addEventListener("click", () => vscode.postMessage({ type: "assignBuilder", builder: "codex" }));
 assignClaudeBtn.addEventListener("click", () => vscode.postMessage({ type: "assignBuilder", builder: "claude" }));
+assignBothBtn.addEventListener("click", () => vscode.postMessage({ type: "assignParallelBuilders" }));
 reviewBtn.addEventListener("click", () => vscode.postMessage({ type: "requestReview" }));
 acceptDefaultBtn.addEventListener("click", () => vscode.postMessage({ type: "acceptDefaultDecision" }));
 handBackBtn.addEventListener("click", () => vscode.postMessage({ type: "handBack" }));
@@ -340,7 +344,7 @@ function renderState(state) {
   if (!hasOpenerOverride) selectedOpener = defaultOpener;
   renderTransport();
   phaseChip.textContent = state.phaseLabel || state.phase || "Idle";
-  phaseChip.className = "phase-chip" + (state.canSend ? " idle" : "");
+  phaseChip.className = "phase-chip" + (!state.canStop && state.canSend ? " idle" : "");
   app.classList.toggle("in-flight", !!state.canStop);
   objectiveText.textContent = state.objective || "Not set";
   objectiveText.title = state.objective || "";
@@ -359,6 +363,10 @@ function renderState(state) {
   renderProfiles(state.capabilityProfiles);
   renderDecisionBoard(state.recentDecisions || []);
   sendBtn.disabled = !state.canSend;
+  sendBtn.textContent = state.canStop ? "QUEUE" : "SEND";
+  sendBtn.title = state.canStop
+    ? "Queue this follow-up and send it after the active turn finishes"
+    : "Send message";
   openerBtn.disabled = !state.canSend;
   previewPromptBtn.disabled = !!state.canOpenFolder;
   openLastPromptBtn.disabled = !!state.canOpenFolder;
@@ -370,6 +378,7 @@ function renderState(state) {
   resetTurnBtn.classList.toggle("hidden", !state.canStop);
   assignCodexBtn.classList.toggle("hidden", !state.canAssignBuilder);
   assignClaudeBtn.classList.toggle("hidden", !state.canAssignBuilder);
+  assignBothBtn.classList.toggle("hidden", !state.canAssignBuilder);
   reviewBtn.classList.toggle("hidden", !state.canRequestReview);
   handBackBtn.classList.toggle("hidden", !state.canHandBack);
   archiveChatBtn.disabled = !state.canArchiveRoom;
@@ -974,7 +983,7 @@ function isSuggested(action) {
   if (lastState.needsClaudePath && action.id === "fix-claude") return true;
   if (lastState.canStop && ["stop", "open-actions", "open-queue"].includes(action.id)) return true;
   if (lastState.canAcceptDefault && action.id === "accept-default") return true;
-  if (lastState.canAssignBuilder && (action.id === "assign-codex" || action.id === "assign-claude")) return true;
+  if (lastState.canAssignBuilder && (action.id === "assign-codex" || action.id === "assign-claude" || action.id === "assign-both")) return true;
   if (lastState.canRequestReview && action.id === "request-review") return true;
   if (String(lastState.verificationSummary || "").toLowerCase().includes("fail") && (action.id === "verification" || action.id === "open-verify")) return true;
   if (lastState.canSend && (action.id === "send" || action.id === "pin-objective")) return true;
@@ -986,7 +995,7 @@ function disabledReason(action) {
   if (action.id === "open-folder") return "workspace is already open";
   if (action.id === "fix-codex") return "Codex path check is not failing";
   if (action.id === "fix-claude") return "Claude path check is not failing";
-  if (action.id === "choose-model" || action.id === "open-objective" || action.id === "open-agent-calls") return "open a workspace folder first";
+  if (action.id === "choose-model" || action.id === "choose-effort" || action.id === "open-objective" || action.id === "open-agent-calls") return "open a workspace folder first";
   if (action.id.indexOf("assign-") === 0) return "builder assignment unavailable";
   if (action.id === "request-review") return "no build ready for review";
   if (action.id.indexOf("poke-") === 0 || action.id.indexOf("-command") > 0 || action.id.indexOf("-raw") > 0 || action.id === "native-action") return "native terminal actions unavailable";

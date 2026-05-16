@@ -98,10 +98,19 @@ export function activate(context: vscode.ExtensionContext): void {
           [
             { label: "Codex", value: "codex" as AgentId },
             { label: "Claude", value: "claude" as AgentId },
+            { label: "Codex + Claude", value: "parallel" as const },
           ],
           { title: "Hydra: Assign Builder", placeHolder: "Who should implement?" }
         );
-        if (pick) await panel.assignBuilder(pick.value);
+        if (pick?.value === "parallel") await panel.assignParallelBuilders();
+        else if (pick) await panel.assignBuilder(pick.value);
+      })
+    ),
+    vscode.commands.registerCommand(
+      "hydraRoom.assignParallelBuilders",
+      withErrorReporting(async () => {
+        const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
+        await panel.assignParallelBuilders();
       })
     ),
     vscode.commands.registerCommand(

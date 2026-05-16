@@ -53,16 +53,34 @@ describe("transition()", () => {
     assert.equal((next as any).builder, "claude");
   });
 
+  test("AwaitingUser + assignBuilders -> ParallelBuild", () => {
+    const next = transition({ name: "AwaitingUser" }, { type: "assignBuilders", agents: ["codex", "claude"] });
+    assert.equal(next.name, "ParallelBuild");
+    assert.deepEqual((next as any).agents, ["codex", "claude"]);
+  });
+
   test("Build + buildDone -> BuildDone with same builder", () => {
     const next = transition({ name: "Build", builder: "codex" }, { type: "buildDone" });
     assert.equal(next.name, "BuildDone");
     assert.equal((next as any).builder, "codex");
   });
 
+  test("ParallelBuild + parallelBuildDone -> ParallelBuildDone", () => {
+    const next = transition({ name: "ParallelBuild", agents: ["codex", "claude"] }, { type: "parallelBuildDone" });
+    assert.equal(next.name, "ParallelBuildDone");
+    assert.deepEqual((next as any).agents, ["codex", "claude"]);
+  });
+
   test("BuildDone + requestReview -> Review with the other agent", () => {
     const next = transition({ name: "BuildDone", builder: "codex" }, { type: "requestReview" });
     assert.equal(next.name, "Review");
     assert.equal((next as any).reviewer, "claude");
+  });
+
+  test("ParallelBuildDone + requestReview -> ParallelReview", () => {
+    const next = transition({ name: "ParallelBuildDone", agents: ["codex", "claude"] }, { type: "requestReview" });
+    assert.equal(next.name, "ParallelReview");
+    assert.deepEqual((next as any).agents, ["codex", "claude"]);
   });
 
   test("BuildDone + userSent -> Opener (chat unlocks after build)", () => {
@@ -84,6 +102,13 @@ describe("transition()", () => {
     assert.equal((next as any).approved, true);
   });
 
+  test("ParallelReview + parallelReviewDone -> ParallelReviewDone approved", () => {
+    const next = transition({ name: "ParallelReview", agents: ["codex", "claude"] }, { type: "parallelReviewDone", approved: true });
+    assert.equal(next.name, "ParallelReviewDone");
+    assert.equal((next as any).approved, true);
+    assert.deepEqual((next as any).agents, ["codex", "claude"]);
+  });
+
   test("ReviewDone + handBack -> Build with the original builder", () => {
     const next = transition(
       { name: "ReviewDone", reviewer: "claude", approved: false },
@@ -91,6 +116,15 @@ describe("transition()", () => {
     );
     assert.equal(next.name, "Build");
     assert.equal((next as any).builder, "codex");
+  });
+
+  test("ParallelReviewDone + handBack -> ParallelBuild with same agents", () => {
+    const next = transition(
+      { name: "ParallelReviewDone", agents: ["codex", "claude"], approved: false },
+      { type: "handBack" }
+    );
+    assert.equal(next.name, "ParallelBuild");
+    assert.deepEqual((next as any).agents, ["codex", "claude"]);
   });
 
   test("ReviewDone + userSent -> Opener (next discussion)", () => {
@@ -107,6 +141,8 @@ describe("transition()", () => {
     { name: "Reactor" as const, opener: "codex" as const, reactor: "claude" as const },
     { name: "Closer" as const, opener: "codex" as const, reactor: "claude" as const },
     { name: "ParallelDiscussion" as const, agents: ["codex", "claude"] as const },
+    { name: "ParallelBuild" as const, agents: ["codex", "claude"] as const },
+    { name: "ParallelReview" as const, agents: ["codex", "claude"] as const },
   ]) {
     test(`${inFlight.name} + stop -> AwaitingUser`, () => {
       const next = transition(inFlight, { type: "stop" });

@@ -5,7 +5,9 @@ export type CommandCenterActionId =
   | "archiveAndClearRoom"
   | "assignCodex"
   | "assignClaude"
+  | "assignParallelBuilders"
   | "chooseModel"
+  | "chooseEffort"
   | "changeCapabilityProfile"
   | "requestReview"
   | "handBack"
@@ -79,7 +81,8 @@ export function buildCommandCenterActions(input: CommandCenterInput): CommandCen
   if (input.canAssignBuilder) {
     actions.push(
       action("assignCodex", "Assign Codex Builder", "Build flow", "Give Codex explicit build authority for the next implementation turn."),
-      action("assignClaude", "Assign Claude Builder", "Build flow", "Give Claude explicit build authority for the next implementation turn.")
+      action("assignClaude", "Assign Claude Builder", "Build flow", "Give Claude explicit build authority for the next implementation turn."),
+      action("assignParallelBuilders", "Assign Both Builders", "Build flow", "Dispatch Codex and Claude as parallel room-level Build workers.")
     );
   }
   if (input.canRequestReview) {
@@ -112,6 +115,7 @@ export function buildCommandCenterActions(input: CommandCenterInput): CommandCen
     action("openSessionBrief", "Open Session Brief", "State", "Refresh and open the compact room snapshot."),
     action("openSupportBundle", "Open Support Bundle", "Diagnostics", "Refresh and open Doctor, authority, terminal, queue, and recent-action diagnostics."),
     action("chooseModel", "Choose Model", "Settings", "Pick Codex or Claude model overrides."),
+    action("chooseEffort", "Choose Thinking Level", "Settings", "Pick Codex reasoning or Claude effort overrides."),
     action("changeCapabilityProfile", "Change Capability Profile", "Settings", "Pick safe, native, review, full-native, or custom CLI profiles."),
     action("captureNativeCapabilities", "Capture Native Capabilities", "Native CLIs", "Snapshot configured Codex and Claude version/help output into .hydra."),
     action("captureNativeDataSnapshot", "Capture Native Data Snapshot", "Native CLIs", "Snapshot redacted Codex/Claude config, plugin, model, state, and session metadata."),

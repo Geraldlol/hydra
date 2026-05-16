@@ -19,6 +19,7 @@
       { "command": "hydraRoom.open", "title": "Hydra: Open Room" },
       { "command": "hydraRoom.askBoth", "title": "Hydra: Send Message" },
       { "command": "hydraRoom.assignBuilder", "title": "Hydra: Assign Builder" },
+      { "command": "hydraRoom.assignParallelBuilders", "title": "Hydra: Assign Both Builders" },
       { "command": "hydraRoom.requestReview", "title": "Hydra: Request Review" },
       { "command": "hydraRoom.runVerification", "title": "Hydra: Run Verification" },
       { "command": "hydraRoom.openVerification", "title": "Hydra: Open Verification Log" },

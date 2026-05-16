@@ -55,6 +55,7 @@ describe("command center", () => {
     assert.ok(actions.some((action) => action.id === "openVerification"));
     assert.ok(actions.some((action) => action.id === "openDecisions"));
     assert.ok(actions.some((action) => action.id === "chooseModel"));
+    assert.ok(actions.some((action) => action.id === "chooseEffort"));
     assert.ok(actions.some((action) => action.id === "runAutopilotStart"));
   });
 
@@ -79,9 +80,10 @@ describe("command center", () => {
       "stopCurrentTurn",
       "resetStuckTurn",
     ]);
-    assert.deepEqual(actions.slice(2, 6).map((action) => action.id), [
+    assert.deepEqual(actions.slice(2, 7).map((action) => action.id), [
       "assignCodex",
       "assignClaude",
+      "assignParallelBuilders",
       "requestReview",
       "handBack",
     ]);

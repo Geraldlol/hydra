@@ -8,9 +8,13 @@ export type State =
   | { name: "ParallelDiscussion"; agents: ReadonlyArray<AgentId> }
   | { name: "AwaitingUser" }
   | { name: "Build"; builder: AgentId }
+  | { name: "ParallelBuild"; agents: ReadonlyArray<AgentId> }
   | { name: "BuildDone"; builder: AgentId }
+  | { name: "ParallelBuildDone"; agents: ReadonlyArray<AgentId> }
   | { name: "Review"; reviewer: AgentId }
-  | { name: "ReviewDone"; reviewer: AgentId; approved: boolean };
+  | { name: "ParallelReview"; agents: ReadonlyArray<AgentId> }
+  | { name: "ReviewDone"; reviewer: AgentId; approved: boolean }
+  | { name: "ParallelReviewDone"; agents: ReadonlyArray<AgentId>; approved: boolean };
 
 export type Event =
   | { type: "userSent"; opener: AgentId; parallel?: boolean }
@@ -19,9 +23,12 @@ export type Event =
   | { type: "closerDone" }
   | { type: "parallelDone" }
   | { type: "assignBuilder"; builder: AgentId }
+  | { type: "assignBuilders"; agents: ReadonlyArray<AgentId> }
   | { type: "buildDone" }
+  | { type: "parallelBuildDone" }
   | { type: "requestReview" }
   | { type: "reviewDone"; approved: boolean }
+  | { type: "parallelReviewDone"; approved: boolean }
   | { type: "handBack" }
   | { type: "stop" };
 
@@ -34,7 +41,9 @@ export function isInFlight(state: State): boolean {
     state.name === "Closer" ||
     state.name === "ParallelDiscussion" ||
     state.name === "Build" ||
-    state.name === "Review"
+    state.name === "ParallelBuild" ||
+    state.name === "Review" ||
+    state.name === "ParallelReview"
   );
 }
 
@@ -65,10 +74,16 @@ export function transition(state: State, event: Event): State {
       if (event.type === "userSent") return { name: "Opener", opener: event.opener, reactor: otherAgent(event.opener) };
       if (event.type === "assignBuilder")
         return { name: "Build", builder: event.builder };
+      if (event.type === "assignBuilders")
+        return { name: "ParallelBuild", agents: event.agents };
       return state;
     case "Build":
       if (event.type === "buildDone")
         return { name: "BuildDone", builder: state.builder };
+      return state;
+    case "ParallelBuild":
+      if (event.type === "parallelBuildDone")
+        return { name: "ParallelBuildDone", agents: state.agents };
       return state;
     case "BuildDone":
       if (event.type === "userSent" && event.parallel) return { name: "ParallelDiscussion", agents: ["codex", "claude"] };
@@ -76,15 +91,31 @@ export function transition(state: State, event: Event): State {
       if (event.type === "requestReview")
         return { name: "Review", reviewer: otherAgent(state.builder) };
       return state;
+    case "ParallelBuildDone":
+      if (event.type === "userSent" && event.parallel) return { name: "ParallelDiscussion", agents: ["codex", "claude"] };
+      if (event.type === "userSent") return { name: "Opener", opener: event.opener, reactor: otherAgent(event.opener) };
+      if (event.type === "requestReview")
+        return { name: "ParallelReview", agents: state.agents };
+      return state;
     case "Review":
       if (event.type === "reviewDone")
         return { name: "ReviewDone", reviewer: state.reviewer, approved: event.approved };
+      return state;
+    case "ParallelReview":
+      if (event.type === "parallelReviewDone")
+        return { name: "ParallelReviewDone", agents: state.agents, approved: event.approved };
       return state;
     case "ReviewDone":
       if (event.type === "userSent" && event.parallel) return { name: "ParallelDiscussion", agents: ["codex", "claude"] };
       if (event.type === "userSent") return { name: "Opener", opener: event.opener, reactor: otherAgent(event.opener) };
       if (event.type === "handBack")
         return { name: "Build", builder: otherAgent(state.reviewer) };
+      return state;
+    case "ParallelReviewDone":
+      if (event.type === "userSent" && event.parallel) return { name: "ParallelDiscussion", agents: ["codex", "claude"] };
+      if (event.type === "userSent") return { name: "Opener", opener: event.opener, reactor: otherAgent(event.opener) };
+      if (event.type === "handBack")
+        return { name: "ParallelBuild", agents: state.agents };
       return state;
   }
 }

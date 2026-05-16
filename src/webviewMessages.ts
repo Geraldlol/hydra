@@ -18,6 +18,7 @@ export type WebviewMessage =
   | { type: "setObjective"; text: string }
   | { type: "stop" }
   | { type: "assignBuilder"; builder: AgentId }
+  | { type: "assignParallelBuilders" }
   | { type: "requestReview" }
   | { type: "runVerification" }
   | { type: "openVerification" }
@@ -39,6 +40,7 @@ export type WebviewMessage =
   | { type: "archiveAndClearRoom" }
   | { type: "openDecisions" }
   | { type: "chooseModel" }
+  | { type: "chooseEffort" }
   | { type: "openNativeTerminals" }
   | {
       type: "pokeNativeTerminal";

@@ -227,6 +227,12 @@ interface PreparedOneShotSpawn {
   suppressLiveStdout: boolean;
 }
 
+interface QueuedUserMessage {
+  text: string;
+  opener: AgentId;
+  timestamp: string;
+}
+
 export class HydraRoomPanel {
   private static readonly viewType = "hydraRoom.panel";
   private static instance: HydraRoomPanel | undefined;
@@ -257,6 +263,8 @@ export class HydraRoomPanel {
   private nativeActions: NativeActionReceipt[] = [];
   private workQueueDispositions: WorkQueueDisposition[] = [];
   private latestDoctorReport: DoctorReport | undefined;
+  private queuedUserMessages: QueuedUserMessage[] = [];
+  private drainingQueuedUserMessages = false;
   private verificationRunning = false;
   private autopilotRunning = false;
   private autopilotSummary = "Not run";
@@ -423,11 +431,26 @@ export class HydraRoomPanel {
   async sendUserMessage(text: string, opener: AgentId = this.getFirstSpeaker()): Promise<void> {
     await this.ready();
     if (!this.workspaceReady) return;
-    if (!isSendable(this.state) || isInFlight(this.state) || this.terminalPokeInFlight) return;
+    if (this.terminalPokeInFlight) return;
     const trimmed = text.trim();
     if (!trimmed) return;
-    if (!this.autoAdvanceInProgress) this.autoAdvanceSendInstructionCount = 0;
     const selectedOpener = normalizeAgentId(opener, this.getFirstSpeaker());
+    if (isInFlight(this.state)) {
+      const queued = this.appendUserMessageToUi(trimmed);
+      this.queuedUserMessages.push({ text: trimmed, opener: selectedOpener, timestamp: queued.timestamp });
+      this.postState();
+      return;
+    }
+    if (!isSendable(this.state)) return;
+    if (!this.autoAdvanceInProgress) this.autoAdvanceSendInstructionCount = 0;
+    await this.startUserMessageTurn(trimmed, selectedOpener, { alreadyAppended: false });
+  }
+
+  private async startUserMessageTurn(
+    trimmed: string,
+    selectedOpener: AgentId,
+    options: { alreadyAppended: boolean }
+  ): Promise<void> {
     const parallel = shouldRunParallelDiscussion(trimmed);
     // Transition state synchronously BEFORE any await. A second concurrent
     // sendUserMessage hitting after this.ready() but during appendUserMessage
@@ -435,12 +458,13 @@ export class HydraRoomPanel {
     // currentAbort. Now the second call sees an in-flight discussion and bails at
     // isSendable.
     this.applyEvent({ type: "userSent", opener: selectedOpener, parallel });
-    await this.appendUserMessage(trimmed);
+    if (!options.alreadyAppended) await this.appendUserMessage(trimmed);
     if (parallel) {
       await this.runParallelDiscussionTurn(trimmed);
     } else {
       await this.runDiscussionTurn(selectedOpener, trimmed);
     }
+    await this.drainQueuedUserMessages();
   }
 
   async stop(): Promise<void> {
@@ -470,12 +494,26 @@ export class HydraRoomPanel {
     );
     this.applyEvent({ type: "assignBuilder", builder });
     await this.runBuildPhase(builder);
+    await this.drainQueuedUserMessages();
+  }
+
+  async assignParallelBuilders(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    if (this.state.name !== "AwaitingUser") return;
+    const agents: AgentId[] = ["codex", "claude"];
+    await this.appendSystemMessage(
+      "Codex and Claude assigned as parallel room builders. Hydra will dispatch both Build workers at once with the same room objective and transcript context."
+    );
+    this.applyEvent({ type: "assignBuilders", agents });
+    await this.runParallelBuildPhase(agents);
+    await this.drainQueuedUserMessages();
   }
 
   async requestReview(): Promise<void> {
     await this.ready();
     if (!this.workspaceReady) return;
-    if (this.state.name !== "BuildDone") return;
+    if (this.state.name !== "BuildDone" && this.state.name !== "ParallelBuildDone") return;
     if (!this.gitAvailable) {
       await this.appendSystemMessage(
         "Review unavailable: workspace is not a git repository. Returning to discussion — build edits remain in the working tree for manual review."
@@ -487,9 +525,20 @@ export class HydraRoomPanel {
       this.postState();
       return;
     }
-    const reviewer: AgentId = this.state.builder === "codex" ? "claude" : "codex";
+    let parallelAgents: AgentId[] | undefined;
+    let reviewer: AgentId | undefined;
+    if (this.state.name === "ParallelBuildDone") {
+      parallelAgents = [...this.state.agents];
+    } else {
+      reviewer = otherAgent(this.state.builder);
+    }
     this.applyEvent({ type: "requestReview" });
-    await this.runReviewPhase(reviewer);
+    if (parallelAgents) {
+      await this.runParallelReviewPhase(parallelAgents);
+    } else if (reviewer) {
+      await this.runReviewPhase(reviewer);
+    }
+    await this.drainQueuedUserMessages();
   }
 
   async runVerification(): Promise<void> {
@@ -584,11 +633,11 @@ export class HydraRoomPanel {
       await this.assignBuilder(action.builder);
       return;
     }
-    if (action.kind === "requestReview" && this.state.name === "BuildDone") {
+    if (action.kind === "requestReview" && (this.state.name === "BuildDone" || this.state.name === "ParallelBuildDone")) {
       await this.requestReview();
       return;
     }
-    if (action.kind === "handBack" && this.state.name === "ReviewDone") {
+    if (action.kind === "handBack" && (this.state.name === "ReviewDone" || this.state.name === "ParallelReviewDone")) {
       await this.handBack();
       return;
     }
@@ -602,10 +651,42 @@ export class HydraRoomPanel {
   async handBack(): Promise<void> {
     await this.ready();
     if (!this.workspaceReady) return;
-    if (this.state.name !== "ReviewDone") return;
-    const builder: AgentId = this.state.reviewer === "codex" ? "claude" : "codex";
+    if (this.state.name !== "ReviewDone" && this.state.name !== "ParallelReviewDone") return;
+    const previousState = this.state;
     this.applyEvent({ type: "handBack" });
-    await this.runBuildPhase(builder);
+    if (previousState.name === "ParallelReviewDone") {
+      await this.runParallelBuildPhase([...previousState.agents]);
+    } else {
+      const builder: AgentId = previousState.reviewer === "codex" ? "claude" : "codex";
+      await this.runBuildPhase(builder);
+    }
+    await this.drainQueuedUserMessages();
+  }
+
+  private async drainQueuedUserMessages(): Promise<void> {
+    if (this.drainingQueuedUserMessages) return;
+    this.drainingQueuedUserMessages = true;
+    try {
+      while (
+        this.queuedUserMessages.length > 0 &&
+        this.workspaceReady &&
+        !this.terminalPokeInFlight &&
+        !isInFlight(this.state) &&
+        isSendable(this.state)
+      ) {
+        const next = this.queuedUserMessages.shift();
+        if (!next) break;
+        await appendMessage(this.transcriptUri.fsPath, {
+          role: "user",
+          text: next.text,
+          timestamp: next.timestamp,
+        });
+        await this.startUserMessageTurn(next.text, next.opener, { alreadyAppended: true });
+      }
+    } finally {
+      this.drainingQueuedUserMessages = false;
+      this.postState();
+    }
   }
 
   async openTranscript(): Promise<void> {
@@ -942,8 +1023,8 @@ export class HydraRoomPanel {
       canStop: isInFlight(this.state) || this.terminalPokeInFlight || this.verificationRunning || this.autopilotRunning,
       canAcceptDefault: this.workspaceReady && !isInFlight(this.state) && !this.terminalPokeInFlight && this.currentDecisionAction().kind !== "none",
       canAssignBuilder: this.workspaceReady && this.state.name === "AwaitingUser",
-      canRequestReview: this.workspaceReady && this.state.name === "BuildDone" && this.gitAvailable,
-      canHandBack: this.workspaceReady && this.state.name === "ReviewDone" && !this.state.approved,
+      canRequestReview: this.workspaceReady && (this.state.name === "BuildDone" || this.state.name === "ParallelBuildDone") && this.gitAvailable,
+      canHandBack: this.workspaceReady && (this.state.name === "ReviewDone" || this.state.name === "ParallelReviewDone") && !this.state.approved,
       canRunVerification: this.workspaceReady && !isInFlight(this.state) && !this.terminalPokeInFlight && !this.verificationRunning,
       canPokeNativeTerminals: this.workspaceReady && !isInFlight(this.state) && !this.terminalPokeInFlight,
       needsCodexPath: checkFailed(this.latestDoctorReport, "codex-command"),
@@ -987,8 +1068,14 @@ export class HydraRoomPanel {
       case "assignClaude":
         await this.assignBuilder("claude");
         return;
+      case "assignParallelBuilders":
+        await this.assignParallelBuilders();
+        return;
       case "chooseModel":
         await this.chooseModel();
+        return;
+      case "chooseEffort":
+        await this.chooseEffort();
         return;
       case "requestReview":
         await this.requestReview();
@@ -1058,6 +1145,9 @@ export class HydraRoomPanel {
         return;
       case "changeCapabilityProfile":
         await this.changeCapabilityProfile();
+        return;
+      case "chooseEffort":
+        await this.chooseEffort();
         return;
       case "fixCodexPath":
         await this.fixAgentCommand("codex");
@@ -1730,6 +1820,7 @@ export class HydraRoomPanel {
       });
     }
     this.currentAbort = undefined;
+    this.queuedUserMessages = [];
     if (isInFlight(this.state)) this.applyEvent({ type: "stop" });
     this.setAgentStatus("codex", "idle", "Idle");
     this.setAgentStatus("claude", "idle", "Idle");
@@ -1985,13 +2076,63 @@ export class HydraRoomPanel {
     }
   }
 
+  private async runParallelBuildPhase(agents: AgentId[]): Promise<void> {
+    const ctrl = new AbortController();
+    this.currentAbort = ctrl;
+    const openedIds: string[] = [];
+    let promiseStarted = false;
+    try {
+      // Snapshot the transcript before opening pending bubbles so neither
+      // worker sees the other's empty pending message as context.
+      const transcriptForPrompt = this.buildPromptContext("build");
+      const calls: Promise<{ text: string; result: RunResult }>[] = [];
+      for (const agent of agents) {
+        const buildEnvelope = await this.buildPromptEnvelope({
+          agent,
+          otherAgent: otherAgent(agent),
+          phase: "build",
+          transcript: transcriptForPrompt,
+        });
+        await this.persistPromptEnvelope(buildEnvelope);
+        const messageId = this.openPendingMessage(agent, "build");
+        openedIds.push(messageId);
+        calls.push(this.callAgent(agent, "build", buildEnvelope.renderedPrompt, messageId, ctrl.signal));
+      }
+      this.postState();
+      promiseStarted = true;
+
+      const results = await Promise.all(calls);
+      if (ctrl.signal.aborted || results.some(({ result }) => didAgentFail(result))) {
+        this.applyEvent({ type: "stop" });
+      } else {
+        this.applyEvent({ type: "parallelBuildDone" });
+      }
+      this.currentAbort = undefined;
+      this.postState();
+      if (!ctrl.signal.aborted && results.every(({ result }) => !didAgentFail(result))) {
+        await this.afterSuccessfulBuild();
+      }
+    } finally {
+      if (!promiseStarted && openedIds.length > 0) {
+        const failure = agentCallFailureResult("Hydra parallel build aborted before this worker could be dispatched (internal error).");
+        for (const id of openedIds) {
+          await this.finalizePendingMessage(id, failure);
+        }
+      }
+      if (this.currentAbort === ctrl) {
+        this.currentAbort = undefined;
+        this.postState();
+      }
+    }
+  }
+
   private async afterSuccessfulBuild(): Promise<void> {
     if (!this.autoVerifyAfterBuild()) return;
     const result = await this.runVerificationInternal("afterBuild");
     if (
       verificationPassed(result) &&
       this.autoRequestReviewAfterPassingVerification() &&
-      this.state.name === "BuildDone"
+      (this.state.name === "BuildDone" || this.state.name === "ParallelBuildDone")
     ) {
       await this.appendSystemMessage("Hydra auto-review started because verification passed after build.");
       await this.requestReview();
@@ -2037,7 +2178,7 @@ export class HydraRoomPanel {
       await this.assignBuilder(action.builder);
       return;
     }
-    if (action.kind === "requestReview" && this.state.name === "BuildDone") {
+    if (action.kind === "requestReview" && (this.state.name === "BuildDone" || this.state.name === "ParallelBuildDone")) {
       this.autoAdvanceSendInstructionCount = 0;
       this.acceptedDefaultDecisionTimestamp = action.sourceTimestamp;
       await this.appendSystemMessage(
@@ -2046,7 +2187,7 @@ export class HydraRoomPanel {
       await this.requestReview();
       return;
     }
-    if (action.kind === "handBack" && this.state.name === "ReviewDone") {
+    if (action.kind === "handBack" && (this.state.name === "ReviewDone" || this.state.name === "ParallelReviewDone")) {
       this.autoAdvanceSendInstructionCount = 0;
       this.acceptedDefaultDecisionTimestamp = action.sourceTimestamp;
       await this.appendSystemMessage(
@@ -2136,6 +2277,63 @@ export class HydraRoomPanel {
       if (reviewId && !reviewIdFinalized) {
         const failure = agentCallFailureResult("Hydra review turn aborted before the reviewer could finish (internal error).");
         await this.finalizePendingMessage(reviewId, failure);
+      }
+      if (this.currentAbort === ctrl) {
+        this.currentAbort = undefined;
+        this.postState();
+      }
+    }
+  }
+
+  private async runParallelReviewPhase(reviewers: AgentId[]): Promise<void> {
+    const ctrl = new AbortController();
+    this.currentAbort = ctrl;
+    const openedIds: string[] = [];
+    let promiseStarted = false;
+    try {
+      const transcriptForPrompt = this.buildPromptContext("review");
+      const diff = await captureGitDiff(this.workspaceRoot, this.diffMaxLines());
+      if (diff === null) {
+        await this.appendSystemMessage("[git diff failed; cannot review]");
+        this.applyEvent({ type: "parallelReviewDone", approved: false });
+        this.currentAbort = undefined;
+        this.postState();
+        return;
+      }
+      const currentHead = this.gitAvailable ? await captureGitHead(this.workspaceRoot) : undefined;
+      const calls: Promise<{ text: string; result: RunResult }>[] = [];
+      for (const reviewer of reviewers) {
+        const reviewEnvelope = await this.buildPromptEnvelope({
+          agent: reviewer,
+          otherAgent: otherAgent(reviewer),
+          phase: "review",
+          transcript: transcriptForPrompt,
+          diff,
+          verification: verificationAsReviewContext(this.latestVerification(), currentHead),
+        });
+        await this.persistPromptEnvelope(reviewEnvelope);
+        const messageId = this.openPendingMessage(reviewer, "review");
+        openedIds.push(messageId);
+        calls.push(this.callAgent(reviewer, "review", reviewEnvelope.renderedPrompt, messageId, ctrl.signal));
+      }
+      this.postState();
+      promiseStarted = true;
+
+      const results = await Promise.all(calls);
+      if (ctrl.signal.aborted || results.some(({ result }) => didAgentFail(result))) {
+        this.applyEvent({ type: "stop" });
+      } else {
+        const approved = results.every(({ text }) => APPROVED_SENTINEL_RE.test(text));
+        this.applyEvent({ type: "parallelReviewDone", approved });
+      }
+      this.currentAbort = undefined;
+      this.postState();
+    } finally {
+      if (!promiseStarted && openedIds.length > 0) {
+        const failure = agentCallFailureResult("Hydra parallel review aborted before this reviewer could finish (internal error).");
+        for (const id of openedIds) {
+          await this.finalizePendingMessage(id, failure);
+        }
       }
       if (this.currentAbort === ctrl) {
         this.currentAbort = undefined;
@@ -2779,11 +2977,32 @@ export class HydraRoomPanel {
       });
     }
 
+    if (this.state.name === "ParallelBuildDone" && this.gitAvailable) {
+      const diff = await captureGitDiff(this.workspaceRoot, this.diffMaxLines());
+      return await this.buildPromptEnvelope({
+        agent: "codex",
+        otherAgent: "claude",
+        phase: "review",
+        transcript: this.buildPromptContext("review"),
+        diff: diff ?? "[git diff failed; preview cannot include diff]",
+        verification: verificationAsReviewContext(this.latestVerification()),
+      });
+    }
+
     if (this.state.name === "ReviewDone" && !this.state.approved && !draftText.trim()) {
       const builder: AgentId = this.state.reviewer === "codex" ? "claude" : "codex";
       return await this.buildPromptEnvelope({
         agent: builder,
         otherAgent: this.state.reviewer,
+        phase: "build",
+        transcript: this.buildPromptContext("build"),
+      });
+    }
+
+    if (this.state.name === "ParallelReviewDone" && !this.state.approved && !draftText.trim()) {
+      return await this.buildPromptEnvelope({
+        agent: "codex",
+        otherAgent: "claude",
         phase: "build",
         transcript: this.buildPromptContext("build"),
       });
@@ -2833,7 +3052,7 @@ export class HydraRoomPanel {
         sourceTimestamp: action.sourceTimestamp,
       };
     }
-    if (action.kind === "requestReview" && this.state.name !== "BuildDone") {
+    if (action.kind === "requestReview" && this.state.name !== "BuildDone" && this.state.name !== "ParallelBuildDone") {
       return {
         kind: "sendInstruction",
         label: "Accept Default",
@@ -2842,7 +3061,7 @@ export class HydraRoomPanel {
         sourceTimestamp: action.sourceTimestamp,
       };
     }
-    if (action.kind === "handBack" && this.state.name !== "ReviewDone") {
+    if (action.kind === "handBack" && this.state.name !== "ReviewDone" && this.state.name !== "ParallelReviewDone") {
       return {
         kind: "sendInstruction",
         label: "Accept Default",
@@ -2883,10 +3102,18 @@ export class HydraRoomPanel {
     switch (this.state.name) {
       case "Build":
         return this.state.builder === agent ? "build" : "opener";
+      case "ParallelBuild":
+        return "build";
       case "BuildDone":
         return otherAgent(this.state.builder) === agent ? "review" : "build";
+      case "ParallelBuildDone":
+        return "review";
       case "Review":
         return this.state.reviewer === agent ? "review" : "opener";
+      case "ParallelReview":
+        return "review";
+      case "ParallelReviewDone":
+        return "build";
       case "ReviewDone":
         return this.state.reviewer === agent ? "review" : "build";
       case "ParallelDiscussion":
@@ -3356,7 +3583,7 @@ export class HydraRoomPanel {
     this.agentStatuses[agent] = { state, detail };
   }
 
-  private async appendUserMessage(text: string): Promise<void> {
+  private appendUserMessageToUi(text: string): UiMessage {
     const id = `u-${Date.now()}`;
     const msg: UiMessage = {
       id,
@@ -3365,6 +3592,11 @@ export class HydraRoomPanel {
       timestamp: new Date().toISOString(),
     };
     this.messages.push(msg);
+    return msg;
+  }
+
+  private async appendUserMessage(text: string): Promise<void> {
+    const msg = this.appendUserMessageToUi(text);
     await appendMessage(this.transcriptUri.fsPath, {
       role: "user",
       text,
@@ -3422,6 +3654,9 @@ export class HydraRoomPanel {
           break;
         case "assignBuilder":
           await this.assignBuilder(msg.builder);
+          break;
+        case "assignParallelBuilders":
+          await this.assignParallelBuilders();
           break;
         case "requestReview":
           await this.requestReview();
@@ -3613,16 +3848,17 @@ export class HydraRoomPanel {
         messages: this.messages,
         phaseLabel: phaseLabel(this.state),
         isIdle: this.state.name === "Idle",
-        canSend: this.workspaceReady && isSendable(this.state) && !this.terminalPokeInFlight,
+        canSend: this.workspaceReady && !this.terminalPokeInFlight && (isSendable(this.state) || isInFlight(this.state)),
         canStop,
+        queuedUserMessageCount: this.queuedUserMessages.length,
         canPokeNativeTerminals: this.workspaceReady && !isInFlight(this.state) && !this.terminalPokeInFlight,
         canClearNativeActions: this.workspaceReady && !this.terminalPokeInFlight,
         canAssignBuilder: this.workspaceReady && this.state.name === "AwaitingUser",
-        canRequestReview: this.workspaceReady && this.state.name === "BuildDone" && this.gitAvailable,
+        canRequestReview: this.workspaceReady && (this.state.name === "BuildDone" || this.state.name === "ParallelBuildDone") && this.gitAvailable,
         canRunVerification: this.workspaceReady && !isInFlight(this.state) && !this.terminalPokeInFlight && !this.verificationRunning,
         canPreviewPrompt: this.workspaceReady && !isInFlight(this.state) && !this.terminalPokeInFlight,
         canArchiveRoom: this.workspaceReady && !canStop,
-        canHandBack: this.workspaceReady && this.state.name === "ReviewDone" && !this.state.approved,
+        canHandBack: this.workspaceReady && (this.state.name === "ReviewDone" || this.state.name === "ParallelReviewDone") && !this.state.approved,
         canOpenFolder: !this.workspaceReady,
         suggestedBuilder: this.state.name === "AwaitingUser" ? this.suggestedBuilder : undefined,
         firstSpeaker: this.getFirstSpeaker(),
@@ -3702,7 +3938,9 @@ function isSendable(state: State): boolean {
     state.name === "Idle" ||
     state.name === "AwaitingUser" ||
     state.name === "BuildDone" ||
-    state.name === "ReviewDone"
+    state.name === "ParallelBuildDone" ||
+    state.name === "ReviewDone" ||
+    state.name === "ParallelReviewDone"
   );
 }
 
@@ -3715,8 +3953,15 @@ function phaseLabel(state: State): string {
     case "ParallelDiscussion": return "Discussion - Codex and Claude running in parallel";
     case "AwaitingUser": return "Awaiting your reply";
     case "Build": return `Build — ${AGENT_NAMES[state.builder]} is editing`;
+    case "ParallelBuild": return "Build — Codex and Claude editing in parallel";
     case "BuildDone": return `Build done — request review`;
+    case "ParallelBuildDone": return "Parallel build done — request review";
     case "Review": return `Review — ${AGENT_NAMES[state.reviewer]} is reading the diff`;
+    case "ParallelReview": return "Review — Codex and Claude reading the diff";
+    case "ParallelReviewDone":
+      return state.approved
+        ? "Parallel review approved â€” you can push when ready"
+        : "Parallel review raised blockers â€” reply or hand back";
     case "ReviewDone":
       return state.approved
         ? "Review approved — you can push when ready"

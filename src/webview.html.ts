@@ -548,8 +548,14 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       color: var(--vscode-button-foreground);
       border-color: var(--error);
     }
-    .app.in-flight #sendBtn { display: none; }
     .app.in-flight #stopBtn { display: block; }
+    .workflow-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+      grid-column: 1 / -1;
+    }
     .action-bank { display: none; }
 
     .overlay {
@@ -908,16 +914,19 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
           <button id="commandCenterBtn" class="secondary" type="button" title="Open Command Center (Ctrl+K)">Commands</button>
           <button id="nativeActionBtn" class="secondary hidden" type="button" title="Choose a direct native terminal action">Native Action...</button>
         </div>
+        <div id="workflowActions" class="workflow-actions">
+          <button id="assignCodexBtn" class="secondary hidden" type="button">Assign Builder: Codex</button>
+          <button id="assignClaudeBtn" class="secondary hidden" type="button">Assign Builder: Claude</button>
+          <button id="assignBothBtn" class="secondary hidden" type="button">Assign Builders: Both</button>
+          <button id="reviewBtn" class="secondary hidden" type="button">Request Review</button>
+          <button id="handBackBtn" class="secondary hidden" type="button">Hand back to Builder</button>
+          <button id="resetTurnBtn" class="secondary hidden" type="button">Reset Turn</button>
+        </div>
 
         <div class="action-bank" aria-hidden="true">
           <button id="setObjectiveBtn" class="secondary" type="button">Pin Objective</button>
           <button id="previewPromptBtn" class="secondary" type="button">Preview Prompt</button>
           <button id="openLastPromptBtn" class="secondary" type="button">Open Last Prompt</button>
-          <button id="assignCodexBtn" class="secondary hidden" type="button">Assign Builder: Codex</button>
-          <button id="assignClaudeBtn" class="secondary hidden" type="button">Assign Builder: Claude</button>
-          <button id="reviewBtn" class="secondary hidden" type="button">Request Review</button>
-          <button id="handBackBtn" class="secondary hidden" type="button">Hand back to Builder</button>
-          <button id="resetTurnBtn" class="secondary hidden" type="button">Reset Turn</button>
           <button id="archiveChatBtn" class="secondary" type="button">Archive Chat</button>
           <button id="nativeTerminalsBtn" class="secondary hidden" type="button">Use Safe One-Shot</button>
           <button id="openNativeTerminalsBtn" class="secondary hidden" type="button">Open Terminals</button>
