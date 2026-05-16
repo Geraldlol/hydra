@@ -2,6 +2,7 @@ import type { AgentId } from "./phases";
 import type { Phase } from "./prompts";
 import type { AuthorityClassification } from "./authority";
 import type { CliProfile } from "./cli";
+import { claudePrintArgs, claudeReadsHydraPromptFromStdin } from "./claudeCli";
 
 export type CapabilityProfileId =
   | "safeDiscussion"
@@ -273,17 +274,17 @@ function claudeArgsForProfile(profile: ConfigurableCapabilityProfileId): string[
   switch (profile) {
     case "safeDiscussion":
     case "nativeReview":
-      return ["-p", "--permission-mode", "default", "--add-dir", "${workspaceFolder}"];
+      return [...claudePrintArgs(), "--permission-mode", "default", "--add-dir", "${workspaceFolder}"];
     case "nativeDiscussion":
     case "nativeBuild":
-      return ["-p", "--permission-mode", "acceptEdits", "--add-dir", "${workspaceFolder}"];
+      return [...claudePrintArgs(), "--permission-mode", "acceptEdits", "--add-dir", "${workspaceFolder}"];
     case "fullNative":
-      return ["-p", "--permission-mode", "bypassPermissions", "--add-dir", "${workspaceFolder}"];
+      return [...claudePrintArgs(), "--permission-mode", "bypassPermissions", "--add-dir", "${workspaceFolder}"];
     case "custom":
       return undefined;
   }
 }
 
 function readsStdin(args: string[]): boolean {
-  return args.includes("-") || args.includes("--print") || args.includes("-p");
+  return args.includes("-") || claudeReadsHydraPromptFromStdin(args);
 }

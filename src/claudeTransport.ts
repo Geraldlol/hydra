@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import type { AgentSpawn } from "./agents";
+import { claudeInvocationMode } from "./claudeCli";
 
 /**
  * Claude-specific flag-injection helpers. Like codexTransport, each helper
@@ -11,7 +12,7 @@ export function shouldUseClaudeStreamJson(spawn: AgentSpawn): boolean {
   // stream-json output is only meaningful in print mode (`-p` / `--print`)
   // and only when the user hasn't explicitly picked a different
   // --output-format value.
-  if (!spawn.args.includes("-p") && !spawn.args.includes("--print")) return false;
+  if (claudeInvocationMode(spawn) !== "print") return false;
   if (spawn.args.includes("--output-format")) return false;
   return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("claudeStreamJson", true);
 }

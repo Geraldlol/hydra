@@ -1,4 +1,5 @@
 import type { AgentId } from "./phases";
+import { claudeUsesPrintModeArgs } from "./claudeCli";
 import type { Phase } from "./prompts";
 
 export type AuthorityLevel = "readOnly" | "workspaceWrite" | "fullNative" | "unknown";
@@ -105,7 +106,7 @@ export function validateNativeArgs(agent: AgentId, args: string[]): string[] {
     // panel.ts auto-injects --verbose when Hydra wraps the spawn, but
     // user-supplied args are passed raw -- catch the typo before runtime.
     const outputFormat = readLastFlagValue(args, "--output-format");
-    const printMode = args.includes("--print") || args.includes("-p");
+    const printMode = claudeUsesPrintModeArgs(args);
     if (outputFormat === "stream-json" && printMode && !args.includes("--verbose")) {
       warnings.push(
         "Claude `--print --output-format=stream-json` requires `--verbose`. The CLI will exit 1 with this combination."
