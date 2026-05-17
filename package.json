@@ -2,7 +2,7 @@
   "name": "vscode-hydra-room",
   "displayName": "Hydra",
   "description": "Three-way collaboration room for the user, Codex CLI, and Claude Code CLI inside VS Code.",
-  "version": "0.4.9",
+  "version": "0.4.10",
   "publisher": "local-tools",
   "license": "MIT",
   "private": false,
