@@ -50,6 +50,10 @@ export interface TerminalBridgeSelfTestResult {
   };
 }
 
+export interface TerminalBridgeRunResult extends RunResult {
+  logPath: string;
+  replyPath: string;
+}
 
 export class TerminalBridge {
   private readonly terminals = new Map<AgentId, ManagedTerminal>();
@@ -127,8 +131,9 @@ export class TerminalBridge {
     timeoutMs: number,
     signal: AbortSignal,
     onChunk?: (chunk: string) => void
-  ): Promise<RunResult> {
-    return (await this.callAgentWithPaths(agent, phase, spawn, prompt, timeoutMs, signal, onChunk)).result;
+  ): Promise<TerminalBridgeRunResult> {
+    const { result, paths } = await this.callAgentWithPaths(agent, phase, spawn, prompt, timeoutMs, signal, onChunk);
+    return { ...result, logPath: paths.logPath, replyPath: paths.replyPath };
   }
 
   async selfTest(timeoutMs: number, signal: AbortSignal = new AbortController().signal): Promise<TerminalBridgeSelfTestResult> {

@@ -20,3 +20,18 @@ describe("codex transport source contracts", () => {
     assert.doesNotMatch(guard, /spawn\.args\.includes\("-o"\)/);
   });
 });
+
+describe("terminal bridge usage source contracts", () => {
+  test("terminal bridge usage is extracted from the raw log output", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    const branchStart = source.indexOf("if (forceTerminalBridge || this.transportMode() === \"terminalBridge\")");
+    const branchEnd = source.indexOf("const prepared = await this.prepareOneShotRequestFiles", branchStart);
+    assert.ok(branchStart >= 0 && branchEnd > branchStart);
+
+    const branch = source.slice(branchStart, branchEnd);
+    assert.match(branch, /const terminalPrepared = this\.prepareTerminalBridgeSpawn\(agent, spawn\)/);
+    assert.match(branch, /result: await this\.terminalBridgeUsageResult\(normalized\)/);
+    assert.match(branch, /outputMode: terminalPrepared\.outputMode/);
+    assert.doesNotMatch(branch, /outputMode: "passthrough"/);
+  });
+});

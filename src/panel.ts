@@ -2476,6 +2476,7 @@ export class HydraRoomPanel {
         if (!this.terminalBridge) {
           return agentCallFailureResult("Terminal bridge is not available because no workspace terminal was initialized.");
         }
+        const terminalPrepared = this.prepareTerminalBridgeSpawn(agent, spawn);
         await this.appendAgentCallTrace({
           id: traceId,
           event: "started",
@@ -2483,30 +2484,38 @@ export class HydraRoomPanel {
           agent,
           phase,
           transport: "terminalBridge",
-          cwd: spawn.cwd,
-          command: spawn.command,
-          args: spawn.args,
-          envKeys: Object.keys(spawn.env ?? {}).sort(),
+          cwd: terminalPrepared.spawn.cwd,
+          command: terminalPrepared.spawn.command,
+          args: terminalPrepared.spawn.args,
+          envKeys: Object.keys(terminalPrepared.spawn.env ?? {}).sort(),
           timeoutMs: timeout,
           promptChars: prompt.length,
           promptSha256: sha256(prompt),
+          outputMode: terminalPrepared.outputMode,
         });
         const result = await this.terminalBridge.callAgent(
           agent,
           phase,
-          spawn,
+          terminalPrepared.spawn,
           prompt,
           timeout,
           signal
         );
+        const normalized = await this.normalizeTerminalBridgeResult(terminalPrepared.outputMode, result);
         const m = this.messages.find((x) => x.id === messageId);
-        if (m && result.stdout) {
-          m.text += result.stdout;
-          this.panel.webview.postMessage({ type: "chunk", messageId, text: result.stdout });
+        if (m && normalized.stdout) {
+          m.text += normalized.stdout;
+          this.panel.webview.postMessage({ type: "chunk", messageId, text: normalized.stdout });
         }
-        await this.appendAgentCallTrace(completedAgentCallTrace(traceId, agent, phase, "terminalBridge", startedAt, result));
-        await this.extractAndRecordUsage({ agent, phase, requestId: traceId, result, outputMode: "passthrough" });
-        return result;
+        await this.appendAgentCallTrace(completedAgentCallTrace(traceId, agent, phase, "terminalBridge", startedAt, normalized));
+        await this.extractAndRecordUsage({
+          agent,
+          phase,
+          requestId: traceId,
+          result: await this.terminalBridgeUsageResult(normalized),
+          outputMode: terminalPrepared.outputMode,
+        });
+        return normalized;
       }
 
       const prepared = await this.prepareOneShotRequestFiles(agent, phase, spawn, prompt);
@@ -2628,6 +2637,19 @@ export class HydraRoomPanel {
     };
   }
 
+  private prepareTerminalBridgeSpawn(
+    agent: AgentId,
+    spawn: AgentSpawn
+  ): { spawn: AgentSpawn; outputMode: "plain" | "claudeStreamJson" | "codexJson" } {
+    if (agent === "claude" && shouldUseClaudeStreamJson(spawn)) {
+      return { spawn: withClaudeStreamJsonArgs(spawn), outputMode: "claudeStreamJson" };
+    }
+    if (agent === "codex" && shouldUseCodexJson(spawn)) {
+      return { spawn: withCodexJsonArgs(spawn), outputMode: "codexJson" };
+    }
+    return { spawn, outputMode: "plain" };
+  }
+
   private async normalizeOneShotResult(prepared: PreparedOneShotSpawn, result: RunResult): Promise<RunResult> {
     let stdout = result.stdout;
     if (prepared.outputMode === "claudeStreamJson") {
@@ -2646,6 +2668,37 @@ export class HydraRoomPanel {
       }
     }
     return { ...result, stdout };
+  }
+
+  private async normalizeTerminalBridgeResult(
+    outputMode: "plain" | "claudeStreamJson" | "codexJson",
+    result: RunResult & { logPath?: string }
+  ): Promise<RunResult & { logPath?: string; replyPath?: string }> {
+    let stdout = result.stdout;
+    const raw = await this.terminalBridgeRawOutput(result);
+    if (outputMode === "claudeStreamJson") {
+      const text = summarizeClaudeEvents(parseClaudeEventStream(raw)).lastAssistantText;
+      stdout = (text ?? "").trimEnd() || result.stdout;
+    } else if (outputMode === "codexJson") {
+      const text = summarizeCodexEvents(parseCodexEventStream(raw)).lastAgentMessage;
+      stdout = (text ?? "").trimEnd() || result.stdout;
+    }
+    return { ...result, stdout };
+  }
+
+  private async terminalBridgeUsageResult(result: RunResult & { logPath?: string }): Promise<RunResult> {
+    return { ...result, stdout: await this.terminalBridgeRawOutput(result) };
+  }
+
+  private async terminalBridgeRawOutput(result: RunResult & { logPath?: string }): Promise<string> {
+    if (!result.logPath) return result.stdout;
+    try {
+      const raw = await fs.readFile(result.logPath, "utf8");
+      return raw || result.stdout;
+    } catch {
+      // Terminal logs are best-effort diagnostics; fall back to the parsed reply.
+      return result.stdout;
+    }
   }
 
   private buildSpawn(agent: AgentId, phase: Phase): AgentSpawn {
