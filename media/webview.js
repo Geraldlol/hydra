@@ -39,6 +39,7 @@ const decisionNeeded = document.getElementById("decisionNeeded");
 const decisionBlockers = document.getElementById("decisionBlockers");
 const decisionBoard = document.getElementById("decisionBoard");
 const acceptDefaultBtn = document.getElementById("acceptDefaultBtn");
+const autoAdvanceDefaultsBtn = document.getElementById("autoAdvanceDefaultsBtn");
 const openerBtn = document.getElementById("openerBtn");
 const commandCenterBtn = document.getElementById("commandCenterBtn");
 const setObjectiveBtn = document.getElementById("setObjectiveBtn");
@@ -106,7 +107,15 @@ const openDecisionsBtn = document.getElementById("openDecisionsBtn");
 const openNativeActionsFooterBtn = document.getElementById("openNativeActionsFooterBtn");
 const decisionRail = document.getElementById("decisionRail");
 const usageRail = document.getElementById("usageRail");
+const usagePanelCount = document.getElementById("usagePanelCount");
+const usageSummary = document.getElementById("usageSummary");
+const usageBoard = document.getElementById("usageBoard");
 const modelRail = document.getElementById("modelRail");
+if (usageRail) {
+  const open = () => openPanel("usage");
+  usageRail.addEventListener("click", open);
+  usageRail.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } });
+}
 if (modelRail) {
   const open = () => vscode.postMessage({ type: "chooseModel" });
   modelRail.addEventListener("click", open);
@@ -137,6 +146,7 @@ const ACTIONS = [
   { id: "open-last-prompt", group: "Objective", name: "Open Last Prompt", what: "Reopen the latest persisted prompt envelope", run: () => openLastPromptBtn.click(), enabled: () => !openLastPromptBtn.disabled },
   { id: "archive-chat", group: "Objective", name: "Archive Chat", what: "Archive transcript and clear room", run: () => archiveChatBtn.click(), enabled: () => !archiveChatBtn.disabled },
   { id: "accept-default", group: "Workflow", name: "Accept Default", what: "Run the latest decision default", run: () => acceptDefaultBtn.click(), enabled: () => !acceptDefaultBtn.disabled },
+  { id: "toggle-auto-accept-default", group: "Workflow", name: "Toggle Auto Accept Default", what: "Turn automatic default acceptance on or off", run: () => autoAdvanceDefaultsBtn.click(), enabled: () => !autoAdvanceDefaultsBtn.disabled },
   { id: "assign-codex", group: "Workflow", name: "Assign Builder: Codex", what: "Let Codex edit files", run: () => assignCodexBtn.click(), enabled: () => !assignCodexBtn.classList.contains("hidden") && !assignCodexBtn.disabled },
   { id: "assign-claude", group: "Workflow", name: "Assign Builder: Claude", what: "Let Claude edit files", run: () => assignClaudeBtn.click(), enabled: () => !assignClaudeBtn.classList.contains("hidden") && !assignClaudeBtn.disabled },
   { id: "assign-both", group: "Workflow", name: "Assign Builders: Both", what: "Run Codex and Claude as parallel Build workers", run: () => assignBothBtn.click(), enabled: () => !assignBothBtn.classList.contains("hidden") && !assignBothBtn.disabled },
@@ -157,6 +167,7 @@ const ACTIONS = [
   { id: "open-queue", group: "Panels", name: "Open Work Queue", what: "Inspect queued follow-ups", run: () => openPanel("queue") },
   { id: "open-verify", group: "Panels", name: "Open Verification Details", what: "Inspect verification status", run: () => openPanel("verify") },
   { id: "open-decisions-panel", group: "Panels", name: "Open Decisions Panel", what: "Inspect decision packets", run: () => openPanel("decisions") },
+  { id: "open-usage-panel", group: "Panels", name: "Open Usage Panel", what: "Inspect session tokens, cache, reasoning, and estimated cost", run: () => openPanel("usage") },
   { id: "open-terminal-panel", group: "Panels", name: "Open Terminal Sessions Panel", what: "Inspect terminal sessions", run: () => openPanel("term") },
   { id: "toggle-ribbons", group: "Panels", name: "Toggle Status Ribbons", what: "Minimize or restore the status ribbons above the composer", run: () => toggleRibbonsBtn.click() },
   { id: "open-objective", group: "Files", name: "Open Objective", what: "Open the pinned room objective file", run: () => vscode.postMessage({ type: "openObjective" }), enabled: () => !lastState.canOpenFolder },
@@ -168,6 +179,7 @@ const ACTIONS = [
   { id: "session-brief", group: "Files", name: "Session Brief", what: "Open the current session brief", run: () => openSessionBriefBtn.click(), enabled: () => !openSessionBriefBtn.disabled },
   { id: "choose-model", group: "Settings", name: "Choose Model", what: "Pick Codex or Claude model overrides", run: () => vscode.postMessage({ type: "chooseModel" }), enabled: () => !lastState.canOpenFolder },
   { id: "choose-effort", group: "Settings", name: "Choose Thinking Level", what: "Pick Codex reasoning or Claude effort overrides", run: () => vscode.postMessage({ type: "chooseEffort" }), enabled: () => !lastState.canOpenFolder },
+  { id: "test-telegram", group: "Settings", name: "Send Test Telegram", what: "Verify Telegram decision notifications", run: () => vscode.postMessage({ type: "testTelegram" }), enabled: () => !lastState.canOpenFolder },
   { id: "change-profile", group: "Settings", name: "Change Capability Profile", what: "Pick safe, native build, review, full-native, or custom CLI profiles", run: () => profileBtn.click(), enabled: () => !profileBtn.disabled },
   { id: "fix-codex", group: "Setup", name: "Fix Codex Path", what: "Update the configured Codex CLI command", run: () => fixCodexBtn.click(), enabled: () => !!lastState.needsCodexPath },
   { id: "fix-claude", group: "Setup", name: "Fix Claude Path", what: "Update the configured Claude CLI command", run: () => fixClaudeBtn.click(), enabled: () => !!lastState.needsClaudePath },
@@ -233,6 +245,7 @@ assignClaudeBtn.addEventListener("click", () => vscode.postMessage({ type: "assi
 assignBothBtn.addEventListener("click", () => vscode.postMessage({ type: "assignParallelBuilders" }));
 reviewBtn.addEventListener("click", () => vscode.postMessage({ type: "requestReview" }));
 acceptDefaultBtn.addEventListener("click", () => vscode.postMessage({ type: "acceptDefaultDecision" }));
+autoAdvanceDefaultsBtn.addEventListener("click", () => vscode.postMessage({ type: "toggleAutoAdvanceActionableDefaults" }));
 handBackBtn.addEventListener("click", () => vscode.postMessage({ type: "handBack" }));
 nativeTerminalsBtn.addEventListener("click", () => vscode.postMessage({ type: transport === "terminalBridge" ? "useOneShotTransport" : "useTerminalBridge" }));
 openNativeTerminalsBtn.addEventListener("click", () => vscode.postMessage({ type: "openNativeTerminals" }));
@@ -357,8 +370,9 @@ function renderState(state) {
   renderNativeActions(state);
   renderWorkQueue(state);
   renderDecision(state.latestDecision, state.decisionsCount || 0, state.latestDecisionRisky, !!state.latestDecisionAccepted);
+  renderAutoAdvanceDefaults(!!state.autoAdvanceActionableDefaults);
   renderDecisionAction(state.decisionAction, !!state.canAcceptDefault, !!state.latestDecisionAccepted, !!state.canStop);
-  renderSessionUsage(state.sessionUsage);
+  renderSessionUsage(state.sessionUsage, state.weeklyUsage);
   renderModels(state.models, state.efforts);
   renderProfiles(state.capabilityProfiles);
   renderDecisionBoard(state.recentDecisions || []);
@@ -815,22 +829,108 @@ function renderProfiles(profiles) {
   profileBtn.textContent = "profiles: C " + claude.text + " | Cx " + codex.text;
   profileBtn.title = "Change capability profiles. Claude: " + claude.title + ". Codex: " + codex.title + ".";
 }
-function renderSessionUsage(u) {
+function renderSessionUsage(u, weekly) {
   if (!usageRail) return;
-  if (!u || !u.turns) {
-    usageRail.textContent = "session: 0 turns";
+  const session = u || {};
+  const week = weekly || {};
+  if (!(session.turns || week.turns)) {
+    usageRail.textContent = "usage: 0 turns";
+    usageRail.className = "rail-chip";
+    usageRail.title = "No usage recorded for this session or the rolling 7-day window yet.";
+    renderUsagePanel(session, week, []);
     return;
   }
-  const total = u.totalTokens || 0;
-  const tokenStr = total >= 1000000 ? (total / 1000000).toFixed(1) + "M"
-    : total >= 10000 ? (total / 1000).toFixed(0) + "k"
-    : total >= 1000 ? (total / 1000).toFixed(1) + "k"
-    : String(total);
-  const cost = u.costUsd || 0;
-  const costStr = cost < 0.01 ? "$" + cost.toFixed(4)
-    : cost < 1 ? "$" + cost.toFixed(3)
-    : "$" + cost.toFixed(2);
-  usageRail.textContent = u.turns + "t · " + tokenStr + " tok · " + costStr;
+  const total = session.totalTokens || 0;
+  const tokenStr = formatTokens(total);
+  const cost = session.costUsd || 0;
+  const costStr = formatCost(cost);
+  u = session;
+  const weekCost = week.costUsd || 0;
+  usageRail.textContent = "session " + (session.turns || 0) + "t " + tokenStr + " tok " + costStr + " | 7d " + formatTokens(week.totalTokens || 0) + " tok " + formatCost(weekCost);
+  usageRail.className = "rail-chip " + (Math.max(cost, weekCost) >= 1 ? "warn" : "ok");
+  usageRail.title = "Open usage panel. Session input " + formatTokens(session.inputTokens || 0) + ", output " + formatTokens(session.outputTokens || 0) + ". Rolling 7-day total " + formatTokens(week.totalTokens || 0) + " tokens, " + formatCost(weekCost) + ".";
+  renderUsagePanel(session, week, lastState.recentUsageRecords || []);
+}
+function renderUsagePanel(u, weekly, records) {
+  if (!usagePanelCount || !usageSummary || !usageBoard) return;
+  const summary = u || {};
+  const week = weekly || {};
+  const rows = records || [];
+  usagePanelCount.textContent = (summary.turns || 0) + " session turns / " + (week.turns || 0) + " 7d turns";
+  usageSummary.innerHTML = "";
+  usageSummary.append(
+    usageStat(formatTokens(summary.totalTokens || 0), "session tokens"),
+    usageStat(formatCost(summary.costUsd || 0), "session cost"),
+    usageStat(formatTokens(week.totalTokens || 0), "7d tokens"),
+    usageStat(formatCost(week.costUsd || 0), "7d cost"),
+    usageStat(formatTokens(summary.inputTokens || 0), "fresh input"),
+    // Why: usageFromCodexSummary folds reasoning into outputTokens already; Claude reports reasoningTokens=0. Adding them here double-counts Codex reasoning.
+    usageStat(formatTokens(summary.outputTokens || 0), "output + reasoning")
+  );
+  const agents = summary.byAgent || {};
+  usageSummary.append(
+    usageStat(agentUsageLabel("codex", agents.codex), "codex"),
+    usageStat(agentUsageLabel("claude", agents.claude), "claude"),
+    usageStat(formatTokens(summary.cacheReadTokens || 0), "cache read"),
+    usageStat(formatTokens(summary.cacheCreateTokens || 0), "cache write")
+  );
+  usageBoard.classList.remove("hidden");
+  usageBoard.innerHTML = "";
+  if (rows.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "empty";
+    empty.textContent = "No per-turn usage has been recorded for this session yet.";
+    usageBoard.append(empty);
+    return;
+  }
+  const header = document.createElement("div");
+  header.className = "usage-row header";
+  ["time", "agent", "phase", "input", "output", "cache", "reasoning", "cost"].forEach((label) => header.append(cell(label)));
+  usageBoard.append(header);
+  for (const record of rows) {
+    const row = document.createElement("div");
+    row.className = "usage-row";
+    const cache = (record.cacheReadTokens || 0) + (record.cacheCreateTokens || 0);
+    row.title = (record.model ? "model: " + record.model + "\n" : "") + "source: " + (record.source || "unknown");
+    row.append(
+      cell(record.timestamp ? new Date(record.timestamp).toLocaleTimeString() : "unknown"),
+      cell(record.agent || "unknown"),
+      cell(record.phase || ""),
+      cell(formatTokens(record.inputTokens || 0)),
+      cell(formatTokens(record.outputTokens || 0)),
+      cell(formatTokens(cache)),
+      cell(formatTokens(record.reasoningTokens || 0)),
+      cell(formatCost(record.costUsd || 0))
+    );
+    usageBoard.append(row);
+  }
+}
+function usageStat(value, label) {
+  const el = document.createElement("div");
+  el.className = "usage-stat";
+  const strong = document.createElement("strong");
+  strong.textContent = value;
+  const span = document.createElement("span");
+  span.textContent = label;
+  el.append(strong, span);
+  return el;
+}
+function agentUsageLabel(agent, value) {
+  const u = value || {};
+  return (u.turns || 0) + "t / " + formatTokens(u.totalTokens || 0) + " / " + formatCost(u.costUsd || 0);
+}
+function formatTokens(value) {
+  const n = Number(value) || 0;
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + "M";
+  if (n >= 10000) return (n / 1000).toFixed(0) + "k";
+  if (n >= 1000) return (n / 1000).toFixed(1) + "k";
+  return String(n);
+}
+function formatCost(value) {
+  const n = Number(value) || 0;
+  if (n < 0.01) return "$" + n.toFixed(4);
+  if (n < 1) return "$" + n.toFixed(3);
+  return "$" + n.toFixed(2);
 }
 function renderDecision(decision, count, risky, accepted) {
   decisionStrip.classList.toggle("hidden", !decision);
@@ -858,6 +958,12 @@ function renderDecisionAction(action, canAccept, accepted, running) {
   acceptDefaultBtn.textContent = label;
   acceptDefaultBtn.title = detail;
   acceptDefaultBtn.disabled = !canAccept;
+}
+function renderAutoAdvanceDefaults(enabled) {
+  autoAdvanceDefaultsBtn.textContent = enabled ? "Auto Accept: On" : "Auto Accept: Off";
+  autoAdvanceDefaultsBtn.title = enabled
+    ? "Turn off automatic acceptance of unblocked decision defaults"
+    : "Turn on automatic acceptance of unblocked decision defaults";
 }
 function renderDecisionBoard(decisions) {
   document.getElementById("decisionPanelCount").textContent = decisions.length + " decisions";
@@ -995,7 +1101,7 @@ function disabledReason(action) {
   if (action.id === "open-folder") return "workspace is already open";
   if (action.id === "fix-codex") return "Codex path check is not failing";
   if (action.id === "fix-claude") return "Claude path check is not failing";
-  if (action.id === "choose-model" || action.id === "choose-effort" || action.id === "open-objective" || action.id === "open-agent-calls") return "open a workspace folder first";
+  if (action.id === "choose-model" || action.id === "choose-effort" || action.id === "test-telegram" || action.id === "open-objective" || action.id === "open-agent-calls") return "open a workspace folder first";
   if (action.id.indexOf("assign-") === 0) return "builder assignment unavailable";
   if (action.id === "request-review") return "no build ready for review";
   if (action.id.indexOf("poke-") === 0 || action.id.indexOf("-command") > 0 || action.id.indexOf("-raw") > 0 || action.id === "native-action") return "native terminal actions unavailable";

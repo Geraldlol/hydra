@@ -1,6 +1,6 @@
 import { describe, test } from "node:test";
 import * as assert from "node:assert/strict";
-import { buildDecisionNotificationHtml, escapeTelegramHtml } from "../src/telegram";
+import { buildDecisionNotificationHtml, escapeTelegramHtml, extractTelegramInboundCommand } from "../src/telegram";
 
 describe("escapeTelegramHtml", () => {
   test("escapes the three Telegram-significant characters and nothing else", () => {
@@ -52,5 +52,22 @@ describe("buildDecisionNotificationHtml", () => {
     });
     assert.ok(html.length < 1200, `expected truncation but got ${html.length} chars`);
     assert.match(html, /…/);
+  });
+});
+
+describe("extractTelegramInboundCommand", () => {
+  test("accepts prefixed direct and group bot commands", () => {
+    assert.equal(extractTelegramInboundCommand("/hydra continue", "/hydra"), "continue");
+    assert.equal(extractTelegramInboundCommand("/hydra@my_bot continue", "/hydra"), "continue");
+    assert.equal(extractTelegramInboundCommand("  /hydra\ncontinue  ", "/hydra"), "continue");
+  });
+
+  test("rejects unprefixed messages unless prefix is explicitly empty", () => {
+    assert.equal(extractTelegramInboundCommand("continue", "/hydra"), undefined);
+    assert.equal(extractTelegramInboundCommand("continue", ""), "continue");
+  });
+
+  test("returns an empty command for a bare prefix", () => {
+    assert.equal(extractTelegramInboundCommand("/hydra", "/hydra"), "");
   });
 });

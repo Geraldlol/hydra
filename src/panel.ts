@@ -99,7 +99,7 @@ import {
 } from "./doctor";
 import { EditorContextAttachment, truncateEditorContext } from "./editorContext";
 import { appendHydraEvent, createHydraEvent, ensureHydraEventsFile, hydraEventsPath, readHydraEvents, type HydraEventKind } from "./events";
-import { ensureFile } from "./fileQueue";
+import { atomicWriteFile, ensureFile } from "./fileQueue";
 import { ensureObjectiveFile, objectiveAsContext, readObjective, writeObjective } from "./objective";
 import { TerminalBridge } from "./terminalBridge";
 import { buildDirectTerminalPokePrompt } from "./terminalPoke";
@@ -132,6 +132,7 @@ import {
   loadUsageRecords,
   parseCodexTextTokens,
   summarizeUsage,
+  usageCutoffIso,
   usageFromClaudeSummary,
   usageFromCodexSummary,
   type ModelPrices,
@@ -158,7 +159,13 @@ import {
   shouldUseClaudeStreamJson,
   withClaudeStreamJsonArgs,
 } from "./claudeTransport";
-import { buildDecisionNotificationHtml, sendTelegramMessage, type TelegramConfig } from "./telegram";
+import {
+  buildDecisionNotificationHtml,
+  extractTelegramInboundCommand,
+  getTelegramUpdates,
+  sendTelegramMessage,
+  type TelegramConfig,
+} from "./telegram";
 import { readWorkspaceInstructions, workspaceInstructionsAsContext } from "./workspaceInstructions";
 import {
   appendWorkQueueDisposition,
@@ -255,6 +262,7 @@ export class HydraRoomPanel {
   private workQueueUri!: vscode.Uri;
   private sessionBriefUri!: vscode.Uri;
   private supportBundleUri!: vscode.Uri;
+  private telegramInboundStateUri!: vscode.Uri;
   private objective = "";
   private workspaceInstructions = "";
   private decisions: DecisionPacket[] = [];
@@ -279,10 +287,16 @@ export class HydraRoomPanel {
   private readonly sessionId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   private usageRecords: UsageRecord[] = [];
   private sessionUsage: UsageSummary | undefined;
+  private weeklyUsage: UsageSummary | undefined;
   private codexModelsUri!: vscode.Uri;
   private codexModelsSnapshot: CodexModelsSnapshot | undefined;
   private terminalBridge: TerminalBridge | undefined;
   private transport: "oneShot" | "terminalBridge" = "oneShot";
+  private telegramInboundTimer: ReturnType<typeof setTimeout> | undefined;
+  private telegramInboundAbort: AbortController | undefined;
+  private telegramInboundPolling = false;
+  private telegramInboundOffset: number | undefined;
+  private telegramInboundGeneration = 0;
   private agentStatuses: Record<AgentId, AgentStatus> = {
     codex: { state: "idle", detail: "Idle" },
     claude: { state: "idle", detail: "Idle" },
@@ -349,7 +363,12 @@ export class HydraRoomPanel {
     this.panel.webview.html = renderHtml(makeNonce(), this.hydraHeadAssets(), scriptUri);
     this.disposables.push(
       this.panel.onDidDispose(() => this.dispose()),
-      this.panel.webview.onDidReceiveMessage((m) => void this.onWebviewMessage(m))
+      this.panel.webview.onDidReceiveMessage((m) => void this.onWebviewMessage(m)),
+      vscode.workspace.onDidChangeConfiguration((e) => {
+        if (e.affectsConfiguration("hydraRoom.telegram")) {
+          void this.restartTelegramInboundPolling();
+        }
+      })
     );
     this.initPromise = this.initialize();
   }
@@ -357,6 +376,7 @@ export class HydraRoomPanel {
   dispose(): void {
     HydraRoomPanel.instance = undefined;
     this.currentAbort?.abort();
+    this.stopTelegramInboundPolling();
     // TerminalBridge is constructed inside initialize() so it isn't in the
     // disposables array. Dispose explicitly to close cached terminals
     // (otherwise they accumulate as ghost terminals across panel reopens).
@@ -398,6 +418,7 @@ export class HydraRoomPanel {
     this.workQueueUri = vscode.Uri.file(path.join(this.workspaceRoot, ".hydra", "work-queue.jsonl"));
     this.sessionBriefUri = vscode.Uri.file(sessionBriefPath(this.workspaceRoot));
     this.supportBundleUri = vscode.Uri.file(supportBundlePath(this.workspaceRoot));
+    this.telegramInboundStateUri = vscode.Uri.file(path.join(this.workspaceRoot, ".hydra", "telegram-inbound.json"));
     await ensureGitignore(this.workspaceRoot);
     await ensureTranscriptFile(this.transcriptUri.fsPath);
     await ensureObjectiveFile(this.objectiveUri.fsPath);
@@ -407,8 +428,10 @@ export class HydraRoomPanel {
     await ensureHydraEventsFile(this.eventsUri.fsPath);
     await ensureJsonlFile(this.agentCallsUri.fsPath);
     await ensureJsonlFile(this.usageUri.fsPath);
+    await ensureFile(this.telegramInboundStateUri.fsPath, "{}\n");
     this.usageRecords = await loadUsageRecords(this.usageUri.fsPath);
     this.sessionUsage = summarizeUsage(this.usageRecords, this.sessionId);
+    this.weeklyUsage = summarizeUsage(this.usageRecords, undefined, usageCutoffIso(7));
     this.codexModelsSnapshot = await loadCodexModelsSnapshot(this.codexModelsUri.fsPath);
     await ensureWorkQueueStateFile(this.workQueueUri.fsPath);
     this.objective = await readObjective(this.objectiveUri.fsPath);
@@ -420,7 +443,9 @@ export class HydraRoomPanel {
     this.gitAvailable = await isGitWorkspace(this.workspaceRoot);
     const existing = await readTranscript(this.transcriptUri.fsPath);
     this.messages = existing.map((m, i) => ({ ...m, id: `prev-${i}` }));
+    this.telegramInboundOffset = await this.readTelegramInboundOffset();
     this.postState();
+    this.startTelegramInboundPolling();
     if (this.autopilotOnStart()) {
       setTimeout(() => void this.runAutopilotStart(), 0);
     }
@@ -645,6 +670,25 @@ export class HydraRoomPanel {
       await this.sendUserMessage(action.instruction, this.getFirstSpeaker());
       return;
     }
+    this.postState();
+  }
+
+  async toggleAutoAdvanceActionableDefaults(): Promise<void> {
+    await this.ready();
+    const resource = this.workspaceReady ? vscode.Uri.file(this.workspaceRoot) : undefined;
+    const cfg = vscode.workspace.getConfiguration("hydraRoom", resource);
+    const current = cfg.get<boolean>("autoAdvanceActionableDefaults", true);
+    const inspected = cfg.inspect<boolean>("autoAdvanceActionableDefaults");
+    const target = inspected?.workspaceFolderValue !== undefined
+      ? vscode.ConfigurationTarget.WorkspaceFolder
+      : inspected?.workspaceValue !== undefined
+        ? vscode.ConfigurationTarget.Workspace
+        : vscode.ConfigurationTarget.Global;
+
+    await cfg.update("autoAdvanceActionableDefaults", !current, target);
+    await this.appendSystemMessage(
+      `Auto Accept Default is now ${!current ? "on" : "off"} (${configurationTargetLabel(target)} setting).`
+    );
     this.postState();
   }
 
@@ -1022,6 +1066,7 @@ export class HydraRoomPanel {
       workspaceReady: this.workspaceReady,
       canStop: isInFlight(this.state) || this.terminalPokeInFlight || this.verificationRunning || this.autopilotRunning,
       canAcceptDefault: this.workspaceReady && !isInFlight(this.state) && !this.terminalPokeInFlight && this.currentDecisionAction().kind !== "none",
+      autoAdvanceActionableDefaults: this.autoAdvanceActionableDefaults(),
       canAssignBuilder: this.workspaceReady && this.state.name === "AwaitingUser",
       canRequestReview: this.workspaceReady && (this.state.name === "BuildDone" || this.state.name === "ParallelBuildDone") && this.gitAvailable,
       canHandBack: this.workspaceReady && (this.state.name === "ReviewDone" || this.state.name === "ParallelReviewDone") && !this.state.approved,
@@ -1059,6 +1104,9 @@ export class HydraRoomPanel {
       case "acceptDefaultDecision":
         await this.acceptDefaultDecision();
         return;
+      case "toggleAutoAdvanceActionableDefaults":
+        await this.toggleAutoAdvanceActionableDefaults();
+        return;
       case "archiveAndClearRoom":
         await this.archiveAndClearRoom();
         return;
@@ -1076,6 +1124,9 @@ export class HydraRoomPanel {
         return;
       case "chooseEffort":
         await this.chooseEffort();
+        return;
+      case "testTelegram":
+        await this.sendTestTelegramMessage();
         return;
       case "requestReview":
         await this.requestReview();
@@ -1145,9 +1196,6 @@ export class HydraRoomPanel {
         return;
       case "changeCapabilityProfile":
         await this.changeCapabilityProfile();
-        return;
-      case "chooseEffort":
-        await this.chooseEffort();
         return;
       case "fixCodexPath":
         await this.fixAgentCommand("codex");
@@ -2969,6 +3017,7 @@ export class HydraRoomPanel {
     }
     this.usageRecords.push(record);
     this.sessionUsage = summarizeUsage(this.usageRecords, this.sessionId);
+    this.weeklyUsage = summarizeUsage(this.usageRecords, undefined, usageCutoffIso(7));
     this.postState();
   }
 
@@ -3511,6 +3560,128 @@ export class HydraRoomPanel {
     return { botToken, chatId };
   }
 
+  private telegramInboundEnabled(): boolean {
+    return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("telegramInboundPollingEnabled", false);
+  }
+
+  private telegramInboundPollIntervalMs(): number {
+    const seconds = vscode.workspace.getConfiguration("hydraRoom").get<number>("telegramInboundPollIntervalSeconds", 10);
+    return Math.max(5, seconds) * 1000;
+  }
+
+  private telegramInboundPrefix(): string {
+    return vscode.workspace.getConfiguration("hydraRoom").get<string>("telegramInboundCommandPrefix", "/hydra").trim();
+  }
+
+  private async restartTelegramInboundPolling(): Promise<void> {
+    await this.ready().catch(() => undefined);
+    this.stopTelegramInboundPolling();
+    this.startTelegramInboundPolling();
+  }
+
+  private startTelegramInboundPolling(): void {
+    if (!this.workspaceReady || !this.telegramInboundEnabled()) return;
+    if (!this.telegramConfig()) return;
+    this.telegramInboundGeneration++;
+    this.scheduleTelegramInboundPoll(250, this.telegramInboundGeneration);
+  }
+
+  private stopTelegramInboundPolling(): void {
+    this.telegramInboundGeneration++;
+    if (this.telegramInboundTimer) clearTimeout(this.telegramInboundTimer);
+    this.telegramInboundTimer = undefined;
+    this.telegramInboundAbort?.abort();
+    this.telegramInboundAbort = undefined;
+    this.telegramInboundPolling = false;
+  }
+
+  private scheduleTelegramInboundPoll(delayMs = this.telegramInboundPollIntervalMs(), generation = this.telegramInboundGeneration): void {
+    if (this.telegramInboundTimer) clearTimeout(this.telegramInboundTimer);
+    this.telegramInboundTimer = setTimeout(() => void this.pollTelegramInboundOnce(generation), delayMs);
+  }
+
+  private async pollTelegramInboundOnce(generation: number): Promise<void> {
+    if (generation !== this.telegramInboundGeneration) return;
+    if (this.telegramInboundPolling) return;
+    if (!this.workspaceReady || !this.telegramInboundEnabled()) return;
+    const cfg = this.telegramConfig();
+    if (!cfg) return;
+    this.telegramInboundPolling = true;
+    this.telegramInboundAbort = new AbortController();
+    try {
+      if (this.telegramInboundOffset === undefined) {
+        const bootstrap = await getTelegramUpdates(cfg, {
+          offset: -1,
+          limit: 1,
+          timeoutSeconds: 0,
+          signal: this.telegramInboundAbort.signal,
+        });
+        if (bootstrap.ok) {
+          const latest = bootstrap.updates[bootstrap.updates.length - 1];
+          await this.writeTelegramInboundOffset(latest ? latest.updateId + 1 : 0);
+        } else if (bootstrap.error !== "aborted") {
+          await this.recordEvent("error", `Telegram inbound bootstrap failed: ${bootstrap.error ?? "unknown"}`, {
+            status: bootstrap.status ?? null,
+          });
+        }
+        return;
+      }
+      const result = await getTelegramUpdates(cfg, {
+        offset: this.telegramInboundOffset,
+        limit: 25,
+        timeoutSeconds: 0,
+        signal: this.telegramInboundAbort.signal,
+      });
+      if (!result.ok) {
+        if (result.error !== "aborted") {
+          await this.recordEvent("error", `Telegram inbound poll failed: ${result.error ?? "unknown"}`, {
+            status: result.status ?? null,
+          });
+        }
+        return;
+      }
+      const prefix = this.telegramInboundPrefix();
+      for (const update of result.updates) {
+        await this.writeTelegramInboundOffset(update.updateId + 1);
+        const message = update.message;
+        if (!message || message.fromIsBot || message.chatId !== cfg.chatId.trim()) continue;
+        const command = extractTelegramInboundCommand(message.text, prefix);
+        if (command === undefined) continue;
+        if (!command) {
+          await this.appendSystemMessage(`Telegram inbound ignored: empty ${prefix || "message"} command.`);
+          this.postState();
+          continue;
+        }
+        const source = message.from ? ` from ${message.from}` : "";
+        await this.appendSystemMessage(`Telegram inbound${source}: ${truncateForLog(command, 160)}`);
+        await this.sendUserMessage(`[Telegram inbound${source}]\n\n${command}`);
+      }
+    } finally {
+      this.telegramInboundPolling = false;
+      this.telegramInboundAbort = undefined;
+      if (generation === this.telegramInboundGeneration && this.workspaceReady && this.telegramInboundEnabled()) {
+        this.scheduleTelegramInboundPoll(this.telegramInboundPollIntervalMs(), generation);
+      }
+    }
+  }
+
+  private async readTelegramInboundOffset(): Promise<number | undefined> {
+    try {
+      const raw = await fs.readFile(this.telegramInboundStateUri.fsPath, "utf8");
+      const parsed = JSON.parse(raw) as { offset?: unknown };
+      return typeof parsed.offset === "number" ? parsed.offset : undefined;
+    } catch {
+      // JSON hand-edit resilience; a corrupt offset file just starts at the
+      // current Bot API queue and rewrites a valid state on the next poll.
+      return undefined;
+    }
+  }
+
+  private async writeTelegramInboundOffset(offset: number): Promise<void> {
+    this.telegramInboundOffset = offset;
+    await atomicWriteFile(this.telegramInboundStateUri.fsPath, `${JSON.stringify({ offset }, null, 2)}\n`);
+  }
+
   async sendTestTelegramMessage(): Promise<void> {
     await this.ready();
     const cfg = this.telegramConfig();
@@ -3759,6 +3930,9 @@ export class HydraRoomPanel {
         case "acceptDefaultDecision":
           await this.acceptDefaultDecision();
           break;
+        case "toggleAutoAdvanceActionableDefaults":
+          await this.toggleAutoAdvanceActionableDefaults();
+          break;
         case "handBack":
           await this.handBack();
           break;
@@ -3773,6 +3947,12 @@ export class HydraRoomPanel {
           break;
         case "chooseModel":
           await this.chooseModel();
+          break;
+        case "chooseEffort":
+          await this.chooseEffort();
+          break;
+        case "testTelegram":
+          await this.sendTestTelegramMessage();
           break;
         case "openNativeTerminals":
           await this.openNativeTerminals();
@@ -3921,6 +4101,8 @@ export class HydraRoomPanel {
         authoritySummaries,
         terminalSessions: this.terminalBridge?.getSessions() ?? [],
         sessionUsage: this.sessionUsage,
+        weeklyUsage: this.weeklyUsage,
+        recentUsageRecords: this.usageRecords.filter((record) => record.sessionId === this.sessionId).slice(-12).reverse(),
         models: {
           claude: this.modelSummaryForRail("claude"),
           codex: this.modelSummaryForRail("codex"),
@@ -3940,6 +4122,7 @@ export class HydraRoomPanel {
         decisionsCount: this.decisions.length,
         decisionAction: this.currentDecisionAction(),
         canAcceptDefault: this.workspaceReady && !isInFlight(this.state) && !this.terminalPokeInFlight && this.currentDecisionAction().kind !== "none",
+        autoAdvanceActionableDefaults: this.autoAdvanceActionableDefaults(),
         latestVerification: this.latestVerification(),
         verificationSummary: verificationSummary(this.latestVerification()),
         verificationRunning: this.verificationRunning,
@@ -4022,6 +4205,12 @@ function phaseLabel(state: State): string {
   }
 }
 
+function configurationTargetLabel(target: vscode.ConfigurationTarget): string {
+  if (target === vscode.ConfigurationTarget.WorkspaceFolder) return "workspace-folder";
+  if (target === vscode.ConfigurationTarget.Workspace) return "workspace";
+  return "user";
+}
+
 function otherAgent(agent: AgentId): AgentId {
   return agent === "codex" ? "claude" : "codex";
 }
@@ -4078,6 +4267,12 @@ function completedAgentCallTrace(
 
 function truncateForTrace(value: string, maxChars: number): string {
   return value.length <= maxChars ? value : `${value.slice(0, maxChars)}\n[truncated ${value.length - maxChars} chars]`;
+}
+
+function truncateForLog(value: string, maxChars: number): string {
+  const singleLine = value.replace(/\s+/g, " ").trim();
+  if (singleLine.length <= maxChars) return singleLine;
+  return `${singleLine.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
 }
 
 function uniqueAgents(agents: AgentId[]): AgentId[] {

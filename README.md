@@ -23,7 +23,7 @@ If VS Code cannot find a CLI, set `hydraRoom.codexCommand` or `hydraRoom.claudeC
 ## Local Development
 
 ```powershell
-cd tools/vscode-hydra-room
+cd C:\Users\geral\Hydra
 npm install
 npm run compile
 npm run dev
@@ -181,6 +181,14 @@ Use `Hydra: Open Session Brief` or the in-room Session Brief button to refresh a
 
 Use `Hydra: Open Support Bundle` or the in-room Support Bundle button to refresh and open `.hydra/support-bundle.md`. The bundle is a diagnostics snapshot for debugging Hydra itself: Doctor checks, effective native authority, native runtime command/argv/env-key diagnostics, compact native data and model-capability summary, terminal session state, Work Queue, latest decision, verification, recent native actions, and recent messages. It avoids rerunning the terminal bridge self-test unless Doctor has already captured one, so opening it is cheap and non-disruptive.
 
+## Telegram Notifications
+
+Hydra can notify Telegram when an agent decision packet has a non-empty `Decision needed from user` field. Set `hydraRoom.telegramBotToken` and `hydraRoom.telegramChatId` in User Settings, or set `TELEGRAM_BOT_TOKEN` in the extension host environment and keep the token setting blank. Leave `hydraRoom.telegramNotifyOnDecisionNeeded` enabled to send decision-needed alerts.
+
+Run `Hydra: Send Test Telegram Message` from the Command Palette or Hydra Command Center after configuring the bot. A successful test writes a confirmation system message into the room; failures point back to the Telegram settings.
+
+Hydra can also poll Telegram for inbound commands. Enable `hydraRoom.telegramInboundPollingEnabled` in User Settings, then send messages in the configured chat that start with `hydraRoom.telegramInboundCommandPrefix` (default: `/hydra`). For example, `/hydra accept the default and continue` is appended to the room as user input. The first poll skips older Bot API updates and stores the next update offset in `.hydra/telegram-inbound.json` so old messages are not replayed after restart. Inbound polling is disabled by default because Telegram messages are remote untrusted input; only set an empty prefix for a private bot chat you fully trust.
+
 ## Verification
 
 Use `Hydra: Run Verification` or the in-room button after a build. Hydra runs `hydraRoom.verifyCommand` from the workspace root. If that setting is blank, Hydra infers a command from `package.json` scripts in this order:
@@ -211,7 +219,7 @@ Use `Hydra: Show Effective Native Authority` and `Hydra: Preview Next Prompt` to
 ## Packaging
 
 ```powershell
-cd tools/vscode-hydra-room
+cd C:\Users\geral\Hydra
 npm install
 npm run check
 npm test
@@ -219,6 +227,28 @@ npm run package
 ```
 
 The package command builds a local `.vsix`. A Marketplace release still needs a real publisher id, icon, and release notes.
+
+To install this working copy into VS Code from the repo root:
+
+```powershell
+npm run install:local
+```
+
+That command runs the package flow, resolves `code.cmd`/`code` from `PATH`, `VSCODE_CLI`, or known VS Code install locations, then installs the newest local `.vsix` with `--force`. If a `.vsix` already exists and you only want to reinstall it, run `npm run install:local:existing`.
+
+If PowerShell blocks `npm.ps1` because script execution is disabled, use the command shim directly:
+
+```powershell
+npm.cmd run install:local
+```
+
+Or bypass npm entirely:
+
+```powershell
+node scripts/install-local.js
+```
+
+For an isolated smoke test, set `HYDRA_VSCODE_USER_DATA_DIR` and `HYDRA_VSCODE_EXTENSIONS_DIR` to temporary directories before running the script. Leave them unset for the normal install into your VS Code profile.
 
 ## Native CLI Internals
 

@@ -26,6 +26,7 @@
       { "command": "hydraRoom.previewNextPrompt", "title": "Hydra: Preview Next Prompt" },
       { "command": "hydraRoom.openLastPrompt", "title": "Hydra: Open Last Prompt" },
       { "command": "hydraRoom.acceptDefaultDecision", "title": "Hydra: Accept Default Decision" },
+      { "command": "hydraRoom.toggleAutoAdvanceActionableDefaults", "title": "Hydra: Toggle Auto Accept Default" },
       { "command": "hydraRoom.commandCenter", "title": "Hydra: Command Center" },
       { "command": "hydraRoom.stop", "title": "Hydra: Stop Current Turn" },
       { "command": "hydraRoom.openTranscript", "title": "Hydra: Open Transcript" },
@@ -409,6 +410,25 @@
           "default": true,
           "markdownDescription": "Send a Telegram message when a decision packet's `Decision needed from user` is non-empty. Requires `hydraRoom.telegramBotToken` and `hydraRoom.telegramChatId`."
         },
+        "hydraRoom.telegramInboundPollingEnabled": {
+          "scope": "application",
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Poll Telegram Bot API updates and inject accepted messages into the Hydra room as user input. Requires `hydraRoom.telegramBotToken`, `hydraRoom.telegramChatId`, and the `hydraRoom.telegramInboundCommandPrefix` prefix. Disabled by default because inbound Telegram messages are remote untrusted input."
+        },
+        "hydraRoom.telegramInboundCommandPrefix": {
+          "scope": "application",
+          "type": "string",
+          "default": "/hydra",
+          "markdownDescription": "Required prefix for Telegram inbound polling. Messages from the configured chat must start with this prefix (for example `/hydra continue with the default`) before Hydra treats them as room input. Set to an empty string only for a private bot chat you fully trust."
+        },
+        "hydraRoom.telegramInboundPollIntervalSeconds": {
+          "scope": "application",
+          "type": "number",
+          "default": 10,
+          "minimum": 5,
+          "markdownDescription": "How often Hydra polls Telegram for inbound commands when `hydraRoom.telegramInboundPollingEnabled` is enabled."
+        },
         "hydraRoom.promptTemplates": {
           "type": "array",
           "default": [],
@@ -527,7 +547,10 @@
         "hydraRoom.verifyCommand",
         "hydraRoom.handoffWebhookUrl",
         "hydraRoom.telegramBotToken",
-        "hydraRoom.telegramChatId"
+        "hydraRoom.telegramChatId",
+        "hydraRoom.telegramInboundPollingEnabled",
+        "hydraRoom.telegramInboundCommandPrefix",
+        "hydraRoom.telegramInboundPollIntervalSeconds"
       ]
     }
   },
@@ -542,7 +565,9 @@
     "setup-vscode-stub": "node scripts/setup-vscode-stub.js",
     "test": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p ./ && npm run copy-fixtures && npm run setup-vscode-stub && node --test dist/test/*.test.js",
     "prepackage": "npm run test",
-    "package": "npx @vscode/vsce package --no-dependencies --allow-missing-repository"
+    "package": "npx --cache .npm-cache @vscode/vsce package --no-dependencies --allow-missing-repository",
+    "install:local": "node scripts/install-local.js",
+    "install:local:existing": "node scripts/install-local.js --skip-package"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

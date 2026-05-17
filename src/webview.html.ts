@@ -169,6 +169,14 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     .agent-status { max-width: 150px; }
     .authority-badge { max-width: 138px; }
     .rail-chip.optional { max-width: 145px; }
+    #usageRail { max-width: 310px; }
+    .rail-primary #usageRail {
+      flex: none;
+      color: var(--text);
+      border-color: var(--focus);
+      background: color-mix(in srgb, var(--focus) 10%, transparent);
+      font-weight: 650;
+    }
     .phase-chip.idle { color: var(--muted); border-color: var(--border); background: transparent; font-weight: 500; }
     .phase-chip.experimental { color: var(--warn); border-color: var(--warn); }
     .agent-status::before,
@@ -656,14 +664,16 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     #panelOverlay[data-panel="queue"] .panel-view[data-view="queue"],
     #panelOverlay[data-panel="verify"] .panel-view[data-view="verify"],
     #panelOverlay[data-panel="decisions"] .panel-view[data-view="decisions"],
-    #panelOverlay[data-panel="term"] .panel-view[data-view="term"] {
+    #panelOverlay[data-panel="term"] .panel-view[data-view="term"],
+    #panelOverlay[data-panel="usage"] .panel-view[data-view="usage"] {
       display: grid;
       grid-template-rows: auto minmax(0, 1fr);
     }
     .native-action-board,
     .work-queue-board,
     .decision-board,
-    .terminal-sessions {
+    .terminal-sessions,
+    .usage-board {
       display: grid;
       gap: 1px;
       color: var(--muted);
@@ -694,10 +704,45 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       grid-template-columns: 1fr;
       align-items: stretch;
     }
+    .usage-summary {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(110px, 1fr));
+      gap: 8px;
+      padding: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+    .usage-stat {
+      display: grid;
+      gap: 2px;
+      padding: 8px;
+      border: 1px solid var(--border);
+      background: color-mix(in srgb, var(--panel-alt) 50%, transparent);
+    }
+    .usage-stat strong {
+      color: var(--text);
+      font-size: 15px;
+      font-weight: 650;
+    }
+    .usage-stat span { color: var(--muted); }
+    .usage-row {
+      display: grid;
+      grid-template-columns: 76px 76px minmax(90px, 0.7fr) repeat(4, minmax(74px, 0.55fr)) 72px;
+      gap: 8px;
+      align-items: center;
+      padding: 7px 8px;
+      border-bottom: 1px solid var(--border);
+      background: color-mix(in srgb, var(--panel-alt) 50%, transparent);
+    }
+    .usage-row.header {
+      color: var(--text);
+      font-weight: 650;
+      background: color-mix(in srgb, var(--panel-alt) 76%, var(--panel));
+    }
     .native-action-row span,
     .work-queue-row span,
     .decision-row span,
-    .terminal-session span {
+    .terminal-session span,
+    .usage-row span {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -732,6 +777,8 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       .composer { grid-template-columns: 1fr; }
       #composerActions { flex-direction: row; min-width: 0; flex-wrap: wrap; }
       #sendBtn, #stopBtn { flex: 1 1 140px; }
+      .usage-summary { grid-template-columns: 1fr 1fr; }
+      .usage-row { grid-template-columns: 1fr; gap: 4px; align-items: stretch; }
     }
     @media (max-width: 720px) {
       #operationalRail {
@@ -824,6 +871,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       <div class="brand"><span class="brand-mark"><img src="${heads.brand}" alt=""></span><span>Hydra</span></div>
       <div class="rail-primary">
         <span id="phaseChip" class="phase-chip idle">Idle</span>
+        <span id="usageRail" class="rail-chip" role="button" tabindex="0" title="Open session token usage and estimated cost. Costs are estimates using hydraRoom.modelPrices (defaults: Claude Sonnet 4.6, Codex GPT-5 blend).">usage: 0 turns</span>
         <span class="rail-objective"><span id="objectiveLabel">Objective</span><span id="objectiveText">Not set</span></span>
       </div>
       <div class="rail-secondary">
@@ -836,7 +884,6 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
         <span id="nativeActionRail" class="rail-chip optional">actions: 0</span>
         <span id="workQueueRail" class="rail-chip optional">queue clear</span>
         <span id="decisionRail" class="rail-chip optional">decision: none</span>
-        <span id="usageRail" class="rail-chip" title="Session token usage and estimated cost. Costs are estimates using hydraRoom.modelPrices (defaults: Claude Sonnet 4.6, Codex GPT-5 blend).">session: 0 turns</span>
         <span id="modelRail" class="rail-chip" role="button" tabindex="0" title="Click to pick a model for Claude or Codex (Ctrl+Alt+M).">models: CLI default</span>
         <button id="profileBtn" class="secondary rail-link" type="button" title="Change Codex or Claude capability profile">Profiles</button>
       </div>
@@ -912,6 +959,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
           <button id="sendBtn" type="button">SEND</button>
           <button id="stopBtn" class="danger" type="button">STOP TURN</button>
           <button id="commandCenterBtn" class="secondary" type="button" title="Open Command Center (Ctrl+K)">Commands</button>
+          <button id="autoAdvanceDefaultsBtn" class="secondary" type="button">Auto Accept: On</button>
           <button id="nativeActionBtn" class="secondary hidden" type="button" title="Choose a direct native terminal action">Native Action...</button>
         </div>
         <div id="workflowActions" class="workflow-actions">
@@ -988,6 +1036,13 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
         <section class="panel-view" data-view="decisions">
           <div class="insp-head"><h3>Decisions</h3><span class="count" id="decisionPanelCount"></span><button class="secondary close" type="button">Close</button></div>
           <div class="insp-body"><div id="decisionBoard" class="decision-board hidden"></div></div>
+        </section>
+        <section class="panel-view" data-view="usage">
+          <div class="insp-head"><h3>Usage</h3><span class="count" id="usagePanelCount"></span><button class="secondary close" type="button">Close</button></div>
+          <div class="insp-body">
+            <div id="usageSummary" class="usage-summary"></div>
+            <div id="usageBoard" class="usage-board hidden"></div>
+          </div>
         </section>
         <section class="panel-view" data-view="term">
           <div class="insp-head"><h3>Terminal Sessions</h3><span class="count" id="terminalPanelCount"></span><button class="secondary close" type="button">Close</button></div>

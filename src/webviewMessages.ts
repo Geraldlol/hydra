@@ -35,12 +35,14 @@ export type WebviewMessage =
   | { type: "previewNextPrompt"; text?: string; opener?: string }
   | { type: "openLastPrompt" }
   | { type: "acceptDefaultDecision" }
+  | { type: "toggleAutoAdvanceActionableDefaults" }
   | { type: "handBack" }
   | { type: "openTranscript" }
   | { type: "archiveAndClearRoom" }
   | { type: "openDecisions" }
   | { type: "chooseModel" }
   | { type: "chooseEffort" }
+  | { type: "testTelegram" }
   | { type: "openNativeTerminals" }
   | {
       type: "pokeNativeTerminal";

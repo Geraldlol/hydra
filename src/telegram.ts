@@ -5,6 +5,44 @@ export interface TelegramConfig {
   chatId: string;
 }
 
+function parseTelegramUpdate(value: unknown): TelegramUpdate | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const update = value as {
+    update_id?: unknown;
+    message?: {
+      message_id?: unknown;
+      text?: unknown;
+      caption?: unknown;
+      chat?: { id?: unknown };
+      from?: { first_name?: unknown; username?: unknown; is_bot?: unknown };
+    };
+  };
+  if (typeof update.update_id !== "number") return undefined;
+  const text = typeof update.message?.text === "string"
+    ? update.message.text
+    : typeof update.message?.caption === "string"
+      ? update.message.caption
+      : undefined;
+  const chatId = update.message?.chat?.id;
+  const result: TelegramUpdate = { updateId: update.update_id };
+  if (text && (typeof chatId === "number" || typeof chatId === "string")) {
+    const firstName = typeof update.message?.from?.first_name === "string" ? update.message.from.first_name : "";
+    const username = typeof update.message?.from?.username === "string" ? `@${update.message.from.username}` : "";
+    result.message = {
+      messageId: typeof update.message?.message_id === "number" ? update.message.message_id : undefined,
+      chatId: String(chatId),
+      text,
+      from: [firstName, username].filter(Boolean).join(" ").trim() || undefined,
+      fromIsBot: update.message?.from?.is_bot === true,
+    };
+  }
+  return result;
+}
+
+function isTelegramUpdate(value: TelegramUpdate | undefined): value is TelegramUpdate {
+  return !!value;
+}
+
 export interface TelegramSendResult {
   ok: boolean;
   /** Telegram-side message_id when ok, useful for follow-up edits. */
@@ -12,6 +50,26 @@ export interface TelegramSendResult {
   /** Human-readable failure cause when !ok. */
   error?: string;
   /** HTTP status, if the request reached Telegram. */
+  status?: number;
+}
+
+export interface TelegramUpdateMessage {
+  messageId?: number;
+  chatId: string;
+  text: string;
+  from?: string;
+  fromIsBot?: boolean;
+}
+
+export interface TelegramUpdate {
+  updateId: number;
+  message?: TelegramUpdateMessage;
+}
+
+export interface TelegramUpdatesResult {
+  ok: boolean;
+  updates: TelegramUpdate[];
+  error?: string;
   status?: number;
 }
 
@@ -59,6 +117,59 @@ export async function sendTelegramMessage(
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+export async function getTelegramUpdates(
+  config: Pick<TelegramConfig, "botToken">,
+  options: { offset?: number; limit?: number; timeoutSeconds?: number; signal?: AbortSignal } = {},
+): Promise<TelegramUpdatesResult> {
+  const token = config.botToken.trim();
+  if (!token) {
+    return { ok: false, updates: [], error: "Telegram bot token is empty" };
+  }
+  const params = new URLSearchParams();
+  if (typeof options.offset === "number") params.set("offset", String(options.offset));
+  params.set("limit", String(Math.max(1, Math.min(100, options.limit ?? 25))));
+  params.set("timeout", String(Math.max(0, Math.min(50, options.timeoutSeconds ?? 0))));
+  params.set("allowed_updates", JSON.stringify(["message"]));
+  const url = `https://api.telegram.org/bot${encodeURIComponent(token)}/getUpdates?${params.toString()}`;
+  try {
+    const res = await fetch(url, { method: "GET", signal: options.signal });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      return { ok: false, updates: [], status: res.status, error: text.slice(0, 500) || `HTTP ${res.status}` };
+    }
+    const parsed = (await res.json().catch(() => ({}))) as {
+      ok?: boolean;
+      result?: unknown[];
+      description?: string;
+    };
+    if (parsed.ok === false) {
+      return { ok: false, updates: [], status: res.status, error: parsed.description ?? "Telegram returned ok:false" };
+    }
+    const updates = Array.isArray(parsed.result)
+      ? parsed.result.map(parseTelegramUpdate).filter(isTelegramUpdate)
+      : [];
+    return { ok: true, status: res.status, updates };
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") return { ok: false, updates: [], error: "aborted" };
+    return { ok: false, updates: [], error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+export function extractTelegramInboundCommand(text: string, prefix: string): string | undefined {
+  const trimmed = text.trim();
+  const commandPrefix = prefix.trim();
+  if (!commandPrefix) return trimmed || undefined;
+  if (trimmed === commandPrefix) return "";
+  if (trimmed.startsWith(`${commandPrefix} `) || trimmed.startsWith(`${commandPrefix}\n`)) {
+    return trimmed.slice(commandPrefix.length).trim();
+  }
+  const mentionMatch = /^\/([A-Za-z0-9_]+)@([A-Za-z0-9_]+)(?:\s+|$)/.exec(trimmed);
+  if (mentionMatch && commandPrefix === `/${mentionMatch[1]}`) {
+    return trimmed.slice(mentionMatch[0].length).trim();
+  }
+  return undefined;
 }
 
 /** Escape a string for safe embedding inside HTML parse_mode. */

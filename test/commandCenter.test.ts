@@ -8,6 +8,7 @@ describe("command center", () => {
       workspaceReady: false,
       canStop: false,
       canAcceptDefault: false,
+      autoAdvanceActionableDefaults: true,
       canAssignBuilder: false,
       canRequestReview: false,
       canHandBack: false,
@@ -20,7 +21,11 @@ describe("command center", () => {
       nativeActionsCount: 0,
     });
 
-    assert.deepEqual(actions.map((action) => action.id), ["openWorkspaceFolder", "runDoctor"]);
+    assert.deepEqual(actions.map((action) => action.id), [
+      "openWorkspaceFolder",
+      "toggleAutoAdvanceActionableDefaults",
+      "runDoctor",
+    ]);
   });
 
   test("surfaces immediate work before general diagnostics", () => {
@@ -28,6 +33,7 @@ describe("command center", () => {
       workspaceReady: true,
       canStop: false,
       canAcceptDefault: true,
+      autoAdvanceActionableDefaults: false,
       canAssignBuilder: false,
       canRequestReview: false,
       canHandBack: false,
@@ -56,6 +62,8 @@ describe("command center", () => {
     assert.ok(actions.some((action) => action.id === "openDecisions"));
     assert.ok(actions.some((action) => action.id === "chooseModel"));
     assert.ok(actions.some((action) => action.id === "chooseEffort"));
+    assert.ok(actions.some((action) => action.id === "testTelegram"));
+    assert.ok(actions.some((action) => action.id === "toggleAutoAdvanceActionableDefaults"));
     assert.ok(actions.some((action) => action.id === "runAutopilotStart"));
   });
 
@@ -64,6 +72,7 @@ describe("command center", () => {
       workspaceReady: true,
       canStop: true,
       canAcceptDefault: false,
+      autoAdvanceActionableDefaults: true,
       canAssignBuilder: true,
       canRequestReview: true,
       canHandBack: true,

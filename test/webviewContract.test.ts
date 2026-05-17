@@ -21,6 +21,7 @@ const boundIds = [
   "archiveClearBtn",
   "assignClaudeBtn",
   "assignCodexBtn",
+  "autoAdvanceDefaultsBtn",
   "authorityBtn",
   "autopilotText",
   "captureNativeCapabilitiesBtn",
@@ -109,6 +110,9 @@ const boundIds = [
   "toggleRibbonsBtn",
   "transportChip",
   "usageRail",
+  "usageBoard",
+  "usagePanelCount",
+  "usageSummary",
   "verificationDetails",
   "verificationRail",
   "verificationStrip",
@@ -126,6 +130,7 @@ const hostMessages = [
   "chooseEffort",
   "chooseModel",
   "changeCapabilityProfile",
+  "testTelegram",
   "fixClaudePath",
   "fixCodexPath",
   "handBack",
@@ -149,6 +154,7 @@ const hostMessages = [
   "showEffectiveAuthority",
   "showTerminalBridgeHealth",
   "stop",
+  "toggleAutoAdvanceActionableDefaults",
   "useOneShotTransport",
   "useTerminalBridge",
 ] as const;
@@ -157,12 +163,14 @@ const commandCenterActionCoverage: Record<CommandCenterActionId, readonly RegExp
   openWorkspaceFolder: [/id: "open-folder"/, /type: "openWorkspaceFolder"/],
   stopCurrentTurn: [/id: "stop"/, /type: "stop"/],
   acceptDefaultDecision: [/id: "accept-default"/, /type: "acceptDefaultDecision"/],
+  toggleAutoAdvanceActionableDefaults: [/id: "toggle-auto-accept-default"/, /type: "toggleAutoAdvanceActionableDefaults"/],
   archiveAndClearRoom: [/id: "archive-chat"/, /type: "archiveAndClearRoom"/],
   assignCodex: [/id: "assign-codex"/, /type: "assignBuilder", builder: "codex"/],
   assignClaude: [/id: "assign-claude"/, /type: "assignBuilder", builder: "claude"/],
   assignParallelBuilders: [/id: "assign-both"/, /type: "assignParallelBuilders"/],
   chooseEffort: [/id: "choose-effort"/, /type: "chooseEffort"/],
   chooseModel: [/id: "choose-model"/, /type: "chooseModel"/],
+  testTelegram: [/id: "test-telegram"/, /type: "testTelegram"/],
   changeCapabilityProfile: [/id: "change-profile"/, /type: "changeCapabilityProfile"/],
   requestReview: [/id: "request-review"/, /type: "requestReview"/],
   handBack: [/id: "hand-back"/, /type: "handBack"/],
@@ -239,6 +247,21 @@ describe("webview contract", () => {
     }
   });
 
+  test("keeps usage visible outside the overflow-clipped secondary rail", () => {
+    const primaryStart = html.indexOf('<div class="rail-primary">');
+    const secondaryStart = html.indexOf('<div class="rail-secondary">');
+    const usage = html.indexOf('id="usageRail"');
+    assert.ok(primaryStart >= 0, "missing primary rail");
+    assert.ok(secondaryStart >= 0, "missing secondary rail");
+    assert.ok(usage > primaryStart && usage < secondaryStart, "usage rail must stay in the always-visible primary rail");
+  });
+
+  test("keeps usage rail visually emphasized at zero usage", () => {
+    assert.match(html, /\.rail-primary #usageRail \{/);
+    assert.match(html, /\.rail-primary #usageRail \{[\s\S]*border-color: var\(--focus\);/);
+    assert.match(html, /\.rail-primary #usageRail \{[\s\S]*font-weight: 650;/);
+  });
+
   test("uses the current host message names for command actions", () => {
     for (const type of hostMessages) {
       assert.match(surface, new RegExp(`(?::|\\?) "${type}"`), `missing host message ${type}`);
@@ -251,6 +274,7 @@ describe("webview contract", () => {
       "open-agent-calls",
       "open-verification-file",
       "choose-model",
+      "test-telegram",
       "fix-codex",
       "fix-claude",
     ]) {

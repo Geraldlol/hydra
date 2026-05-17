@@ -83,6 +83,9 @@ export const TRUST_SCOPED_SETTINGS = [
   "handoffWebhookUrl",
   "telegramBotToken",
   "telegramChatId",
+  "telegramInboundPollingEnabled",
+  "telegramInboundCommandPrefix",
+  "telegramInboundPollIntervalSeconds",
 ] as const;
 
 export async function runHydraDoctor(input: DoctorInput): Promise<DoctorReport> {

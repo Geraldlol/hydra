@@ -156,6 +156,13 @@ export function activate(context: vscode.ExtensionContext): void {
       })
     ),
     vscode.commands.registerCommand(
+      "hydraRoom.toggleAutoAdvanceActionableDefaults",
+      withErrorReporting(async () => {
+        const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
+        await panel.toggleAutoAdvanceActionableDefaults();
+      })
+    ),
+    vscode.commands.registerCommand(
       "hydraRoom.commandCenter",
       withErrorReporting(async () => {
         const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);

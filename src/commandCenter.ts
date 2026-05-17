@@ -2,12 +2,14 @@ export type CommandCenterActionId =
   | "openWorkspaceFolder"
   | "stopCurrentTurn"
   | "acceptDefaultDecision"
+  | "toggleAutoAdvanceActionableDefaults"
   | "archiveAndClearRoom"
   | "assignCodex"
   | "assignClaude"
   | "assignParallelBuilders"
   | "chooseModel"
   | "chooseEffort"
+  | "testTelegram"
   | "changeCapabilityProfile"
   | "requestReview"
   | "handBack"
@@ -48,6 +50,7 @@ export interface CommandCenterInput {
   workspaceReady: boolean;
   canStop: boolean;
   canAcceptDefault: boolean;
+  autoAdvanceActionableDefaults: boolean;
   canAssignBuilder: boolean;
   canRequestReview: boolean;
   canHandBack: boolean;
@@ -64,6 +67,12 @@ export function buildCommandCenterActions(input: CommandCenterInput): CommandCen
   if (!input.workspaceReady) {
     return [
       action("openWorkspaceFolder", "Open Folder", "Required", "Choose a project folder so Hydra can write .hydra state and run the native CLIs."),
+      action(
+        "toggleAutoAdvanceActionableDefaults",
+        input.autoAdvanceActionableDefaults ? "Turn Off Auto Accept Default" : "Turn On Auto Accept Default",
+        "Workflow",
+        "Toggle whether Hydra automatically runs unblocked Decision Packet defaults."
+      ),
       action("runDoctor", "Run Doctor", "Diagnose", "Show setup checks for the current VS Code window."),
     ];
   }
@@ -116,6 +125,13 @@ export function buildCommandCenterActions(input: CommandCenterInput): CommandCen
     action("openSupportBundle", "Open Support Bundle", "Diagnostics", "Refresh and open Doctor, authority, terminal, queue, and recent-action diagnostics."),
     action("chooseModel", "Choose Model", "Settings", "Pick Codex or Claude model overrides."),
     action("chooseEffort", "Choose Thinking Level", "Settings", "Pick Codex reasoning or Claude effort overrides."),
+    action("testTelegram", "Send Test Telegram", "Settings", "Send a Telegram test ping using the configured bot token and chat id."),
+    action(
+      "toggleAutoAdvanceActionableDefaults",
+      input.autoAdvanceActionableDefaults ? "Turn Off Auto Accept Default" : "Turn On Auto Accept Default",
+      "Settings",
+      "Toggle whether Hydra automatically runs unblocked Decision Packet defaults."
+    ),
     action("changeCapabilityProfile", "Change Capability Profile", "Settings", "Pick safe, native, review, full-native, or custom CLI profiles."),
     action("captureNativeCapabilities", "Capture Native Capabilities", "Native CLIs", "Snapshot configured Codex and Claude version/help output into .hydra."),
     action("captureNativeDataSnapshot", "Capture Native Data Snapshot", "Native CLIs", "Snapshot redacted Codex/Claude config, plugin, model, state, and session metadata."),
