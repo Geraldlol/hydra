@@ -184,6 +184,38 @@ describe("decision packets", () => {
     assert.match(action.instruction ?? "", /Accepted default next action/);
   });
 
+  test("does not send host-only AwaitingUser defaults back into the room", () => {
+    const transition = parseDecisionPacket(
+      [
+        "Recommendation: Transition the room to AwaitingUser.",
+        "Default next action: Hydra should transition this turn to `AwaitingUser` so the Assign Builder controls can become visible.",
+        "Decision needed from user: none",
+        "Blockers: none",
+      ].join("\n"),
+      {
+        agent: "codex",
+        phase: "closer",
+        sourceMessageTimestamp: "2026-05-08T20:00:00.000Z",
+      }
+    );
+    const reveal = parseDecisionPacket(
+      [
+        "Recommendation: Transition the room to AwaitingUser.",
+        "Default next action: Hydra should reveal the Assign Builder controls so the user can choose the builder.",
+        "Decision needed from user: none",
+        "Blockers: none",
+      ].join("\n"),
+      {
+        agent: "codex",
+        phase: "opener",
+        sourceMessageTimestamp: "2026-05-08T20:00:01.000Z",
+      }
+    );
+
+    assert.equal(resolveDecisionAction(transition, "AwaitingUser").kind, "none");
+    assert.equal(resolveDecisionAction(reveal, "AwaitingUser").kind, "none");
+  });
+
   test("uses packet author for executable defaults with no named agent", () => {
     const packet = parseDecisionPacket(
       [
@@ -202,6 +234,46 @@ describe("decision packets", () => {
     const action = resolveDecisionAction(packet, "AwaitingUser");
     assert.equal(action.kind, "assignBuilder");
     assert.equal(action.builder, "codex");
+  });
+
+  test("treats self-owned diff review and staging defaults as builder authority", () => {
+    const packet = parseDecisionPacket(
+      [
+        "Recommendation: Let the agent that picked up the work continue.",
+        "Default next action: Review the diff, propose a commit grouping, and either present it for approval or start staging.",
+        "Decision needed from user: none",
+        "Blockers: none",
+      ].join("\n"),
+      {
+        agent: "codex",
+        phase: "opener",
+        sourceMessageTimestamp: "2026-05-16T17:34:27.854Z",
+      }
+    );
+
+    const action = resolveDecisionAction(packet, "AwaitingUser");
+    assert.equal(action.kind, "assignBuilder");
+    assert.equal(action.builder, "codex");
+  });
+
+  test("treats unnamed self-claim defaults as authority for the packet author", () => {
+    const packet = parseDecisionPacket(
+      [
+        "Recommendation: Let Claude keep the work he picked up.",
+        "Default next action: I've got this; let me continue.",
+        "Decision needed from user: none",
+        "Blockers: none",
+      ].join("\n"),
+      {
+        agent: "claude",
+        phase: "opener",
+        sourceMessageTimestamp: "2026-05-16T17:38:16.826Z",
+      }
+    );
+
+    const action = resolveDecisionAction(packet, "AwaitingUser");
+    assert.equal(action.kind, "assignBuilder");
+    assert.equal(action.builder, "claude");
   });
 
   test("detects auto-advanceable decisions with no user blockers", () => {

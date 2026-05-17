@@ -250,19 +250,29 @@ export interface UsageSummary {
   outputTokens: number;
   cacheReadTokens: number;
   cacheCreateTokens: number;
+  reasoningTokens: number;
   totalTokens: number;
   costUsd: number;
   byAgent: Record<AgentId, { turns: number; totalTokens: number; costUsd: number }>;
 }
 
-export function summarizeUsage(records: UsageRecord[], filterSessionId?: string): UsageSummary {
-  const filtered = filterSessionId ? records.filter((r) => r.sessionId === filterSessionId) : records;
+export function summarizeUsage(records: UsageRecord[], filterSessionId?: string, sinceIso?: string): UsageSummary {
+  const sinceMs = sinceIso ? Date.parse(sinceIso) : undefined;
+  const filtered = records.filter((r) => {
+    if (filterSessionId && r.sessionId !== filterSessionId) return false;
+    if (typeof sinceMs === "number" && Number.isFinite(sinceMs)) {
+      const ts = Date.parse(r.timestamp);
+      if (!Number.isFinite(ts) || ts < sinceMs) return false;
+    }
+    return true;
+  });
   const summary: UsageSummary = {
     turns: 0,
     inputTokens: 0,
     outputTokens: 0,
     cacheReadTokens: 0,
     cacheCreateTokens: 0,
+    reasoningTokens: 0,
     totalTokens: 0,
     costUsd: 0,
     byAgent: {
@@ -270,19 +280,21 @@ export function summarizeUsage(records: UsageRecord[], filterSessionId?: string)
       claude: { turns: 0, totalTokens: 0, costUsd: 0 },
     },
   };
+  // Why: historical .hydra/usage.jsonl records pre-date the reasoningTokens field; coerce every numeric field so an undefined doesn't poison the aggregate with NaN.
   for (const r of filtered) {
     summary.turns += 1;
-    summary.inputTokens += r.inputTokens;
-    summary.outputTokens += r.outputTokens;
-    summary.cacheReadTokens += r.cacheReadTokens;
-    summary.cacheCreateTokens += r.cacheCreateTokens;
-    summary.totalTokens += r.totalTokens;
-    summary.costUsd += r.costUsd;
+    summary.inputTokens += r.inputTokens || 0;
+    summary.outputTokens += r.outputTokens || 0;
+    summary.cacheReadTokens += r.cacheReadTokens || 0;
+    summary.cacheCreateTokens += r.cacheCreateTokens || 0;
+    summary.reasoningTokens += r.reasoningTokens || 0;
+    summary.totalTokens += r.totalTokens || 0;
+    summary.costUsd += r.costUsd || 0;
     const a = summary.byAgent[r.agent];
     if (a) {
       a.turns += 1;
-      a.totalTokens += r.totalTokens;
-      a.costUsd += r.costUsd;
+      a.totalTokens += r.totalTokens || 0;
+      a.costUsd += r.costUsd || 0;
     }
   }
   summary.costUsd = Math.round(summary.costUsd * 10_000) / 10_000;
@@ -290,6 +302,11 @@ export function summarizeUsage(records: UsageRecord[], filterSessionId?: string)
     a.costUsd = Math.round(a.costUsd * 10_000) / 10_000;
   }
   return summary;
+}
+
+export function usageCutoffIso(days: number, now = new Date()): string {
+  const cutoff = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+  return cutoff.toISOString();
 }
 
 export function formatTokensCompact(n: number): string {

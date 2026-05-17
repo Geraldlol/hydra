@@ -8,6 +8,7 @@ import {
   parseCodexTextTokens,
   resolveModelPrices,
   summarizeUsage,
+  usageCutoffIso,
   usageFromClaudeSummary,
   usageFromCodexSummary,
 } from "../src/usage";
@@ -225,5 +226,34 @@ describe("summarizeUsage", () => {
     assert.equal(summary.turns, 0);
     assert.equal(summary.totalTokens, 0);
     assert.equal(summary.costUsd, 0);
+  });
+
+  test("filters records by rolling usage cutoff", () => {
+    const now = new Date("2026-05-15T12:00:00.000Z");
+    const recent = buildUsageRecord({
+      sessionId: "old-session",
+      agent: "codex",
+      phase: "opener",
+      source: "codexJson",
+      tokens: { inputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheCreateTokens: 0, reasoningTokens: 0 },
+      prices: DEFAULT_PRICES,
+    });
+    recent.timestamp = "2026-05-14T12:00:00.000Z";
+    const stale = buildUsageRecord({
+      sessionId: "old-session",
+      agent: "claude",
+      phase: "reactor",
+      source: "claudeStreamJson",
+      tokens: { inputTokens: 999, outputTokens: 1, cacheReadTokens: 0, cacheCreateTokens: 0, reasoningTokens: 0 },
+      prices: DEFAULT_PRICES,
+    });
+    stale.timestamp = "2026-05-01T12:00:00.000Z";
+
+    const summary = summarizeUsage([recent, stale], undefined, usageCutoffIso(7, now));
+
+    assert.equal(summary.turns, 1);
+    assert.equal(summary.totalTokens, 150);
+    assert.equal(summary.byAgent.codex.turns, 1);
+    assert.equal(summary.byAgent.claude.turns, 0);
   });
 });

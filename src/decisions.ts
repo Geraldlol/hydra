@@ -120,7 +120,11 @@ export function resolveDecisionAction(
 
   const sourceTimestamp = packet.timestamp;
   const lower = defaultAction.toLowerCase();
-  if (stateName === "BuildDone") {
+  if (isHostOnlyDefault(lower, stateName)) {
+    return noDecisionAction("The latest default is a host/UI state transition, not a room instruction.");
+  }
+
+  if (stateName === "BuildDone" || stateName === "ParallelBuildDone") {
     return {
       kind: "requestReview",
       label: "Accept Default: Request Review",
@@ -129,7 +133,7 @@ export function resolveDecisionAction(
     };
   }
 
-  if (stateName === "ReviewDone" && /\b(hand back|fix|address|return to builder|builder)\b/.test(lower)) {
+  if ((stateName === "ReviewDone" || stateName === "ParallelReviewDone") && /\b(hand back|fix|address|return to builder|builder)\b/.test(lower)) {
     return {
       kind: "handBack",
       label: "Accept Default: Hand Back",
@@ -227,12 +231,28 @@ function builderFromAction(value: string, fallback?: AgentId): AgentId | undefin
   const lower = value.toLowerCase();
   const mentionsCodex = /\bcodex\b/.test(lower);
   const mentionsClaude = /\bclaude\b/.test(lower);
-  const buildIntent = /\b(build|builds|patch|patches|implement|implements|fix|fixes|edit|edits|land|lands|apply|applies|update|updates|ship|ships|run|runs|execute|executes|verify|verifies|test|tests|inspect|inspects|check|checks)\b/.test(lower);
+  const buildIntent =
+    /\b(build|builds|patch|patches|implement|implements|fix|fixes|edit|edits|land|lands|apply|applies|update|updates|ship|ships|run|runs|execute|executes|verify|verifies|test|tests|inspect|inspects|check|checks|review|reviews|propose|proposes|stage|stages|staging)\b/.test(lower) ||
+    /\b(?:i(?:'| a)?ve|i have|i)\s+got\s+(?:this|it|something)\b/.test(lower) ||
+    /\blet\s+me\s+(?:do|handle|take|continue|finish)\b/.test(lower) ||
+    /\bi(?:'| a)?ll\s+(?:do|handle|take|continue|finish)\b/.test(lower);
   if (!buildIntent) return undefined;
   if (mentionsCodex && !mentionsClaude) return "codex";
   if (mentionsClaude && !mentionsCodex) return "claude";
   if (!mentionsCodex && !mentionsClaude) return fallback;
   return undefined;
+}
+
+function isHostOnlyDefault(lower: string, stateName: string): boolean {
+  if (stateName === "AwaitingUser") {
+    if (/\btransition\b.*\bawaitinguser\b/.test(lower)) return true;
+    if (/\b(awaiting user|awaiting input|awaiting reply)\b/.test(lower) && /\b(transition|move|return|flip|set)\b/.test(lower)) return true;
+    if (/\b(reveal|show|display)\b.*\b(assign builder|builder controls|assign builder controls)\b/.test(lower)) return true;
+  }
+
+  if (/\bhydra\b.*\b(wait|idle)\b.*\buser\b/.test(lower)) return true;
+  if (/\bwait for the user\b/.test(lower)) return true;
+  return false;
 }
 
 export function isNoneValue(value: string): boolean {
