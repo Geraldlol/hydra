@@ -3801,9 +3801,16 @@ export class HydraRoomPanel {
       `<i>${this.workspaceRoot}</i>`,
       "",
       "If you see this, decision-needed notifications will reach you here.",
+      "",
+      "Reply to this message to send a test response into the Hydra room.",
     ].join("\n");
+    const paths = telegramCoordinatorPaths(cfg.botToken);
+    await this.prepareTelegramOutboundRouting(cfg, paths);
     const result = await sendTelegramMessage(cfg, text);
     if (result.ok) {
+      if (typeof result.messageId === "number") {
+        await this.appendTelegramOutboundRoute(cfg, paths, result.messageId, new Date().toISOString());
+      }
       await this.appendSystemMessage(`Telegram test message sent (message_id=${result.messageId ?? "?"}).`);
     } else {
       const detail = `Telegram test failed${result.status ? ` (HTTP ${result.status})` : ""}: ${result.error ?? "unknown error"}. Double-check hydraRoom.telegramBotToken and hydraRoom.telegramChatId.`;
@@ -3883,6 +3890,8 @@ export class HydraRoomPanel {
     if (!vscode.workspace.getConfiguration("hydraRoom").get<boolean>("telegramNotifyOnDecisionNeeded", true)) return;
     const cfg = this.telegramConfig();
     if (!cfg) return;
+    const paths = telegramCoordinatorPaths(cfg.botToken);
+    await this.prepareTelegramOutboundRouting(cfg, paths);
     const html = buildDecisionNotificationHtml({
       agent: packet.agent,
       phase: packet.phase,
@@ -3903,18 +3912,45 @@ export class HydraRoomPanel {
         await vscode.commands.executeCommand("workbench.action.openSettings", "hydraRoom.telegram");
       }
     } else if (typeof result.messageId === "number") {
-      const paths = telegramCoordinatorPaths(cfg.botToken);
-      await ensureTelegramCoordinator(paths);
-      await appendTelegramRoutingRecord(paths, {
-        messageId: result.messageId,
-        botKey: telegramBotKey(cfg.botToken),
-        chatId: cfg.chatId.trim(),
-        roomSessionId: this.sessionId,
-        roomToken: telegramRoomToken(this.sessionId),
-        workspace: this.workspaceRoot,
-        timestamp: packet.timestamp,
+      await this.appendTelegramOutboundRoute(cfg, paths, result.messageId, packet.timestamp);
+    }
+  }
+
+  private async prepareTelegramOutboundRouting(cfg: TelegramConfig, paths: TelegramCoordinatorPaths): Promise<void> {
+    await ensureTelegramCoordinator(paths);
+    if (await readTelegramOffset(paths) !== undefined) return;
+    const bootstrap = await getTelegramUpdates(cfg, {
+      offset: -1,
+      limit: 1,
+      timeoutSeconds: 0,
+      signal: this.telegramInboundAbort?.signal,
+    });
+    if (bootstrap.ok) {
+      const latest = bootstrap.updates[bootstrap.updates.length - 1];
+      await writeTelegramOffset(paths, latest ? latest.updateId + 1 : 0);
+    } else if (bootstrap.error !== "aborted") {
+      await this.recordEvent("error", `Telegram inbound bootstrap before outbound failed: ${bootstrap.error ?? "unknown"}`, {
+        status: bootstrap.status ?? null,
       });
     }
+  }
+
+  private async appendTelegramOutboundRoute(
+    cfg: TelegramConfig,
+    paths: TelegramCoordinatorPaths,
+    messageId: number,
+    timestamp: string
+  ): Promise<void> {
+    await ensureTelegramCoordinator(paths);
+    await appendTelegramRoutingRecord(paths, {
+      messageId,
+      botKey: telegramBotKey(cfg.botToken),
+      chatId: cfg.chatId.trim(),
+      roomSessionId: this.sessionId,
+      roomToken: telegramRoomToken(this.sessionId),
+      workspace: this.workspaceRoot,
+      timestamp,
+    });
   }
 
   private async sendTelegramInboundReply(cfg: TelegramConfig, afterMessageIndex: number): Promise<void> {
