@@ -38,8 +38,8 @@ import {
   FULL_NATIVE_CONSENT_ALWAYS,
   FULL_NATIVE_CONSENT_CANCEL,
 } from "./fullNativeConsent";
-import { parseClaudeEventStream, summarizeClaudeEvents, type ClaudeStreamSummary } from "./claudeEvents";
-import { parseCodexEventStream, summarizeCodexEvents } from "./codexEvents";
+import { formatClaudeStreamSummary, parseClaudeEventStream, summarizeClaudeEvents, type ClaudeStreamSummary } from "./claudeEvents";
+import { formatCodexThreadSummary, parseCodexEventStream, summarizeCodexEvents } from "./codexEvents";
 import {
   argsForCapabilityProfile,
   capabilityProfilePreset,
@@ -282,6 +282,7 @@ export class HydraRoomPanel {
   private telegramInboundStateUri!: vscode.Uri;
   private objective = "";
   private workspaceInstructions = "";
+  private workspaceInstructionsByAgent: Record<AgentId, string> = { codex: "", claude: "" };
   private decisions: DecisionPacket[] = [];
   private acceptedDefaultDecisionTimestamp: string | undefined;
   private verifications: VerificationResult[] = [];
@@ -451,7 +452,11 @@ export class HydraRoomPanel {
     this.codexModelsSnapshot = await loadCodexModelsSnapshot(this.codexModelsUri.fsPath);
     await ensureWorkQueueStateFile(this.workQueueUri.fsPath);
     this.objective = await readObjective(this.objectiveUri.fsPath);
-    this.workspaceInstructions = await readWorkspaceInstructions(this.workspaceRoot);
+    this.workspaceInstructions = await readWorkspaceInstructions(this.workspaceRoot, 0);
+    this.workspaceInstructionsByAgent = {
+      codex: await readWorkspaceInstructions(this.workspaceRoot, 0, undefined, { agent: "codex" }),
+      claude: await readWorkspaceInstructions(this.workspaceRoot, 0, undefined, { agent: "claude" }),
+    };
     this.decisions = await readDecisions(this.decisionsUri.fsPath);
     this.verifications = await readVerifications(this.verificationUri.fsPath);
     this.nativeActions = await readNativeActions(this.nativeActionsUri.fsPath);
@@ -1953,7 +1958,7 @@ export class HydraRoomPanel {
     let reactorId: string | undefined;
     let closerId: string | undefined;
     try {
-      const openerTranscript = this.buildPromptContext("opener");
+      const openerTranscript = this.buildPromptContext("opener", undefined, opener);
       const openerEnvelope = await this.buildPromptEnvelope({
         agent: opener,
         otherAgent: reactor,
@@ -1980,7 +1985,7 @@ export class HydraRoomPanel {
       // Build the reactor prompt only after the opener has finalized into
       // the transcript. This ordering is what makes the second head actually
       // respond to the first instead of reading a stale snapshot.
-      const transcriptAfterOpener = this.buildPromptContext("reactor");
+      const transcriptAfterOpener = this.buildPromptContext("reactor", undefined, reactor);
       const reactorEnvelope = await this.buildPromptEnvelope({
         agent: reactor,
         otherAgent: opener,
@@ -2020,7 +2025,7 @@ export class HydraRoomPanel {
       // Build the closer prompt only after the reactor has finalized into the
       // transcript. The opener owns this short final turn so critique becomes an
       // action decision instead of a dangling handoff.
-      const transcriptAfterReactor = this.buildPromptContext("closer");
+      const transcriptAfterReactor = this.buildPromptContext("closer", undefined, opener);
       const closerEnvelope = await this.buildPromptEnvelope({
         agent: opener,
         otherAgent: reactor,
@@ -2092,9 +2097,9 @@ export class HydraRoomPanel {
     let promiseStarted = false;
     try {
       const agents: AgentId[] = ["codex", "claude"];
-      const transcript = this.buildPromptContext("parallel");
       const calls: Promise<{ text: string; result: RunResult }>[] = [];
       for (const agent of agents) {
+        const transcript = this.buildPromptContext("parallel", undefined, agent);
         const envelope = await this.buildPromptEnvelope({
           agent,
           otherAgent: otherAgent(agent),
@@ -2145,7 +2150,7 @@ export class HydraRoomPanel {
     try {
       // Snapshot the transcript BEFORE opening the pending bubble, otherwise the
       // builder's own empty entry would appear at the tail of its prompt context.
-      const transcriptForPrompt = this.buildPromptContext("build");
+      const transcriptForPrompt = this.buildPromptContext("build", undefined, builder);
       const otherAgent: AgentId = builder === "codex" ? "claude" : "codex";
       const buildEnvelope = await this.buildPromptEnvelope({
         agent: builder,
@@ -2189,9 +2194,9 @@ export class HydraRoomPanel {
     try {
       // Snapshot the transcript before opening pending bubbles so neither
       // worker sees the other's empty pending message as context.
-      const transcriptForPrompt = this.buildPromptContext("build");
       const calls: Promise<{ text: string; result: RunResult }>[] = [];
       for (const agent of agents) {
+        const transcriptForPrompt = this.buildPromptContext("build", undefined, agent);
         const buildEnvelope = await this.buildPromptEnvelope({
           agent,
           otherAgent: otherAgent(agent),
@@ -2331,7 +2336,7 @@ export class HydraRoomPanel {
     try {
       // Snapshot the transcript BEFORE opening the pending bubble, otherwise the
       // reviewer's own empty entry would appear at the tail of its prompt context.
-      const transcriptForPrompt = this.buildPromptContext("review");
+      const transcriptForPrompt = this.buildPromptContext("review", undefined, reviewer);
       reviewId = this.openPendingMessage(reviewer, "review");
       this.postState();
 
@@ -2396,7 +2401,6 @@ export class HydraRoomPanel {
     const openedIds: string[] = [];
     let promiseStarted = false;
     try {
-      const transcriptForPrompt = this.buildPromptContext("review");
       const diff = await captureGitDiff(this.workspaceRoot, this.diffMaxLines());
       if (diff === null) {
         await this.appendSystemMessage("[git diff failed; cannot review]");
@@ -2408,6 +2412,7 @@ export class HydraRoomPanel {
       const currentHead = this.gitAvailable ? await captureGitHead(this.workspaceRoot) : undefined;
       const calls: Promise<{ text: string; result: RunResult }>[] = [];
       for (const reviewer of reviewers) {
+        const transcriptForPrompt = this.buildPromptContext("review", undefined, reviewer);
         const reviewEnvelope = await this.buildPromptEnvelope({
           agent: reviewer,
           otherAgent: otherAgent(reviewer),
@@ -2678,7 +2683,8 @@ export class HydraRoomPanel {
         }
       }
       await this.appendAgentCallTrace(completedAgentCallTrace(traceId, agent, phase, "oneShot", startedAt, normalized));
-      await this.extractAndRecordUsage({ agent, phase, requestId: traceId, result: normalized, outputMode: prepared.outputMode });
+      const usageResult = prepared.outputMode === "plain" ? normalized : result;
+      await this.extractAndRecordUsage({ agent, phase, requestId: traceId, result: usageResult, outputMode: prepared.outputMode });
       return normalized;
     } catch (err) {
       const result = agentCallFailureResult(err instanceof Error ? err.message : String(err));
@@ -2758,11 +2764,9 @@ export class HydraRoomPanel {
   private async normalizeOneShotResult(prepared: PreparedOneShotSpawn, result: RunResult): Promise<RunResult> {
     let stdout = result.stdout;
     if (prepared.outputMode === "claudeStreamJson") {
-      const text = summarizeClaudeEvents(parseClaudeEventStream(result.stdout)).lastAssistantText;
-      stdout = (text ?? "").trimEnd() || result.stdout;
+      stdout = roomTextFromClaudeStreamJson(result.stdout);
     } else if (prepared.outputMode === "codexJson") {
-      const text = summarizeCodexEvents(parseCodexEventStream(result.stdout)).lastAgentMessage;
-      stdout = (text ?? "").trimEnd() || result.stdout;
+      stdout = roomTextFromCodexJson(result.stdout);
     }
     if (prepared.replyPath) {
       try {
@@ -2782,11 +2786,9 @@ export class HydraRoomPanel {
     let stdout = result.stdout;
     const raw = await this.terminalBridgeRawOutput(result);
     if (outputMode === "claudeStreamJson") {
-      const text = summarizeClaudeEvents(parseClaudeEventStream(raw)).lastAssistantText;
-      stdout = (text ?? "").trimEnd() || result.stdout;
+      stdout = roomTextFromClaudeStreamJson(raw);
     } else if (outputMode === "codexJson") {
-      const text = summarizeCodexEvents(parseCodexEventStream(raw)).lastAgentMessage;
-      stdout = (text ?? "").trimEnd() || result.stdout;
+      stdout = roomTextFromCodexJson(raw);
     }
     return { ...result, stdout };
   }
@@ -2968,7 +2970,7 @@ export class HydraRoomPanel {
     const renderedPrompt = buildDirectTerminalPokePrompt({
       agent,
       otherAgent: other,
-      roomContext: this.buildPromptContext(phase, "terminalBridge"),
+      roomContext: this.buildPromptContext(phase, "terminalBridge", agent),
       instruction,
       editorContext,
       workspaceDiff,
@@ -3130,7 +3132,7 @@ export class HydraRoomPanel {
         agent: reviewer,
         otherAgent: this.state.builder,
         phase: "review",
-        transcript: this.buildPromptContext("review"),
+        transcript: this.buildPromptContext("review", undefined, reviewer),
         diff: diff ?? "[git diff failed; preview cannot include diff]",
         verification: verificationAsReviewContext(this.latestVerification()),
       });
@@ -3142,7 +3144,7 @@ export class HydraRoomPanel {
         agent: "codex",
         otherAgent: "claude",
         phase: "review",
-        transcript: this.buildPromptContext("review"),
+        transcript: this.buildPromptContext("review", undefined, "codex"),
         diff: diff ?? "[git diff failed; preview cannot include diff]",
         verification: verificationAsReviewContext(this.latestVerification()),
       });
@@ -3154,7 +3156,7 @@ export class HydraRoomPanel {
         agent: builder,
         otherAgent: this.state.reviewer,
         phase: "build",
-        transcript: this.buildPromptContext("build"),
+        transcript: this.buildPromptContext("build", undefined, builder),
       });
     }
 
@@ -3163,7 +3165,7 @@ export class HydraRoomPanel {
         agent: "codex",
         otherAgent: "claude",
         phase: "build",
-        transcript: this.buildPromptContext("build"),
+        transcript: this.buildPromptContext("build", undefined, "codex"),
       });
     }
 
@@ -3185,7 +3187,7 @@ export class HydraRoomPanel {
       agent: selectedOpener,
       otherAgent: reactor,
       phase,
-      transcript: this.buildPromptContextFromMessages(previewMessages, phase),
+      transcript: this.buildPromptContextFromMessages(previewMessages, phase, undefined, selectedOpener),
       currentUserMessage: trimmed,
     });
   }
@@ -3468,14 +3470,19 @@ export class HydraRoomPanel {
     return Math.max(1, Math.floor(raw));
   }
 
-  private buildPromptContext(phase: Phase, transport: "oneShot" | "terminalBridge" = this.transportMode()): string {
-    return this.buildPromptContextFromMessages(this.messages, phase, transport);
+  private buildPromptContext(
+    phase: Phase,
+    transport: "oneShot" | "terminalBridge" = this.transportMode(),
+    agent?: AgentId
+  ): string {
+    return this.buildPromptContextFromMessages(this.messages, phase, transport, agent);
   }
 
   private buildPromptContextFromMessages(
     messages: TranscriptMessage[],
     phase: Phase,
-    transport: "oneShot" | "terminalBridge" = this.transportMode()
+    transport: "oneShot" | "terminalBridge" = this.transportMode(),
+    agent?: AgentId
   ): string {
     const contextTurns = transport === "terminalBridge"
       ? this.terminalBridgeContextTurns()
@@ -3483,14 +3490,25 @@ export class HydraRoomPanel {
     const contextTitle = transport === "terminalBridge"
       ? "--- Current terminal poke context ---"
       : "--- Bounded transcript window ---";
-    return [
-      objectiveAsContext(this.objective),
-      "",
-      workspaceInstructionsAsContext(this.workspaceInstructions),
+    const workspaceInstructionsMaxChars = transport === "terminalBridge"
+      ? this.terminalBridgeWorkspaceInstructionsMaxChars()
+      : this.oneShotWorkspaceInstructionsMaxChars();
+    const sections = [objectiveAsContext(this.objective)];
+    if (transport !== "terminalBridge" || workspaceInstructionsMaxChars > 0) {
+      const workspaceInstructions = transport === "terminalBridge" && agent
+        ? this.workspaceInstructionsByAgent[agent]
+        : this.workspaceInstructions;
+      sections.push(
+        "",
+        workspaceInstructionsAsContext(workspaceInstructions, { maxChars: workspaceInstructionsMaxChars })
+      );
+    }
+    sections.push(
       "",
       contextTitle,
-      buildPromptContext(messages, phase, contextTurns, this.contextFreshnessMs()),
-    ].join("\n");
+      buildPromptContext(messages, phase, contextTurns, this.contextFreshnessMs())
+    );
+    return sections.join("\n");
   }
 
   private oneShotContextTurns(): number {
@@ -3499,6 +3517,14 @@ export class HydraRoomPanel {
 
   private terminalBridgeContextTurns(): number {
     return vscode.workspace.getConfiguration("hydraRoom").get<number>("terminalBridgeContextTurns", 0);
+  }
+
+  private oneShotWorkspaceInstructionsMaxChars(): number {
+    return vscode.workspace.getConfiguration("hydraRoom").get<number>("oneShotWorkspaceInstructionsMaxChars", 12000);
+  }
+
+  private terminalBridgeWorkspaceInstructionsMaxChars(): number {
+    return vscode.workspace.getConfiguration("hydraRoom").get<number>("terminalBridgeWorkspaceInstructionsMaxChars", 0);
   }
 
   private editorContextMaxChars(): number {
@@ -4675,6 +4701,20 @@ function formatElapsed(ms: number): string {
   const seconds = totalSeconds % 60;
   if (minutes === 0) return `${seconds}s`;
   return `${minutes}m ${seconds.toString().padStart(2, "0")}s`;
+}
+
+function roomTextFromClaudeStreamJson(raw: string): string {
+  const summary = summarizeClaudeEvents(parseClaudeEventStream(raw));
+  const text = summary.lastAssistantText?.trimEnd();
+  if (text) return text;
+  return formatClaudeStreamSummary(summary);
+}
+
+function roomTextFromCodexJson(raw: string): string {
+  const summary = summarizeCodexEvents(parseCodexEventStream(raw));
+  const text = summary.lastAgentMessage?.trimEnd();
+  if (text) return text;
+  return formatCodexThreadSummary(summary);
 }
 
 function resolveWorkspaceRoot(context: vscode.ExtensionContext): string | undefined {

@@ -113,6 +113,8 @@ Use `Codex + Editor` / `Claude + Editor`, or the matching command-palette action
 
 Use `Codex + Diff` / `Claude + Diff`, or the matching command-palette actions, when the working tree matters. Hydra attaches `git diff HEAD` plus untracked files, capped by `hydraRoom.diffMaxLines`, to one direct native-terminal request.
 
+Visible terminal prompts do not inject repository instructions by default, so each native CLI can rely on its own local context loading. Set `hydraRoom.terminalBridgeWorkspaceInstructionsMaxChars` above 0 to opt in to capped Hydra-injected repository instructions; terminal prompts filter out the recipient CLI's own native instruction files first. One-shot prompts keep `hydraRoom.oneShotWorkspaceInstructionsMaxChars` at 12000 and include the full Hydra instruction set.
+
 Use `Poke Both`, `Both + Editor`, or `Both + Diff` when you want Codex and Claude to answer in parallel through their native terminals without the room protocol. Hydra opens both terminals, creates one user transcript entry, and streams both replies into separate agent bubbles.
 
 ## Autopilot

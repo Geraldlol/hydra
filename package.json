@@ -317,6 +317,18 @@
           "minimum": 0,
           "markdownDescription": "Number of previous user turns to include when injecting into visible native terminals. Defaults to 0 so terminal bridge requests behave like fresh pokes into each native CLI."
         },
+        "hydraRoom.oneShotWorkspaceInstructionsMaxChars": {
+          "type": "number",
+          "default": 12000,
+          "minimum": 0,
+          "markdownDescription": "Maximum characters of repository instruction files injected into one-shot Hydra prompts. Set to 0 to include the loaded instruction context without an additional prompt-time cap."
+        },
+        "hydraRoom.terminalBridgeWorkspaceInstructionsMaxChars": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "markdownDescription": "Maximum characters of repository instruction files injected into visible native-terminal prompts after filtering out the recipient CLI's own native instruction files. Set to 0 to skip Hydra-injected repository instructions in terminal bridge prompts."
+        },
         "hydraRoom.editorContextMaxChars": {
           "type": "number",
           "default": 12000,
@@ -560,7 +572,7 @@
     }
   },
   "scripts": {
-    "compile": "tsc -p ./",
+    "compile": "tsc --incremental -p ./",
     "dev": "node scripts/open-dev-host.js",
     "watch": "tsc -watch -p ./",
     "check": "tsc --noEmit -p ./",
@@ -568,7 +580,7 @@
     "probe:native-contract:execute": "node scripts/native-contract-probe.js --execute",
     "copy-fixtures": "node -e \"const fs=require('node:fs');if(fs.existsSync('test/fixtures'))fs.cpSync('test/fixtures','dist/test/fixtures',{recursive:true})\"",
     "setup-vscode-stub": "node scripts/setup-vscode-stub.js",
-    "test": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p ./ && npm run copy-fixtures && npm run setup-vscode-stub && node --test dist/test/*.test.js",
+    "test": "tsc --incremental -p ./ && npm run copy-fixtures && npm run setup-vscode-stub && node --test --test-concurrency=4 dist/test/*.test.js",
     "prepackage": "npm run test",
     "package": "npx --cache .npm-cache @vscode/vsce package --no-dependencies --allow-missing-repository",
     "install:local": "node scripts/install-local.js",

@@ -5,7 +5,8 @@ out/
 .vscode-test/
 .vscode/
 *.vsix
-.hydra/
+!/.hydra/
+/.hydra/*
 .npm-cache/
 .claude/
 debug.log

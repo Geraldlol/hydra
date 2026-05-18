@@ -164,6 +164,23 @@ describe("terminal bridge protocol", () => {
     assert.doesNotMatch(out, /Code\.exe/);
   });
 
+  test("dispatch command keeps structured JSON streams in the log instead of teeing raw events to the terminal", () => {
+    const out = buildPowerShellDispatchCommand(
+      {
+        command: "claude",
+        args: ["-p", "--output-format", "stream-json", "--verbose"],
+        cwd: "C:\\repo",
+      },
+      "C:\\repo\\.hydra\\prompts\\p.md",
+      "C:\\repo\\.hydra\\replies\\r.json",
+      "C:\\repo\\.hydra\\logs\\r.log"
+    );
+    assert.match(out, /\$__hydraStructuredOutput = /);
+    assert.match(out, /Structured native events are captured in the request log/);
+    assert.match(out, /AppendAllText\(\$__hydraLog, \$__hydraChunk/);
+    assert.match(out, /if \(-not \$__hydraStructuredOutput\) \{ Write-Host -NoNewline \$__hydraChunk \}/);
+  });
+
   test("dispatch command keeps known fallbacks for extension-suffixed agent commands", () => {
     const codex = buildPowerShellDispatchCommand(
       {

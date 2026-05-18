@@ -34,4 +34,30 @@ describe("terminal bridge usage source contracts", () => {
     assert.match(branch, /outputMode: terminalPrepared\.outputMode/);
     assert.doesNotMatch(branch, /outputMode: "passthrough"/);
   });
+
+  test("terminal bridge uses recipient-filtered workspace instructions", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    const methodStart = source.indexOf("private buildPromptContextFromMessages(");
+    const methodEnd = source.indexOf("private oneShotContextTurns()", methodStart);
+    assert.ok(methodStart >= 0 && methodEnd > methodStart);
+
+    const method = source.slice(methodStart, methodEnd);
+    assert.match(method, /transport === "terminalBridge"\s*\?\s*this\.terminalBridgeWorkspaceInstructionsMaxChars\(\)/);
+    assert.match(method, /transport !== "terminalBridge" \|\| workspaceInstructionsMaxChars > 0/);
+    assert.match(method, /transport === "terminalBridge" && agent\s*\?\s*this\.workspaceInstructionsByAgent\[agent\]/);
+    assert.match(method, /workspaceInstructionsAsContext\(workspaceInstructions, \{ maxChars: workspaceInstructionsMaxChars \}\)/);
+  });
+
+  test("terminal bridge reply polling starts fast and backs off to the configured cap", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "terminalBridge.ts"), "utf8");
+    const methodStart = source.indexOf("async function waitForReply(");
+    const methodEnd = source.indexOf("async function readLogChunk", methodStart);
+    assert.ok(methodStart >= 0 && methodEnd > methodStart);
+
+    const method = source.slice(methodStart, methodEnd);
+    assert.match(method, /const maxPollMs = Math\.max\(1, Math\.floor\(pollMs\)\)/);
+    assert.match(method, /let nextPollMs = Math\.min\(50, maxPollMs\)/);
+    assert.match(method, /await sleepWithAbort\(nextPollMs\)/);
+    assert.match(method, /nextPollMs = Math\.min\(maxPollMs, nextPollMs \* 2\)/);
+  });
 });

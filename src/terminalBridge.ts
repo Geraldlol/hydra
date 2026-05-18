@@ -301,7 +301,7 @@ export class TerminalBridge {
   }
 
   private postDispatchSettleMs(): number {
-    return this.options.postDispatchSettleMs ?? 250;
+    return this.options.postDispatchSettleMs ?? 50;
   }
 
   private retireTerminal(agent: AgentId): void {
@@ -446,6 +446,8 @@ async function waitForReply(
   let lastParseError = "";
   let logOffset = 0;
   let streamed = "";
+  const maxPollMs = Math.max(1, Math.floor(pollMs));
+  let nextPollMs = Math.min(50, maxPollMs);
 
   // Race the polling delay against an abort signal so cancellation is
   // observed immediately rather than at most pollMs later.
@@ -495,7 +497,8 @@ async function waitForReply(
         lastParseError = err instanceof Error ? err.message : String(err);
       }
     }
-    await sleepWithAbort(pollMs);
+    await sleepWithAbort(nextPollMs);
+    nextPollMs = Math.min(maxPollMs, nextPollMs * 2);
   }
 
   if (signal.aborted) {
