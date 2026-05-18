@@ -15,6 +15,7 @@ function parseTelegramUpdate(value: unknown): TelegramUpdate | undefined {
       caption?: unknown;
       chat?: { id?: unknown };
       from?: { first_name?: unknown; username?: unknown; is_bot?: unknown };
+      reply_to_message?: { message_id?: unknown };
     };
   };
   if (typeof update.update_id !== "number") return undefined;
@@ -32,6 +33,9 @@ function parseTelegramUpdate(value: unknown): TelegramUpdate | undefined {
       messageId: typeof update.message?.message_id === "number" ? update.message.message_id : undefined,
       chatId: String(chatId),
       text,
+      replyToMessageId: typeof update.message?.reply_to_message?.message_id === "number"
+        ? update.message.reply_to_message.message_id
+        : undefined,
       from: [firstName, username].filter(Boolean).join(" ").trim() || undefined,
       fromIsBot: update.message?.from?.is_bot === true,
     };
@@ -55,6 +59,7 @@ export interface TelegramSendResult {
 
 export interface TelegramUpdateMessage {
   messageId?: number;
+  replyToMessageId?: number;
   chatId: string;
   text: string;
   from?: string;
@@ -193,6 +198,7 @@ export interface DecisionNotificationInput {
   defaultNextAction?: string;
   recommendation?: string;
   blockers?: string;
+  roomToken?: string;
   timestamp: string;
 }
 
@@ -210,6 +216,9 @@ export function buildDecisionNotificationHtml(input: DecisionNotificationInput):
   }
   if (input.blockers && input.blockers.trim() && !/^none$/i.test(input.blockers.trim())) {
     lines.push(`<b>Blockers:</b> ${escapeTelegramHtml(truncate(input.blockers, 300))}`);
+  }
+  if (input.roomToken && input.roomToken.trim()) {
+    lines.push(`<b>Room:</b> <code>${escapeTelegramHtml(input.roomToken.trim())}</code>`);
   }
   lines.push("");
   lines.push(`<i>${escapeTelegramHtml(input.timestamp)}</i>`);

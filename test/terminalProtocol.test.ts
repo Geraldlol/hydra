@@ -59,8 +59,8 @@ describe("terminal bridge protocol", () => {
     assert.match(out, /FullyQualifiedErrorId -eq 'NativeCommandError'/);
     assert.match(out, /WriteAllText\(\$__hydraLog, '', \$__hydraUtf8NoBom\)/);
     assert.match(out, /AppendAllText\(\$__hydraLog, \$__hydraChunk/);
-    assert.match(out, /Raw native output is captured in the request log/);
-    assert.doesNotMatch(out, /Write-Host -NoNewline \$__hydraChunk/);
+    assert.match(out, /Native output is tee'd to this terminal and the request log/);
+    assert.match(out, /Write-Host -NoNewline \$__hydraChunk/);
     assert.match(out, /Reply captured/);
     assert.match(out, /\$__hydraPromptText = \[System\.IO\.File\]::ReadAllText\(\$__hydraPrompt\)/);
     assert.match(out, /\$__hydraCommandLeaf = \[System\.IO\.Path\]::GetFileNameWithoutExtension\(\$__hydraCommand\)\.ToLowerInvariant\(\)/);

@@ -52,6 +52,7 @@ import {
   type ConfigurableCapabilityProfileId,
 } from "./capabilityProfiles";
 import { buildCommandCenterActions, type CommandCenterActionId } from "./commandCenter";
+import { shouldAutoSkipCloserOnAgreement } from "./closerSkip";
 import {
   appendDecision,
   decisionHasNoUserBlockers,
@@ -99,7 +100,7 @@ import {
 } from "./doctor";
 import { EditorContextAttachment, truncateEditorContext } from "./editorContext";
 import { appendHydraEvent, createHydraEvent, ensureHydraEventsFile, hydraEventsPath, readHydraEvents, type HydraEventKind } from "./events";
-import { atomicWriteFile, ensureFile } from "./fileQueue";
+import { ensureFile } from "./fileQueue";
 import { ensureObjectiveFile, objectiveAsContext, readObjective, writeObjective } from "./objective";
 import { TerminalBridge } from "./terminalBridge";
 import { buildDirectTerminalPokePrompt } from "./terminalPoke";
@@ -161,11 +162,26 @@ import {
 } from "./claudeTransport";
 import {
   buildDecisionNotificationHtml,
+  escapeTelegramHtml,
   extractTelegramInboundCommand,
   getTelegramUpdates,
   sendTelegramMessage,
   type TelegramConfig,
 } from "./telegram";
+import {
+  appendTelegramInboxRecord,
+  appendTelegramRoutingRecord,
+  ensureTelegramCoordinator,
+  findTelegramRoutingRecord,
+  readTelegramInboxForRoom,
+  readTelegramOffset,
+  telegramBotKey,
+  telegramCoordinatorPaths,
+  telegramRoomToken,
+  withTelegramPollerLease,
+  writeTelegramOffset,
+  type TelegramCoordinatorPaths,
+} from "./telegramCoordinator";
 import { readWorkspaceInstructions, workspaceInstructionsAsContext } from "./workspaceInstructions";
 import {
   appendWorkQueueDisposition,
@@ -238,6 +254,7 @@ interface QueuedUserMessage {
   text: string;
   opener: AgentId;
   timestamp: string;
+  telegramChatId?: string;
 }
 
 export class HydraRoomPanel {
@@ -295,7 +312,6 @@ export class HydraRoomPanel {
   private telegramInboundTimer: ReturnType<typeof setTimeout> | undefined;
   private telegramInboundAbort: AbortController | undefined;
   private telegramInboundPolling = false;
-  private telegramInboundOffset: number | undefined;
   private telegramInboundGeneration = 0;
   private agentStatuses: Record<AgentId, AgentStatus> = {
     codex: { state: "idle", detail: "Idle" },
@@ -418,7 +434,7 @@ export class HydraRoomPanel {
     this.workQueueUri = vscode.Uri.file(path.join(this.workspaceRoot, ".hydra", "work-queue.jsonl"));
     this.sessionBriefUri = vscode.Uri.file(sessionBriefPath(this.workspaceRoot));
     this.supportBundleUri = vscode.Uri.file(supportBundlePath(this.workspaceRoot));
-    this.telegramInboundStateUri = vscode.Uri.file(path.join(this.workspaceRoot, ".hydra", "telegram-inbound.json"));
+    this.telegramInboundStateUri = vscode.Uri.file(path.join(this.workspaceRoot, ".hydra", "telegram-inbox-state.json"));
     await ensureGitignore(this.workspaceRoot);
     await ensureTranscriptFile(this.transcriptUri.fsPath);
     await ensureObjectiveFile(this.objectiveUri.fsPath);
@@ -428,7 +444,7 @@ export class HydraRoomPanel {
     await ensureHydraEventsFile(this.eventsUri.fsPath);
     await ensureJsonlFile(this.agentCallsUri.fsPath);
     await ensureJsonlFile(this.usageUri.fsPath);
-    await ensureFile(this.telegramInboundStateUri.fsPath, "{}\n");
+    await ensureFile(this.telegramInboundStateUri.fsPath, "{\"seenIds\":[]}\n");
     this.usageRecords = await loadUsageRecords(this.usageUri.fsPath);
     this.sessionUsage = summarizeUsage(this.usageRecords, this.sessionId);
     this.weeklyUsage = summarizeUsage(this.usageRecords, undefined, usageCutoffIso(7));
@@ -443,7 +459,6 @@ export class HydraRoomPanel {
     this.gitAvailable = await isGitWorkspace(this.workspaceRoot);
     const existing = await readTranscript(this.transcriptUri.fsPath);
     this.messages = existing.map((m, i) => ({ ...m, id: `prev-${i}` }));
-    this.telegramInboundOffset = await this.readTelegramInboundOffset();
     this.postState();
     this.startTelegramInboundPolling();
     if (this.autopilotOnStart()) {
@@ -453,20 +468,39 @@ export class HydraRoomPanel {
 
   // ---------------- public command entry points ----------------
 
-  async sendUserMessage(text: string, opener: AgentId = this.getFirstSpeaker()): Promise<void> {
+  async sendUserMessage(
+    text: string,
+    opener: AgentId = this.getFirstSpeaker(),
+    options: { telegramChatId?: string } = {}
+  ): Promise<void> {
     await this.ready();
-    if (!this.workspaceReady) return;
-    if (this.terminalPokeInFlight) return;
     const trimmed = text.trim();
     if (!trimmed) return;
-    const selectedOpener = normalizeAgentId(opener, this.getFirstSpeaker());
-    if (isInFlight(this.state)) {
-      const queued = this.appendUserMessageToUi(trimmed);
-      this.queuedUserMessages.push({ text: trimmed, opener: selectedOpener, timestamp: queued.timestamp });
+    if (!this.workspaceReady) {
+      this.appendSystemMessageToUi("Hydra cannot send yet because no workspace folder is ready. Open a project folder, then send again.");
       this.postState();
       return;
     }
-    if (!isSendable(this.state)) return;
+    const selectedOpener = normalizeAgentId(opener, this.getFirstSpeaker());
+    if (this.terminalPokeInFlight) {
+      const queued = this.appendUserMessageToUi(trimmed);
+      this.queuedUserMessages.push({ text: trimmed, opener: selectedOpener, timestamp: queued.timestamp, telegramChatId: options.telegramChatId });
+      await this.appendSystemMessage("Hydra queued your message until the native terminal action finishes.");
+      this.postState();
+      return;
+    }
+    if (isInFlight(this.state)) {
+      const queued = this.appendUserMessageToUi(trimmed);
+      this.queuedUserMessages.push({ text: trimmed, opener: selectedOpener, timestamp: queued.timestamp, telegramChatId: options.telegramChatId });
+      await this.appendSystemMessage("Hydra queued your message until the current turn finishes.");
+      this.postState();
+      return;
+    }
+    if (!isSendable(this.state)) {
+      await this.appendSystemMessage(`Hydra ignored a send request because the room is not in a sendable state: ${this.state.name}.`);
+      this.postState();
+      return;
+    }
     if (!this.autoAdvanceInProgress) this.autoAdvanceSendInstructionCount = 0;
     await this.startUserMessageTurn(trimmed, selectedOpener, { alreadyAppended: false });
   }
@@ -720,12 +754,17 @@ export class HydraRoomPanel {
       ) {
         const next = this.queuedUserMessages.shift();
         if (!next) break;
+        const beforeReplyAt = this.messages.length;
         await appendMessage(this.transcriptUri.fsPath, {
           role: "user",
           text: next.text,
           timestamp: next.timestamp,
         });
         await this.startUserMessageTurn(next.text, next.opener, { alreadyAppended: true });
+        if (next.telegramChatId) {
+          const cfg = this.telegramConfig();
+          if (cfg) await this.sendTelegramInboundReply({ ...cfg, chatId: next.telegramChatId }, beforeReplyAt);
+        }
       }
     } finally {
       this.drainingQueuedUserMessages = false;
@@ -938,6 +977,7 @@ export class HydraRoomPanel {
       this.terminalPokeInFlight = false;
       if (this.currentAbort === ctrl) this.currentAbort = undefined;
       this.postState();
+      await this.drainQueuedUserMessages();
     }
   }
 
@@ -957,6 +997,7 @@ export class HydraRoomPanel {
     } finally {
       this.terminalPokeInFlight = false;
       this.postState();
+      await this.drainQueuedUserMessages();
     }
   }
 
@@ -1312,6 +1353,7 @@ export class HydraRoomPanel {
       this.terminalPokeInFlight = false;
       this.currentAbort = undefined;
       this.postState();
+      await this.drainQueuedUserMessages();
     }
   }
 
@@ -1347,6 +1389,7 @@ export class HydraRoomPanel {
       });
       this.terminalPokeInFlight = false;
       this.postState();
+      await this.drainQueuedUserMessages();
     }
   }
 
@@ -1443,6 +1486,7 @@ export class HydraRoomPanel {
       this.terminalPokeInFlight = false;
       this.currentAbort = undefined;
       this.postState();
+      await this.drainQueuedUserMessages();
     }
   }
 
@@ -1948,6 +1992,7 @@ export class HydraRoomPanel {
       reactorId = this.openPendingMessage(reactor, "reactor");
       this.postState();
 
+      const reactorMessageId = reactorId;
       const reactorResult = await this.callAgent(reactor, "reactor", reactorEnvelope.renderedPrompt, reactorId, ctrl.signal);
       reactorId = undefined;
 
@@ -1959,6 +2004,18 @@ export class HydraRoomPanel {
       }
 
       this.applyEvent({ type: "reactorDone" });
+
+      if (this.autoSkipCloserOnAgreement() && shouldAutoSkipCloserOnAgreement(reactorResult.text, {
+        agent: reactor,
+        phase: "reactor",
+        sourceMessageTimestamp: this.messages.find((m) => m.id === reactorMessageId)?.timestamp ?? new Date().toISOString(),
+      })) {
+        this.applyEvent({ type: "closerDone" });
+        this.currentAbort = undefined;
+        this.postState();
+        await this.autoAdvanceActionableDefault("discussion");
+        return;
+      }
 
       // Build the closer prompt only after the reactor has finalized into the
       // transcript. The opener owns this short final turn so critique becomes an
@@ -3381,6 +3438,10 @@ export class HydraRoomPanel {
     return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("autoVerifyAfterBuild", true);
   }
 
+  private autoSkipCloserOnAgreement(): boolean {
+    return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("autoSkipCloserOnAgreement", true);
+  }
+
   private autoRequestReviewAfterPassingVerification(): boolean {
     return vscode.workspace
       .getConfiguration("hydraRoom")
@@ -3609,52 +3670,28 @@ export class HydraRoomPanel {
     this.telegramInboundPolling = true;
     this.telegramInboundAbort = new AbortController();
     try {
-      if (this.telegramInboundOffset === undefined) {
-        const bootstrap = await getTelegramUpdates(cfg, {
-          offset: -1,
-          limit: 1,
-          timeoutSeconds: 0,
-          signal: this.telegramInboundAbort.signal,
-        });
-        if (bootstrap.ok) {
-          const latest = bootstrap.updates[bootstrap.updates.length - 1];
-          await this.writeTelegramInboundOffset(latest ? latest.updateId + 1 : 0);
-        } else if (bootstrap.error !== "aborted") {
-          await this.recordEvent("error", `Telegram inbound bootstrap failed: ${bootstrap.error ?? "unknown"}`, {
-            status: bootstrap.status ?? null,
-          });
-        }
-        return;
-      }
-      const result = await getTelegramUpdates(cfg, {
-        offset: this.telegramInboundOffset,
-        limit: 25,
-        timeoutSeconds: 0,
-        signal: this.telegramInboundAbort.signal,
+      const paths = telegramCoordinatorPaths(cfg.botToken);
+      await ensureTelegramCoordinator(paths);
+      await withTelegramPollerLease(paths, this.sessionId, this.telegramInboundPollIntervalMs() * 2, async () => {
+        await this.pollTelegramBotIntoSharedInbox(cfg, paths);
       });
-      if (!result.ok) {
-        if (result.error !== "aborted") {
-          await this.recordEvent("error", `Telegram inbound poll failed: ${result.error ?? "unknown"}`, {
-            status: result.status ?? null,
-          });
-        }
-        return;
-      }
-      const prefix = this.telegramInboundPrefix();
-      for (const update of result.updates) {
-        await this.writeTelegramInboundOffset(update.updateId + 1);
-        const message = update.message;
-        if (!message || message.fromIsBot || message.chatId !== cfg.chatId.trim()) continue;
-        const command = extractTelegramInboundCommand(message.text, prefix);
-        if (command === undefined) continue;
-        if (!command) {
-          await this.appendSystemMessage(`Telegram inbound ignored: empty ${prefix || "message"} command.`);
+      const records = await readTelegramInboxForRoom(paths, {
+        roomSessionId: this.sessionId,
+        stateFile: this.telegramInboundStateUri.fsPath,
+      });
+      for (const record of records) {
+        if (!record.command.trim()) {
+          await this.appendSystemMessage("Telegram inbound ignored: empty routed command.");
           this.postState();
           continue;
         }
-        const source = message.from ? ` from ${message.from}` : "";
-        await this.appendSystemMessage(`Telegram inbound${source}: ${truncateForLog(command, 160)}`);
-        await this.sendUserMessage(`[Telegram inbound${source}]\n\n${command}`);
+        const source = record.message.from ? ` from ${record.message.from}` : "";
+        await this.appendSystemMessage(`Telegram inbound${source}: ${truncateForLog(record.command, 160)}`);
+        const beforeReplyAt = this.messages.length;
+        await this.sendUserMessage(`[Telegram inbound${source}]\n\n${record.command}`, this.getFirstSpeaker(), {
+          telegramChatId: record.message.chatId,
+        });
+        await this.sendTelegramInboundReply({ ...cfg, chatId: record.message.chatId }, beforeReplyAt);
       }
     } finally {
       this.telegramInboundPolling = false;
@@ -3665,21 +3702,85 @@ export class HydraRoomPanel {
     }
   }
 
-  private async readTelegramInboundOffset(): Promise<number | undefined> {
-    try {
-      const raw = await fs.readFile(this.telegramInboundStateUri.fsPath, "utf8");
-      const parsed = JSON.parse(raw) as { offset?: unknown };
-      return typeof parsed.offset === "number" ? parsed.offset : undefined;
-    } catch {
-      // JSON hand-edit resilience; a corrupt offset file just starts at the
-      // current Bot API queue and rewrites a valid state on the next poll.
-      return undefined;
+  private async pollTelegramBotIntoSharedInbox(cfg: TelegramConfig, paths: TelegramCoordinatorPaths): Promise<void> {
+    const offset = await readTelegramOffset(paths);
+    if (offset === undefined) {
+      const bootstrap = await getTelegramUpdates(cfg, {
+        offset: -1,
+        limit: 1,
+        timeoutSeconds: 0,
+        signal: this.telegramInboundAbort?.signal,
+      });
+      if (bootstrap.ok) {
+        const latest = bootstrap.updates[bootstrap.updates.length - 1];
+        await writeTelegramOffset(paths, latest ? latest.updateId + 1 : 0);
+      } else if (bootstrap.error !== "aborted") {
+        await this.recordEvent("error", `Telegram inbound bootstrap failed: ${bootstrap.error ?? "unknown"}`, {
+          status: bootstrap.status ?? null,
+        });
+      }
+      return;
+    }
+
+    const result = await getTelegramUpdates(cfg, {
+      offset,
+      limit: 25,
+      timeoutSeconds: 0,
+      signal: this.telegramInboundAbort?.signal,
+    });
+    if (!result.ok) {
+      if (result.error !== "aborted") {
+        await this.recordEvent("error", `Telegram inbound poll failed: ${result.error ?? "unknown"}`, {
+          status: result.status ?? null,
+        });
+      }
+      return;
+    }
+
+    const prefix = this.telegramInboundPrefix();
+    for (const update of result.updates) {
+      await writeTelegramOffset(paths, update.updateId + 1);
+      const message = update.message;
+      if (!message || message.fromIsBot || message.chatId !== cfg.chatId.trim()) continue;
+      const routed = await this.routeTelegramInboundMessage(paths, message, prefix);
+      if (!routed) continue;
+      await appendTelegramInboxRecord(paths, {
+        id: `${telegramBotKey(cfg.botToken)}-${update.updateId}`,
+        updateId: update.updateId,
+        botKey: telegramBotKey(cfg.botToken),
+        chatId: message.chatId,
+        roomSessionId: routed.roomSessionId,
+        workspace: routed.workspace,
+        command: routed.command,
+        message,
+        receivedAt: new Date().toISOString(),
+      });
     }
   }
 
-  private async writeTelegramInboundOffset(offset: number): Promise<void> {
-    this.telegramInboundOffset = offset;
-    await atomicWriteFile(this.telegramInboundStateUri.fsPath, `${JSON.stringify({ offset }, null, 2)}\n`);
+  private async routeTelegramInboundMessage(
+    paths: TelegramCoordinatorPaths,
+    message: { chatId: string; text: string; replyToMessageId?: number },
+    prefix: string
+  ): Promise<{ roomSessionId: string; workspace: string; command: string } | undefined> {
+    if (typeof message.replyToMessageId === "number") {
+      const record = await findTelegramRoutingRecord(paths, {
+        chatId: message.chatId,
+        messageId: message.replyToMessageId,
+      });
+      if (record) return { roomSessionId: record.roomSessionId, workspace: record.workspace, command: message.text.trim() };
+    }
+
+    const prefixed = extractTelegramInboundCommand(message.text, prefix);
+    if (prefixed === undefined) return undefined;
+    const tokenMatch = /^([A-Za-z0-9]{4,})\b\s*([\s\S]*)$/.exec(prefixed.trim());
+    if (!tokenMatch) return undefined;
+    const record = await findTelegramRoutingRecord(paths, {
+      chatId: message.chatId,
+      roomToken: tokenMatch[1],
+    });
+    if (!record) return undefined;
+    return { roomSessionId: record.roomSessionId, workspace: record.workspace, command: tokenMatch[2].trim() };
   }
 
   async sendTestTelegramMessage(): Promise<void> {
@@ -3790,6 +3891,7 @@ export class HydraRoomPanel {
       defaultNextAction: packet.defaultNextAction,
       recommendation: packet.recommendation,
       blockers: packet.blockers,
+      roomToken: telegramRoomToken(this.sessionId),
       timestamp: packet.timestamp,
     });
     const result = await sendTelegramMessage(cfg, html);
@@ -3800,7 +3902,50 @@ export class HydraRoomPanel {
       if (choice === "Open Settings") {
         await vscode.commands.executeCommand("workbench.action.openSettings", "hydraRoom.telegram");
       }
+    } else if (typeof result.messageId === "number") {
+      const paths = telegramCoordinatorPaths(cfg.botToken);
+      await ensureTelegramCoordinator(paths);
+      await appendTelegramRoutingRecord(paths, {
+        messageId: result.messageId,
+        botKey: telegramBotKey(cfg.botToken),
+        chatId: cfg.chatId.trim(),
+        roomSessionId: this.sessionId,
+        roomToken: telegramRoomToken(this.sessionId),
+        workspace: this.workspaceRoot,
+        timestamp: packet.timestamp,
+      });
     }
+  }
+
+  private async sendTelegramInboundReply(cfg: TelegramConfig, afterMessageIndex: number): Promise<void> {
+    const reply = this.latestTelegramInboundReply(afterMessageIndex);
+    if (!reply) {
+      const result = await sendTelegramMessage(cfg, "Hydra queued your message; the reply will follow when the active turn finishes.");
+      if (!result.ok) {
+        await this.recordEvent("error", `Telegram inbound queue ack failed: ${result.error ?? "unknown"}`, {
+          status: result.status ?? null,
+        });
+      }
+      await this.appendSystemMessage("Telegram inbound message was queued behind active work; a Telegram queue acknowledgement was sent.");
+      return;
+    }
+    const result = await sendTelegramMessage(cfg, reply);
+    if (!result.ok) {
+      await this.recordEvent("error", `Telegram inbound reply failed: ${result.error ?? "unknown"}`, {
+        status: result.status ?? null,
+      });
+    }
+  }
+
+  private latestTelegramInboundReply(afterMessageIndex: number): string | undefined {
+    const agentMessages = this.messages
+      .slice(afterMessageIndex)
+      .filter((message): message is UiMessage & { role: AgentId } => (message.role === "codex" || message.role === "claude") && !message.pending);
+    const latest = agentMessages[agentMessages.length - 1];
+    if (!latest) return undefined;
+    const label = AGENT_NAMES[latest.role];
+    const phase = latest.phase ? ` (${latest.phase})` : "";
+    return `<b>${escapeTelegramHtml(label)}${escapeTelegramHtml(phase)}</b>\n\n${escapeTelegramHtml(truncateForTelegram(latest.text))}`;
   }
 
   private setAgentStatus(agent: AgentId, state: AgentStatusState, detail: string): void {
@@ -3829,7 +3974,7 @@ export class HydraRoomPanel {
     this.postState();
   }
 
-  private async appendSystemMessage(text: string): Promise<void> {
+  private appendSystemMessageToUi(text: string): UiMessage {
     const id = `s-${Date.now()}`;
     const msg: UiMessage = {
       id,
@@ -3838,6 +3983,11 @@ export class HydraRoomPanel {
       timestamp: new Date().toISOString(),
     };
     this.messages.push(msg);
+    return msg;
+  }
+
+  private async appendSystemMessage(text: string): Promise<void> {
+    const msg = this.appendSystemMessageToUi(text);
     await appendMessage(this.transcriptUri.fsPath, {
       role: "system",
       text,
@@ -4273,6 +4423,12 @@ function truncateForLog(value: string, maxChars: number): string {
   const singleLine = value.replace(/\s+/g, " ").trim();
   if (singleLine.length <= maxChars) return singleLine;
   return `${singleLine.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+}
+
+function truncateForTelegram(value: string, maxChars = 3600): string {
+  const normalized = value.trim();
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
 }
 
 function uniqueAgents(agents: AgentId[]): AgentId[] {

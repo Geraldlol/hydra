@@ -375,6 +375,11 @@
           "default": true,
           "markdownDescription": "Automatically execute actionable Decision Packet defaults when they have no blockers and require no user decision. For example, a discussion default that names a builder enters Build without requiring the user to click Accept Default."
         },
+        "hydraRoom.autoSkipCloserOnAgreement": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Skip the discussion closer when the reactor begins with `Agree:` and its Decision Packet has `Decision needed from user: none` and `Blockers: none`. Disable to force the traditional opener/reactor/closer cadence."
+        },
         "hydraRoom.autoAdvanceSendInstructionMaxConsecutive": {
           "type": "number",
           "default": 3,

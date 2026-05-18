@@ -318,10 +318,10 @@ export class TerminalBridge {
   private async ensureTerminal(agent: AgentId): Promise<vscode.Terminal> {
     const existing = this.terminals.get(agent);
     if (existing) {
-      existing.terminal.show(false);
+      existing.terminal.show(true);
       await this.setSession(agent, {
         state: "ready",
-        detail: "Native terminal focused",
+        detail: "Native terminal ready",
       });
       return existing.terminal;
     }
@@ -336,7 +336,7 @@ export class TerminalBridge {
     });
     const managed: ManagedTerminal = { terminal };
     this.terminals.set(agent, managed);
-    terminal.show(false);
+    terminal.show(true);
 
     const command = this.terminalCommand(agent);
     if (command.trim()) {

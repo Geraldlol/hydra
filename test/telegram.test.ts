@@ -20,6 +20,7 @@ describe("buildDecisionNotificationHtml", () => {
       defaultNextAction: "Hydra runs `git push origin main`",
       recommendation: "Push now; the build is green",
       blockers: "none",
+      roomToken: "abc123",
       timestamp: "2026-05-12T16:00:00Z",
     });
     assert.match(html, /<b>Hydra needs you<\/b>/);
@@ -27,6 +28,7 @@ describe("buildDecisionNotificationHtml", () => {
     assert.match(html, /Approve push to origin\/main\?/);
     assert.match(html, /<code>Hydra runs `git push origin main`<\/code>/);
     assert.match(html, /Push now; the build is green/);
+    assert.match(html, /<b>Room:<\/b> <code>abc123<\/code>/);
     // "none" blockers should be hidden so the notification stays tight.
     assert.equal(html.includes("Blockers:"), false);
     assert.match(html, /2026-05-12T16:00:00Z/);

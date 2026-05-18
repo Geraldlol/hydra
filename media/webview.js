@@ -83,15 +83,19 @@ const verificationStrip = document.getElementById("verificationStrip");
 const verificationText = document.getElementById("verificationText");
 const verificationRail = document.getElementById("verificationRail");
 const verificationDetails = document.getElementById("verificationDetails");
+const nativeActionStrip = document.getElementById("nativeActionStrip");
 const nativeActionText = document.getElementById("nativeActionText");
 const nativeActionRail = document.getElementById("nativeActionRail");
 const nativeActionBoard = document.getElementById("nativeActionBoard");
+const nativePanelCount = document.getElementById("nativePanelCount");
 const nativeAgentFilter = document.getElementById("nativeAgentFilter");
 const nativeStatusFilter = document.getElementById("nativeStatusFilter");
 const clearNativeActionsBtn = document.getElementById("clearNativeActionsBtn");
+const workQueueStrip = document.getElementById("workQueueStrip");
 const workQueueText = document.getElementById("workQueueText");
 const workQueueRail = document.getElementById("workQueueRail");
 const workQueueBoard = document.getElementById("workQueueBoard");
+const queuePanelCount = document.getElementById("queuePanelCount");
 const runVerificationBtn = document.getElementById("runVerificationBtn");
 const openVerificationBtn = document.getElementById("openVerificationBtn");
 const openNativeActionsBtn = document.getElementById("openNativeActionsBtn");
@@ -106,6 +110,8 @@ const archiveClearBtn = document.getElementById("archiveClearBtn");
 const openDecisionsBtn = document.getElementById("openDecisionsBtn");
 const openNativeActionsFooterBtn = document.getElementById("openNativeActionsFooterBtn");
 const decisionRail = document.getElementById("decisionRail");
+const decisionRiskChip = document.getElementById("decisionRiskChip");
+const decisionPanelCount = document.getElementById("decisionPanelCount");
 const usageRail = document.getElementById("usageRail");
 const usagePanelCount = document.getElementById("usagePanelCount");
 const usageSummary = document.getElementById("usageSummary");
@@ -128,6 +134,7 @@ const panelOverlay = document.getElementById("panelOverlay");
 
 const labels = { user: "human", codex: "codex", claude: "claude", system: "system" };
 let lastMessages = [];
+let pendingLocalUserMessages = [];
 let lastFilteredNativeActions = [];
 let defaultOpener = "codex";
 let selectedOpener = "codex";
@@ -199,6 +206,7 @@ const ACTIONS = [
 sendBtn.addEventListener("click", () => {
   const text = composer.value.trim();
   if (!text) return composer.focus();
+  addOptimisticUserMessage(text);
   vscode.postMessage({ type: "send", text, opener: selectedOpener });
   composer.value = "";
   hasOpenerOverride = false;
@@ -351,7 +359,10 @@ function replaceMessageText(messageId, text) {
 
 function renderState(state) {
   lastState = state;
-  lastMessages = state.messages || [];
+  const hostMessages = state.messages || [];
+  pendingLocalUserMessages = pendingLocalUserMessages.filter((pending) => !hostMessages.some((m) => sameUserMessage(m, pending)));
+  lastMessages = hostMessages.concat(pendingLocalUserMessages);
+  renderMessages();
   transport = state.transport || "oneShot";
   defaultOpener = state.defaultOpener || "codex";
   if (!hasOpenerOverride) selectedOpener = defaultOpener;
@@ -444,10 +455,31 @@ function renderState(state) {
   assignCodexBtn.classList.toggle("suggested", state.suggestedBuilder === "codex");
   assignClaudeBtn.classList.toggle("suggested", state.suggestedBuilder === "claude");
   renderOpenerButton();
-  renderMessages();
   renderPalette(paletteInput.value || "");
   applyCollapsedRibbons();
   updateRibbonMinimizedSummary(state);
+}
+
+function addOptimisticUserMessage(text) {
+  const msg = {
+    id: "local-u-" + Date.now() + "-" + Math.random().toString(36).slice(2),
+    role: "user",
+    text,
+    timestamp: new Date().toISOString(),
+    pending: true,
+    activity: "sending"
+  };
+  pendingLocalUserMessages.push(msg);
+  lastMessages = lastMessages.concat([msg]);
+  renderMessages();
+}
+
+function sameUserMessage(a, b) {
+  if (!a || !b || a.role !== "user" || b.role !== "user" || a.text !== b.text) return false;
+  const aTime = Date.parse(a.timestamp || "");
+  const bTime = Date.parse(b.timestamp || "");
+  if (!Number.isFinite(aTime) || !Number.isFinite(bTime)) return true;
+  return Math.abs(aTime - bTime) < 5 * 60 * 1000;
 }
 
 function setRibbonsMinimized(value) {
@@ -708,7 +740,7 @@ function renderNativeActions(state) {
   lastNativeActions = state.recentNativeActions || [];
   const filteredActions = lastNativeActions.filter(matchesNativeActionFilters);
   lastFilteredNativeActions = filteredActions;
-  document.getElementById("nativePanelCount").textContent = count + " actions";
+  nativePanelCount.textContent = count + " actions";
   clearNativeActionsBtn.disabled = !state.canClearNativeActions || filteredActions.length === 0;
   nativeActionStrip.classList.toggle("hidden", count === 0);
   nativeActionBoard.classList.toggle("hidden", lastNativeActions.length === 0);
@@ -773,7 +805,7 @@ function renderWorkQueue(state) {
   const items = state.workQueue || [];
   workQueueText.textContent = items.length === 0 ? "Queue clear" : items.length + " open item" + (items.length === 1 ? "" : "s");
   workQueueRail.textContent = items.length === 0 ? "queue clear" : "queue: " + items.length;
-  document.getElementById("queuePanelCount").textContent = items.length + " items";
+  queuePanelCount.textContent = items.length + " items";
   workQueueStrip.classList.toggle("hidden", items.length === 0);
   workQueueBoard.classList.toggle("hidden", items.length === 0);
   workQueueBoard.innerHTML = "";
@@ -936,13 +968,12 @@ function renderDecision(decision, count, risky, accepted) {
   decisionStrip.classList.toggle("hidden", !decision);
   decisionRail.textContent = decision ? "decision: " + (accepted ? "accepted" : decision.decisionNeededFromUser ? "needs user" : "ready") : "decision: none";
   decisionRail.className = "rail-chip optional" + (decision && !accepted && decision.decisionNeededFromUser ? " warn" : accepted ? " ok" : "");
-  const riskChip = document.getElementById("decisionRiskChip");
-  if (riskChip) {
+  if (decisionRiskChip) {
     if (decision && risky && risky.risky && risky.reasons && risky.reasons.length) {
-      riskChip.textContent = "risky: " + risky.reasons.join(", ");
-      riskChip.style.display = "";
+      decisionRiskChip.textContent = "risky: " + risky.reasons.join(", ");
+      decisionRiskChip.style.display = "";
     } else {
-      riskChip.style.display = "none";
+      decisionRiskChip.style.display = "none";
     }
   }
   if (!decision) return;
@@ -966,7 +997,7 @@ function renderAutoAdvanceDefaults(enabled) {
     : "Turn on automatic acceptance of unblocked decision defaults";
 }
 function renderDecisionBoard(decisions) {
-  document.getElementById("decisionPanelCount").textContent = decisions.length + " decisions";
+  decisionPanelCount.textContent = decisions.length + " decisions";
   decisionBoard.classList.toggle("hidden", decisions.length === 0);
   decisionBoard.innerHTML = "";
   for (const decision of decisions) {
