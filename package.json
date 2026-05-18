@@ -283,9 +283,9 @@
         },
         "hydraRoom.terminalStartupDelayMs": {
           "type": "number",
-          "default": 2500,
+          "default": 1000,
           "minimum": 0,
-          "markdownDescription": "Delay after starting a persistent native terminal before Hydra injects the first request."
+          "markdownDescription": "Maximum milliseconds to wait for the visible native terminal startup probe after running an agent terminal startup command."
         },
         "hydraRoom.terminalReplyPollMs": {
           "type": "number",

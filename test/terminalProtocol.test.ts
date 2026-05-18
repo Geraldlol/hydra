@@ -5,6 +5,7 @@ import {
   buildPowerShellDispatchCommand,
   buildPowerShellDispatchInvocation,
   buildTerminalReadyCommand,
+  buildTerminalStartupProbeCommand,
   buildTerminalPromptFile,
   expandTerminalCommand,
   HYDRA_SYNTHETIC_ECHO_COMMAND,
@@ -243,6 +244,15 @@ describe("terminal bridge protocol", () => {
     assert.match(out, /Dispatch mode: leave this shell open/);
     assert.match(out, /short request launchers/);
     assert.match(out, /Workspace: C:\\repo/);
+  });
+
+  test("startup probe command writes a ready marker after the ready banner", () => {
+    const out = buildTerminalStartupProbeCommand("claude", "C:\\repo", "C:\\repo\\.hydra\\sessions\\claude.ready");
+    assert.match(out, /\[Hydra\] Claude terminal ready\./);
+    assert.match(out, /New-Item -ItemType Directory -Path \$__hydraStartupProbeDir -Force/);
+    assert.match(out, /\$__hydraStartupProbe = 'C:\\repo\\.hydra\\sessions\\claude.ready'/);
+    assert.match(out, /WriteAllText\(\$__hydraStartupProbe, 'ready', \$__hydraUtf8NoBom\)/);
+    assert.doesNotMatch(out, /-Encoding UTF8/);
   });
 
   test("parses terminal replies", () => {

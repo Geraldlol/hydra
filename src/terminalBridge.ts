@@ -22,6 +22,7 @@ import {
   buildPowerShellDispatchInvocation,
   HYDRA_SYNTHETIC_ECHO_COMMAND,
   buildTerminalReadyCommand,
+  buildTerminalStartupProbeCommand,
   buildTerminalPromptFile,
   expandTerminalCommand,
   parseTerminalReply,
@@ -340,12 +341,16 @@ export class TerminalBridge {
 
     const command = this.terminalCommand(agent);
     if (command.trim()) {
-      terminal.sendText(expandTerminalCommand(command, this.workspaceRoot), true);
-      await delay(this.startupDelayMs());
+      const expanded = expandTerminalCommand(command, this.workspaceRoot);
+      const markerPath = path.join(this.workspaceRoot, ".hydra", "sessions", `${agent}-startup-${Date.now()}-${crypto.randomUUID()}.ready`);
+      terminal.sendText(expanded, true);
+      terminal.sendText(buildTerminalStartupProbeCommand(agent, this.workspaceRoot, markerPath), true);
+      const ready = await waitForFile(markerPath, this.startupDelayMs(), 50);
+      await unlinkIfExists(markerPath);
       await this.setSession(agent, {
         state: "ready",
-        detail: "Startup command sent; terminal ready",
-        currentCommand: expandTerminalCommand(command, this.workspaceRoot),
+        detail: ready ? "Startup command completed; terminal ready" : "Startup command sent; readiness marker not observed",
+        currentCommand: expanded,
       });
     } else {
       terminal.sendText(buildTerminalReadyCommand(agent, this.workspaceRoot), true);
@@ -390,7 +395,7 @@ export class TerminalBridge {
   }
 
   private startupDelayMs(): number {
-    return vscode.workspace.getConfiguration("hydraRoom").get<number>("terminalStartupDelayMs", 2500);
+    return vscode.workspace.getConfiguration("hydraRoom").get<number>("terminalStartupDelayMs", 1000);
   }
 
   private replyPollMs(): number {
@@ -541,6 +546,35 @@ function isProbablyParseError(err: unknown): boolean {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+}
+
+async function waitForFile(filePath: string, timeoutMs: number, pollMs: number): Promise<boolean> {
+  const start = Date.now();
+  const maxMs = Math.max(0, timeoutMs);
+  while (Date.now() - start < maxMs) {
+    try {
+      await fs.access(filePath);
+      return true;
+    } catch {
+      // The startup marker is created by the terminal after its startup command finishes.
+    }
+    await delay(pollMs);
+  }
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    // Timed out before the startup marker appeared; callers fall back to the existing best-effort behavior.
+    return false;
+  }
+}
+
+async function unlinkIfExists(filePath: string): Promise<void> {
+  try {
+    await fs.unlink(filePath);
+  } catch {
+    // The marker may not exist if startup probing timed out.
+  }
 }
 
 async function readFileBytes(filePath: string): Promise<Buffer> {

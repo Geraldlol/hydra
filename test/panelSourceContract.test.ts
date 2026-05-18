@@ -60,4 +60,17 @@ describe("terminal bridge usage source contracts", () => {
     assert.match(method, /await sleepWithAbort\(nextPollMs\)/);
     assert.match(method, /nextPollMs = Math\.min\(maxPollMs, nextPollMs \* 2\)/);
   });
+
+  test("terminal startup uses a readiness probe instead of a fixed 2.5 second sleep", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "terminalBridge.ts"), "utf8");
+    const methodStart = source.indexOf("private async ensureTerminal(");
+    const methodEnd = source.indexOf("private async setSession", methodStart);
+    assert.ok(methodStart >= 0 && methodEnd > methodStart);
+
+    const method = source.slice(methodStart, methodEnd);
+    assert.match(method, /buildTerminalStartupProbeCommand\(agent, this\.workspaceRoot, markerPath\)/);
+    assert.match(method, /const ready = await waitForFile\(markerPath, this\.startupDelayMs\(\), 50\)/);
+    assert.doesNotMatch(method, /await delay\(this\.startupDelayMs\(\)\)/);
+    assert.match(source, /get<number>\("terminalStartupDelayMs", 1000\)/);
+  });
 });

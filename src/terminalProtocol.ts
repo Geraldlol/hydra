@@ -59,6 +59,18 @@ export function buildTerminalReadyCommand(agent: AgentId, workspaceRoot: string)
   ].join("; ");
 }
 
+export function buildTerminalStartupProbeCommand(agent: AgentId, workspaceRoot: string, markerPath: string): string {
+  const markerDir = path.dirname(markerPath);
+  return [
+    buildTerminalReadyCommand(agent, workspaceRoot),
+    `$__hydraStartupProbeDir = ${quotePowerShell(markerDir)}`,
+    "if ($__hydraStartupProbeDir) { New-Item -ItemType Directory -Path $__hydraStartupProbeDir -Force | Out-Null }",
+    `$__hydraStartupProbe = ${quotePowerShell(markerPath)}`,
+    "$__hydraUtf8NoBom = [System.Text.UTF8Encoding]::new($false)",
+    "[System.IO.File]::WriteAllText($__hydraStartupProbe, 'ready', $__hydraUtf8NoBom)",
+  ].join("; ");
+}
+
 export function buildPowerShellDispatchCommand(
   spawn: AgentSpawn,
   promptPath: string,
