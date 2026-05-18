@@ -245,12 +245,17 @@ export function buildPromptContext(
   maxAgeMs = 24 * 60 * 60 * 1000,
   nowMs = Date.now()
 ): string {
-  const windowed = windowTranscriptMessages(messages, phase, completedUserTurns, maxAgeMs, nowMs);
+  const promptMessages = messages.filter((message) => !isPromptNoiseSystemMessage(message));
+  const windowed = windowTranscriptMessages(promptMessages, phase, completedUserTurns, maxAgeMs, nowMs);
   const omitted = messages.length - windowed.length;
   const context = transcriptAsContext(windowed);
   if (omitted === 0) return context;
   const freshnessNote = maxAgeMs > 0 ? ` and/or older than ${formatDuration(maxAgeMs)}` : "";
   return `[Hydra context window: ${omitted} message(s) omitted by turn limit${freshnessNote}. Full history remains in .hydra/transcript.md.]\n\n${context}`;
+}
+
+function isPromptNoiseSystemMessage(message: TranscriptMessage): boolean {
+  return message.role === "system" && /^Hydra auto-advanced after .*\(send-instruction \d+\/\d+\):/.test(message.text);
 }
 
 function filterFreshMessages(

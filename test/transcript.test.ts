@@ -161,6 +161,28 @@ describe("transcript", () => {
     assert.match(out, /current opener/);
   });
 
+  test("buildPromptContext omits auto-advance system bookkeeping from prompts", () => {
+    const now = Date.parse("2026-05-08T12:00:00.000Z");
+    const messages: TranscriptMessage[] = [
+      { role: "user", text: "original task", timestamp: "2026-05-08T11:59:00.000Z" },
+      {
+        role: "system",
+        text:
+          "Hydra auto-advanced after discussion (send-instruction 1/3): Send the default action back into the room as the next user instruction.\n" +
+          "  why: codex closer @ 2026-05-08T11:59:05.000Z · default=\"Run npm test\" · needs-user=none · blockers=none",
+        timestamp: "2026-05-08T11:59:05.000Z",
+      },
+      { role: "user", text: "Accepted default next action:\n\nRun npm test", timestamp: "2026-05-08T11:59:06.000Z" },
+    ];
+
+    const out = buildPromptContext(messages, "opener", 0, 24 * 60 * 60 * 1000, now);
+    assert.match(out, /Hydra context window: 2 message\(s\) omitted/);
+    assert.doesNotMatch(out, /Hydra auto-advanced after discussion/);
+    assert.doesNotMatch(out, /default="Run npm test"/);
+    assert.match(out, /Accepted default next action/);
+    assert.match(out, /Run npm test/);
+  });
+
   test("readTranscript returns [] when file does not exist", async () => {
     const dir = await makeTmpDir();
     const out = await readTranscript(path.join(dir, "missing.md"));
