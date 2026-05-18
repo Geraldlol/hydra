@@ -662,6 +662,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     .panel-view { display: none; min-height: 0; overflow: hidden; }
     #panelOverlay[data-panel="actions"] .panel-view[data-view="actions"],
     #panelOverlay[data-panel="queue"] .panel-view[data-view="queue"],
+    #panelOverlay[data-panel="edits"] .panel-view[data-view="edits"],
     #panelOverlay[data-panel="verify"] .panel-view[data-view="verify"],
     #panelOverlay[data-panel="decisions"] .panel-view[data-view="decisions"],
     #panelOverlay[data-panel="term"] .panel-view[data-view="term"],
@@ -671,6 +672,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     }
     .native-action-board,
     .work-queue-board,
+    .edit-board,
     .decision-board,
     .terminal-sessions,
     .usage-board {
@@ -681,6 +683,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     }
     .native-action-row,
     .work-queue-row,
+    .edit-row,
     .decision-row,
     .terminal-session {
       display: grid;
@@ -696,6 +699,9 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     }
     .work-queue-row {
       grid-template-columns: 92px minmax(160px, 0.55fr) minmax(220px, 1fr) auto;
+    }
+    .edit-row {
+      grid-template-columns: 88px 96px minmax(220px, 1fr) auto;
     }
     .decision-row {
       grid-template-columns: 110px minmax(150px, 1fr) minmax(150px, 1fr) minmax(120px, 0.7fr);
@@ -740,6 +746,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     }
     .native-action-row span,
     .work-queue-row span,
+    .edit-row span,
     .decision-row span,
     .terminal-session span,
     .usage-row span {
@@ -748,6 +755,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       white-space: nowrap;
     }
     .native-action-controls,
+    .edit-controls,
     .work-queue-controls {
       display: flex;
       gap: 6px;
@@ -773,6 +781,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       .rail-chip.optional, #objectiveLabel { display: none; }
       .native-action-row,
       .work-queue-row,
+      .edit-row,
       .decision-row { grid-template-columns: 1fr; gap: 4px; align-items: stretch; }
       .composer { grid-template-columns: 1fr; }
       #composerActions { flex-direction: row; min-width: 0; flex-wrap: wrap; }
@@ -881,6 +890,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
         <span id="codexAuthority" class="authority-badge unknown"><span class="rail-value"><strong>Codex</strong> unknown</span></span>
         <span id="claudeAuthority" class="authority-badge unknown"><span class="rail-value"><strong>Claude</strong> unknown</span></span>
         <span id="verificationRail" class="rail-chip optional">verify: none</span>
+        <span id="editsRail" class="rail-chip optional" role="button" tabindex="0" title="Open current workspace edits">edits: 0</span>
         <span id="nativeActionRail" class="rail-chip optional">actions: 0</span>
         <span id="workQueueRail" class="rail-chip optional">queue clear</span>
         <span id="decisionRail" class="rail-chip optional">decision: none</span>
@@ -1028,6 +1038,10 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
         <section class="panel-view" data-view="queue">
           <div class="insp-head"><h3>Work Queue</h3><span class="count" id="queuePanelCount"></span><button class="secondary close" type="button">Close</button></div>
           <div class="insp-body"><div id="workQueueBoard" class="work-queue-board hidden"></div></div>
+        </section>
+        <section class="panel-view" data-view="edits">
+          <div class="insp-head"><h3>Edits</h3><span class="count" id="editsPanelCount"></span><button class="secondary close" type="button">Close</button></div>
+          <div class="insp-body"><div id="editBoard" class="edit-board hidden"></div></div>
         </section>
         <section class="panel-view" data-view="verify">
           <div class="insp-head"><h3>Verification</h3><span class="count" id="verifyPanelCount"></span><button class="secondary close" type="button">Close</button></div>

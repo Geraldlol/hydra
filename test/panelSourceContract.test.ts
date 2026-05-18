@@ -61,6 +61,25 @@ describe("terminal bridge usage source contracts", () => {
     assert.match(method, /nextPollMs = Math\.min\(maxPollMs, nextPollMs \* 2\)/);
   });
 
+  test("terminal bridge caches resolved agent commands per agent and command", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "terminalBridge.ts"), "utf8");
+
+    assert.match(source, /private readonly resolvedCommandCache = new Map<string, Promise<string>>\(\)/);
+
+    const helperStart = source.indexOf("private async resolveAgentCommandCached(");
+    const helperEnd = source.indexOf("private retireTerminal(", helperStart);
+    assert.ok(helperStart >= 0 && helperEnd > helperStart, "missing resolveAgentCommandCached");
+    const helper = source.slice(helperStart, helperEnd);
+    assert.match(helper, /const cacheKey = `\$\{agent\}\\0\$\{command\}`/);
+    assert.match(helper, /this\.resolvedCommandCache\.get\(cacheKey\)/);
+    assert.match(helper, /this\.resolvedCommandCache\.delete\(cacheKey\)/);
+    assert.match(helper, /this\.resolvedCommandCache\.set\(cacheKey, resolved\)/);
+
+    const dispatchCall = /terminalSpawn = \{ \.\.\.spawn, command: await this\.resolveAgentCommandCached\(agent, spawn\.command\) \}/;
+    assert.match(source, dispatchCall);
+    assert.doesNotMatch(source, /command: await resolveAgentCommand\(agent, spawn\.command\)/);
+  });
+
   test("terminal startup uses a readiness probe instead of a fixed 2.5 second sleep", () => {
     const source = fs.readFileSync(path.join(process.cwd(), "src", "terminalBridge.ts"), "utf8");
     const methodStart = source.indexOf("private async ensureTerminal(");
@@ -72,5 +91,31 @@ describe("terminal bridge usage source contracts", () => {
     assert.match(method, /const ready = await waitForFile\(markerPath, this\.startupDelayMs\(\), 50\)/);
     assert.doesNotMatch(method, /await delay\(this\.startupDelayMs\(\)\)/);
     assert.match(source, /get<number>\("terminalStartupDelayMs", 1000\)/);
+  });
+});
+
+describe("workspace edit viewer source contracts", () => {
+  const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+
+  test("workspace edit viewer uses z-terminated git status parsing", () => {
+    const functionStart = source.indexOf("async function captureGitStatusChanges(");
+    const functionEnd = source.indexOf("function gitStatusKind(", functionStart);
+    assert.ok(functionStart >= 0, "missing captureGitStatusChanges");
+    assert.ok(functionEnd > functionStart, "missing git status parser boundary");
+    const section = source.slice(functionStart, functionEnd);
+    assert.match(section, /\["status", "--porcelain=v1", "-z", "-uall"\]/);
+    assert.match(section, /function parseGitStatusEntries\(raw: string\)/);
+    assert.match(section, /raw\.split\("\\0"\)/);
+    assert.match(section, /status\.includes\("R"\) \|\| status\.includes\("C"\)/);
+  });
+
+  test("workspace edit viewer refreshes from a debounced file watcher", () => {
+    assert.match(source, /createFileSystemWatcher\(new vscode\.RelativePattern\(this\.workspaceRoot, "\*\*\/\*"\)\)/);
+    assert.match(source, /watcher\.onDidCreate\(schedule\)/);
+    assert.match(source, /watcher\.onDidChange\(schedule\)/);
+    assert.match(source, /watcher\.onDidDelete\(schedule\)/);
+    assert.match(source, /private scheduleWorkspaceChangesRefresh\(\): void/);
+    assert.match(source, /setTimeout\(\(\) => \{/);
+    assert.match(source, /this\.refreshWorkspaceChanges\(\)\.then\(\(\) => this\.postState\(\)\)/);
   });
 });

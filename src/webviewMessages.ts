@@ -24,6 +24,7 @@ export type WebviewMessage =
   | { type: "openVerification" }
   | { type: "openNativeActions" }
   | { type: "openAgentCalls" }
+  | { type: "openWorkspaceChange"; path?: string }
   | { type: "clearNativeAction"; id?: string }
   | { type: "clearNativeActions"; ids?: string[] }
   | { type: "openObjective" }

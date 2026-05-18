@@ -83,6 +83,9 @@ const verificationStrip = document.getElementById("verificationStrip");
 const verificationText = document.getElementById("verificationText");
 const verificationRail = document.getElementById("verificationRail");
 const verificationDetails = document.getElementById("verificationDetails");
+const editsRail = document.getElementById("editsRail");
+const editsPanelCount = document.getElementById("editsPanelCount");
+const editBoard = document.getElementById("editBoard");
 const nativeActionStrip = document.getElementById("nativeActionStrip");
 const nativeActionText = document.getElementById("nativeActionText");
 const nativeActionRail = document.getElementById("nativeActionRail");
@@ -126,6 +129,11 @@ if (modelRail) {
   const open = () => vscode.postMessage({ type: "chooseModel" });
   modelRail.addEventListener("click", open);
   modelRail.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } });
+}
+if (editsRail) {
+  const open = () => openPanel("edits");
+  editsRail.addEventListener("click", open);
+  editsRail.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } });
 }
 const cmdOverlay = document.getElementById("cmdOverlay");
 const paletteInput = document.getElementById("paletteInput");
@@ -172,6 +180,7 @@ const ACTIONS = [
   { id: "poke-both", group: "Terminals", name: "Poke Both", what: "Send composer to both terminals", run: () => pokeBothBtn.click(), enabled: () => !pokeBothBtn.disabled },
   { id: "open-actions", group: "Panels", name: "Open Native Actions Panel", what: "Inspect recent native actions", run: () => openPanel("actions") },
   { id: "open-queue", group: "Panels", name: "Open Work Queue", what: "Inspect queued follow-ups", run: () => openPanel("queue") },
+  { id: "open-edits", group: "Panels", name: "Open Edits Panel", what: "Inspect current workspace edits", run: () => openPanel("edits") },
   { id: "open-verify", group: "Panels", name: "Open Verification Details", what: "Inspect verification status", run: () => openPanel("verify") },
   { id: "open-decisions-panel", group: "Panels", name: "Open Decisions Panel", what: "Inspect decision packets", run: () => openPanel("decisions") },
   { id: "open-usage-panel", group: "Panels", name: "Open Usage Panel", what: "Inspect session tokens, cache, reasoning, and estimated cost", run: () => openPanel("usage") },
@@ -328,6 +337,14 @@ nativeActionBoard.addEventListener("click", (event) => {
   if (button.dataset.action === "discuss") vscode.postMessage({ type: "send", text: action.instruction || "", opener: selectedOpener });
   if (button.dataset.action === "clear") vscode.postMessage({ type: "clearNativeAction", id });
 });
+if (editBoard) {
+  editBoard.addEventListener("click", (event) => {
+    const target = event.target;
+    const button = target && target.closest ? target.closest("button[data-edit-path]") : undefined;
+    if (!button) return;
+    vscode.postMessage({ type: "openWorkspaceChange", path: button.dataset.editPath || "" });
+  });
+}
 
 window.addEventListener("message", (event) => {
   const msg = event.data;
@@ -378,6 +395,7 @@ function renderState(state) {
   renderTerminalSessions(state.terminalSessions || [], transport);
   renderAutopilot(state);
   renderVerification(state);
+  renderEdits(state);
   renderNativeActions(state);
   renderWorkQueue(state);
   renderDecision(state.latestDecision, state.decisionsCount || 0, state.latestDecisionRisky, !!state.latestDecisionAccepted);
@@ -532,6 +550,7 @@ function updateRibbonMinimizedSummary(state) {
   const parts = [];
   if (state.autopilotRunning || state.autopilotSummary) parts.push("Autopilot: " + (state.autopilotRunning ? "running" : state.autopilotSummary));
   if (state.verificationRunning || state.verificationSummary) parts.push("Verify: " + (state.verificationRunning ? "running" : state.verificationSummary));
+  if (state.workspaceChangesCount) parts.push("Edits: " + state.workspaceChangesCount);
   if (state.latestDecision) parts.push("Decision" + (state.decisionsCount ? " " + state.decisionsCount : "") + ": " + (state.latestDecision.defaultNextAction || "ready"));
   if (state.nativeActionsCount) parts.push("Actions: " + state.nativeActionsCount);
   if (state.workQueue && state.workQueue.length) parts.push("Queue: " + state.workQueue.length);
@@ -731,6 +750,42 @@ function renderVerification(state) {
   verificationStrip.classList.toggle("hidden", !state.verificationRunning && !state.verificationSummary);
   verificationStrip.classList.toggle("failed", text.toLowerCase().includes("fail"));
   verificationDetails.textContent = text;
+}
+function renderEdits(state) {
+  const changes = state.workspaceChanges || [];
+  const count = state.workspaceChangesCount || changes.length;
+  if (editsRail) {
+    editsRail.textContent = "edits: " + count;
+    editsRail.className = "rail-chip optional" + (count > 0 ? " warn" : "");
+    editsRail.title = count > 0 ? "Open current workspace edits" : "No current workspace edits";
+  }
+  if (!editsPanelCount || !editBoard) return;
+  editsPanelCount.textContent = count + " file" + (count === 1 ? "" : "s");
+  editBoard.classList.toggle("hidden", changes.length === 0);
+  editBoard.innerHTML = "";
+  if (changes.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "empty";
+    empty.textContent = "No workspace edits detected.";
+    editBoard.append(empty);
+    return;
+  }
+  for (const change of changes) {
+    const row = document.createElement("div");
+    row.className = "edit-row";
+    row.title = change.path || "";
+    row.append(cell(change.status || "?", "status " + (change.kind || "changed")), cell(change.kind || "changed"), cell(change.path || ""));
+    const controls = document.createElement("span");
+    controls.className = "edit-controls";
+    const open = document.createElement("button");
+    open.className = "secondary";
+    open.textContent = "Open";
+    open.dataset.editPath = change.path || "";
+    open.disabled = change.kind === "deleted";
+    controls.append(open);
+    row.append(controls);
+    editBoard.append(row);
+  }
 }
 function renderNativeActions(state) {
   nativeActionText.textContent = state.nativeActionSummary || "No native actions yet";

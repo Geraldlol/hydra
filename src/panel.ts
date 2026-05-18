@@ -207,6 +207,12 @@ interface UiMessage extends TranscriptMessage {
   activity?: string;
 }
 
+interface WorkspaceChange {
+  path: string;
+  status: string;
+  kind: string;
+}
+
 const AGENT_NAMES: Record<AgentId, string> = { codex: "Codex", claude: "Claude" };
 
 // Surfaced when a code path tries to use the native terminal bridge before
@@ -319,6 +325,8 @@ export class HydraRoomPanel {
     claude: { state: "idle", detail: "Idle" },
   };
   private gitAvailable = false;
+  private workspaceChanges: WorkspaceChange[] = [];
+  private workspaceChangesRefreshTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly initPromise: Promise<void>;
 
   static open(context: vscode.ExtensionContext): HydraRoomPanel {
@@ -392,6 +400,10 @@ export class HydraRoomPanel {
 
   dispose(): void {
     HydraRoomPanel.instance = undefined;
+    if (this.workspaceChangesRefreshTimer) {
+      clearTimeout(this.workspaceChangesRefreshTimer);
+      this.workspaceChangesRefreshTimer = undefined;
+    }
     this.currentAbort?.abort();
     this.stopTelegramInboundPolling();
     // TerminalBridge is constructed inside initialize() so it isn't in the
@@ -462,6 +474,17 @@ export class HydraRoomPanel {
     this.nativeActions = await readNativeActions(this.nativeActionsUri.fsPath);
     this.workQueueDispositions = await readWorkQueueDispositions(this.workQueueUri.fsPath);
     this.gitAvailable = await isGitWorkspace(this.workspaceRoot);
+    await this.refreshWorkspaceChanges();
+    if (this.gitAvailable) {
+      const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(this.workspaceRoot, "**/*"));
+      const schedule = () => this.scheduleWorkspaceChangesRefresh();
+      this.disposables.push(
+        watcher,
+        watcher.onDidCreate(schedule),
+        watcher.onDidChange(schedule),
+        watcher.onDidDelete(schedule),
+      );
+    }
     const existing = await readTranscript(this.transcriptUri.fsPath);
     this.messages = existing.map((m, i) => ({ ...m, id: `prev-${i}` }));
     this.postState();
@@ -847,6 +870,32 @@ export class HydraRoomPanel {
     await ensureJsonlFile(this.agentCallsUri.fsPath);
     const doc = await vscode.workspace.openTextDocument(this.agentCallsUri);
     await vscode.window.showTextDocument(doc, vscode.ViewColumn.Active);
+  }
+
+  async openWorkspaceChange(relativePath: string): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    const normalized = relativePath.replace(/\\/g, "/");
+    if (!normalized || path.isAbsolute(normalized) || normalized.split("/").includes("..")) {
+      await this.appendSystemMessage("Hydra refused to open an invalid workspace change path.");
+      this.postState();
+      return;
+    }
+    const absolute = path.resolve(this.workspaceRoot, normalized);
+    const root = path.resolve(this.workspaceRoot);
+    if (absolute !== root && !absolute.startsWith(root + path.sep)) {
+      await this.appendSystemMessage("Hydra refused to open a path outside the workspace.");
+      this.postState();
+      return;
+    }
+    try {
+      const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(absolute));
+      await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await this.appendSystemMessage(`Hydra could not open \`${normalized}\`: ${message}`);
+      this.postState();
+    }
   }
 
   async openObjective(): Promise<void> {
@@ -3607,6 +3656,7 @@ export class HydraRoomPanel {
       );
     }
     await this.captureDecisionPacket(m);
+    await this.refreshWorkspaceChanges();
     await appendMessage(this.transcriptUri.fsPath, {
       role: m.role,
       text: m.text,
@@ -4109,6 +4159,9 @@ export class HydraRoomPanel {
         case "openAgentCalls":
           await this.openAgentCalls();
           break;
+        case "openWorkspaceChange":
+          await this.openWorkspaceChange(String(msg.path ?? ""));
+          break;
         case "clearNativeAction":
           await this.clearNativeActions([msg.id ?? ""]);
           break;
@@ -4342,6 +4395,8 @@ export class HydraRoomPanel {
         nativeActionSummary: nativeActionSummary(this.nativeActions[this.nativeActions.length - 1]),
         recentNativeActions: this.nativeActions.slice(-10).reverse(),
         nativeActionsCount: this.nativeActions.length,
+        workspaceChanges: this.workspaceChanges,
+        workspaceChangesCount: this.workspaceChanges.length,
         workQueue,
         latestDoctorReport: this.latestDoctorReport,
         autopilotRunning: this.autopilotRunning,
@@ -4356,6 +4411,23 @@ export class HydraRoomPanel {
 
   private applyEvent(event: Event): void {
     this.state = transition(this.state, event);
+  }
+
+  private async refreshWorkspaceChanges(): Promise<void> {
+    if (!this.gitAvailable) {
+      this.workspaceChanges = [];
+      return;
+    }
+    const changes = await captureGitStatusChanges(this.workspaceRoot);
+    this.workspaceChanges = changes ?? [];
+  }
+
+  private scheduleWorkspaceChangesRefresh(): void {
+    if (this.workspaceChangesRefreshTimer) clearTimeout(this.workspaceChangesRefreshTimer);
+    this.workspaceChangesRefreshTimer = setTimeout(() => {
+      this.workspaceChangesRefreshTimer = undefined;
+      void this.refreshWorkspaceChanges().then(() => this.postState());
+    }, 350);
   }
 
   private resolveTranscriptUri(): vscode.Uri {
@@ -4754,6 +4826,40 @@ async function captureGitDiff(cwd: string, maxLines: number): Promise<string | n
     appendLimitedLines(lines, diff, maxLines);
   }
   return lines.join("\n");
+}
+
+async function captureGitStatusChanges(cwd: string): Promise<WorkspaceChange[] | null> {
+  const status = await runGit(cwd, ["status", "--porcelain=v1", "-z", "-uall"]);
+  if (!status || status.code !== 0) return null;
+  return parseGitStatusEntries(status.out).slice(0, 200);
+}
+
+function parseGitStatusEntries(raw: string): WorkspaceChange[] {
+  const entries = raw.split("\0");
+  const changes: WorkspaceChange[] = [];
+  for (let i = 0; i < entries.length; i += 1) {
+    const entry = entries[i];
+    if (entry.length < 4) continue;
+    const status = entry.slice(0, 2);
+    const filePath = entry.slice(3);
+    if (status.includes("R") || status.includes("C")) i += 1;
+    changes.push({
+      path: filePath,
+      status: status.trim() || status,
+      kind: gitStatusKind(status),
+    });
+  }
+  return changes;
+}
+
+function gitStatusKind(status: string): string {
+  if (status === "??") return "untracked";
+  if (status.includes("A")) return "added";
+  if (status.includes("D")) return "deleted";
+  if (status.includes("R")) return "renamed";
+  if (status.includes("C")) return "copied";
+  if (status.includes("M")) return "modified";
+  return "changed";
 }
 
 async function runGit(cwd: string, args: string[]): Promise<{ code: number | null; out: string } | null> {

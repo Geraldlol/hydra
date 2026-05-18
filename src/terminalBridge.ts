@@ -69,6 +69,13 @@ export class TerminalBridge {
     codex: Promise.resolve(),
     claude: Promise.resolve(),
   };
+  // Why: the four fixed `.hydra/<prompts|replies|logs|dispatch>` directories
+  // never change across dispatches. Creating them once (lazily, on first use)
+  // shaves four sequential mkdir round-trips off every terminal-bridge poke.
+  // On failure we reset the cache so a transient FS hiccup doesn't pin the
+  // bridge into a broken state for the rest of the session.
+  private dispatchDirsReady: Promise<void> | undefined;
+  private readonly resolvedCommandCache = new Map<string, Promise<string>>();
   private readonly disposables: vscode.Disposable[] = [];
   private disposed = false;
 
@@ -230,17 +237,16 @@ export class TerminalBridge {
     // parsed as new.
     const requestId = `${Date.now()}-${crypto.randomUUID()}`;
     const paths = terminalProtocolPaths(this.workspaceRoot, requestId, agent, phase);
-    await fs.mkdir(path.dirname(paths.promptPath), { recursive: true });
-    await fs.mkdir(path.dirname(paths.replyPath), { recursive: true });
-    await fs.mkdir(path.dirname(paths.logPath), { recursive: true });
-    await fs.mkdir(path.dirname(paths.dispatchPath), { recursive: true });
-    await fs.writeFile(paths.promptPath, buildTerminalPromptFile(agent, phase, prompt, paths.replyPath), "utf8");
-    await fs.writeFile(paths.logPath, "", "utf8");
+    await this.ensureDispatchDirs(paths);
+    await Promise.all([
+      fs.writeFile(paths.promptPath, buildTerminalPromptFile(agent, phase, prompt, paths.replyPath), "utf8"),
+      fs.writeFile(paths.logPath, "", "utf8"),
+    ]);
 
     const terminal = await this.ensureTerminal(agent);
     let terminalSpawn: AgentSpawn;
     try {
-      terminalSpawn = { ...spawn, command: await resolveAgentCommand(agent, spawn.command) };
+      terminalSpawn = { ...spawn, command: await this.resolveAgentCommandCached(agent, spawn.command) };
     } catch (err) {
       await this.setSession(agent, {
         state: "error",
@@ -303,6 +309,35 @@ export class TerminalBridge {
 
   private postDispatchSettleMs(): number {
     return this.options.postDispatchSettleMs ?? 50;
+  }
+
+  private async ensureDispatchDirs(paths: ReturnType<typeof terminalProtocolPaths>): Promise<void> {
+    this.dispatchDirsReady ??= Promise.all([
+      fs.mkdir(path.dirname(paths.promptPath), { recursive: true }),
+      fs.mkdir(path.dirname(paths.replyPath), { recursive: true }),
+      fs.mkdir(path.dirname(paths.logPath), { recursive: true }),
+      fs.mkdir(path.dirname(paths.dispatchPath), { recursive: true }),
+    ]).then(
+      () => undefined,
+      (err) => {
+        this.dispatchDirsReady = undefined;
+        throw err;
+      }
+    );
+    await this.dispatchDirsReady;
+  }
+
+  private async resolveAgentCommandCached(agent: AgentId, command: string): Promise<string> {
+    const cacheKey = `${agent}\0${command}`;
+    let resolved = this.resolvedCommandCache.get(cacheKey);
+    if (!resolved) {
+      resolved = resolveAgentCommand(agent, command).catch((err) => {
+        this.resolvedCommandCache.delete(cacheKey);
+        throw err;
+      });
+      this.resolvedCommandCache.set(cacheKey, resolved);
+    }
+    return resolved;
   }
 
   private retireTerminal(agent: AgentId): void {
