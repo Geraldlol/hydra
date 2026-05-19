@@ -10,3 +10,4 @@ out/
 .npm-cache/
 .claude/
 debug.log
+.hydra/

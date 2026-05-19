@@ -266,8 +266,8 @@
         },
         "hydraRoom.preferTerminalBridgeOnStart": {
           "type": "boolean",
-          "default": true,
-          "markdownDescription": "When Autopilot passes the terminal bridge self-test, automatically use the visible native terminal bridge instead of safe one-shot transport."
+          "default": false,
+          "markdownDescription": "When Autopilot passes the terminal bridge self-test, automatically use the visible native terminal bridge instead of safe one-shot transport. Disabled by default because the terminal bridge is experimental."
         },
         "hydraRoom.codexTerminalCommand": {
           "scope": "application",
@@ -581,6 +581,8 @@
     "copy-fixtures": "node -e \"const fs=require('node:fs');if(fs.existsSync('test/fixtures'))fs.cpSync('test/fixtures','dist/test/fixtures',{recursive:true})\"",
     "setup-vscode-stub": "node scripts/setup-vscode-stub.js",
     "test": "tsc --incremental -p ./ && node -e \"const fs=require('node:fs');if(fs.existsSync('test/fixtures'))fs.cpSync('test/fixtures','dist/test/fixtures',{recursive:true})\" && node scripts/setup-vscode-stub.js && node --test --test-concurrency=4 dist/test/*.test.js",
+    "test:fast": "tsc --incremental -p ./ && node --test --test-concurrency=4 dist/test/*.test.js",
+    "verify:fast": "npm run test:fast",
     "prepackage": "npm run test",
     "package": "npx --cache .npm-cache @vscode/vsce package --no-dependencies --allow-missing-repository",
     "install:local": "node scripts/install-local.js",

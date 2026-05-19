@@ -35,7 +35,7 @@ describe("terminal bridge usage source contracts", () => {
     assert.doesNotMatch(branch, /outputMode: "passthrough"/);
   });
 
-  test("terminal bridge uses recipient-filtered workspace instructions", () => {
+  test("workspace instructions filter out the recipient agent's native instruction files in both transports", () => {
     const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
     const methodStart = source.indexOf("private buildPromptContextFromMessages(");
     const methodEnd = source.indexOf("private oneShotContextTurns()", methodStart);
@@ -44,7 +44,8 @@ describe("terminal bridge usage source contracts", () => {
     const method = source.slice(methodStart, methodEnd);
     assert.match(method, /transport === "terminalBridge"\s*\?\s*this\.terminalBridgeWorkspaceInstructionsMaxChars\(\)/);
     assert.match(method, /transport !== "terminalBridge" \|\| workspaceInstructionsMaxChars > 0/);
-    assert.match(method, /transport === "terminalBridge" && agent\s*\?\s*this\.workspaceInstructionsByAgent\[agent\]/);
+    assert.match(method, /agent\s*\?\s*this\.workspaceInstructionsByAgent\[agent\]\s*:\s*this\.workspaceInstructions/);
+    assert.doesNotMatch(method, /transport === "terminalBridge" && agent\s*\?\s*this\.workspaceInstructionsByAgent/);
     assert.match(method, /workspaceInstructionsAsContext\(workspaceInstructions, \{ maxChars: workspaceInstructionsMaxChars \}\)/);
   });
 

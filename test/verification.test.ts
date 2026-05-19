@@ -24,6 +24,16 @@ describe("verification evidence", () => {
     assert.equal(await inferVerificationCommand(dir), "npm run check && npm test");
   });
 
+  test("prefers explicit fast verification scripts", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-verify-"));
+    await fs.writeFile(
+      path.join(dir, "package.json"),
+      JSON.stringify({ scripts: { check: "tsc", test: "node --test", "verify:fast": "npm run test:fast" } }),
+      "utf8"
+    );
+    assert.equal(await inferVerificationCommand(dir), "npm run verify:fast");
+  });
+
   test("round-trips verification JSONL and skips malformed lines", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-verify-"));
     const file = path.join(dir, ".hydra", "verification.jsonl");

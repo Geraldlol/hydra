@@ -430,9 +430,7 @@ export class HydraRoomPanel {
     this.workspaceReady = true;
     this.workspaceRoot = workspaceRoot;
     await this.migrateLegacyDiscussionTimeoutDefault();
-    this.terminalBridge = new TerminalBridge(this.workspaceRoot, {
-      onSessionUpdate: () => this.postState(),
-    });
+    this.terminalBridge = this.createTerminalBridge();
     this.transcriptUri = this.resolveTranscriptUri();
     this.objectiveUri = vscode.Uri.file(path.join(this.workspaceRoot, ".hydra", "objective.md"));
     this.decisionsUri = vscode.Uri.file(path.join(this.workspaceRoot, ".hydra", "decisions.jsonl"));
@@ -1721,6 +1719,7 @@ export class HydraRoomPanel {
   async useTerminalBridge(): Promise<void> {
     await this.ready();
     if (!this.workspaceReady) return;
+    this.terminalBridge ??= this.createTerminalBridge();
     if (this.transportMode() === "terminalBridge") {
       await this.terminalBridge?.openAll();
       vscode.window.showInformationMessage("Hydra is already using the experimental terminal bridge.");
@@ -1836,6 +1835,8 @@ export class HydraRoomPanel {
       return;
     }
     this.transport = "oneShot";
+    this.terminalBridge?.dispose();
+    this.terminalBridge = undefined;
     await this.appendSystemMessage("Safe one-shot transport enabled. Hydra will call Codex and Claude directly instead of injecting into native terminals.");
     this.postState();
   }
@@ -3470,7 +3471,7 @@ export class HydraRoomPanel {
   }
 
   private preferTerminalBridgeOnStart(): boolean {
-    return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("preferTerminalBridgeOnStart", true);
+    return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("preferTerminalBridgeOnStart", false);
   }
 
   private diffMaxLines(): number {
@@ -3544,7 +3545,11 @@ export class HydraRoomPanel {
       : this.oneShotWorkspaceInstructionsMaxChars();
     const sections = [objectiveAsContext(this.objective)];
     if (transport !== "terminalBridge" || workspaceInstructionsMaxChars > 0) {
-      const workspaceInstructions = transport === "terminalBridge" && agent
+      // Why: the recipient CLI (Claude Code → CLAUDE.md, Codex → AGENTS.md /
+      // .codex/instructions.md) auto-loads its own native instruction file
+      // from cwd, so re-inlining it here is duplicated tokens on every turn.
+      // Filter agent-side regardless of transport.
+      const workspaceInstructions = agent
         ? this.workspaceInstructionsByAgent[agent]
         : this.workspaceInstructions;
       sections.push(
@@ -4443,6 +4448,12 @@ export class HydraRoomPanel {
       .getConfiguration("hydraRoom")
       .get<string>("firstSpeaker", "codex");
     return normalizeAgentId(configured, "codex");
+  }
+
+  private createTerminalBridge(): TerminalBridge {
+    return new TerminalBridge(this.workspaceRoot, {
+      onSessionUpdate: () => this.postState(),
+    });
   }
 }
 

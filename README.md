@@ -85,7 +85,7 @@ Most users do not need these.
 - `Hydra: Setup: Fix Codex CLI Path`
 - `Hydra: Setup: Fix Claude CLI Path`
 
-Hydra starts in safe one-shot transport, then Autopilot runs Doctor and the terminal bridge self-test. If both native CLIs are available and the bridge test passes, Hydra switches to the visible terminal bridge automatically. If anything fails, it stays in safe one-shot mode and shows fix buttons in the room.
+Hydra starts in safe one-shot transport, then Autopilot runs Doctor and the terminal bridge self-test. By default it stays in safe one-shot mode even when the bridge test passes; set `hydraRoom.preferTerminalBridgeOnStart: true` to opt in to automatic visible terminal bridge use. If setup checks fail, Hydra stays in safe one-shot mode and shows fix buttons in the room.
 
 The native terminal bridge is experimental and routes calls through visible terminals using `.hydra/prompts/*.md`, `.hydra/logs/*.log`, and `.hydra/replies/*.json`. Agent output is echoed in the native terminal and streamed into the room while the command runs. Hydra also writes `.hydra/sessions/codex.session.json` and `.hydra/sessions/claude.session.json` so the panel and Doctor-style health output can show each terminal's current command, state, last activity, and latest log path. The room shows the active transport in the header, has an Open Terminals button for bringing both native CLIs into view, and can switch back with `Hydra: Advanced: Use Safe One-Shot Transport` if terminal mode gets noisy.
 
@@ -113,7 +113,7 @@ Use `Codex + Editor` / `Claude + Editor`, or the matching command-palette action
 
 Use `Codex + Diff` / `Claude + Diff`, or the matching command-palette actions, when the working tree matters. Hydra attaches `git diff HEAD` plus untracked files, capped by `hydraRoom.diffMaxLines`, to one direct native-terminal request.
 
-Visible terminal prompts do not inject repository instructions by default, so each native CLI can rely on its own local context loading. Set `hydraRoom.terminalBridgeWorkspaceInstructionsMaxChars` above 0 to opt in to capped Hydra-injected repository instructions; terminal prompts filter out the recipient CLI's own native instruction files first. One-shot prompts keep `hydraRoom.oneShotWorkspaceInstructionsMaxChars` at 12000 and include the full Hydra instruction set.
+Visible terminal prompts do not inject repository instructions by default, so each native CLI can rely on its own local context loading. Set `hydraRoom.terminalBridgeWorkspaceInstructionsMaxChars` above 0 to opt in to capped Hydra-injected repository instructions. Both transports filter out the recipient CLI's own native instruction files (Claude → `CLAUDE.md`, Codex → `AGENTS.md` / `.codex/instructions.md`) since the CLI auto-loads them from the workspace root — only the *other* agent's instructions are inlined. One-shot prompts keep `hydraRoom.oneShotWorkspaceInstructionsMaxChars` at 12000 for the remaining sources.
 
 Use `Poke Both`, `Both + Editor`, or `Both + Diff` when you want Codex and Claude to answer in parallel through their native terminals without the room protocol. Hydra opens both terminals, creates one user transcript entry, and streams both replies into separate agent bubbles.
 
@@ -126,7 +126,7 @@ Autopilot is the first-run path:
 - warns when command or raw-args settings are overridden by workspace settings
 - runs the terminal bridge self-test
 - opens native terminals only after the bridge is usable
-- picks terminal bridge or safe one-shot automatically
+- keeps safe one-shot automatically unless `hydraRoom.preferTerminalBridgeOnStart` is enabled
 
 Turn it off with `hydraRoom.autopilotOnStart: false`. Keep one-shot as the automatic default with `hydraRoom.preferTerminalBridgeOnStart: false`.
 

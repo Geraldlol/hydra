@@ -55,6 +55,8 @@ export async function inferVerificationCommand(workspaceRoot: string): Promise<s
   const scripts = (parsed as { scripts?: unknown }).scripts;
   if (!scripts || typeof scripts !== "object") return undefined;
   const scriptNames = new Set(Object.keys(scripts));
+  if (scriptNames.has("verify:fast")) return "npm run verify:fast";
+  if (scriptNames.has("verify")) return "npm run verify";
   if (scriptNames.has("check") && scriptNames.has("test")) return "npm run check && npm test";
   if (scriptNames.has("test")) return "npm test";
   if (scriptNames.has("check")) return "npm run check";
