@@ -109,7 +109,7 @@ Use the in-room `Poke Codex` and `Poke Claude` buttons, or `Hydra: Poke Codex Te
 
 Normal room messages still use the opener -> reactor -> closer discussion loop. If the latest message explicitly addresses both agents, such as "both of you", "you both", or "Codex and Claude, ...", Hydra instead runs Codex and Claude in parallel with independent discussion prompts and returns control after both replies finish.
 
-Use `Codex + Editor` / `Claude + Editor`, or the matching command-palette actions, when the active editor matters. Hydra attaches the active selection first; if nothing is selected, it attaches the active file up to `hydraRoom.editorContextMaxChars`. Direct terminal pokes use the fresh terminal-poke context window, so they do not resend stale week-old transcript unless you explicitly attach it in the prompt.
+Use `Codex + Editor` / `Claude + Editor`, or the matching command-palette actions, when the active editor matters. Hydra attaches the active selection first; if nothing is selected, it attaches the active file up to `hydraRoom.editorContextMaxChars`. Direct terminal pokes include the active room transcript plus any editor context you explicitly attach.
 
 Use `Codex + Diff` / `Claude + Diff`, or the matching command-palette actions, when the working tree matters. Hydra attaches `git diff HEAD` plus untracked files, capped by `hydraRoom.diffMaxLines`, to one direct native-terminal request.
 
@@ -132,7 +132,7 @@ Turn it off with `hydraRoom.autopilotOnStart: false`. Keep one-shot as the autom
 
 ## Transcript
 
-Hydra keeps the full room log at `.hydra/transcript.md`. Agent prompts use a bounded context window so long sessions do not resend the full transcript every turn.
+Hydra keeps the full room log at `.hydra/transcript.md`. Agent prompts include the active room transcript so the agents see the same room history Hydra has on disk.
 
 Hydra also writes:
 

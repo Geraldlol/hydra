@@ -16,8 +16,8 @@ describe("buildPrompt()", () => {
     assert.match(out, /and Claude\./);
     assert.match(out, /Phase: opener\./);
     assert.match(out, /--- Shared context ---/);
-    assert.match(out, /bounded transcript\s+window/);
-    assert.match(out, /Older transcript entries may be omitted/);
+    assert.match(out, /active transcript for this turn/);
+    assert.doesNotMatch(out, /Older transcript entries may be omitted/);
     assert.match(out, /latest user message is authoritative/);
     assert.match(out, /do not revive the older status as active work/);
     assert.match(out, /What shall we build\?/);

@@ -91,7 +91,7 @@ describe("transcript", () => {
     assert.match(out, /## t2 Codex \(opener\)\n\nb\n/);
   });
 
-  test("buildPromptContext keeps current turn plus two prior user turns", () => {
+  test("buildPromptContext keeps the full active transcript", () => {
     const messages: TranscriptMessage[] = [
       { role: "user", text: "u1", timestamp: "t1" },
       { role: "codex", text: "old opener", timestamp: "t2", phase: "opener" },
@@ -106,9 +106,9 @@ describe("transcript", () => {
     ];
 
     const out = buildPromptContext(messages, "closer");
-    assert.match(out, /Hydra context window: 2 message\(s\) omitted/);
-    assert.doesNotMatch(out, /u1/);
-    assert.doesNotMatch(out, /old opener/);
+    assert.doesNotMatch(out, /Hydra context window/);
+    assert.match(out, /u1/);
+    assert.match(out, /old opener/);
     assert.match(out, /u2/);
     assert.match(out, /u3/);
     assert.match(out, /u4 current/);
@@ -129,7 +129,7 @@ describe("transcript", () => {
     assert.match(out, /u2/);
   });
 
-  test("buildPromptContext drops stale messages even when they are in the turn window", () => {
+  test("buildPromptContext keeps stale messages from the active transcript", () => {
     const now = Date.parse("2026-05-08T12:00:00.000Z");
     const messages: TranscriptMessage[] = [
       { role: "user", text: "week old task", timestamp: "2026-05-01T12:00:00.000Z" },
@@ -139,13 +139,14 @@ describe("transcript", () => {
     ];
 
     const out = buildPromptContext(messages, "reactor", 2, 24 * 60 * 60 * 1000, now);
-    assert.match(out, /older than 1d/);
-    assert.doesNotMatch(out, /week old/);
+    assert.doesNotMatch(out, /Hydra context window/);
+    assert.match(out, /week old task/);
+    assert.match(out, /week old answer/);
     assert.match(out, /today task/);
     assert.match(out, /today opener/);
   });
 
-  test("buildPromptContext supports terminal-poke windows with no previous turns", () => {
+  test("buildPromptContext ignores terminal-poke turn limits", () => {
     const now = Date.parse("2026-05-08T12:00:00.000Z");
     const messages: TranscriptMessage[] = [
       { role: "user", text: "prior task", timestamp: "2026-05-08T11:00:00.000Z" },
@@ -155,8 +156,8 @@ describe("transcript", () => {
     ];
 
     const out = buildPromptContext(messages, "reactor", 0, 24 * 60 * 60 * 1000, now);
-    assert.doesNotMatch(out, /prior task/);
-    assert.doesNotMatch(out, /prior answer/);
+    assert.match(out, /prior task/);
+    assert.match(out, /prior answer/);
     assert.match(out, /current poke/);
     assert.match(out, /current opener/);
   });
@@ -176,7 +177,8 @@ describe("transcript", () => {
     ];
 
     const out = buildPromptContext(messages, "opener", 0, 24 * 60 * 60 * 1000, now);
-    assert.match(out, /Hydra context window: 2 message\(s\) omitted/);
+    assert.doesNotMatch(out, /Hydra context window/);
+    assert.match(out, /original task/);
     assert.doesNotMatch(out, /Hydra auto-advanced after discussion/);
     assert.doesNotMatch(out, /default="Run npm test"/);
     assert.match(out, /Accepted default next action/);

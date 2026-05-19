@@ -209,73 +209,19 @@ export function transcriptAsContext(messages: TranscriptMessage[]): string {
   return messages.map(serializeMessage).join("\n");
 }
 
-export function windowTranscriptMessages(
-  messages: TranscriptMessage[],
-  phase: Phase,
-  completedUserTurns = 2,
-  maxAgeMs = 24 * 60 * 60 * 1000,
-  nowMs = Date.now()
-): TranscriptMessage[] {
-  const freshMessages = filterFreshMessages(messages, maxAgeMs, nowMs);
-  const userIndexes: number[] = [];
-  freshMessages.forEach((message, index) => {
-    if (message.role === "user") userIndexes.push(index);
-  });
-
-  if (freshMessages.length === 0 || userIndexes.length === 0) return freshMessages;
-
-  const turnLimit = Math.max(0, Math.floor(completedUserTurns));
-  if (phase === "opener" || phase === "reactor" || phase === "closer" || phase === "parallel") {
-    const currentUserIndex = userIndexes[userIndexes.length - 1];
-    const completedBeforeCurrent = userIndexes.filter((index) => index < currentUserIndex);
-    const previousStart = completedBeforeCurrent[Math.max(0, completedBeforeCurrent.length - turnLimit)];
-    return freshMessages.slice(previousStart ?? currentUserIndex);
-  }
-
-  const start = turnLimit === 0
-    ? userIndexes[userIndexes.length - 1]
-    : userIndexes[Math.max(0, userIndexes.length - turnLimit)];
-  return freshMessages.slice(start);
-}
-
 export function buildPromptContext(
   messages: TranscriptMessage[],
-  phase: Phase,
-  completedUserTurns = 2,
-  maxAgeMs = 24 * 60 * 60 * 1000,
-  nowMs = Date.now()
+  _phase: Phase,
+  _completedUserTurns = 2,
+  _maxAgeMs = 24 * 60 * 60 * 1000,
+  _nowMs = Date.now()
 ): string {
   const promptMessages = messages.filter((message) => !isPromptNoiseSystemMessage(message));
-  const windowed = windowTranscriptMessages(promptMessages, phase, completedUserTurns, maxAgeMs, nowMs);
-  const omitted = messages.length - windowed.length;
-  const context = transcriptAsContext(windowed);
-  if (omitted === 0) return context;
-  const freshnessNote = maxAgeMs > 0 ? ` and/or older than ${formatDuration(maxAgeMs)}` : "";
-  return `[Hydra context window: ${omitted} message(s) omitted by turn limit${freshnessNote}. Full history remains in .hydra/transcript.md.]\n\n${context}`;
+  return transcriptAsContext(promptMessages);
 }
 
 function isPromptNoiseSystemMessage(message: TranscriptMessage): boolean {
   return message.role === "system" && /^Hydra auto-advanced after .*\(send-instruction \d+\/\d+\):/.test(message.text);
-}
-
-function filterFreshMessages(
-  messages: TranscriptMessage[],
-  maxAgeMs: number,
-  nowMs: number
-): TranscriptMessage[] {
-  if (maxAgeMs <= 0) return messages;
-  return messages.filter((message) => {
-    const timestampMs = Date.parse(message.timestamp);
-    if (!Number.isFinite(timestampMs)) return true;
-    return nowMs - timestampMs <= maxAgeMs;
-  });
-}
-
-function formatDuration(ms: number): string {
-  const hours = Math.round(ms / (60 * 60 * 1000));
-  if (hours > 0 && hours % 24 === 0) return `${hours / 24}d`;
-  if (hours > 0) return `${hours}h`;
-  return `${ms}ms`;
 }
 
 function archiveTimestamp(now: Date): string {

@@ -299,24 +299,6 @@
           "minimum": 5000,
           "markdownDescription": "Maximum time to wait for terminal bridge self-tests and setup checks. Normal agent calls use the Discussion or Build/Review timeout settings."
         },
-        "hydraRoom.contextFreshnessMs": {
-          "type": "number",
-          "default": 86400000,
-          "minimum": 0,
-          "markdownDescription": "Maximum age of transcript messages Hydra injects into agent prompts. Defaults to 24 hours; set to 0 to disable age filtering. Full history remains on disk."
-        },
-        "hydraRoom.oneShotContextTurns": {
-          "type": "number",
-          "default": 2,
-          "minimum": 0,
-          "markdownDescription": "Number of previous user turns to include in safe one-shot prompts, after freshness filtering. The current turn is always included."
-        },
-        "hydraRoom.terminalBridgeContextTurns": {
-          "type": "number",
-          "default": 0,
-          "minimum": 0,
-          "markdownDescription": "Number of previous user turns to include when injecting into visible native terminals. Defaults to 0 so terminal bridge requests behave like fresh pokes into each native CLI."
-        },
         "hydraRoom.oneShotWorkspaceInstructionsMaxChars": {
           "type": "number",
           "default": 12000,

@@ -874,7 +874,7 @@ export class HydraRoomPanel {
     await this.ready();
     if (!this.workspaceReady) return;
     const normalized = relativePath.replace(/\\/g, "/");
-    if (!normalized || path.isAbsolute(normalized) || normalized.split("/").includes("..")) {
+    if (!normalized || path.isAbsolute(normalized) || /^[A-Za-z]:/.test(normalized) || normalized.split("/").includes("..")) {
       await this.appendSystemMessage("Hydra refused to open an invalid workspace change path.");
       this.postState();
       return;
@@ -3534,12 +3534,9 @@ export class HydraRoomPanel {
     transport: "oneShot" | "terminalBridge" = this.transportMode(),
     agent?: AgentId
   ): string {
-    const contextTurns = transport === "terminalBridge"
-      ? this.terminalBridgeContextTurns()
-      : this.oneShotContextTurns();
     const contextTitle = transport === "terminalBridge"
-      ? "--- Current terminal poke context ---"
-      : "--- Bounded transcript window ---";
+      ? "--- Current terminal poke transcript ---"
+      : "--- Full transcript ---";
     const workspaceInstructionsMaxChars = transport === "terminalBridge"
       ? this.terminalBridgeWorkspaceInstructionsMaxChars()
       : this.oneShotWorkspaceInstructionsMaxChars();
@@ -3560,17 +3557,9 @@ export class HydraRoomPanel {
     sections.push(
       "",
       contextTitle,
-      buildPromptContext(messages, phase, contextTurns, this.contextFreshnessMs())
+      buildPromptContext(messages, phase)
     );
     return sections.join("\n");
-  }
-
-  private oneShotContextTurns(): number {
-    return vscode.workspace.getConfiguration("hydraRoom").get<number>("oneShotContextTurns", 2);
-  }
-
-  private terminalBridgeContextTurns(): number {
-    return vscode.workspace.getConfiguration("hydraRoom").get<number>("terminalBridgeContextTurns", 0);
   }
 
   private oneShotWorkspaceInstructionsMaxChars(): number {
@@ -3583,10 +3572,6 @@ export class HydraRoomPanel {
 
   private editorContextMaxChars(): number {
     return vscode.workspace.getConfiguration("hydraRoom").get<number>("editorContextMaxChars", 12000);
-  }
-
-  private contextFreshnessMs(): number {
-    return vscode.workspace.getConfiguration("hydraRoom").get<number>("contextFreshnessMs", 24 * 60 * 60 * 1000);
   }
 
   // ---------------- message lifecycle ----------------
@@ -4840,7 +4825,10 @@ async function captureGitDiff(cwd: string, maxLines: number): Promise<string | n
 }
 
 async function captureGitStatusChanges(cwd: string): Promise<WorkspaceChange[] | null> {
-  const status = await runGit(cwd, ["status", "--porcelain=v1", "-z", "-uall"]);
+  // Why: -uall recursively walks every untracked file and this refresh is driven
+  // by a broad workspace watcher. Default untracked mode keeps the UI signal
+  // while avoiding deep scans and noisy local path disclosure.
+  const status = await runGit(cwd, ["status", "--porcelain=v1", "-z"]);
   if (!status || status.code !== 0) return null;
   return parseGitStatusEntries(status.out).slice(0, 200);
 }

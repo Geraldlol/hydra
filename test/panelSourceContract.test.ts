@@ -38,7 +38,7 @@ describe("terminal bridge usage source contracts", () => {
   test("workspace instructions filter out the recipient agent's native instruction files in both transports", () => {
     const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
     const methodStart = source.indexOf("private buildPromptContextFromMessages(");
-    const methodEnd = source.indexOf("private oneShotContextTurns()", methodStart);
+    const methodEnd = source.indexOf("private oneShotWorkspaceInstructionsMaxChars()", methodStart);
     assert.ok(methodStart >= 0 && methodEnd > methodStart);
 
     const method = source.slice(methodStart, methodEnd);
@@ -104,10 +104,16 @@ describe("workspace edit viewer source contracts", () => {
     assert.ok(functionStart >= 0, "missing captureGitStatusChanges");
     assert.ok(functionEnd > functionStart, "missing git status parser boundary");
     const section = source.slice(functionStart, functionEnd);
-    assert.match(section, /\["status", "--porcelain=v1", "-z", "-uall"\]/);
+    assert.match(section, /\["status", "--porcelain=v1", "-z"\]/);
+    assert.doesNotMatch(section, /"-uall"/);
     assert.match(section, /function parseGitStatusEntries\(raw: string\)/);
     assert.match(section, /raw\.split\("\\0"\)/);
     assert.match(section, /status\.includes\("R"\) \|\| status\.includes\("C"\)/);
+  });
+
+  test("workspace edit viewer rejects Windows drive-relative open paths", () => {
+    assert.match(source, /\^\[A-Za-z\]:/);
+    assert.match(source, /Hydra refused to open an invalid workspace change path/);
   });
 
   test("workspace edit viewer refreshes from a debounced file watcher", () => {

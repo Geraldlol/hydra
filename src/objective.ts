@@ -42,7 +42,7 @@ export function objectiveAsContext(objective: string): string {
   if (!trimmed) {
     return [
       "--- Pinned room objective ---",
-      "Not set. If the user has not provided a concrete task in the bounded transcript, ask for one narrow objective.",
+      "Not set. If the user has not provided a concrete task in the active transcript, ask for one narrow objective.",
     ].join("\n");
   }
   return ["--- Pinned room objective ---", trimmed].join("\n");

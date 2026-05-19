@@ -84,9 +84,14 @@ describe("telegram coordinator", () => {
 
 async function useTempAppData(): Promise<() => void> {
   const prior = process.env.APPDATA;
-  process.env.APPDATA = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-telegram-"));
+  const priorXdg = process.env.XDG_CONFIG_HOME;
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-telegram-"));
+  process.env.APPDATA = tempDir;
+  process.env.XDG_CONFIG_HOME = tempDir;
   return () => {
     if (prior === undefined) delete process.env.APPDATA;
     else process.env.APPDATA = prior;
+    if (priorXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = priorXdg;
   };
 }

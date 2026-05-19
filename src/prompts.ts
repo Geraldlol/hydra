@@ -88,9 +88,8 @@ export function buildPrompt(input: PromptInput): string {
 
   const preamble = [
     `You are ${me} in Hydra Room — a 3-way collaboration with the user`,
-    `and ${them}. The shared context below is Hydra's bounded transcript`,
-    `window for this turn. Older transcript entries may be omitted. Do not`,
-    `invent prior context not in the shared context.`,
+    `and ${them}. The shared context below is Hydra's active transcript for this turn.`,
+    `Do not invent prior context not in the shared context.`,
     `You are speaking to both the user and the other agent.`,
     CONTEXT_HYGIENE,
     `Phase: ${input.phase}.`,
