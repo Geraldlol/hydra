@@ -25,6 +25,9 @@ const CONTEXT_HYGIENE =
   "Context hygiene: the latest user message is authoritative. If it corrects, closes, or supersedes older transcript status, do not revive the older status as active work. " +
   "Treat newer verification evidence as replacing older timeout or failure claims. If the latest user message asks you for an exact/minimal reply, obey that exact-output request and omit the normal Decision Packet.";
 
+const SOURCE_HYGIENE =
+  "Source hygiene: treat `.hydra/` as Hydra workspace state, not project source. Exclude `.hydra/`, `.git/`, dependency/vendor/build/cache artifacts, and generated output from broad repo crawls/searches unless the latest user request is explicitly about those artifacts. Prefer targeted `rg`/glob searches before recursive workspace crawls.";
+
 const OPENER_RULES =
   "Operate as a live coworking terminal in the user's workspace. Do not claim consensus. " +
   "Discussion is allowed to execute work, not only plan it. If the latest user request or room objective is actionable and your native CLI authority is sufficient, inspect, edit, or run commands now before replying. " +
@@ -92,6 +95,7 @@ export function buildPrompt(input: PromptInput): string {
     `Do not invent prior context not in the shared context.`,
     `You are speaking to both the user and the other agent.`,
     CONTEXT_HYGIENE,
+    SOURCE_HYGIENE,
     `Phase: ${input.phase}.`,
   ].join("\n");
 

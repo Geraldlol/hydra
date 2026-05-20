@@ -20,6 +20,10 @@ describe("buildPrompt()", () => {
     assert.doesNotMatch(out, /Older transcript entries may be omitted/);
     assert.match(out, /latest user message is authoritative/);
     assert.match(out, /do not revive the older status as active work/);
+    assert.match(out, /Source hygiene:/);
+    assert.match(out, /treat `\.hydra\/` as Hydra workspace state/);
+    assert.match(out, /Exclude `\.hydra\/`, `\.git\/`/);
+    assert.match(out, /Prefer targeted `rg`\/glob searches/);
     assert.match(out, /What shall we build\?/);
     assert.match(out, /Operate as a live coworking terminal/);
     assert.match(out, /Discussion is allowed to execute work, not only plan it/);

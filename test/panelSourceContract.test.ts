@@ -35,6 +35,38 @@ describe("terminal bridge usage source contracts", () => {
     assert.doesNotMatch(branch, /outputMode: "passthrough"/);
   });
 
+  test("codex terminal bridge exec uses structured output even when global flags precede exec", () => {
+    // Why: users sometimes prefix global codex flags (e.g. --config) before exec.
+    // The previous `spawn.args[0] === "exec"` check missed those argv shapes and
+    // let the bridge fall back to plain output, re-leaking the prompt transcript
+    // into the visible terminal. The broader `args.includes("exec")` check fixes
+    // that bypass.
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    const methodStart = source.indexOf("private prepareTerminalBridgeSpawn(");
+    const methodEnd = source.indexOf("private async normalizeOneShotResult", methodStart);
+    assert.ok(methodStart >= 0 && methodEnd > methodStart);
+
+    const method = source.slice(methodStart, methodEnd);
+    assert.match(method, /agent === "codex" && spawn\.args\.includes\("exec"\)/);
+    assert.doesNotMatch(method, /spawn\.args\[0\] === "exec"/);
+    assert.match(method, /withCodexJsonArgs\(spawn\)/);
+    assert.match(method, /outputMode: "codexJson"/);
+  });
+
+  test("normalized native replies pass through the prompt-envelope leak guard", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    const oneShotStart = source.indexOf("private async normalizeOneShotResult");
+    const terminalStart = source.indexOf("private async normalizeTerminalBridgeResult");
+    const usageStart = source.indexOf("private async terminalBridgeUsageResult");
+    assert.ok(oneShotStart >= 0 && terminalStart > oneShotStart && usageStart > terminalStart);
+
+    const oneShot = source.slice(oneShotStart, terminalStart);
+    const terminal = source.slice(terminalStart, usageStart);
+    assert.match(source, /import \{ detectNativeReplyLeak, formatNativeReplyLeakError \} from "\.\/nativeReplyGuard"/);
+    assert.match(oneShot, /return guardNativeReply\(\{ \.\.\.result, stdout \}\)/);
+    assert.match(terminal, /return guardNativeReply\(\{ \.\.\.result, stdout \}\)/);
+  });
+
   test("workspace instructions filter out the recipient agent's native instruction files in both transports", () => {
     const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
     const methodStart = source.indexOf("private buildPromptContextFromMessages(");

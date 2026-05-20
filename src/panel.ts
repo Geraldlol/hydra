@@ -101,6 +101,7 @@ import {
 import { EditorContextAttachment, truncateEditorContext } from "./editorContext";
 import { appendHydraEvent, createHydraEvent, ensureHydraEventsFile, hydraEventsPath, readHydraEvents, type HydraEventKind } from "./events";
 import { ensureFile } from "./fileQueue";
+import { detectNativeReplyLeak, formatNativeReplyLeakError } from "./nativeReplyGuard";
 import { ensureObjectiveFile, objectiveAsContext, readObjective, writeObjective } from "./objective";
 import { TerminalBridge } from "./terminalBridge";
 import { buildDirectTerminalPokePrompt } from "./terminalPoke";
@@ -2805,8 +2806,18 @@ export class HydraRoomPanel {
     if (agent === "claude" && shouldUseClaudeStreamJson(spawn)) {
       return { spawn: withClaudeStreamJsonArgs(spawn), outputMode: "claudeStreamJson" };
     }
-    if (agent === "codex" && shouldUseCodexJson(spawn)) {
-      return { spawn: withCodexJsonArgs(spawn), outputMode: "codexJson" };
+    if (agent === "codex" && spawn.args.includes("exec")) {
+      // Why: users may prefix global codex flags (e.g. `--config sandbox_mode=...`)
+      // before `exec`. The previous `args[0] === "exec"` check missed those argv
+      // shapes, so the terminal bridge fell back to plain output and re-leaked the
+      // full prompt transcript into the visible terminal — the exact symptom the
+      // codexJson force-on was added to fix.
+      return {
+        spawn: spawn.args.includes("--json") || spawn.args.includes("--experimental-json")
+          ? spawn
+          : withCodexJsonArgs(spawn),
+        outputMode: "codexJson",
+      };
     }
     return { spawn, outputMode: "plain" };
   }
@@ -2826,7 +2837,7 @@ export class HydraRoomPanel {
         // Older CLIs and failed runs may not produce a native reply file.
       }
     }
-    return { ...result, stdout };
+    return guardNativeReply({ ...result, stdout });
   }
 
   private async normalizeTerminalBridgeResult(
@@ -2840,7 +2851,7 @@ export class HydraRoomPanel {
     } else if (outputMode === "codexJson") {
       stdout = roomTextFromCodexJson(raw);
     }
-    return { ...result, stdout };
+    return guardNativeReply({ ...result, stdout });
   }
 
   private async terminalBridgeUsageResult(result: RunResult & { logPath?: string }): Promise<RunResult> {
@@ -4652,6 +4663,16 @@ function agentCallFailureResult(message: string): RunResult {
     exitCode: null,
     timedOut: false,
     cancelled: false,
+  };
+}
+
+function guardNativeReply<T extends RunResult>(result: T): T {
+  const leak = detectNativeReplyLeak(result.stdout);
+  if (!leak) return result;
+  return {
+    ...result,
+    stderr: [result.stderr.trim(), formatNativeReplyLeakError(leak)].filter(Boolean).join("\n"),
+    exitCode: result.exitCode === 0 ? 1 : result.exitCode,
   };
 }
 

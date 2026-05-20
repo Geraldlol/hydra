@@ -149,7 +149,7 @@
         "hydraRoom.codexJson": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "When dispatching `codex exec`, automatically request the typed event stream via `--json`, parse it through Hydra's `codexEvents` module, and use the final `agent_message` item as the reply in the room. Structured tool-call / command-execution / file-change events are summarized in `.hydra/agent-calls.jsonl`. Supersedes `hydraRoom.codexCaptureLastMessage` when both are enabled. Defaults to `false` while the surrounding Hydra UX for parsed Codex events stabilizes."
+          "markdownDescription": "When dispatching `codex exec` through safe one-shot transport, automatically request the typed event stream via `--json`, parse it through Hydra's `codexEvents` module, and use the final `agent_message` item as the reply in the room. Structured tool-call / command-execution / file-change events are summarized in `.hydra/agent-calls.jsonl`. Supersedes `hydraRoom.codexCaptureLastMessage` when both are enabled. Defaults to `false` for one-shot while the surrounding Hydra UX for parsed Codex events stabilizes. The experimental terminal bridge always uses structured Codex output so the visible terminal does not echo the full prompt transcript."
         },
         "hydraRoom.claudeCommand": {
           "scope": "application",

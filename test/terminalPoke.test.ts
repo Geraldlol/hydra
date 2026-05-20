@@ -27,6 +27,8 @@ describe("direct terminal poke prompts", () => {
     assert.match(prompt, /direct native-terminal poke/);
     assert.match(prompt, /directly to your native Codex CLI endpoint/);
     assert.match(prompt, /Do not wait for Claude/);
+    assert.match(prompt, /Treat `\.hydra\/` as Hydra workspace state/);
+    assert.match(prompt, /Prefer targeted `rg`\/glob searches/);
     assert.match(prompt, /Patch the terminal bridge/);
     assert.match(prompt, /Active editor context/);
     assert.match(prompt, /src\/terminalBridge\.ts/);

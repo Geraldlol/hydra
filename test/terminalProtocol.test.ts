@@ -50,7 +50,8 @@ describe("terminal bridge protocol", () => {
     assert.match(out, /OpenAI\\Codex\\bin\\codex\.exe/);
     assert.match(out, /OpenAI\.Codex_\*\\LocalCache\\Local\\OpenAI\\Codex\\bin\\codex\.exe/);
     assert.match(out, /\$__hydraArgs = @\('exec', '--sandbox', 'read-only'/);
-    assert.match(out, /New-Item -ItemType Directory -LiteralPath \$__hydraReplyDir -Force/);
+    assert.match(out, /\[System\.IO\.Directory\]::CreateDirectory\(\$__hydraReplyDir\)/);
+    assert.match(out, /\[System\.IO\.Directory\]::CreateDirectory\(\$__hydraLogDir\)/);
     assert.match(out, /\$__hydraLastMessage = \[System\.IO\.Path\]::ChangeExtension\(\$__hydraReply, '.last.txt'\)/);
     assert.match(out, /Remove-Item -LiteralPath \$__hydraLastMessage -Force -ErrorAction SilentlyContinue/);
     assert.match(out, /\$__hydraUtf8NoBom = \[System\.Text\.UTF8Encoding\]::new\(\$false\)/);
@@ -249,7 +250,7 @@ describe("terminal bridge protocol", () => {
   test("startup probe command writes a ready marker after the ready banner", () => {
     const out = buildTerminalStartupProbeCommand("claude", "C:\\repo", "C:\\repo\\.hydra\\sessions\\claude.ready");
     assert.match(out, /\[Hydra\] Claude terminal ready\./);
-    assert.match(out, /New-Item -ItemType Directory -LiteralPath \$__hydraStartupProbeDir -Force/);
+    assert.match(out, /\[System\.IO\.Directory\]::CreateDirectory\(\$__hydraStartupProbeDir\)/);
     assert.match(out, /\$__hydraStartupProbe = 'C:\\repo\\.hydra\\sessions\\claude.ready'/);
     assert.match(out, /WriteAllText\(\$__hydraStartupProbe, 'ready', \$__hydraUtf8NoBom\)/);
     assert.doesNotMatch(out, /-Encoding UTF8/);
