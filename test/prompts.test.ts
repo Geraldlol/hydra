@@ -20,8 +20,7 @@ describe("buildPrompt()", () => {
     assert.doesNotMatch(out, /Older transcript entries may be omitted/);
     assert.match(out, /latest user message is authoritative/);
     assert.match(out, /do not revive the older status as active work/);
-    assert.match(out, /Hydra wiki context/);
-    assert.match(out, /compiled memory before re-deriving older facts/);
+    assert.doesNotMatch(out, /Treat it as established truth/);
     assert.match(out, /Source hygiene:/);
     assert.match(out, /treat `\.hydra\/` as Hydra workspace state/);
     assert.match(out, /Exclude `\.hydra\/`, `\.git\/`/);
@@ -42,6 +41,25 @@ describe("buildPrompt()", () => {
     assert.match(out, /Decision needed from user:/);
     assert.match(out, /Blockers:/);
     assert.match(out, /summarize what you did and what remains\./);
+  });
+
+  test("adds wiki guidance only when compiled wiki context is present", () => {
+    const out = buildPrompt({
+      agent: "codex",
+      otherAgent: "claude",
+      phase: "opener",
+      transcript: [
+        "--- Hydra wiki context ---",
+        "Persistent compiled room knowledge.",
+        "",
+        TRANSCRIPT,
+      ].join("\n"),
+    });
+
+    assert.match(out, /Wiki context: the `--- Hydra wiki context ---` section is compiled memory/);
+    assert.match(out, /Treat it as established truth unless/);
+    assert.match(out, /do not re-derive facts it already gives/);
+    assert.match(out, /name that gap explicitly so the wrapup loop can capture it/);
   });
 
   test("opener prompt is byte-identical for same inputs", () => {

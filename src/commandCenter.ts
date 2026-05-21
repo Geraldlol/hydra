@@ -47,6 +47,16 @@ export interface CommandCenterAction {
   detail: string;
 }
 
+export interface CommandCenterWikiStatus {
+  contextChars: number;
+  contextMaxChars: number;
+  promptChars: number;
+  promptTruncated: boolean;
+  rawTurnCount: number;
+  lastWrapupDate?: string;
+  lastWrapupTitle?: string;
+}
+
 export interface CommandCenterInput {
   workspaceReady: boolean;
   canStop: boolean;
@@ -62,6 +72,7 @@ export interface CommandCenterInput {
   transport: "oneShot" | "terminalBridge";
   workQueueCount: number;
   nativeActionsCount: number;
+  wikiStatus?: CommandCenterWikiStatus;
 }
 
 export function buildCommandCenterActions(input: CommandCenterInput): CommandCenterAction[] {
@@ -123,7 +134,12 @@ export function buildCommandCenterActions(input: CommandCenterInput): CommandCen
     action("openVerification", "Open Verification Log", "State", "Open the durable verification result log."),
     action("openDecisions", "Open Decisions", "State", "Open the durable decision packet log."),
     action("openSessionBrief", "Open Session Brief", "State", "Refresh and open the compact room snapshot."),
-    action("openWikiContext", "Open Wiki Context", "State", "Open the persistent compiled wiki that Hydra injects into prompts."),
+    action(
+      "openWikiContext",
+      "Open Wiki Context",
+      input.wikiStatus ? wikiStatusDescription(input.wikiStatus) : "State",
+      input.wikiStatus ? wikiStatusDetail(input.wikiStatus) : "Open the persistent compiled wiki that Hydra injects into prompts."
+    ),
     action("openSupportBundle", "Open Support Bundle", "Diagnostics", "Refresh and open Doctor, authority, terminal, queue, and recent-action diagnostics."),
     action("chooseModel", "Choose Model", "Settings", "Pick Codex or Claude model overrides."),
     action("chooseEffort", "Choose Thinking Level", "Settings", "Pick Codex reasoning or Claude effort overrides."),
@@ -162,4 +178,20 @@ function action(
   detail: string
 ): CommandCenterAction {
   return { id, label, description, detail };
+}
+
+function wikiStatusDescription(status: CommandCenterWikiStatus): string {
+  if (status.contextMaxChars <= 0) return "Wiki disabled";
+  const suffix = status.promptTruncated ? " clipped" : "";
+  return `Wiki ${status.contextChars}/${status.contextMaxChars} chars${suffix}`;
+}
+
+function wikiStatusDetail(status: CommandCenterWikiStatus): string {
+  const prompt = status.contextMaxChars <= 0
+    ? "Prompt injection disabled"
+    : `Prompt context ${status.promptChars}/${status.contextMaxChars} chars${status.promptTruncated ? " (truncated)" : ""}`;
+  const last = status.lastWrapupDate
+    ? `last wrapup ${status.lastWrapupDate}${status.lastWrapupTitle ? ` | ${status.lastWrapupTitle}` : ""}`
+    : "last wrapup none";
+  return `${prompt}; raw turns ${status.rawTurnCount}; ${last}. Open the persistent compiled wiki.`;
 }

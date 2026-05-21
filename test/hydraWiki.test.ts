@@ -14,6 +14,7 @@ import {
   pruneHydraWikiRawTurns,
   readHydraWikiFiles,
   readHydraWikiPromptContext,
+  readHydraWikiStatus,
   writeHydraWikiWrapupSource,
 } from "../src/hydraWiki";
 
@@ -83,6 +84,30 @@ describe("Hydra wiki context", () => {
     await fs.writeFile(path.join(dir, ".hydra", "wiki", "context.md"), "Real context", "utf8");
 
     assert.equal(readHydraWikiPromptContext(dir, 0), undefined);
+  });
+
+  test("summarizes wiki status for Command Center", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-wiki-"));
+    await ensureHydraWikiFiles(dir);
+    await fs.writeFile(path.join(dir, ".hydra", "wiki", "context.md"), "# Hydra Wiki Context\n\nDurable fact.\n", "utf8");
+    await fs.writeFile(
+      path.join(dir, ".hydra", "wiki", "log.md"),
+      "# Hydra Wiki Log\n\n## [2026-05-20] wrapup | Older\n\n- Updated: [[context]]\n\n## [2026-05-21] wrapup | Latest Lesson\n\n- Updated: [[context]]\n",
+      "utf8"
+    );
+    const rawDir = path.join(dir, ".hydra", "wiki", "raw", "turns");
+    await fs.mkdir(rawDir, { recursive: true });
+    await fs.writeFile(path.join(rawDir, "2026-05-21-aaaaaaaaaaaa.md"), "raw", "utf8");
+    await fs.writeFile(path.join(rawDir, "notes.md"), "ignored", "utf8");
+
+    const status = await readHydraWikiStatus(dir, 8000);
+
+    assert.equal(status.contextChars, "# Hydra Wiki Context\n\nDurable fact.".length);
+    assert.equal(status.contextMaxChars, 8000);
+    assert.equal(status.promptTruncated, false);
+    assert.equal(status.rawTurnCount, 1);
+    assert.equal(status.lastWrapupDate, "2026-05-21");
+    assert.equal(status.lastWrapupTitle, "Latest Lesson");
   });
 
   test("builds a wrapup source from the latest room turn only", () => {
@@ -273,5 +298,14 @@ describe("Hydra wiki context", () => {
 
     assert.deepEqual(pruned.prunedPaths, []);
     await fs.stat(path.join(rawDir, "2026-04-20-aaaaaaaaaaaa.md"));
+  });
+
+  test("reports invalid prune timestamps instead of silently skipping retention", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-wiki-"));
+
+    const pruned = await pruneHydraWikiRawTurns(dir, "not-a-date", 30);
+
+    assert.deepEqual(pruned.prunedPaths, []);
+    assert.equal(pruned.invalidNowIso, "not-a-date");
   });
 });

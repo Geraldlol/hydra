@@ -23,8 +23,12 @@ const DECISION_PACKET =
 
 const CONTEXT_HYGIENE =
   "Context hygiene: the latest user message is authoritative. If it corrects, closes, or supersedes older transcript status, do not revive the older status as active work. " +
-  "Treat newer verification evidence as replacing older timeout or failure claims. When `--- Hydra wiki context ---` is present, use it as compiled memory before re-deriving older facts, but let the latest user instruction and active transcript win on conflict. " +
+  "Treat newer verification evidence as replacing older timeout or failure claims. " +
   "If the latest user message asks you for an exact/minimal reply, obey that exact-output request and omit the normal Decision Packet.";
+
+const WIKI_CONTEXT_GUIDANCE =
+  "Wiki context: the `--- Hydra wiki context ---` section is compiled memory. Treat it as established truth unless the latest user instruction, active transcript, or direct source evidence contradicts it; do not re-derive facts it already gives.\n" +
+  "When you notice durable knowledge that is missing, stale, or contradicted in the wiki, name that gap explicitly so the wrapup loop can capture it.";
 
 const SOURCE_HYGIENE =
   "Source hygiene: treat `.hydra/` as Hydra workspace state, not project source. Exclude `.hydra/`, `.git/`, dependency/vendor/build/cache artifacts, and generated output from broad repo crawls/searches unless the latest user request is explicitly about those artifacts. Prefer targeted `rg`/glob searches before recursive workspace crawls.";
@@ -89,6 +93,7 @@ const PHASE_RULES: Record<Phase, string> = {
 export function buildPrompt(input: PromptInput): string {
   const me = AGENT_NAMES[input.agent];
   const them = AGENT_NAMES[input.otherAgent];
+  const hasWikiContext = input.transcript.includes("--- Hydra wiki context ---");
 
   const preamble = [
     `You are ${me} in Hydra Room — a 3-way collaboration with the user`,
@@ -96,6 +101,7 @@ export function buildPrompt(input: PromptInput): string {
     `Do not invent prior context not in the shared context.`,
     `You are speaking to both the user and the other agent.`,
     CONTEXT_HYGIENE,
+    ...(hasWikiContext ? [WIKI_CONTEXT_GUIDANCE] : []),
     SOURCE_HYGIENE,
     `Phase: ${input.phase}.`,
   ].join("\n");

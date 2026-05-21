@@ -60,6 +60,18 @@ export interface HydraWikiStoredSource {
 
 export interface HydraWikiRawTurnsPruneResult {
   prunedPaths: string[];
+  invalidNowIso?: string;
+}
+
+export interface HydraWikiStatus {
+  contextChars: number;
+  contextMaxChars: number;
+  promptChars: number;
+  promptTruncated: boolean;
+  promptFiles: string[];
+  rawTurnCount: number;
+  lastWrapupDate?: string;
+  lastWrapupTitle?: string;
 }
 
 export interface HydraWikiWrapupPromptInput {
@@ -186,6 +198,39 @@ export function readHydraWikiPromptContext(
   };
 }
 
+export async function readHydraWikiStatus(
+  workspaceRoot: string,
+  maxChars: number
+): Promise<HydraWikiStatus> {
+  await ensureHydraWikiFiles(workspaceRoot);
+  const cap = Math.max(0, Math.floor(maxChars));
+  const contextPath = path.join(workspaceRoot, HYDRA_WIKI_DIR, "context.md");
+  const logPath = path.join(workspaceRoot, HYDRA_WIKI_DIR, "log.md");
+  const rawTurnsDir = path.join(workspaceRoot, HYDRA_WIKI_DIR, "raw", "turns");
+
+  const contextText = await fs.promises.readFile(contextPath, "utf8").catch(() => "");
+  const contextChars = isDefaultWikiTemplate(path.join(HYDRA_WIKI_DIR, "context.md"), contextText)
+    ? 0
+    : contextText.trim().length;
+  const promptContext = readHydraWikiPromptContext(workspaceRoot, cap);
+  const rawEntries = await fs.promises.readdir(rawTurnsDir, { withFileTypes: true }).catch(() => []);
+  const rawTurnCount = rawEntries.filter((entry) =>
+    entry.isFile() && /^\d{4}-\d{2}-\d{2}-[a-f0-9]{12}\.md$/i.test(entry.name)
+  ).length;
+  const lastWrapup = latestWrapupFromLog(await fs.promises.readFile(logPath, "utf8").catch(() => ""));
+
+  return {
+    contextChars,
+    contextMaxChars: cap,
+    promptChars: promptContext?.originalChars ?? 0,
+    promptTruncated: promptContext?.truncated ?? false,
+    promptFiles: promptContext?.files ?? [],
+    rawTurnCount,
+    lastWrapupDate: lastWrapup?.date,
+    lastWrapupTitle: lastWrapup?.title,
+  };
+}
+
 function readFileIfExists(filePath: string): string {
   try {
     return fs.readFileSync(filePath, "utf8");
@@ -193,6 +238,14 @@ function readFileIfExists(filePath: string): string {
     // Wiki files are optional until the user initializes them.
     return "";
   }
+}
+
+function latestWrapupFromLog(log: string): { date: string; title: string } | undefined {
+  let latest: { date: string; title: string } | undefined;
+  for (const match of log.matchAll(/^## \[(\d{4}-\d{2}-\d{2})\]\s+wrapup\s+\|\s+(.+)$/gim)) {
+    latest = { date: match[1], title: match[2].trim() };
+  }
+  return latest;
 }
 
 function isDefaultWikiTemplate(relativePath: string, text: string): boolean {
@@ -281,7 +334,7 @@ export async function pruneHydraWikiRawTurns(
   if (days <= 0) return { prunedPaths: [] };
 
   const nowMs = Date.parse(nowIso);
-  if (!Number.isFinite(nowMs)) return { prunedPaths: [] };
+  if (!Number.isFinite(nowMs)) return { prunedPaths: [], invalidNowIso: nowIso };
 
   const cutoffDay = new Date(nowMs - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
   const rawTurnsDir = path.join(workspaceRoot, HYDRA_WIKI_DIR, "raw", "turns");

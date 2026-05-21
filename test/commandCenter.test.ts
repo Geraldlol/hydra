@@ -44,6 +44,15 @@ describe("command center", () => {
       transport: "oneShot",
       workQueueCount: 2,
       nativeActionsCount: 4,
+      wikiStatus: {
+        contextChars: 1200,
+        contextMaxChars: 8000,
+        promptChars: 2200,
+        promptTruncated: false,
+        rawTurnCount: 7,
+        lastWrapupDate: "2026-05-21",
+        lastWrapupTitle: "Wiki consumer guidance",
+      },
     });
 
     assert.deepEqual(actions.slice(0, 4).map((action) => action.id), [
@@ -66,6 +75,45 @@ describe("command center", () => {
     assert.ok(actions.some((action) => action.id === "testTelegram"));
     assert.ok(actions.some((action) => action.id === "toggleAutoAdvanceActionableDefaults"));
     assert.ok(actions.some((action) => action.id === "runAutopilotStart"));
+    const wiki = actions.find((action) => action.id === "openWikiContext");
+    assert.ok(wiki);
+    assert.equal(wiki.description, "Wiki 1200/8000 chars");
+    assert.match(wiki.detail, /Prompt context 2200\/8000 chars/);
+    assert.match(wiki.detail, /raw turns 7/);
+    assert.match(wiki.detail, /last wrapup 2026-05-21 \| Wiki consumer guidance/);
+  });
+
+  test("shows disabled wiki injection in Command Center status", () => {
+    const actions = buildCommandCenterActions({
+      workspaceReady: true,
+      canStop: false,
+      canAcceptDefault: false,
+      autoAdvanceActionableDefaults: false,
+      canAssignBuilder: false,
+      canRequestReview: false,
+      canHandBack: false,
+      canRunVerification: false,
+      canPokeNativeTerminals: false,
+      needsCodexPath: false,
+      needsClaudePath: false,
+      transport: "oneShot",
+      workQueueCount: 0,
+      nativeActionsCount: 0,
+      wikiStatus: {
+        contextChars: 0,
+        contextMaxChars: 0,
+        promptChars: 0,
+        promptTruncated: false,
+        rawTurnCount: 0,
+      },
+    });
+
+    const wiki = actions.find((action) => action.id === "openWikiContext");
+
+    assert.ok(wiki);
+    assert.equal(wiki.description, "Wiki disabled");
+    assert.match(wiki.detail, /Prompt injection disabled/);
+    assert.match(wiki.detail, /last wrapup none/);
   });
 
   test("offers build flow, recovery, and safe transport when terminal bridge is active", () => {

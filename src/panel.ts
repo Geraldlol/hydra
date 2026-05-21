@@ -203,6 +203,7 @@ import {
   pruneHydraWikiRawTurns,
   readHydraWikiFiles,
   readHydraWikiPromptContext,
+  readHydraWikiStatus,
   writeHydraWikiWrapupSource,
 } from "./hydraWiki";
 import { renderSessionBrief, sessionBriefPath, writeSessionBrief } from "./sessionBrief";
@@ -1223,6 +1224,14 @@ export class HydraRoomPanel {
 
   async showCommandCenter(): Promise<void> {
     await this.ready();
+    let wikiStatus: Awaited<ReturnType<typeof readHydraWikiStatus>> | undefined;
+    if (this.workspaceReady) {
+      try {
+        wikiStatus = await readHydraWikiStatus(this.workspaceRoot, this.wikiContextMaxChars());
+      } catch {
+        // Wiki status is advisory; keep Command Center usable if wiki files are hand-edited mid-read.
+      }
+    }
     const actions = buildCommandCenterActions({
       workspaceReady: this.workspaceReady,
       canStop: isInFlight(this.state) || this.terminalPokeInFlight || this.verificationRunning || this.autopilotRunning,
@@ -1238,6 +1247,7 @@ export class HydraRoomPanel {
       transport: this.transportMode(),
       workQueueCount: this.workspaceReady ? this.currentWorkQueue().length : 0,
       nativeActionsCount: this.nativeActions.length,
+      wikiStatus,
     });
     const pick = await vscode.window.showQuickPick(
       actions.map((item) => ({
@@ -2414,6 +2424,13 @@ export class HydraRoomPanel {
         : undefined;
       const applied = await applyHydraWikiWrapupDraft(this.workspaceRoot, draft, nowIso, storedSource);
       const pruned = await pruneHydraWikiRawTurns(this.workspaceRoot, nowIso, this.wikiRawTurnsKeepDays());
+      if (pruned.invalidNowIso) {
+        await this.recordEvent("error", "Hydra wiki raw source pruning skipped because the current timestamp was unparseable.", {
+          agent,
+          source: traceSource,
+          nowIso: pruned.invalidNowIso,
+        });
+      }
       if (applied.changed) {
         const data: Record<string, string | number | boolean | null> = {
           agent,
