@@ -83,6 +83,23 @@ describe("transition()", () => {
     assert.deepEqual((next as any).agents, ["codex", "claude"]);
   });
 
+  test("BuildDone + requestReviewSkipped -> AwaitingUser", () => {
+    const next = transition({ name: "BuildDone", builder: "codex" }, { type: "requestReviewSkipped" });
+    assert.equal(next.name, "AwaitingUser");
+  });
+
+  test("ParallelBuildDone + requestReviewSkipped -> AwaitingUser", () => {
+    const next = transition({ name: "ParallelBuildDone", agents: ["codex", "claude"] }, { type: "requestReviewSkipped" });
+    assert.equal(next.name, "AwaitingUser");
+  });
+
+  test("requestReviewSkipped is identity on non-BuildDone states", () => {
+    // Spot-check; the exhaustive sweep below covers the remaining states.
+    assert.equal(transition({ name: "Idle" }, { type: "requestReviewSkipped" }).name, "Idle");
+    assert.equal(transition({ name: "Build", builder: "codex" }, { type: "requestReviewSkipped" }).name, "Build");
+    assert.equal(transition({ name: "Review", reviewer: "claude" }, { type: "requestReviewSkipped" }).name, "Review");
+  });
+
   test("BuildDone + userSent -> Opener (chat unlocks after build)", () => {
     const next = transition({ name: "BuildDone", builder: "codex" }, { type: "userSent", opener: "claude" });
     assert.equal(next.name, "Opener");
@@ -196,6 +213,7 @@ describe("transition exhaustive sweep", () => {
     | { type: "requestReview" }
     | { type: "reviewDone"; approved: boolean }
     | { type: "handBack" }
+    | { type: "requestReviewSkipped" }
     | { type: "stop" };
 
   const states: ReadonlyArray<SweepState> = [
@@ -223,6 +241,7 @@ describe("transition exhaustive sweep", () => {
     { type: "requestReview" },
     { type: "reviewDone", approved: true },
     { type: "handBack" },
+    { type: "requestReviewSkipped" },
     { type: "stop" },
   ];
 
@@ -244,6 +263,7 @@ describe("transition exhaustive sweep", () => {
       "requestReview": "identity",
       "reviewDone": "identity",
       "handBack": "identity",
+      "requestReviewSkipped": "identity",
       "stop": "identity",
     },
     Opener: {
@@ -258,6 +278,7 @@ describe("transition exhaustive sweep", () => {
       "requestReview": "identity",
       "reviewDone": "identity",
       "handBack": "identity",
+      "requestReviewSkipped": "identity",
       "stop": { name: "AwaitingUser" },
     },
     Reactor: {
@@ -272,6 +293,7 @@ describe("transition exhaustive sweep", () => {
       "requestReview": "identity",
       "reviewDone": "identity",
       "handBack": "identity",
+      "requestReviewSkipped": "identity",
       "stop": { name: "AwaitingUser" },
     },
     Closer: {
@@ -286,6 +308,7 @@ describe("transition exhaustive sweep", () => {
       "requestReview": "identity",
       "reviewDone": "identity",
       "handBack": "identity",
+      "requestReviewSkipped": "identity",
       "stop": { name: "AwaitingUser" },
     },
     ParallelDiscussion: {
@@ -300,6 +323,7 @@ describe("transition exhaustive sweep", () => {
       "requestReview": "identity",
       "reviewDone": "identity",
       "handBack": "identity",
+      "requestReviewSkipped": "identity",
       "stop": { name: "AwaitingUser" },
     },
     AwaitingUser: {
@@ -314,6 +338,7 @@ describe("transition exhaustive sweep", () => {
       "requestReview": "identity",
       "reviewDone": "identity",
       "handBack": "identity",
+      "requestReviewSkipped": "identity",
       "stop": "identity",
     },
     Build: {
@@ -328,6 +353,7 @@ describe("transition exhaustive sweep", () => {
       "requestReview": "identity",
       "reviewDone": "identity",
       "handBack": "identity",
+      "requestReviewSkipped": "identity",
       "stop": { name: "AwaitingUser" },
     },
     BuildDone: {
@@ -342,6 +368,7 @@ describe("transition exhaustive sweep", () => {
       "requestReview": { name: "Review" },
       "reviewDone": "identity",
       "handBack": "identity",
+      "requestReviewSkipped": { name: "AwaitingUser" },
       "stop": "identity",
     },
     Review: {
@@ -356,6 +383,7 @@ describe("transition exhaustive sweep", () => {
       "requestReview": "identity",
       "reviewDone": { name: "ReviewDone" },
       "handBack": "identity",
+      "requestReviewSkipped": "identity",
       "stop": { name: "AwaitingUser" },
     },
     ReviewDone: {
@@ -370,6 +398,7 @@ describe("transition exhaustive sweep", () => {
       "requestReview": "identity",
       "reviewDone": "identity",
       "handBack": { name: "Build" },
+      "requestReviewSkipped": "identity",
       "stop": "identity",
     },
   };

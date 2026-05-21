@@ -157,4 +157,26 @@ describe("workspace edit viewer source contracts", () => {
     assert.match(source, /setTimeout\(\(\) => \{/);
     assert.match(source, /this\.refreshWorkspaceChanges\(\)\.then\(\(\) => this\.postState\(\)\)/);
   });
+
+  test("only archiveAndClearRoom assigns this.state directly outside applyEvent", () => {
+    // Why: every other phase change must route through transition() so the
+    // state machine remains the single source of truth. archiveAndClearRoom
+    // is the documented exception because it is a room-wide wipe (messages,
+    // agent statuses, transcript) that incidentally resets the phase —
+    // modeling it as a phase event would conflate concerns. Pin the count
+    // so a future regression that adds a new direct mutation gets caught.
+    // The regex deliberately matches literal-object assignments only, so the
+    // canonical `this.state = transition(this.state, event)` inside applyEvent
+    // is not counted.
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    const literalMutations = [...source.matchAll(/this\.state\s*=\s*\{\s*name:/g)];
+    assert.equal(
+      literalMutations.length,
+      1,
+      `expected exactly 1 direct this.state literal assignment (archiveAndClearRoom), found ${literalMutations.length}`
+    );
+    const idx = literalMutations[0].index ?? -1;
+    const head = source.slice(Math.max(0, idx - 600), idx);
+    assert.match(head, /async archiveAndClearRoom/);
+  });
 });

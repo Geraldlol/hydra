@@ -604,11 +604,7 @@ export class HydraRoomPanel {
       await this.appendSystemMessage(
         "Review unavailable: workspace is not a git repository. Returning to discussion — build edits remain in the working tree for manual review."
       );
-      // Escape BuildDone directly. The phase machine has no transition out
-      // of BuildDone except via requestReview, so without this the room is
-      // stranded — Stop is a no-op in BuildDone (not an in-flight state).
-      this.state = { name: "AwaitingUser" };
-      this.postState();
+      this.applyEvent({ type: "requestReviewSkipped" });
       return;
     }
     let parallelAgents: AgentId[] | undefined;
