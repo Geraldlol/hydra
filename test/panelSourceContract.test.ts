@@ -173,4 +173,29 @@ describe("wiki wrapup source contracts", () => {
     assert.match(method, /Hydra wiki wrapup completed with no durable wiki changes after \$\{source\}\./);
     assert.match(method, /rawSourcesPruned: 0/);
   });
+
+  test("agent replies emit wiki usage telemetry after transcript persistence", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    const methodStart = source.indexOf("private async finalizePendingMessage(");
+    const methodEnd = source.indexOf("private async recordWikiUsageTelemetry", methodStart);
+    assert.ok(methodStart >= 0 && methodEnd > methodStart);
+
+    const method = source.slice(methodStart, methodEnd);
+    assert.match(method, /await appendMessage\(this\.transcriptUri\.fsPath/);
+    assert.match(method, /await this\.recordWikiUsageTelemetry\(m\)/);
+  });
+
+  test("wiki usage telemetry records citation and prompt-file counts", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    const methodStart = source.indexOf("private async recordWikiUsageTelemetry(");
+    const methodEnd = source.indexOf("private async captureDecisionPacket", methodStart);
+    assert.ok(methodStart >= 0 && methodEnd > methodStart);
+
+    const method = source.slice(methodStart, methodEnd);
+    assert.match(method, /readHydraWikiPromptContext\(this\.workspaceRoot, this\.wikiContextMaxChars\(\)/);
+    assert.match(method, /summarizeHydraWikiUsage\(message\.text\)/);
+    assert.match(method, /Hydra wiki usage telemetry:/);
+    assert.match(method, /sourceCitationCount: telemetry\.sourceCitationCount/);
+    assert.match(method, /promptFiles: wikiContext\.files\.join\(","\)/);
+  });
 });

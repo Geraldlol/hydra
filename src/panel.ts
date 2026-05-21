@@ -192,6 +192,7 @@ import {
   readWorkQueueDispositions,
   type WorkQueueDisposition,
 } from "./workQueueState";
+import { summarizeHydraWikiUsage } from "./wikiTelemetry";
 import {
   applyHydraWikiWrapupDraft,
   buildHydraWikiWrapupPrompt,
@@ -4111,6 +4112,37 @@ export class HydraRoomPanel {
       error: m.error,
       cancelled: m.cancelled,
     });
+    await this.recordWikiUsageTelemetry(m);
+  }
+
+  private async recordWikiUsageTelemetry(message: UiMessage): Promise<void> {
+    if (!this.workspaceReady) return;
+    if (message.role !== "codex" && message.role !== "claude") return;
+    if (message.error || message.cancelled) return;
+    const wikiContext = readHydraWikiPromptContext(this.workspaceRoot, this.wikiContextMaxChars(), {
+      includeLog: this.wikiPromptIncludeLog(),
+    });
+    if (!wikiContext) return;
+
+    const telemetry = summarizeHydraWikiUsage(message.text);
+    await this.recordEvent(
+      "diagnostic",
+      `Hydra wiki usage telemetry: ${AGENT_NAMES[message.role]} ${message.phase ?? "turn"} reply ${telemetry.hasSignal ? "referenced wiki memory" : "had no wiki usage signal"}.`,
+      {
+        agent: message.role,
+        phase: message.phase ?? null,
+        hasSignal: telemetry.hasSignal,
+        sourceCitationCount: telemetry.sourceCitationCount,
+        distinctSourceCitationCount: telemetry.distinctSourceCitationCount,
+        sourceIds: telemetry.sourceIds.join(","),
+        mentionsHydraWikiContext: telemetry.mentionsHydraWikiContext,
+        mentionsWikiContext: telemetry.mentionsWikiContext,
+        mentionsHydraWikiPath: telemetry.mentionsHydraWikiPath,
+        replyChars: telemetry.replyChars,
+        promptChars: wikiContext.markdown.length,
+        promptFiles: wikiContext.files.join(","),
+      }
+    );
   }
 
   private async captureDecisionPacket(message: UiMessage): Promise<void> {
