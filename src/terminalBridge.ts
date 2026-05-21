@@ -52,6 +52,7 @@ export interface TerminalBridgeSelfTestResult {
 }
 
 export interface TerminalBridgeRunResult extends RunResult {
+  promptPath: string;
   logPath: string;
   replyPath: string;
 }
@@ -141,7 +142,7 @@ export class TerminalBridge {
     onChunk?: (chunk: string) => void
   ): Promise<TerminalBridgeRunResult> {
     const { result, paths } = await this.callAgentWithPaths(agent, phase, spawn, prompt, timeoutMs, signal, onChunk);
-    return { ...result, logPath: paths.logPath, replyPath: paths.replyPath };
+    return { ...result, promptPath: paths.promptPath, logPath: paths.logPath, replyPath: paths.replyPath };
   }
 
   async selfTest(timeoutMs: number, signal: AbortSignal = new AbortController().signal): Promise<TerminalBridgeSelfTestResult> {

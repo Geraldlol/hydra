@@ -25,6 +25,8 @@ export type WebviewMessage =
   | { type: "openNativeActions" }
   | { type: "openAgentCalls" }
   | { type: "openWorkspaceChange"; path?: string }
+  | { type: "openRunFailureFile"; path?: string }
+  | { type: "copyRunFailurePromptSha"; sha?: string }
   | { type: "clearNativeAction"; id?: string }
   | { type: "clearNativeActions"; ids?: string[] }
   | { type: "openObjective" }

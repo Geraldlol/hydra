@@ -201,11 +201,18 @@ import {
 } from "./supportBundle";
 import type { HydraStatusBarSnapshot } from "./statusBar";
 import { renderHtml, type HydraHeadAssets } from "./webview.html";
+import {
+  createRunFailureCard,
+  isSafeRunFailureRequestPath,
+  type RunFailureCard,
+  type RunFailureRequestFileKind,
+} from "./runFailureCard";
 
 interface UiMessage extends TranscriptMessage {
   id: string;
   pending?: boolean;
   activity?: string;
+  runFailure?: RunFailureCard;
 }
 
 interface WorkspaceChange {
@@ -274,6 +281,7 @@ export class HydraRoomPanel {
   private readonly disposables: vscode.Disposable[] = [];
   private state: State = { name: "Idle" };
   private messages: UiMessage[] = [];
+  private readonly pendingRunFailures = new Map<string, RunFailureCard>();
   private transcriptUri!: vscode.Uri;
   private objectiveUri!: vscode.Uri;
   private decisionsUri!: vscode.Uri;
@@ -895,6 +903,39 @@ export class HydraRoomPanel {
       await this.appendSystemMessage(`Hydra could not open \`${normalized}\`: ${message}`);
       this.postState();
     }
+  }
+
+  async openRunFailureFile(relativePath: string): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    const normalized = relativePath.replace(/\\/g, "/");
+    if (!isSafeRunFailureRequestPath(normalized)) {
+      await this.appendSystemMessage("Hydra refused to open an invalid run diagnostic path.");
+      this.postState();
+      return;
+    }
+    const absolute = path.resolve(this.workspaceRoot, normalized);
+    const root = path.resolve(this.workspaceRoot);
+    if (absolute !== root && !absolute.startsWith(root + path.sep)) {
+      await this.appendSystemMessage("Hydra refused to open a run diagnostic path outside the workspace.");
+      this.postState();
+      return;
+    }
+    try {
+      const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(absolute));
+      await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await this.appendSystemMessage(`Hydra could not open \`${normalized}\`: ${message}`);
+      this.postState();
+    }
+  }
+
+  async copyRunFailurePromptSha(sha: string): Promise<void> {
+    await this.ready();
+    if (!/^[a-f0-9]{64}$/i.test(sha)) return;
+    await vscode.env.clipboard.writeText(sha);
+    void vscode.window.showInformationMessage("Prompt SHA copied.");
   }
 
   async openObjective(): Promise<void> {
@@ -2521,8 +2562,10 @@ export class HydraRoomPanel {
       spawn = { ...spawn, command: await resolveAgentCommand(agent, spawn.command) };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      const traceId = makeTraceId(agent, phase);
+      const startedAt = Date.now();
       await this.appendAgentCallTrace({
-        id: makeTraceId(agent, phase),
+        id: traceId,
         event: "resolveFailed",
         timestamp: new Date().toISOString(),
         agent,
@@ -2539,6 +2582,15 @@ export class HydraRoomPanel {
         timedOut: false,
         cancelled: false,
       };
+      this.recordRunFailureCard(messageId, {
+        id: traceId,
+        agent,
+        phase,
+        transport: this.transportMode(),
+        startedAt,
+        result,
+        promptSha256: sha256(prompt),
+      });
       await this.finalizePendingMessage(messageId, result);
       stopActivity();
       const finalized = this.messages.find((x) => x.id === messageId);
@@ -2632,6 +2684,7 @@ export class HydraRoomPanel {
   ): Promise<RunResult> {
     const traceId = makeTraceId(agent, phase);
     const startedAt = Date.now();
+    const promptSha256 = sha256(prompt);
     try {
       if (forceTerminalBridge || this.transportMode() === "terminalBridge") {
         if (!this.terminalBridge) {
@@ -2651,7 +2704,7 @@ export class HydraRoomPanel {
           envKeys: Object.keys(terminalPrepared.spawn.env ?? {}).sort(),
           timeoutMs: timeout,
           promptChars: prompt.length,
-          promptSha256: sha256(prompt),
+          promptSha256,
           outputMode: terminalPrepared.outputMode,
         });
         const result = await this.terminalBridge.callAgent(
@@ -2668,6 +2721,16 @@ export class HydraRoomPanel {
           m.text += normalized.stdout;
           this.panel.webview.postMessage({ type: "chunk", messageId, text: normalized.stdout });
         }
+        this.recordRunFailureCard(messageId, {
+          id: traceId,
+          agent,
+          phase,
+          transport: "terminalBridge",
+          startedAt,
+          result: normalized,
+          promptSha256,
+          requestFiles: requestFileTrace(normalized),
+        });
         await this.appendAgentCallTrace(completedAgentCallTrace(traceId, agent, phase, "terminalBridge", startedAt, normalized));
         await this.extractAndRecordUsage({
           agent,
@@ -2694,7 +2757,7 @@ export class HydraRoomPanel {
         envKeys: Object.keys(spawn.env ?? {}).sort(),
         timeoutMs: timeout,
         promptChars: prompt.length,
-        promptSha256: sha256(prompt),
+        promptSha256,
         requestFiles: requestFileTrace(prepared),
         outputMode: prepared.outputMode,
       });
@@ -2733,12 +2796,31 @@ export class HydraRoomPanel {
           this.panel.webview.postMessage({ type: "replaceMessageText", messageId, text: normalized.stdout });
         }
       }
+      this.recordRunFailureCard(messageId, {
+        id: traceId,
+        agent,
+        phase,
+        transport: "oneShot",
+        startedAt,
+        result: normalized,
+        promptSha256,
+        requestFiles: requestFileTrace(prepared),
+      });
       await this.appendAgentCallTrace(completedAgentCallTrace(traceId, agent, phase, "oneShot", startedAt, normalized));
       const usageResult = prepared.outputMode === "plain" ? normalized : result;
       await this.extractAndRecordUsage({ agent, phase, requestId: traceId, result: usageResult, outputMode: prepared.outputMode });
       return normalized;
     } catch (err) {
       const result = agentCallFailureResult(err instanceof Error ? err.message : String(err));
+      this.recordRunFailureCard(messageId, {
+        id: traceId,
+        agent,
+        phase,
+        transport: this.transportMode(),
+        startedAt,
+        result,
+        promptSha256,
+      });
       await this.appendAgentCallTrace(completedAgentCallTrace(traceId, agent, phase, this.transportMode(), startedAt, result));
       return result;
     }
@@ -2842,8 +2924,8 @@ export class HydraRoomPanel {
 
   private async normalizeTerminalBridgeResult(
     outputMode: "plain" | "claudeStreamJson" | "codexJson",
-    result: RunResult & { logPath?: string }
-  ): Promise<RunResult & { logPath?: string; replyPath?: string }> {
+    result: RunResult & { promptPath?: string; logPath?: string; replyPath?: string }
+  ): Promise<RunResult & { promptPath?: string; logPath?: string; replyPath?: string }> {
     let stdout = result.stdout;
     const raw = await this.terminalBridgeRawOutput(result);
     if (outputMode === "claudeStreamJson") {
@@ -3087,6 +3169,12 @@ export class HydraRoomPanel {
       // Flight recording is diagnostic metadata. Never fail the user's agent
       // call because the trace file is temporarily unavailable.
     }
+  }
+
+  private recordRunFailureCard(messageId: string, input: Omit<Parameters<typeof createRunFailureCard>[0], "workspaceRoot">): void {
+    const card = createRunFailureCard({ ...input, workspaceRoot: this.workspaceRoot });
+    if (card) this.pendingRunFailures.set(messageId, card);
+    else this.pendingRunFailures.delete(messageId);
   }
 
   private modelPrices(): { agentDefaults: Record<AgentId, ModelPrices>; modelOverrides: Record<string, ModelPrices> } {
@@ -3630,6 +3718,9 @@ export class HydraRoomPanel {
     if (!m) return;
     if (!m.pending && m.cancelled) return;
     m.pending = false;
+    const runFailure = this.pendingRunFailures.get(messageId);
+    this.pendingRunFailures.delete(messageId);
+    if (runFailure) m.runFailure = runFailure;
     const timedOutDiscussion =
       result.timedOut && (m.phase === "opener" || m.phase === "reactor" || m.phase === "closer" || m.phase === "parallel");
     if (result.cancelled || timedOutDiscussion) {
@@ -4163,6 +4254,12 @@ export class HydraRoomPanel {
         case "openWorkspaceChange":
           await this.openWorkspaceChange(String(msg.path ?? ""));
           break;
+        case "openRunFailureFile":
+          await this.openRunFailureFile(String(msg.path ?? ""));
+          break;
+        case "copyRunFailurePromptSha":
+          await this.copyRunFailurePromptSha(String(msg.sha ?? ""));
+          break;
         case "clearNativeAction":
           await this.clearNativeActions([msg.id ?? ""]);
           break;
@@ -4522,11 +4619,15 @@ function sha256(value: string): string {
   return crypto.createHash("sha256").update(value, "utf8").digest("hex");
 }
 
-function requestFileTrace(prepared: PreparedOneShotSpawn): Record<string, string> | undefined {
-  const trace: Record<string, string> = {};
-  if (prepared.promptPath) trace.prompt = prepared.promptPath;
-  if (prepared.replyPath) trace.reply = prepared.replyPath;
-  if (prepared.logPath) trace.log = prepared.logPath;
+function requestFileTrace(input: {
+  promptPath?: string;
+  replyPath?: string;
+  logPath?: string;
+}): Partial<Record<RunFailureRequestFileKind, string>> | undefined {
+  const trace: Partial<Record<RunFailureRequestFileKind, string>> = {};
+  if (input.promptPath) trace.prompt = input.promptPath;
+  if (input.replyPath) trace.reply = input.replyPath;
+  if (input.logPath) trace.log = input.logPath;
   return Object.keys(trace).length > 0 ? trace : undefined;
 }
 

@@ -311,6 +311,59 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       font-family: var(--vscode-editor-font-family);
       font-size: var(--vscode-editor-font-size);
     }
+    .run-failure {
+      margin-top: 9px;
+      padding-top: 8px;
+      border-top: 1px solid color-mix(in srgb, var(--error) 45%, var(--border));
+      display: grid;
+      gap: 7px;
+    }
+    .run-failure-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      color: var(--error);
+      font-size: 12px;
+    }
+    .run-failure-head span {
+      color: var(--muted);
+      font-family: var(--vscode-editor-font-family);
+      overflow-wrap: anywhere;
+      text-align: right;
+    }
+    .run-failure-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 12px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .run-failure-meta b { color: var(--text); font-weight: 650; }
+    .run-failure-stderr {
+      margin: 0;
+      max-height: 160px;
+      overflow: auto;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      padding: 6px 7px;
+      border: 1px solid var(--border);
+      background: var(--input);
+      font-family: var(--vscode-editor-font-family);
+      font-size: 11px;
+      line-height: 1.35;
+    }
+    .run-failure-stderr.muted { color: var(--muted); font-style: italic; }
+    .run-failure-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .run-failure-actions button {
+      min-height: 24px;
+      padding: 2px 8px;
+      font-size: 11px;
+    }
     .pending .text::after {
       content: "|";
       display: inline-block;

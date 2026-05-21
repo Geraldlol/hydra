@@ -345,6 +345,17 @@ if (editBoard) {
     vscode.postMessage({ type: "openWorkspaceChange", path: button.dataset.editPath || "" });
   });
 }
+if (messagesEl) {
+  messagesEl.addEventListener("click", (event) => {
+    const target = event.target;
+    const button = target && target.closest ? target.closest("button[data-run-failure-action]") : undefined;
+    if (!button) return;
+    const action = button.dataset.runFailureAction || "";
+    if (action === "open-file") vscode.postMessage({ type: "openRunFailureFile", path: button.dataset.runFailurePath || "" });
+    if (action === "copy-sha") vscode.postMessage({ type: "copyRunFailurePromptSha", sha: button.dataset.runFailureSha || "" });
+    if (action === "open-agent-calls") vscode.postMessage({ type: "openAgentCalls" });
+  });
+}
 
 window.addEventListener("message", (event) => {
   const msg = event.data;
@@ -617,10 +628,97 @@ function renderMessages() {
     text.textContent = m.text || "";
     if (!m.pending || m.text || !m.activity) card.append(head, text);
     else card.append(head);
+    if (m.runFailure) card.append(renderRunFailureCard(m.runFailure));
     article.append(time, card);
     messagesEl.append(article);
   }
   messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function renderRunFailureCard(card) {
+  const section = document.createElement("section");
+  section.className = "run-failure";
+  const header = document.createElement("div");
+  header.className = "run-failure-head";
+  const title = document.createElement("strong");
+  title.textContent = "Run failed";
+  const status = document.createElement("span");
+  status.textContent = card.status || "Failed";
+  header.append(title, status);
+
+  const meta = document.createElement("div");
+  meta.className = "run-failure-meta";
+  meta.append(
+    runFailureMeta("Duration", formatDuration(card.durationMs)),
+    runFailureMeta("Transport", card.transport === "terminalBridge" ? "Terminal bridge" : "One-shot"),
+    runFailureMeta("Prompt", shortSha(card.promptSha256))
+  );
+
+  const stderr = document.createElement("pre");
+  stderr.className = "run-failure-stderr";
+  stderr.textContent = card.stderrPreview || "No stderr captured";
+  if (!card.stderrPreview) stderr.classList.add("muted");
+
+  const actions = document.createElement("div");
+  actions.className = "run-failure-actions";
+  const files = Array.isArray(card.requestFiles) ? card.requestFiles : [];
+  for (const file of files) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary";
+    button.dataset.runFailureAction = "open-file";
+    button.dataset.runFailurePath = file.path || "";
+    button.title = file.label || file.path || "";
+    button.textContent = labelRequestFile(file.kind);
+    actions.append(button);
+  }
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "secondary";
+  copy.dataset.runFailureAction = "copy-sha";
+  copy.dataset.runFailureSha = card.promptSha256 || "";
+  copy.textContent = "Copy SHA";
+  actions.append(copy);
+  const log = document.createElement("button");
+  log.type = "button";
+  log.className = "secondary";
+  log.dataset.runFailureAction = "open-agent-calls";
+  log.textContent = "Agent log";
+  actions.append(log);
+
+  section.append(header, meta, stderr, actions);
+  return section;
+}
+
+function runFailureMeta(label, value) {
+  const item = document.createElement("span");
+  const key = document.createElement("b");
+  key.textContent = label + ": ";
+  const val = document.createElement("span");
+  val.textContent = value || "none";
+  item.append(key, val);
+  return item;
+}
+
+function labelRequestFile(kind) {
+  if (kind === "prompt") return "Prompt";
+  if (kind === "reply") return "Reply";
+  if (kind === "log") return "Log";
+  return "File";
+}
+
+function shortSha(value) {
+  const sha = String(value || "");
+  return sha.length > 12 ? sha.slice(0, 12) : sha || "none";
+}
+
+function formatDuration(ms) {
+  const n = Number(ms) || 0;
+  const totalSeconds = Math.max(0, Math.round(n / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes === 0) return seconds + "s";
+  return minutes + "m " + String(seconds).padStart(2, "0") + "s";
 }
 
 function renderOpenerButton() {
