@@ -50,6 +50,7 @@ describe("command center", () => {
         contextMaxChars: 8000,
         promptChars: 2200,
         promptTruncated: false,
+        promptFiles: [".hydra/wiki/context.md", ".hydra/wiki/index.md"],
         rawTurnCount: 7,
         lastWrapupDate: "2026-05-21",
         lastWrapupTitle: "Wiki consumer guidance",
@@ -81,6 +82,7 @@ describe("command center", () => {
     assert.ok(wiki);
     assert.equal(wiki.description, "Wiki 1200/8000 chars");
     assert.match(wiki.detail, /Prompt context 2200\/8000 chars/);
+    assert.match(wiki.detail, /files context\.md, index\.md/);
     assert.match(wiki.detail, /raw turns 7/);
     assert.match(wiki.detail, /last wrapup 2026-05-21 \| Wiki consumer guidance/);
   });

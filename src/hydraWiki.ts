@@ -87,11 +87,19 @@ export interface HydraWikiWrapupMessage {
   phase?: string;
 }
 
+export interface HydraWikiPromptOptions {
+  includeLog?: boolean;
+}
+
 export const HYDRA_WIKI_PROMPT_FILES: HydraWikiPromptFile[] = [
   { relativePath: path.join(HYDRA_WIKI_DIR, "context.md"), label: "context.md" },
   { relativePath: path.join(HYDRA_WIKI_DIR, "index.md"), label: "index.md" },
-  { relativePath: path.join(HYDRA_WIKI_DIR, "log.md"), label: "log.md" },
 ];
+
+const HYDRA_WIKI_LOG_PROMPT_FILE: HydraWikiPromptFile = {
+  relativePath: path.join(HYDRA_WIKI_DIR, "log.md"),
+  label: "log.md",
+};
 
 const DEFAULT_WIKI_FILES: Record<string, string> = {
   [path.join(HYDRA_WIKI_DIR, "schema.md")]: `# Hydra Wiki Schema
@@ -161,7 +169,8 @@ export async function readHydraWikiFiles(workspaceRoot: string): Promise<HydraWi
 
 export function readHydraWikiPromptContext(
   workspaceRoot: string,
-  maxChars: number
+  maxChars: number,
+  options: HydraWikiPromptOptions = {}
 ): HydraWikiPromptContext | undefined {
   const cap = Math.max(0, Math.floor(maxChars));
   if (cap <= 0) return undefined;
@@ -169,8 +178,11 @@ export function readHydraWikiPromptContext(
   const sections: string[] = [];
   const files: string[] = [];
   let originalChars = 0;
+  const promptFiles = options.includeLog
+    ? [...HYDRA_WIKI_PROMPT_FILES, HYDRA_WIKI_LOG_PROMPT_FILE]
+    : HYDRA_WIKI_PROMPT_FILES;
 
-  for (const source of HYDRA_WIKI_PROMPT_FILES) {
+  for (const source of promptFiles) {
     const absolutePath = path.join(workspaceRoot, source.relativePath);
     const text = readFileIfExists(absolutePath);
     const trimmed = text.trim();
@@ -200,7 +212,8 @@ export function readHydraWikiPromptContext(
 
 export async function readHydraWikiStatus(
   workspaceRoot: string,
-  maxChars: number
+  maxChars: number,
+  options: HydraWikiPromptOptions = {}
 ): Promise<HydraWikiStatus> {
   await ensureHydraWikiFiles(workspaceRoot);
   const cap = Math.max(0, Math.floor(maxChars));
@@ -212,7 +225,7 @@ export async function readHydraWikiStatus(
   const contextChars = isDefaultWikiTemplate(path.join(HYDRA_WIKI_DIR, "context.md"), contextText)
     ? 0
     : contextText.trim().length;
-  const promptContext = readHydraWikiPromptContext(workspaceRoot, cap);
+  const promptContext = readHydraWikiPromptContext(workspaceRoot, cap, options);
   const rawEntries = await fs.promises.readdir(rawTurnsDir, { withFileTypes: true }).catch(() => []);
   const rawTurnCount = rawEntries.filter((entry) =>
     entry.isFile() && /^\d{4}-\d{2}-\d{2}-[a-f0-9]{12}\.md$/i.test(entry.name)

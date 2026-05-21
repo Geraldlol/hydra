@@ -158,3 +158,19 @@ describe("workspace edit viewer source contracts", () => {
     assert.match(source, /this\.refreshWorkspaceChanges\(\)\.then\(\(\) => this\.postState\(\)\)/);
   });
 });
+
+describe("wiki wrapup source contracts", () => {
+  test("wiki wrapups emit start and no-change diagnostics", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    const methodStart = source.indexOf("private async maybeRunWikiWrapup(");
+    const methodEnd = source.indexOf("private async runWikiWrapupAgent", methodStart);
+    assert.ok(methodStart >= 0 && methodEnd > methodStart);
+
+    const method = source.slice(methodStart, methodEnd);
+    assert.match(method, /Hydra wiki wrapup started after \$\{source\}\./);
+    assert.match(method, /sourceSha256: wrapupSource\.sha256/);
+    assert.match(method, /sourceTruncated: wrapupSource\.truncated/);
+    assert.match(method, /Hydra wiki wrapup completed with no durable wiki changes after \$\{source\}\./);
+    assert.match(method, /rawSourcesPruned: 0/);
+  });
+});

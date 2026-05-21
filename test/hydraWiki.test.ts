@@ -51,6 +51,11 @@ describe("Hydra wiki context", () => {
       "# Hydra Wiki Index\n\n- [[failure-cards]]: inline diagnostics for agent timeouts.\n",
       "utf8"
     );
+    await fs.writeFile(
+      path.join(dir, ".hydra", "wiki", "log.md"),
+      "# Hydra Wiki Log\n\n## [2026-05-21] wrapup | Noisy append-only history\n",
+      "utf8"
+    );
 
     const context = readHydraWikiPromptContext(dir, 8000);
 
@@ -58,8 +63,22 @@ describe("Hydra wiki context", () => {
     assert.match(context.markdown, /--- Hydra wiki context ---/);
     assert.match(context.markdown, /Hydra has a run failure card feature/);
     assert.match(context.markdown, /failure-cards/);
+    assert.doesNotMatch(context.markdown, /Noisy append-only history/);
     assert.deepEqual(context.files, [".hydra/wiki/context.md", ".hydra/wiki/index.md"]);
     assert.equal(context.truncated, false);
+  });
+
+  test("can opt into prompt-injecting the wiki log", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-wiki-"));
+    await ensureHydraWikiFiles(dir);
+    await fs.writeFile(path.join(dir, ".hydra", "wiki", "context.md"), "# Hydra Wiki Context\n\nDurable fact.\n", "utf8");
+    await fs.writeFile(path.join(dir, ".hydra", "wiki", "log.md"), "# Hydra Wiki Log\n\n## [2026-05-21] wrapup | Durable log\n", "utf8");
+
+    const context = readHydraWikiPromptContext(dir, 8000, { includeLog: true });
+
+    assert.ok(context);
+    assert.match(context.markdown, /Durable log/);
+    assert.deepEqual(context.files, [".hydra/wiki/context.md", ".hydra/wiki/log.md"]);
   });
 
   test("caps wiki prompt context", async () => {
@@ -105,6 +124,7 @@ describe("Hydra wiki context", () => {
     assert.equal(status.contextChars, "# Hydra Wiki Context\n\nDurable fact.".length);
     assert.equal(status.contextMaxChars, 8000);
     assert.equal(status.promptTruncated, false);
+    assert.deepEqual(status.promptFiles, [".hydra/wiki/context.md"]);
     assert.equal(status.rawTurnCount, 1);
     assert.equal(status.lastWrapupDate, "2026-05-21");
     assert.equal(status.lastWrapupTitle, "Latest Lesson");

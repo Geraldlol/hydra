@@ -1238,7 +1238,9 @@ export class HydraRoomPanel {
     let wikiStatus: Awaited<ReturnType<typeof readHydraWikiStatus>> | undefined;
     if (this.workspaceReady) {
       try {
-        wikiStatus = await readHydraWikiStatus(this.workspaceRoot, this.wikiContextMaxChars());
+        wikiStatus = await readHydraWikiStatus(this.workspaceRoot, this.wikiContextMaxChars(), {
+          includeLog: this.wikiPromptIncludeLog(),
+        });
       } catch {
         // Wiki status is advisory; keep Command Center usable if wiki files are hand-edited mid-read.
       }
@@ -2450,6 +2452,15 @@ export class HydraRoomPanel {
     const agent = this.wikiWrapupAgent();
     const traceSource = `${source} wiki wrapup`;
     try {
+      await this.recordEvent("diagnostic", `Hydra wiki wrapup started after ${source}.`, {
+        agent,
+        source: traceSource,
+        forced: force,
+        manual,
+        sourceSha256: wrapupSource.sha256,
+        sourceChars: wrapupSource.markdown.length,
+        sourceTruncated: wrapupSource.truncated,
+      });
       if (manual) {
         await this.appendSystemMessage(`Hydra wiki wrapup started with ${AGENT_NAMES[agent]}.`);
         this.postState();
@@ -2524,8 +2535,15 @@ export class HydraRoomPanel {
         if (manual) {
           await this.appendSystemMessage(`Hydra wiki wrapup made no content changes and pruned ${pruned.prunedPaths.length} raw source snapshot(s).`);
         }
-      } else if (manual) {
-        await this.appendSystemMessage("Hydra wiki wrapup completed with no durable wiki changes.");
+      } else {
+        await this.recordEvent("diagnostic", `Hydra wiki wrapup completed with no durable wiki changes after ${source}.`, {
+          agent,
+          source: traceSource,
+          rawSourcesPruned: 0,
+        });
+        if (manual) {
+          await this.appendSystemMessage("Hydra wiki wrapup completed with no durable wiki changes.");
+        }
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -3945,7 +3963,9 @@ export class HydraRoomPanel {
         workspaceInstructionsAsContext(workspaceInstructions, { maxChars: workspaceInstructionsMaxChars })
       );
     }
-    const wikiContext = readHydraWikiPromptContext(this.workspaceRoot, this.wikiContextMaxChars());
+    const wikiContext = readHydraWikiPromptContext(this.workspaceRoot, this.wikiContextMaxChars(), {
+      includeLog: this.wikiPromptIncludeLog(),
+    });
     if (wikiContext) {
       sections.push("", wikiContext.markdown);
     }
@@ -3971,6 +3991,10 @@ export class HydraRoomPanel {
 
   private wikiContextMaxChars(): number {
     return vscode.workspace.getConfiguration("hydraRoom").get<number>("wikiContextMaxChars", 8000);
+  }
+
+  private wikiPromptIncludeLog(): boolean {
+    return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("wikiPromptIncludeLog", false);
   }
 
   private wikiWrapupEnabled(): boolean {

@@ -53,6 +53,7 @@ export interface CommandCenterWikiStatus {
   contextMaxChars: number;
   promptChars: number;
   promptTruncated: boolean;
+  promptFiles?: string[];
   rawTurnCount: number;
   lastWrapupDate?: string;
   lastWrapupTitle?: string;
@@ -192,9 +193,12 @@ function wikiStatusDescription(status: CommandCenterWikiStatus): string {
 }
 
 function wikiStatusDetail(status: CommandCenterWikiStatus): string {
+  const files = status.promptFiles?.length
+    ? `; files ${status.promptFiles.map((file) => file.replace(/^.*\//, "")).join(", ")}`
+    : "";
   const prompt = status.contextMaxChars <= 0
     ? "Prompt injection disabled"
-    : `Prompt context ${status.promptChars}/${status.contextMaxChars} chars${status.promptTruncated ? " (truncated)" : ""}`;
+    : `Prompt context ${status.promptChars}/${status.contextMaxChars} chars${status.promptTruncated ? " (truncated)" : ""}${files}`;
   const last = status.lastWrapupDate
     ? `last wrapup ${status.lastWrapupDate}${status.lastWrapupTitle ? ` | ${status.lastWrapupTitle}` : ""}`
     : "last wrapup none";

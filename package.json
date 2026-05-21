@@ -2,7 +2,7 @@
   "name": "vscode-hydra-room",
   "displayName": "Hydra",
   "description": "Three-way collaboration room for the user, Codex CLI, and Claude Code CLI inside VS Code.",
-  "version": "0.4.17",
+  "version": "0.4.19",
   "publisher": "local-tools",
   "license": "MIT",
   "private": false,
@@ -324,6 +324,11 @@
           "default": 8000,
           "minimum": 0,
           "markdownDescription": "Maximum characters of compiled `.hydra/wiki` context injected into agent prompts. Set to 0 to disable wiki prompt context."
+        },
+        "hydraRoom.wikiPromptIncludeLog": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Include append-only `.hydra/wiki/log.md` entries in every agent prompt. Disabled by default so routine prompts spend wiki budget on compiled `context.md` and `index.md`; wrapups still read the log tail for maintenance."
         },
         "hydraRoom.wikiWrapupEnabled": {
           "type": "boolean",
