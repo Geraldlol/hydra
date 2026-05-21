@@ -6,17 +6,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `vscode-hydra-room` (display name "Hydra") is a VS Code extension that runs a 3-way collaboration room between the user, the OpenAI **Codex CLI**, and the Anthropic **Claude Code CLI**. Both agents are invoked as native CLI subprocesses; the extension is the orchestrator, transcript keeper, and decision-packet parser. README.md is the user-facing manual; this file is the architecture and conventions cheat sheet for editing the code.
 
-The package id is `local-tools.vscode-hydra-room`. It is not published to the Marketplace; install locally via `npm run package` + `code --install-extension *.vsix`.
+The package id is `local-tools.vscode-hydra-room`. It is not published to the Marketplace; install locally via `pnpm run package` + `code --install-extension *.vsix`.
 
 ## Commands
 
 ```powershell
-npm run check                     # tsc --noEmit (type-check only)
-npm test                          # rm dist + tsc -p . + copy fixtures + node --test dist/test/*.test.js
-npm run dev                       # open VS Code Extension Development Host with this repo as the workspace
-npm run package                   # runs prepackage (npm test) then builds .vsix at repo root
-npm run probe:native-contract     # dry-run inspection of the native Codex/Claude CLI surfaces
+pnpm run check                    # tsc --noEmit (type-check only)
+pnpm test                         # rm dist + tsc -p . + copy fixtures + node --test dist/test/*.test.js
+pnpm run dev                      # open VS Code Extension Development Host with this repo as the workspace
+pnpm run package                  # runs prepackage (pnpm test) then builds .vsix at repo root
+pnpm run probe:native-contract    # dry-run inspection of the native Codex/Claude CLI surfaces
 ```
+
+Use Corepack so `packageManager` resolves pnpm@11.1.3.
 
 ### Single-test runs
 
@@ -36,7 +38,7 @@ The project uses Node's default per-file process isolation — each test file ge
 
 ### Dev host
 
-`scripts/open-dev-host.js` opens this repo as both the extension-development path AND the dev workspace. To test the extension against a different folder, set `DEV_HOST_WORKSPACE=C:\path\to\other\repo` before `npm run dev`.
+`scripts/open-dev-host.js` opens this repo as both the extension-development path AND the dev workspace. To test the extension against a different folder, set `DEV_HOST_WORKSPACE=C:\path\to\other\repo` before `pnpm run dev`.
 
 ## Big-picture architecture
 

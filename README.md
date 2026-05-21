@@ -24,14 +24,17 @@ If VS Code cannot find a CLI, set `hydraRoom.codexCommand` or `hydraRoom.claudeC
 
 ```powershell
 cd C:\Users\geral\Hydra
-npm install
-npm run compile
-npm run dev
+corepack enable
+pnpm install
+pnpm run compile
+pnpm run dev
 ```
 
-`npm run dev` resolves the VS Code CLI (via `PATH`, `VSCODE_CLI`, or known Windows install locations), opens a new Extension Development Host window with the repo root already loaded as the workspace, and sets `HYDRA_WORKSPACE_ROOT` for the session.
+The repo pins pnpm via `packageManager`; Corepack resolves that exact version.
 
-If `npm run dev` cannot find your VS Code CLI, set `VSCODE_CLI` to the absolute path of `code.cmd` (Windows) or `code` (macOS/Linux), or fall back to the manual form:
+`pnpm run dev` resolves the VS Code CLI (via `PATH`, `VSCODE_CLI`, or known Windows install locations), opens a new Extension Development Host window with the repo root already loaded as the workspace, and sets `HYDRA_WORKSPACE_ROOT` for the session.
+
+If `pnpm run dev` cannot find your VS Code CLI, set `VSCODE_CLI` to the absolute path of `code.cmd` (Windows) or `code` (macOS/Linux), or fall back to the manual form:
 
 ```powershell
 code --extensionDevelopmentPath . ..\..
@@ -233,10 +236,11 @@ Use `Hydra: Show Effective Native Authority` and `Hydra: Preview Next Prompt` to
 
 ```powershell
 cd C:\Users\geral\Hydra
-npm install
-npm run check
-npm test
-npm run package
+corepack enable
+pnpm install
+pnpm run check
+pnpm test
+pnpm run package
 ```
 
 The package command builds a local `.vsix`. A Marketplace release still needs a real publisher id, icon, and release notes.
@@ -244,18 +248,18 @@ The package command builds a local `.vsix`. A Marketplace release still needs a 
 To install this working copy into VS Code from the repo root:
 
 ```powershell
-npm run install:local
+pnpm run install:local
 ```
 
-That command runs the package flow, resolves `code.cmd`/`code` from `PATH`, `VSCODE_CLI`, or known VS Code install locations, then installs the newest local `.vsix` with `--force`. If a `.vsix` already exists and you only want to reinstall it, run `npm run install:local:existing`.
+That command runs the package flow, resolves `code.cmd`/`code` from `PATH`, `VSCODE_CLI`, or known VS Code install locations, then installs the newest local `.vsix` with `--force`. If a `.vsix` already exists and you only want to reinstall it, run `pnpm run install:local:existing`.
 
-If PowerShell blocks `npm.ps1` because script execution is disabled, use the command shim directly:
+If PowerShell blocks `pnpm.ps1` because script execution is disabled, use the command shim directly:
 
 ```powershell
-npm.cmd run install:local
+pnpm.cmd run install:local
 ```
 
-Or bypass npm entirely:
+Or bypass pnpm entirely:
 
 ```powershell
 node scripts/install-local.js
