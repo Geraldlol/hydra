@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as crypto from "node:crypto";
 import * as path from "node:path";
 import { atomicWriteFile, ensureFile, serializePerFile } from "./fileQueue";
 
@@ -25,7 +26,10 @@ export interface HydraWikiFiles {
 
 export interface HydraWikiWrapupSource {
   markdown: string;
+  rawMarkdown: string;
   key: string;
+  sha256: string;
+  rawSourcePath?: string;
   originalChars: number;
   truncated: boolean;
 }
@@ -41,9 +45,21 @@ export interface HydraWikiWrapupDraft {
 export interface AppliedHydraWikiWrapup {
   changed: boolean;
   title: string;
+  rawSourcePath?: string;
+  rawSourceSha256?: string;
   contextChanged: boolean;
   indexChanged: boolean;
   logAppended: boolean;
+}
+
+export interface HydraWikiStoredSource {
+  relativePath: string;
+  sha256: string;
+  created: boolean;
+}
+
+export interface HydraWikiRawTurnsPruneResult {
+  prunedPaths: string[];
 }
 
 export interface HydraWikiWrapupPromptInput {
@@ -72,7 +88,7 @@ Hydra wiki is the persistent compiled layer for room knowledge. It should let fu
 
 ## Layers
 
-- Raw sources: transcript, decisions, verification records, native action logs, agent call traces, user-provided docs, and linked sources. Treat them as history and evidence.
+- Raw sources: transcript, decisions, verification records, native action logs, agent call traces, user-provided docs, linked sources, and immutable wrapup snapshots under \`.hydra/wiki/raw/turns/\`. Treat them as history and evidence.
 - Wiki core: markdown pages in \`.hydra/wiki/\` owned by the agents. Keep durable facts, architecture notes, decisions, contradictions, open questions, and stable workflows here.
 - Schema: this file. Update it when the maintenance workflow changes.
 
@@ -80,8 +96,13 @@ Hydra wiki is the persistent compiled layer for room knowledge. It should let fu
 
 - Ingest: read one source, extract durable information, update relevant wiki pages, update \`index.md\`, and append \`log.md\`.
 - Query: read \`context.md\` and \`index.md\` first, then drill into wiki pages or raw sources only as needed.
-- Wrapup: after a substantial room turn, fold durable facts into \`context.md\`, add or update page links, and append \`log.md\`.
+- Wrapup: after a substantial room turn, preserve the room turn as a raw source snapshot, fold durable facts into \`context.md\`, cite new or materially changed facts with \`[src:<sha12>]\`, add or update page links, and append \`log.md\` with the raw source path and SHA.
 - Lint: flag contradictions, stale claims, orphan pages, missing links, and unresolved questions.
+
+## Provenance
+
+- Use \`[src:<sha12>]\` on context facts that came from a raw room-turn snapshot. The source id is the 12-character SHA prefix in the raw filename.
+- Prefer preserving existing source tags when rewriting a fact. Replace them only when the new source supersedes the older claim.
 
 ## Prompt Budget Rule
 
@@ -203,14 +224,88 @@ export function hydraWikiWrapupSourceFromMessages(
   const capped = truncateForWrapupSource(body, Math.max(0, Math.floor(maxChars)));
   return {
     markdown: capped.markdown,
+    rawMarkdown: body,
     key: stableWrapupKey(turnMessages),
+    sha256: sha256(body),
     originalChars,
     truncated: capped.truncated,
   };
 }
 
+export function hydraWikiWrapupSourcePath(source: HydraWikiWrapupSource, nowIso: string): string {
+  const day = /^\d{4}-\d{2}-\d{2}/.test(nowIso) ? nowIso.slice(0, 10) : "unknown-date";
+  return path.join(HYDRA_WIKI_DIR, "raw", "turns", `${day}-${source.sha256.slice(0, 12)}.md`)
+    .split(path.sep)
+    .join("/");
+}
+
+export async function writeHydraWikiWrapupSource(
+  workspaceRoot: string,
+  source: HydraWikiWrapupSource,
+  nowIso: string
+): Promise<HydraWikiStoredSource> {
+  const relativePath = hydraWikiWrapupSourcePath(source, nowIso);
+  const absolutePath = path.join(workspaceRoot, ...relativePath.split("/"));
+  const content = [
+    "---",
+    "kind: hydra-room-turn",
+    `created: "${nowIso}"`,
+    `sha256: "${source.sha256}"`,
+    `originalChars: ${source.originalChars}`,
+    `promptChars: ${source.markdown.length}`,
+    `truncatedForPrompt: ${source.truncated ? "true" : "false"}`,
+    "---",
+    "",
+    "# Hydra Raw Room Turn",
+    "",
+    source.rawMarkdown.trimEnd(),
+    "",
+  ].join("\n");
+
+  const created = await serializePerFile(absolutePath, async () => {
+    const exists = await fs.promises.stat(absolutePath).then(() => true, () => false);
+    if (exists) return false;
+    await atomicWriteFile(absolutePath, content);
+    return true;
+  });
+
+  return { relativePath, sha256: source.sha256, created };
+}
+
+export async function pruneHydraWikiRawTurns(
+  workspaceRoot: string,
+  nowIso: string,
+  keepDays: number
+): Promise<HydraWikiRawTurnsPruneResult> {
+  const days = Math.max(0, Math.floor(keepDays));
+  if (days <= 0) return { prunedPaths: [] };
+
+  const nowMs = Date.parse(nowIso);
+  if (!Number.isFinite(nowMs)) return { prunedPaths: [] };
+
+  const cutoffDay = new Date(nowMs - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const rawTurnsDir = path.join(workspaceRoot, HYDRA_WIKI_DIR, "raw", "turns");
+  const rawTurnsRoot = path.resolve(rawTurnsDir);
+  const entries = await fs.promises.readdir(rawTurnsDir, { withFileTypes: true }).catch(() => []);
+  const prunedPaths: string[] = [];
+
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const match = /^(\d{4}-\d{2}-\d{2})-[a-f0-9]{12}\.md$/i.exec(entry.name);
+    if (!match || match[1] >= cutoffDay) continue;
+
+    const absolutePath = path.resolve(rawTurnsDir, entry.name);
+    if (absolutePath !== rawTurnsRoot && !absolutePath.startsWith(`${rawTurnsRoot}${path.sep}`)) continue;
+    await fs.promises.unlink(absolutePath);
+    prunedPaths.push(path.join(HYDRA_WIKI_DIR, "raw", "turns", entry.name).split(path.sep).join("/"));
+  }
+
+  return { prunedPaths };
+}
+
 export function buildHydraWikiWrapupPrompt(input: HydraWikiWrapupPromptInput): string {
   const logTail = tailMarkdown(input.files.log, 6000);
+  const sourceId = input.source.sha256.slice(0, 12);
   return [
     "You maintain Hydra's persistent `.hydra/wiki` memory using the LLM Wiki pattern: compile durable knowledge once, keep the wiki current, and avoid re-deriving old context every future turn.",
     "",
@@ -222,15 +317,22 @@ export function buildHydraWikiWrapupPrompt(input: HydraWikiWrapupPromptInput): s
     "- If the turn creates no durable wiki value, return `changed: false` and leave the markdown fields empty.",
     "- `contextMarkdown` and `indexMarkdown` must be full replacement file contents when changed, not patches.",
     "- Keep `context.md` compact. It is injected into future prompts.",
+    `- For new or materially changed context facts derived from this turn, append \`[src:${sourceId}]\` to the bullet or sentence.`,
+    "- Preserve existing `[src:<sha12>]` tags when rewriting still-valid facts; replace them only when this turn supersedes the claim.",
     "- Update `index.md` only when it helps future agents navigate the wiki.",
-    "- `logEntryMarkdown` is appended to `log.md`; use a heading like `## [YYYY-MM-DD] wrapup | Short Title`.",
+    "- `logEntryMarkdown` is appended to `log.md`; use a heading like `## [YYYY-MM-DD] wrapup | Short Title` and cite the raw source path/SHA below.",
     "- Return JSON only. No markdown fence, no prose.",
     "",
     "JSON shape:",
-    `{"changed":true,"title":"Short Title","contextMarkdown":"# Hydra Wiki Context\\n\\n...","indexMarkdown":"# Hydra Wiki Index\\n\\n...","logEntryMarkdown":"## [${input.nowIso.slice(0, 10)}] wrapup | Short Title\\n\\n- Updated: [[context]]\\n- Sources: active room turn"}`,
+    `{"changed":true,"title":"Short Title","contextMarkdown":"# Hydra Wiki Context\\n\\n- Durable fact. [src:${sourceId}]\\n","indexMarkdown":"# Hydra Wiki Index\\n\\n...","logEntryMarkdown":"## [${input.nowIso.slice(0, 10)}] wrapup | Short Title\\n\\n- Updated: [[context]]\\n- Source: \`${input.source.rawSourcePath ?? hydraWikiWrapupSourcePath(input.source, input.nowIso)}\` (sha256: \`${input.source.sha256}\`)"}`,
     "",
     "Current time:",
     input.nowIso,
+    "",
+    "Raw source snapshot:",
+    input.source.rawSourcePath ?? hydraWikiWrapupSourcePath(input.source, input.nowIso),
+    `sha256: ${input.source.sha256}`,
+    `source id: ${sourceId}`,
     "",
     "--- schema.md ---",
     input.files.schema.trim(),
@@ -280,12 +382,21 @@ export function parseHydraWikiWrapupResponse(text: string): HydraWikiWrapupDraft
 export async function applyHydraWikiWrapupDraft(
   workspaceRoot: string,
   draft: HydraWikiWrapupDraft,
-  nowIso: string
+  nowIso: string,
+  source?: HydraWikiStoredSource
 ): Promise<AppliedHydraWikiWrapup> {
   await ensureHydraWikiFiles(workspaceRoot);
   const title = sanitizeTitle(draft.title) || "Hydra wrapup";
   if (!draft.changed) {
-    return { changed: false, title, contextChanged: false, indexChanged: false, logAppended: false };
+    return {
+      changed: false,
+      title,
+      rawSourcePath: source?.relativePath,
+      rawSourceSha256: source?.sha256,
+      contextChanged: false,
+      indexChanged: false,
+      logAppended: false,
+    };
   }
 
   const contextPath = wikiFilePath(workspaceRoot, "context.md");
@@ -294,10 +405,13 @@ export async function applyHydraWikiWrapupDraft(
 
   const contextChanged = await writeWikiFileIfChanged(contextPath, draft.contextMarkdown);
   const indexChanged = await writeWikiFileIfChanged(indexPath, draft.indexMarkdown);
-  const logAppended = await appendWikiLogEntry(logPath, draft.logEntryMarkdown, title, nowIso);
+  const logEntryMarkdown = draft.logEntryMarkdown ?? (source ? "- Updated wiki synthesis from raw source." : undefined);
+  const logAppended = await appendWikiLogEntry(logPath, logEntryMarkdown, title, nowIso, source);
   return {
     changed: contextChanged || indexChanged || logAppended,
     title,
+    rawSourcePath: source?.relativePath,
+    rawSourceSha256: source?.sha256,
     contextChanged,
     indexChanged,
     logAppended,
@@ -385,10 +499,11 @@ async function appendWikiLogEntry(
   filePath: string,
   entry: string | undefined,
   title: string,
-  nowIso: string
+  nowIso: string,
+  source?: HydraWikiStoredSource
 ): Promise<boolean> {
   if (!entry) return false;
-  const normalized = normalizeLogEntry(entry, title, nowIso);
+  const normalized = normalizeLogEntry(entry, title, nowIso, source);
   await serializePerFile(filePath, async () => {
     const current = await fs.promises.readFile(filePath, "utf8").catch(() => "");
     const separator = current.trim() ? "\n\n" : "";
@@ -398,8 +513,19 @@ async function appendWikiLogEntry(
   return true;
 }
 
-function normalizeLogEntry(entry: string, title: string, nowIso: string): string {
+function normalizeLogEntry(entry: string, title: string, nowIso: string, source?: HydraWikiStoredSource): string {
   const trimmed = entry.trim();
-  if (/^## \[\d{4}-\d{2}-\d{2}\]/m.test(trimmed)) return trimmed;
-  return [`## [${nowIso.slice(0, 10)}] wrapup | ${title}`, "", trimmed].join("\n");
+  const withHeading = /^## \[\d{4}-\d{2}-\d{2}\]/m.test(trimmed)
+    ? trimmed
+    : [`## [${nowIso.slice(0, 10)}] wrapup | ${title}`, "", trimmed].join("\n");
+  if (!source) return withHeading;
+  const sourceId = source.sha256.slice(0, 12);
+  if (withHeading.includes(source.relativePath) || withHeading.includes(source.sha256) || withHeading.includes(sourceId)) {
+    return withHeading;
+  }
+  return `${withHeading.trimEnd()}\n\n- Source: \`${source.relativePath}\` (sha256: \`${source.sha256}\`)`;
+}
+
+function sha256(value: string): string {
+  return crypto.createHash("sha256").update(value).digest("hex");
 }

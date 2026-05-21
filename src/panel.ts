@@ -198,9 +198,12 @@ import {
   ensureHydraWikiFiles,
   hydraWikiContextPath,
   hydraWikiWrapupSourceFromMessages,
+  hydraWikiWrapupSourcePath,
   parseHydraWikiWrapupResponse,
+  pruneHydraWikiRawTurns,
   readHydraWikiFiles,
   readHydraWikiPromptContext,
+  writeHydraWikiWrapupSource,
 } from "./hydraWiki";
 import { renderSessionBrief, sessionBriefPath, writeSessionBrief } from "./sessionBrief";
 import {
@@ -2385,10 +2388,11 @@ export class HydraRoomPanel {
     try {
       const files = await readHydraWikiFiles(this.workspaceRoot);
       const nowIso = new Date().toISOString();
+      const sourcePath = hydraWikiWrapupSourcePath(wrapupSource, nowIso);
       const prompt = buildHydraWikiWrapupPrompt({
         nowIso,
         files,
-        source: wrapupSource,
+        source: { ...wrapupSource, rawSourcePath: sourcePath },
       });
       const result = await this.runWikiWrapupAgent(agent, prompt);
       if (didAgentFail(result.result)) {
@@ -2405,14 +2409,30 @@ export class HydraRoomPanel {
         await this.recordEvent("error", `Hydra wiki wrapup returned unparseable JSON after ${source}.`, { agent });
         return;
       }
-      const applied = await applyHydraWikiWrapupDraft(this.workspaceRoot, draft, nowIso);
+      const storedSource = draft.changed
+        ? await writeHydraWikiWrapupSource(this.workspaceRoot, wrapupSource, nowIso)
+        : undefined;
+      const applied = await applyHydraWikiWrapupDraft(this.workspaceRoot, draft, nowIso, storedSource);
+      const pruned = await pruneHydraWikiRawTurns(this.workspaceRoot, nowIso, this.wikiRawTurnsKeepDays());
       if (applied.changed) {
-        await this.recordEvent("commandInvoked", `Hydra wiki wrapup updated ${applied.title}.`, {
+        const data: Record<string, string | number | boolean | null> = {
           agent,
           source: traceSource,
           contextChanged: applied.contextChanged,
           indexChanged: applied.indexChanged,
           logAppended: applied.logAppended,
+          rawSourcesPruned: pruned.prunedPaths.length,
+        };
+        if (applied.rawSourcePath) data.rawSourcePath = applied.rawSourcePath;
+        if (applied.rawSourceSha256) data.rawSourceSha256 = applied.rawSourceSha256;
+        await this.recordEvent("commandInvoked", `Hydra wiki wrapup updated ${applied.title}.`, {
+          ...data,
+        });
+      } else if (pruned.prunedPaths.length > 0) {
+        await this.recordEvent("commandInvoked", `Hydra wiki pruned ${pruned.prunedPaths.length} raw source snapshot(s).`, {
+          agent,
+          source: traceSource,
+          rawSourcesPruned: pruned.prunedPaths.length,
         });
       }
     } catch (err) {
@@ -3870,6 +3890,11 @@ export class HydraRoomPanel {
   private wikiWrapupTimeoutMs(): number {
     const raw = vscode.workspace.getConfiguration("hydraRoom").get<number>("wikiWrapupTimeoutMs", 120000);
     return Math.max(1000, Math.floor(raw));
+  }
+
+  private wikiRawTurnsKeepDays(): number {
+    const raw = vscode.workspace.getConfiguration("hydraRoom").get<number>("wikiRawTurnsKeepDays", 30);
+    return Math.max(0, Math.floor(raw));
   }
 
   private wikiWrapupAgent(): AgentId {

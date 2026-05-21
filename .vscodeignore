@@ -17,4 +17,5 @@ package-lock.json
 *.map
 *.tsbuildinfo
 npm-debug.log
+debug.log
 *.vsix

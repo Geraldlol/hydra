@@ -183,9 +183,9 @@ Use `Hydra: Open Session Brief` or the in-room Session Brief button to refresh a
 
 ## Wiki Context
 
-Hydra maintains a small LLM wiki under `.hydra/wiki/`: `schema.md`, `context.md`, `index.md`, and `log.md`. Non-default wiki content is injected into future prompts before the transcript, capped by `hydraRoom.wikiContextMaxChars`.
+Hydra maintains a small LLM wiki under `.hydra/wiki/`: `schema.md`, `context.md`, `index.md`, `log.md`, and immutable raw wrapup sources under `.hydra/wiki/raw/turns/`. Non-default wiki content is injected into future prompts before the transcript, capped by `hydraRoom.wikiContextMaxChars`.
 
-After each successful discussion turn, `hydraRoom.wikiWrapupEnabled` asks one native agent to distill durable facts from that turn into the wiki and append the log. `hydraRoom.wikiWrapupAgent` can pin Codex or Claude, or leave `auto` to pick the lower estimated configured discussion-model cost. Use `Hydra: Open Wiki Context` to inspect or edit the compiled memory.
+After each successful discussion turn, `hydraRoom.wikiWrapupEnabled` asks one native agent to distill durable facts from that turn into the wiki and append the log. When the wrapup changes the wiki, Hydra also saves the room turn as a raw source snapshot and records its path/SHA in the log, so future cleanup or contradiction passes can cite the exact source. New or materially changed context facts are prompted to carry `[src:<sha12>]` provenance tags back to the raw snapshot. `hydraRoom.wikiRawTurnsKeepDays` prunes old raw snapshots after wrapups; set it to `0` to retain them forever. `hydraRoom.wikiWrapupAgent` can pin Codex or Claude, or leave `auto` to pick the lower estimated configured discussion-model cost. Use `Hydra: Open Wiki Context` to inspect or edit the compiled memory.
 
 ## Support Bundle
 
