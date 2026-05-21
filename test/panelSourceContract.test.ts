@@ -193,6 +193,23 @@ describe("workspace edit viewer source contracts", () => {
     const head = source.slice(Math.max(0, idx - 600), idx);
     assert.match(head, /async archiveAndClearRoom/);
   });
+
+  test("runVerificationInternal gates inferred commands on vscode.workspace.isTrusted", () => {
+    // Why: a workspace's package.json scripts are attacker-controlled in
+    // an untrusted workspace. The handler must short-circuit BEFORE
+    // executing any inferred command. Source-grep ensures a future
+    // refactor does not silently drop the gate.
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    const start = source.indexOf("private async runVerificationInternal");
+    assert.ok(start >= 0, "runVerificationInternal not found in panel.ts");
+    // Match the method's closing brace at 2-space indent, EOL-agnostic
+    // (Windows CRLF checkouts otherwise wouldn't match a bare "\n  }\n").
+    const endOffset = source.slice(start).search(/\r?\n {2}\}\r?\n/);
+    assert.ok(endOffset > 0, "runVerificationInternal body not delimited");
+    const body = source.slice(start, start + endOffset);
+    assert.match(body, /vscode\.workspace\.isTrusted/);
+    assert.match(body, /resolveVerificationCommand/);
+  });
 });
 
 describe("wiki wrapup source contracts", () => {

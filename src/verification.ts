@@ -64,6 +64,27 @@ export async function inferVerificationCommand(workspaceRoot: string): Promise<s
   return undefined;
 }
 
+export type VerificationCommandResolution =
+  | { kind: "explicit"; command: string }
+  | { kind: "inferred"; command: string }
+  | { kind: "refusedUntrustedInference" }
+  | { kind: "missing" };
+
+export async function resolveVerificationCommand(input: {
+  configured: string;
+  isWorkspaceTrusted: boolean;
+  workspaceRoot: string;
+}): Promise<VerificationCommandResolution> {
+  const configured = input.configured.trim();
+  if (configured) return { kind: "explicit", command: configured };
+  // Why: package.json scripts in an untrusted workspace are
+  // attacker-controlled. Refuse inference without ever reading
+  // package.json so a hostile repo cannot probe Hydra's behavior either.
+  if (!input.isWorkspaceTrusted) return { kind: "refusedUntrustedInference" };
+  const inferred = await inferVerificationCommand(input.workspaceRoot);
+  return inferred ? { kind: "inferred", command: inferred } : { kind: "missing" };
+}
+
 export interface VerificationResultWithCancel extends VerificationResult {
   cancelled?: boolean;
 }
