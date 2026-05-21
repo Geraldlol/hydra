@@ -262,6 +262,11 @@ interface NativeTerminalPokeOptions {
   includeWorkspaceDiff?: boolean;
 }
 
+interface WikiWrapupOptions {
+  force?: boolean;
+  manual?: boolean;
+}
+
 interface NativeActionPick extends vscode.QuickPickItem {
   plainLabel: string;
   agents: AgentId[];
@@ -1002,6 +1007,12 @@ export class HydraRoomPanel {
     await vscode.window.showTextDocument(doc, vscode.ViewColumn.Active);
   }
 
+  async runWikiWrapupNow(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    await this.maybeRunWikiWrapup("manual command", { force: true, manual: true });
+  }
+
   async openSupportBundle(): Promise<void> {
     await this.ready();
     if (!this.workspaceReady) return;
@@ -1241,6 +1252,7 @@ export class HydraRoomPanel {
       canRequestReview: this.workspaceReady && (this.state.name === "BuildDone" || this.state.name === "ParallelBuildDone") && this.gitAvailable,
       canHandBack: this.workspaceReady && (this.state.name === "ReviewDone" || this.state.name === "ParallelReviewDone") && !this.state.approved,
       canRunVerification: this.workspaceReady && !isInFlight(this.state) && !this.terminalPokeInFlight && !this.verificationRunning,
+      canRunWikiWrapup: this.canRunManualWikiWrapup(),
       canPokeNativeTerminals: this.workspaceReady && !isInFlight(this.state) && !this.terminalPokeInFlight,
       needsCodexPath: checkFailed(this.latestDoctorReport, "codex-command"),
       needsClaudePath: checkFailed(this.latestDoctorReport, "claude-command"),
@@ -1328,6 +1340,9 @@ export class HydraRoomPanel {
         return;
       case "openWikiContext":
         await this.openWikiContext();
+        return;
+      case "runWikiWrapupNow":
+        await this.runWikiWrapupNow();
         return;
       case "openSupportBundle":
         await this.openSupportBundle();
@@ -2385,17 +2400,60 @@ export class HydraRoomPanel {
     }
   }
 
-  private async maybeRunWikiWrapup(source: string): Promise<void> {
-    if (!this.wikiWrapupEnabled()) return;
-    if (!this.workspaceReady || this.wikiWrapupInFlight || this.sessionCostCapExceeded()) return;
+  private async maybeRunWikiWrapup(source: string, options: WikiWrapupOptions = {}): Promise<void> {
+    const force = !!options.force;
+    const manual = !!options.manual;
+    const skip = async (reason: string, detail: string, data: Record<string, string | number | boolean | null> = {}) => {
+      await this.recordEvent("diagnostic", `Hydra wiki wrapup skipped after ${source}: ${detail}`, {
+        source,
+        reason,
+        forced: force,
+        manual,
+        ...data,
+      });
+      if (manual) {
+        await this.appendSystemMessage(`Hydra wiki wrapup skipped: ${detail}`);
+        this.postState();
+      }
+    };
+
+    if (!force && !this.wikiWrapupEnabled()) {
+      await skip("disabled", "hydraRoom.wikiWrapupEnabled is false");
+      return;
+    }
+    if (!this.workspaceReady) {
+      await skip("workspace-not-ready", "no workspace folder is ready");
+      return;
+    }
+    if (this.wikiWrapupInFlight) {
+      await skip("already-running", "another wiki wrapup is already running");
+      return;
+    }
+    if (this.sessionCostCapExceeded()) {
+      await skip("cost-cap", "the session cost cap has been reached");
+      return;
+    }
     const wrapupSource = hydraWikiWrapupSourceFromMessages(this.messages, this.wikiWrapupMaxSourceChars());
-    if (!wrapupSource || wrapupSource.key === this.lastWikiWrapupSourceKey) return;
+    if (!wrapupSource) {
+      await skip("no-source", "no completed room turn with an agent reply is available");
+      return;
+    }
+    if (!force && wrapupSource.key === this.lastWikiWrapupSourceKey) {
+      await skip("duplicate-source", "the latest room turn was already considered", {
+        sourceSha256: wrapupSource.sha256,
+      });
+      return;
+    }
 
     this.lastWikiWrapupSourceKey = wrapupSource.key;
     this.wikiWrapupInFlight = true;
     const agent = this.wikiWrapupAgent();
     const traceSource = `${source} wiki wrapup`;
     try {
+      if (manual) {
+        await this.appendSystemMessage(`Hydra wiki wrapup started with ${AGENT_NAMES[agent]}.`);
+        this.postState();
+      }
       const files = await readHydraWikiFiles(this.workspaceRoot);
       const nowIso = new Date().toISOString();
       const sourcePath = hydraWikiWrapupSourcePath(wrapupSource, nowIso);
@@ -2411,12 +2469,20 @@ export class HydraRoomPanel {
           exitCode: result.result.exitCode,
           timedOut: result.result.timedOut,
         });
+        if (manual) {
+          await this.appendSystemMessage(
+            `Hydra wiki wrapup failed: exitCode=${result.result.exitCode ?? "null"}, timedOut=${result.result.timedOut ? "true" : "false"}.`
+          );
+        }
         return;
       }
 
       const draft = parseHydraWikiWrapupResponse(result.text);
       if (!draft) {
         await this.recordEvent("error", `Hydra wiki wrapup returned unparseable JSON after ${source}.`, { agent });
+        if (manual) {
+          await this.appendSystemMessage("Hydra wiki wrapup failed: the maintainer agent returned unparseable JSON.");
+        }
         return;
       }
       const storedSource = draft.changed
@@ -2445,16 +2511,28 @@ export class HydraRoomPanel {
         await this.recordEvent("commandInvoked", `Hydra wiki wrapup updated ${applied.title}.`, {
           ...data,
         });
+        if (manual) {
+          const raw = applied.rawSourcePath ? ` Raw source: \`${applied.rawSourcePath}\`.` : "";
+          await this.appendSystemMessage(`Hydra wiki wrapup updated \`${applied.title}\`.${raw}`);
+        }
       } else if (pruned.prunedPaths.length > 0) {
         await this.recordEvent("commandInvoked", `Hydra wiki pruned ${pruned.prunedPaths.length} raw source snapshot(s).`, {
           agent,
           source: traceSource,
           rawSourcesPruned: pruned.prunedPaths.length,
         });
+        if (manual) {
+          await this.appendSystemMessage(`Hydra wiki wrapup made no content changes and pruned ${pruned.prunedPaths.length} raw source snapshot(s).`);
+        }
+      } else if (manual) {
+        await this.appendSystemMessage("Hydra wiki wrapup completed with no durable wiki changes.");
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       await this.recordEvent("error", `Hydra wiki wrapup failed after ${source}: ${message}`, { agent });
+      if (manual) {
+        await this.appendSystemMessage(`Hydra wiki wrapup failed: ${message}`);
+      }
     } finally {
       this.wikiWrapupInFlight = false;
       this.postState();
@@ -4527,6 +4605,9 @@ export class HydraRoomPanel {
         case "openWikiContext":
           await this.openWikiContext();
           break;
+        case "runWikiWrapupNow":
+          await this.runWikiWrapupNow();
+          break;
         case "openSupportBundle":
           await this.openSupportBundle();
           break;
@@ -4707,6 +4788,7 @@ export class HydraRoomPanel {
         canAssignBuilder: this.workspaceReady && this.state.name === "AwaitingUser",
         canRequestReview: this.workspaceReady && (this.state.name === "BuildDone" || this.state.name === "ParallelBuildDone") && this.gitAvailable,
         canRunVerification: this.workspaceReady && !isInFlight(this.state) && !this.terminalPokeInFlight && !this.verificationRunning,
+        canRunWikiWrapup: this.canRunManualWikiWrapup(),
         canPreviewPrompt: this.workspaceReady && !isInFlight(this.state) && !this.terminalPokeInFlight,
         canArchiveRoom: this.workspaceReady && !canStop,
         canHandBack: this.workspaceReady && (this.state.name === "ReviewDone" || this.state.name === "ParallelReviewDone") && !this.state.approved,
@@ -4764,6 +4846,13 @@ export class HydraRoomPanel {
 
   private applyEvent(event: Event): void {
     this.state = transition(this.state, event);
+  }
+
+  private canRunManualWikiWrapup(): boolean {
+    if (!this.workspaceReady || isInFlight(this.state) || this.terminalPokeInFlight || this.verificationRunning || this.autopilotRunning || this.wikiWrapupInFlight) {
+      return false;
+    }
+    return !!hydraWikiWrapupSourceFromMessages(this.messages, this.wikiWrapupMaxSourceChars());
   }
 
   private async refreshWorkspaceChanges(): Promise<void> {

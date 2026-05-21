@@ -22,6 +22,7 @@ export type CommandCenterActionId =
   | "openDecisions"
   | "openSessionBrief"
   | "openWikiContext"
+  | "runWikiWrapupNow"
   | "openSupportBundle"
   | "captureNativeCapabilities"
   | "captureNativeDataSnapshot"
@@ -66,6 +67,7 @@ export interface CommandCenterInput {
   canRequestReview: boolean;
   canHandBack: boolean;
   canRunVerification: boolean;
+  canRunWikiWrapup?: boolean;
   canPokeNativeTerminals: boolean;
   needsCodexPath: boolean;
   needsClaudePath: boolean;
@@ -140,6 +142,9 @@ export function buildCommandCenterActions(input: CommandCenterInput): CommandCen
       input.wikiStatus ? wikiStatusDescription(input.wikiStatus) : "State",
       input.wikiStatus ? wikiStatusDetail(input.wikiStatus) : "Open the persistent compiled wiki that Hydra injects into prompts."
     ),
+    ...(input.canRunWikiWrapup
+      ? [action("runWikiWrapupNow", "Run Wiki Wrapup Now", "State", "Force one wiki wrapup from the latest completed room turn and record diagnostics.")]
+      : []),
     action("openSupportBundle", "Open Support Bundle", "Diagnostics", "Refresh and open Doctor, authority, terminal, queue, and recent-action diagnostics."),
     action("chooseModel", "Choose Model", "Settings", "Pick Codex or Claude model overrides."),
     action("chooseEffort", "Choose Thinking Level", "Settings", "Pick Codex reasoning or Claude effort overrides."),

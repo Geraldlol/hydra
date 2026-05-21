@@ -194,6 +194,7 @@ const ACTIONS = [
   { id: "open-transcript", group: "Files", name: "Open Transcript", what: "Open the Hydra transcript", run: () => openTranscriptBtn.click(), enabled: () => !openTranscriptBtn.disabled },
   { id: "session-brief", group: "Files", name: "Session Brief", what: "Open the current session brief", run: () => openSessionBriefBtn.click(), enabled: () => !openSessionBriefBtn.disabled },
   { id: "wiki-context", group: "Files", name: "Wiki Context", what: "Open the persistent compiled wiki context", run: () => vscode.postMessage({ type: "openWikiContext" }), enabled: () => !lastState.canOpenFolder },
+  { id: "wiki-wrapup-now", group: "Files", name: "Run Wiki Wrapup Now", what: "Force a wiki wrapup from the latest completed room turn", run: () => vscode.postMessage({ type: "runWikiWrapupNow" }), enabled: () => !!lastState.canRunWikiWrapup },
   { id: "choose-model", group: "Settings", name: "Choose Model", what: "Pick Codex or Claude model overrides", run: () => vscode.postMessage({ type: "chooseModel" }), enabled: () => !lastState.canOpenFolder },
   { id: "choose-effort", group: "Settings", name: "Choose Thinking Level", what: "Pick Codex reasoning or Claude effort overrides", run: () => vscode.postMessage({ type: "chooseEffort" }), enabled: () => !lastState.canOpenFolder },
   { id: "test-telegram", group: "Settings", name: "Send Test Telegram", what: "Verify Telegram decision notifications", run: () => vscode.postMessage({ type: "testTelegram" }), enabled: () => !lastState.canOpenFolder },

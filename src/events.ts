@@ -8,6 +8,7 @@ export type HydraEventKind =
   | "terminalSessionChanged"
   | "verificationStarted"
   | "verificationFinished"
+  | "diagnostic"
   | "commandInvoked"
   | "error";
 

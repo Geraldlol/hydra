@@ -38,6 +38,7 @@ describe("command center", () => {
       canRequestReview: false,
       canHandBack: false,
       canRunVerification: true,
+      canRunWikiWrapup: true,
       canPokeNativeTerminals: true,
       needsCodexPath: false,
       needsClaudePath: false,
@@ -70,6 +71,7 @@ describe("command center", () => {
     assert.ok(actions.some((action) => action.id === "openVerification"));
     assert.ok(actions.some((action) => action.id === "openDecisions"));
     assert.ok(actions.some((action) => action.id === "openWikiContext"));
+    assert.ok(actions.some((action) => action.id === "runWikiWrapupNow"));
     assert.ok(actions.some((action) => action.id === "chooseModel"));
     assert.ok(actions.some((action) => action.id === "chooseEffort"));
     assert.ok(actions.some((action) => action.id === "testTelegram"));

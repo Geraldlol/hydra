@@ -32,6 +32,7 @@ export type WebviewMessage =
   | { type: "openObjective" }
   | { type: "openSessionBrief" }
   | { type: "openWikiContext" }
+  | { type: "runWikiWrapupNow" }
   | { type: "openSupportBundle" }
   | { type: "captureNativeCapabilities" }
   | { type: "captureNativeDataSnapshot" }
