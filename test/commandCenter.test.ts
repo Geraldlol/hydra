@@ -60,6 +60,7 @@ describe("command center", () => {
     assert.ok(actions.some((action) => action.id === "openLastPrompt"));
     assert.ok(actions.some((action) => action.id === "openVerification"));
     assert.ok(actions.some((action) => action.id === "openDecisions"));
+    assert.ok(actions.some((action) => action.id === "openWikiContext"));
     assert.ok(actions.some((action) => action.id === "chooseModel"));
     assert.ok(actions.some((action) => action.id === "chooseEffort"));
     assert.ok(actions.some((action) => action.id === "testTelegram"));

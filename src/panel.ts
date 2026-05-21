@@ -133,6 +133,7 @@ import {
   DEFAULT_PRICES,
   loadUsageRecords,
   parseCodexTextTokens,
+  resolveModelPrices,
   summarizeUsage,
   usageCutoffIso,
   usageFromClaudeSummary,
@@ -191,6 +192,16 @@ import {
   readWorkQueueDispositions,
   type WorkQueueDisposition,
 } from "./workQueueState";
+import {
+  applyHydraWikiWrapupDraft,
+  buildHydraWikiWrapupPrompt,
+  ensureHydraWikiFiles,
+  hydraWikiContextPath,
+  hydraWikiWrapupSourceFromMessages,
+  parseHydraWikiWrapupResponse,
+  readHydraWikiFiles,
+  readHydraWikiPromptContext,
+} from "./hydraWiki";
 import { renderSessionBrief, sessionBriefPath, writeSessionBrief } from "./sessionBrief";
 import {
   renderSupportBundle,
@@ -282,6 +293,8 @@ export class HydraRoomPanel {
   private state: State = { name: "Idle" };
   private messages: UiMessage[] = [];
   private readonly pendingRunFailures = new Map<string, RunFailureCard>();
+  private wikiWrapupInFlight = false;
+  private lastWikiWrapupSourceKey: string | undefined;
   private transcriptUri!: vscode.Uri;
   private objectiveUri!: vscode.Uri;
   private decisionsUri!: vscode.Uri;
@@ -293,6 +306,7 @@ export class HydraRoomPanel {
   private nativeDataSnapshotUri!: vscode.Uri;
   private workQueueUri!: vscode.Uri;
   private sessionBriefUri!: vscode.Uri;
+  private wikiContextUri!: vscode.Uri;
   private supportBundleUri!: vscode.Uri;
   private telegramInboundStateUri!: vscode.Uri;
   private objective = "";
@@ -453,6 +467,7 @@ export class HydraRoomPanel {
     this.nativeDataSnapshotUri = vscode.Uri.file(nativeDataSnapshotPath(this.workspaceRoot));
     this.workQueueUri = vscode.Uri.file(path.join(this.workspaceRoot, ".hydra", "work-queue.jsonl"));
     this.sessionBriefUri = vscode.Uri.file(sessionBriefPath(this.workspaceRoot));
+    this.wikiContextUri = vscode.Uri.file(hydraWikiContextPath(this.workspaceRoot));
     this.supportBundleUri = vscode.Uri.file(supportBundlePath(this.workspaceRoot));
     this.telegramInboundStateUri = vscode.Uri.file(path.join(this.workspaceRoot, ".hydra", "telegram-inbox-state.json"));
     await ensureGitignore(this.workspaceRoot);
@@ -975,6 +990,14 @@ export class HydraRoomPanel {
     this.postState();
   }
 
+  async openWikiContext(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    await ensureHydraWikiFiles(this.workspaceRoot);
+    const doc = await vscode.workspace.openTextDocument(this.wikiContextUri);
+    await vscode.window.showTextDocument(doc, vscode.ViewColumn.Active);
+  }
+
   async openSupportBundle(): Promise<void> {
     await this.ready();
     if (!this.workspaceReady) return;
@@ -1289,6 +1312,9 @@ export class HydraRoomPanel {
         return;
       case "openSessionBrief":
         await this.openSessionBrief();
+        return;
+      case "openWikiContext":
+        await this.openWikiContext();
         return;
       case "openSupportBundle":
         await this.openSupportBundle();
@@ -2110,6 +2136,7 @@ export class HydraRoomPanel {
         this.applyEvent({ type: "closerDone" });
         this.currentAbort = undefined;
         this.postState();
+        await this.maybeRunWikiWrapup("discussion");
         await this.autoAdvanceActionableDefault("discussion");
         return;
       }
@@ -2156,6 +2183,7 @@ export class HydraRoomPanel {
       this.applyEvent({ type: "closerDone" });
       this.currentAbort = undefined;
       this.postState();
+      await this.maybeRunWikiWrapup("discussion");
       await this.autoAdvanceActionableDefault("discussion");
     } finally {
       // Safety net: only fires if a synchronous throw escaped the try block.
@@ -2219,6 +2247,9 @@ export class HydraRoomPanel {
       }
       this.currentAbort = undefined;
       this.postState();
+      if (!ctrl.signal.aborted && results.every(({ result }) => !didAgentFail(result))) {
+        await this.maybeRunWikiWrapup("parallel discussion");
+      }
       await this.autoAdvanceActionableDefault("parallel discussion");
     } finally {
       if (!promiseStarted && openedIds.length > 0) {
@@ -2339,6 +2370,152 @@ export class HydraRoomPanel {
       await this.appendSystemMessage("Hydra auto-review started because verification passed after build.");
       await this.requestReview();
     }
+  }
+
+  private async maybeRunWikiWrapup(source: string): Promise<void> {
+    if (!this.wikiWrapupEnabled()) return;
+    if (!this.workspaceReady || this.wikiWrapupInFlight || this.sessionCostCapExceeded()) return;
+    const wrapupSource = hydraWikiWrapupSourceFromMessages(this.messages, this.wikiWrapupMaxSourceChars());
+    if (!wrapupSource || wrapupSource.key === this.lastWikiWrapupSourceKey) return;
+
+    this.lastWikiWrapupSourceKey = wrapupSource.key;
+    this.wikiWrapupInFlight = true;
+    const agent = this.wikiWrapupAgent();
+    const traceSource = `${source} wiki wrapup`;
+    try {
+      const files = await readHydraWikiFiles(this.workspaceRoot);
+      const nowIso = new Date().toISOString();
+      const prompt = buildHydraWikiWrapupPrompt({
+        nowIso,
+        files,
+        source: wrapupSource,
+      });
+      const result = await this.runWikiWrapupAgent(agent, prompt);
+      if (didAgentFail(result.result)) {
+        await this.recordEvent("error", `Hydra wiki wrapup failed after ${source}.`, {
+          agent,
+          exitCode: result.result.exitCode,
+          timedOut: result.result.timedOut,
+        });
+        return;
+      }
+
+      const draft = parseHydraWikiWrapupResponse(result.text);
+      if (!draft) {
+        await this.recordEvent("error", `Hydra wiki wrapup returned unparseable JSON after ${source}.`, { agent });
+        return;
+      }
+      const applied = await applyHydraWikiWrapupDraft(this.workspaceRoot, draft, nowIso);
+      if (applied.changed) {
+        await this.recordEvent("commandInvoked", `Hydra wiki wrapup updated ${applied.title}.`, {
+          agent,
+          source: traceSource,
+          contextChanged: applied.contextChanged,
+          indexChanged: applied.indexChanged,
+          logAppended: applied.logAppended,
+        });
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await this.recordEvent("error", `Hydra wiki wrapup failed after ${source}: ${message}`, { agent });
+    } finally {
+      this.wikiWrapupInFlight = false;
+      this.postState();
+    }
+  }
+
+  private async runWikiWrapupAgent(
+    agent: AgentId,
+    prompt: string
+  ): Promise<{ text: string; result: RunResult }> {
+    const phase: Phase = "opener";
+    const traceId = `${makeTraceId(agent, phase)}-wiki-wrapup`;
+    const startedAt = Date.now();
+    const promptSha256 = sha256(prompt);
+    let spawn = this.buildSpawn(agent, phase);
+    spawn = { ...spawn, command: await resolveAgentCommand(agent, spawn.command) };
+    const consent = await this.ensureFullNativeConsent(agent, phase, spawn);
+    if (!consent.allowed) {
+      await this.appendAgentCallTrace({
+        id: traceId,
+        event: "fullNativeConsentDenied",
+        kind: "wikiWrapup",
+        timestamp: new Date().toISOString(),
+        agent,
+        phase,
+        transport: "oneShot",
+        promptChars: prompt.length,
+        promptSha256,
+      });
+      return {
+        text: consent.message ?? "",
+        result: {
+          stdout: "",
+          stderr: consent.message ?? "Hydra cancelled the wiki wrapup call because full native authority was not confirmed.",
+          exitCode: null,
+          timedOut: false,
+          cancelled: true,
+        },
+      };
+    }
+    const prepared = await this.prepareOneShotRequestFiles(agent, phase, spawn, prompt);
+    await this.appendAgentCallTrace({
+      id: traceId,
+      event: "started",
+      kind: "wikiWrapup",
+      timestamp: new Date(startedAt).toISOString(),
+      agent,
+      phase,
+      transport: "oneShot",
+      cwd: prepared.spawn.cwd,
+      command: prepared.spawn.command,
+      args: prepared.spawn.args,
+      envKeys: Object.keys(prepared.spawn.env ?? {}).sort(),
+      timeoutMs: this.wikiWrapupTimeoutMs(),
+      promptChars: prompt.length,
+      promptSha256,
+      requestFiles: requestFileTrace(prepared),
+      outputMode: prepared.outputMode,
+    });
+
+    const result = await runAgent(
+      prepared.spawn,
+      prompt,
+      this.wikiWrapupTimeoutMs(),
+      () => {},
+      new AbortController().signal
+    );
+    const normalized = await this.normalizeOneShotResult(prepared, result);
+    if (prepared.outputMode === "claudeStreamJson") {
+      await this.appendAgentCallTrace({
+        id: traceId,
+        event: "streamSummary",
+        kind: "wikiWrapup",
+        timestamp: new Date().toISOString(),
+        agent,
+        phase,
+        transport: "oneShot",
+        summary: summarizeClaudeEvents(parseClaudeEventStream(result.stdout)),
+      });
+    } else if (prepared.outputMode === "codexJson") {
+      await this.appendAgentCallTrace({
+        id: traceId,
+        event: "streamSummary",
+        kind: "wikiWrapup",
+        timestamp: new Date().toISOString(),
+        agent,
+        phase,
+        transport: "oneShot",
+        summary: summarizeCodexEvents(parseCodexEventStream(result.stdout)),
+      });
+    }
+    await this.appendAgentCallTrace({
+      ...completedAgentCallTrace(traceId, agent, phase, "oneShot", startedAt, normalized),
+      kind: "wikiWrapup",
+    });
+    const usageResult = prepared.outputMode === "plain" ? normalized : result;
+    await this.extractAndRecordUsage({ agent, phase, requestId: traceId, result: usageResult, outputMode: prepared.outputMode });
+    return { text: normalized.stdout, result: normalized };
   }
 
   private autoAdvanceExplainer(): string {
@@ -3653,6 +3830,10 @@ export class HydraRoomPanel {
         workspaceInstructionsAsContext(workspaceInstructions, { maxChars: workspaceInstructionsMaxChars })
       );
     }
+    const wikiContext = readHydraWikiPromptContext(this.workspaceRoot, this.wikiContextMaxChars());
+    if (wikiContext) {
+      sections.push("", wikiContext.markdown);
+    }
     sections.push(
       "",
       contextTitle,
@@ -3671,6 +3852,35 @@ export class HydraRoomPanel {
 
   private editorContextMaxChars(): number {
     return vscode.workspace.getConfiguration("hydraRoom").get<number>("editorContextMaxChars", 12000);
+  }
+
+  private wikiContextMaxChars(): number {
+    return vscode.workspace.getConfiguration("hydraRoom").get<number>("wikiContextMaxChars", 8000);
+  }
+
+  private wikiWrapupEnabled(): boolean {
+    return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("wikiWrapupEnabled", true);
+  }
+
+  private wikiWrapupMaxSourceChars(): number {
+    const raw = vscode.workspace.getConfiguration("hydraRoom").get<number>("wikiWrapupMaxSourceChars", 16000);
+    return Math.max(1000, Math.floor(raw));
+  }
+
+  private wikiWrapupTimeoutMs(): number {
+    const raw = vscode.workspace.getConfiguration("hydraRoom").get<number>("wikiWrapupTimeoutMs", 120000);
+    return Math.max(1000, Math.floor(raw));
+  }
+
+  private wikiWrapupAgent(): AgentId {
+    const configured = vscode.workspace.getConfiguration("hydraRoom").get<string>("wikiWrapupAgent", "auto").trim();
+    if (configured === "codex" || configured === "claude") return configured;
+    const { agentDefaults, modelOverrides } = this.modelPrices();
+    const score = (agent: AgentId) => {
+      const prices = resolveModelPrices(agent, modelForPhase(agent, "opener") || undefined, modelOverrides, agentDefaults);
+      return prices.inputPerMTok + prices.outputPerMTok * 0.25;
+    };
+    return score("codex") <= score("claude") ? "codex" : "claude";
   }
 
   // ---------------- message lifecycle ----------------
@@ -4271,6 +4481,9 @@ export class HydraRoomPanel {
           break;
         case "openSessionBrief":
           await this.openSessionBrief();
+          break;
+        case "openWikiContext":
+          await this.openWikiContext();
           break;
         case "openSupportBundle":
           await this.openSupportBundle();

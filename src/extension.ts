@@ -247,6 +247,13 @@ export function activate(context: vscode.ExtensionContext): void {
       })
     ),
     vscode.commands.registerCommand(
+      "hydraRoom.openWikiContext",
+      withErrorReporting(async () => {
+        const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
+        await panel.openWikiContext();
+      })
+    ),
+    vscode.commands.registerCommand(
       "hydraRoom.openSupportBundle",
       withErrorReporting(async () => {
         const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);

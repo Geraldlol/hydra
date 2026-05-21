@@ -21,6 +21,7 @@ export type CommandCenterActionId =
   | "openVerification"
   | "openDecisions"
   | "openSessionBrief"
+  | "openWikiContext"
   | "openSupportBundle"
   | "captureNativeCapabilities"
   | "captureNativeDataSnapshot"
@@ -122,6 +123,7 @@ export function buildCommandCenterActions(input: CommandCenterInput): CommandCen
     action("openVerification", "Open Verification Log", "State", "Open the durable verification result log."),
     action("openDecisions", "Open Decisions", "State", "Open the durable decision packet log."),
     action("openSessionBrief", "Open Session Brief", "State", "Refresh and open the compact room snapshot."),
+    action("openWikiContext", "Open Wiki Context", "State", "Open the persistent compiled wiki that Hydra injects into prompts."),
     action("openSupportBundle", "Open Support Bundle", "Diagnostics", "Refresh and open Doctor, authority, terminal, queue, and recent-action diagnostics."),
     action("chooseModel", "Choose Model", "Settings", "Pick Codex or Claude model overrides."),
     action("chooseEffort", "Choose Thinking Level", "Settings", "Pick Codex reasoning or Claude effort overrides."),

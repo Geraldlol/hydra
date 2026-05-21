@@ -67,6 +67,7 @@ In the Extension Development Host, run `Hydra: Start`.
 - `Hydra: Open Decisions`
 - `Hydra: Open Room Objective`
 - `Hydra: Open Session Brief`
+- `Hydra: Open Wiki Context`
 - `Hydra: Open Support Bundle`
 - `Hydra: Capture Native Capabilities`
 - `Hydra: Capture Native Data Snapshot`
@@ -144,6 +145,7 @@ Hydra also writes:
 - `.hydra/native-data-snapshot.md` for redacted Codex/Claude config, plugin, model, state, and session metadata.
 - `.hydra/work-queue.jsonl` for queue dismiss/snooze state.
 - `.hydra/session-brief.md` for the latest operator snapshot.
+- `.hydra/wiki/` for the compiled project wiki Hydra injects into future prompts.
 - `.hydra/support-bundle.md` for the latest diagnostics snapshot.
 - `.hydra/prompts/index.jsonl` for prompt envelopes showing the exact command, transport, context, and rendered prompt sent to native CLIs.
 - `.hydra/prompts/`, `.hydra/replies/`, and `.hydra/logs/` when the experimental terminal bridge is enabled.
@@ -178,6 +180,12 @@ Hydra computes a live Work Queue from existing durable state: actionable decisio
 ## Session Brief
 
 Use `Hydra: Open Session Brief` or the in-room Session Brief button to refresh and open `.hydra/session-brief.md`. The brief is a compact human-facing snapshot of the current objective, phase, transport, Work Queue, latest decision, latest verification, recent native actions, and recent room messages. It is not automatically injected into agent prompts; it exists so you can quickly recover the room state after reloads or handoffs without rereading the full transcript.
+
+## Wiki Context
+
+Hydra maintains a small LLM wiki under `.hydra/wiki/`: `schema.md`, `context.md`, `index.md`, and `log.md`. Non-default wiki content is injected into future prompts before the transcript, capped by `hydraRoom.wikiContextMaxChars`.
+
+After each successful discussion turn, `hydraRoom.wikiWrapupEnabled` asks one native agent to distill durable facts from that turn into the wiki and append the log. `hydraRoom.wikiWrapupAgent` can pin Codex or Claude, or leave `auto` to pick the lower estimated configured discussion-model cost. Use `Hydra: Open Wiki Context` to inspect or edit the compiled memory.
 
 ## Support Bundle
 

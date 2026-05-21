@@ -31,6 +31,7 @@ export type WebviewMessage =
   | { type: "clearNativeActions"; ids?: string[] }
   | { type: "openObjective" }
   | { type: "openSessionBrief" }
+  | { type: "openWikiContext" }
   | { type: "openSupportBundle" }
   | { type: "captureNativeCapabilities" }
   | { type: "captureNativeDataSnapshot" }

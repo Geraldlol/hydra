@@ -2,7 +2,7 @@
   "name": "vscode-hydra-room",
   "displayName": "Hydra",
   "description": "Three-way collaboration room for the user, Codex CLI, and Claude Code CLI inside VS Code.",
-  "version": "0.4.13",
+  "version": "0.4.14",
   "publisher": "local-tools",
   "license": "MIT",
   "private": false,
@@ -33,6 +33,7 @@
       { "command": "hydraRoom.archiveAndClearRoom", "title": "Hydra: Archive and Clear Room" },
       { "command": "hydraRoom.openDecisions", "title": "Hydra: Open Decisions" },
       { "command": "hydraRoom.openSessionBrief", "title": "Hydra: Open Session Brief" },
+      { "command": "hydraRoom.openWikiContext", "title": "Hydra: Open Wiki Context" },
       { "command": "hydraRoom.openSupportBundle", "title": "Hydra: Open Support Bundle" },
       { "command": "hydraRoom.captureNativeCapabilities", "title": "Hydra: Capture Native Capabilities" },
       { "command": "hydraRoom.captureNativeDataSnapshot", "title": "Hydra: Capture Native Data Snapshot" },
@@ -316,6 +317,35 @@
           "default": 12000,
           "minimum": 1000,
           "markdownDescription": "Maximum characters from the active editor selection or file attached to direct native terminal pokes."
+        },
+        "hydraRoom.wikiContextMaxChars": {
+          "type": "number",
+          "default": 8000,
+          "minimum": 0,
+          "markdownDescription": "Maximum characters of compiled `.hydra/wiki` context injected into agent prompts. Set to 0 to disable wiki prompt context."
+        },
+        "hydraRoom.wikiWrapupEnabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "After a successful discussion turn, ask one native agent to distill durable facts into `.hydra/wiki/context.md`, update `.hydra/wiki/index.md` when useful, and append `.hydra/wiki/log.md`. Disable to keep the wiki manual-only."
+        },
+        "hydraRoom.wikiWrapupAgent": {
+          "type": "string",
+          "enum": ["auto", "codex", "claude"],
+          "default": "auto",
+          "markdownDescription": "Agent used for automatic wiki wrapups. `auto` chooses the lower estimated configured discussion-model cost from `hydraRoom.modelPrices`; `codex` or `claude` pins the maintainer."
+        },
+        "hydraRoom.wikiWrapupMaxSourceChars": {
+          "type": "number",
+          "default": 16000,
+          "minimum": 1000,
+          "markdownDescription": "Maximum characters from the just-finished room turn sent to the automatic wiki wrapup prompt."
+        },
+        "hydraRoom.wikiWrapupTimeoutMs": {
+          "type": "number",
+          "default": 120000,
+          "minimum": 1000,
+          "markdownDescription": "Maximum runtime in milliseconds for the background automatic wiki wrapup agent call."
         },
         "hydraRoom.firstSpeaker": {
           "type": "string",

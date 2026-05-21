@@ -20,6 +20,8 @@ describe("buildPrompt()", () => {
     assert.doesNotMatch(out, /Older transcript entries may be omitted/);
     assert.match(out, /latest user message is authoritative/);
     assert.match(out, /do not revive the older status as active work/);
+    assert.match(out, /Hydra wiki context/);
+    assert.match(out, /compiled memory before re-deriving older facts/);
     assert.match(out, /Source hygiene:/);
     assert.match(out, /treat `\.hydra\/` as Hydra workspace state/);
     assert.match(out, /Exclude `\.hydra\/`, `\.git\/`/);

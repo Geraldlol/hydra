@@ -23,7 +23,8 @@ const DECISION_PACKET =
 
 const CONTEXT_HYGIENE =
   "Context hygiene: the latest user message is authoritative. If it corrects, closes, or supersedes older transcript status, do not revive the older status as active work. " +
-  "Treat newer verification evidence as replacing older timeout or failure claims. If the latest user message asks you for an exact/minimal reply, obey that exact-output request and omit the normal Decision Packet.";
+  "Treat newer verification evidence as replacing older timeout or failure claims. When `--- Hydra wiki context ---` is present, use it as compiled memory before re-deriving older facts, but let the latest user instruction and active transcript win on conflict. " +
+  "If the latest user message asks you for an exact/minimal reply, obey that exact-output request and omit the normal Decision Packet.";
 
 const SOURCE_HYGIENE =
   "Source hygiene: treat `.hydra/` as Hydra workspace state, not project source. Exclude `.hydra/`, `.git/`, dependency/vendor/build/cache artifacts, and generated output from broad repo crawls/searches unless the latest user request is explicitly about those artifacts. Prefer targeted `rg`/glob searches before recursive workspace crawls.";
