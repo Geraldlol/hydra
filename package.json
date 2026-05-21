@@ -126,18 +126,21 @@
           "markdownDescription": "Raw Codex CLI args for Review. Defaults to Codex's native review command over staged, unstaged, and untracked changes. Hydra does not downgrade these args by phase and expands Hydra request-file placeholders."
         },
         "hydraRoom.codexDiscussionProfile": {
+          "scope": "application",
           "type": "string",
           "enum": ["safeDiscussion", "nativeDiscussion", "nativeBuild", "nativeReview", "fullNative", "custom"],
           "default": "custom",
           "markdownDescription": "Capability profile for Codex discussion turns. `custom` preserves `hydraRoom.codexExecArgsDiscussion`."
         },
         "hydraRoom.codexBuildProfile": {
+          "scope": "application",
           "type": "string",
           "enum": ["safeDiscussion", "nativeDiscussion", "nativeBuild", "nativeReview", "fullNative", "custom"],
           "default": "custom",
           "markdownDescription": "Capability profile for Codex Build turns. `custom` preserves `hydraRoom.codexExecArgsBuild`."
         },
         "hydraRoom.codexReviewProfile": {
+          "scope": "application",
           "type": "string",
           "enum": ["safeDiscussion", "nativeDiscussion", "nativeBuild", "nativeReview", "fullNative", "custom"],
           "default": "custom",
@@ -181,18 +184,21 @@
           "markdownDescription": "Raw Claude Code CLI args for Review. Add native review/tool/MCP/plugin/model flags here. Hydra does not downgrade these args by phase and expands Hydra request-file placeholders."
         },
         "hydraRoom.claudeDiscussionProfile": {
+          "scope": "application",
           "type": "string",
           "enum": ["safeDiscussion", "nativeDiscussion", "nativeBuild", "nativeReview", "fullNative", "custom"],
           "default": "custom",
           "markdownDescription": "Capability profile for Claude discussion turns. `custom` preserves `hydraRoom.claudeExecArgsDiscussion`."
         },
         "hydraRoom.claudeBuildProfile": {
+          "scope": "application",
           "type": "string",
           "enum": ["safeDiscussion", "nativeDiscussion", "nativeBuild", "nativeReview", "fullNative", "custom"],
           "default": "custom",
           "markdownDescription": "Capability profile for Claude Build turns. `custom` preserves `hydraRoom.claudeExecArgsBuild`."
         },
         "hydraRoom.claudeReviewProfile": {
+          "scope": "application",
           "type": "string",
           "enum": ["safeDiscussion", "nativeDiscussion", "nativeBuild", "nativeReview", "fullNative", "custom"],
           "default": "custom",
@@ -628,6 +634,9 @@
         "hydraRoom.codexExecArgsDiscussion",
         "hydraRoom.codexExecArgsBuild",
         "hydraRoom.codexExecArgsReview",
+        "hydraRoom.codexDiscussionProfile",
+        "hydraRoom.codexBuildProfile",
+        "hydraRoom.codexReviewProfile",
         "hydraRoom.claudeCommand",
         "hydraRoom.claudeExecArgsDiscussion",
         "hydraRoom.claudeExecArgsBuild",
@@ -636,6 +645,9 @@
         "hydraRoom.codexModel",
         "hydraRoom.claudeEffort",
         "hydraRoom.codexReasoning",
+        "hydraRoom.claudeDiscussionProfile",
+        "hydraRoom.claudeBuildProfile",
+        "hydraRoom.claudeReviewProfile",
         "hydraRoom.nativePathPrepend",
         "hydraRoom.nativeEnv",
         "hydraRoom.codexNativePathPrepend",

@@ -85,4 +85,27 @@ describe("trust scope contract", () => {
       `Trust-scoped settings missing scope:"application": ${missing.join(", ")}`
     );
   });
+
+  test("capability profile settings are pinned as trust-scoped", () => {
+    // Why: the six *Profile settings select Codex/Claude argv at dispatch
+    // time. A `fullNative` value maps to Codex `--sandbox danger-full-access`
+    // or Claude `--permission-mode bypassPermissions`. A workspace setting
+    // override could flip an untrusted repo into either argv shape; pin
+    // them explicitly so a future removal from the generic lockstep test
+    // above is still caught.
+    const profileSettings = [
+      "codexDiscussionProfile",
+      "codexBuildProfile",
+      "codexReviewProfile",
+      "claudeDiscussionProfile",
+      "claudeBuildProfile",
+      "claudeReviewProfile",
+    ];
+    for (const key of profileSettings) {
+      assert.ok(
+        (TRUST_SCOPED_SETTINGS as readonly string[]).includes(key),
+        `${key} must be in TRUST_SCOPED_SETTINGS — fullNative profile maps to dangerous argv`
+      );
+    }
+  });
 });
