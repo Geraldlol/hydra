@@ -30,7 +30,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${heads.cspSource}; script-src 'nonce-${nonce}' ${heads.cspSource}; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${heads.cspSource}; script-src 'nonce-${nonce}' ${heads.cspSource}; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none';">
   <title>Hydra Room</title>
   <style>
     :root {

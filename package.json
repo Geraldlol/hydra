@@ -2,7 +2,7 @@
   "name": "vscode-hydra-room",
   "displayName": "Hydra",
   "description": "Three-way collaboration room for the user, Codex CLI, and Claude Code CLI inside VS Code.",
-  "version": "0.4.27",
+  "version": "0.4.28",
   "publisher": "local-tools",
   "license": "MIT",
   "private": false,
@@ -302,10 +302,29 @@
           "markdownDescription": "Maximum time to wait for terminal bridge self-tests and setup checks. Normal agent calls use the Discussion or Build/Review timeout settings."
         },
         "hydraRoom.oneShotWorkspaceInstructionsMaxChars": {
-          "type": "number",
-          "default": 12000,
-          "minimum": 0,
-          "markdownDescription": "Maximum characters of repository instruction files injected into one-shot Hydra prompts. Set to 0 to include the loaded instruction context without an additional prompt-time cap."
+          "default": {
+            "discussion": 6000,
+            "build": 12000,
+            "review": 12000
+          },
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "description": "Character cap applied to every phase. Set to 0 to include the loaded instruction context without an additional prompt-time cap."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "discussion": { "type": "number", "minimum": 0 },
+                "build": { "type": "number", "minimum": 0 },
+                "review": { "type": "number", "minimum": 0 }
+              },
+              "additionalProperties": false,
+              "description": "Per-phase repository-instruction caps. Discussion covers opener, reactor, closer, and parallel discussion turns."
+            }
+          ],
+          "markdownDescription": "Maximum characters of repository instruction files injected into one-shot Hydra prompts after filtering out the recipient CLI's own native instruction files. Set a single number for every phase, or use `{ \"discussion\": 6000, \"build\": 12000, \"review\": 12000 }`. A value of 0 includes the loaded instruction context without an additional prompt-time cap for that phase."
         },
         "hydraRoom.terminalBridgeWorkspaceInstructionsMaxChars": {
           "type": "number",
@@ -315,7 +334,7 @@
         },
         "hydraRoom.promptTranscriptMaxChars": {
           "default": {
-            "discussion": 80000,
+            "discussion": 40000,
             "build": 400000,
             "review": 400000
           },
@@ -336,7 +355,7 @@
               "description": "Per-phase transcript caps. Discussion covers opener, reactor, closer, and parallel discussion turns."
             }
           ],
-          "markdownDescription": "Maximum characters of active room transcript injected into agent prompts after objective, workspace instructions, and wiki context. This is a per-call cost and attention guardrail, not a model context-window limit. Hydra keeps the newest transcript messages and adds an omission notice when older active history is trimmed. Either set one number for every phase, or use `{ \"discussion\": 80000, \"build\": 400000, \"review\": 400000 }`. The wiki context refresh threshold uses the largest configured cap, so the default refreshes at the 400k durable-memory boundary while discussion prompts stay lean."
+          "markdownDescription": "Maximum characters of active room transcript injected into agent prompts after objective, workspace instructions, and wiki context. This is a per-call cost and attention guardrail, not a model context-window limit. Hydra keeps the newest transcript messages and adds an omission notice when older active history is trimmed. Either set one number for every phase, or use `{ \"discussion\": 40000, \"build\": 400000, \"review\": 400000 }`. The wiki context refresh threshold uses the largest configured cap, so the default refreshes at the 400k durable-memory boundary while discussion prompts stay lean."
         },
         "hydraRoom.editorContextMaxChars": {
           "type": "number",

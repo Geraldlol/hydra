@@ -380,10 +380,6 @@ if (messagesEl) {
 }
 
 window.addEventListener("message", (event) => {
-  // Defense in depth: VS Code's host posts messages from window.parent. We
-  // have no nested iframes today; this guard blocks any future regression
-  // where a sub-frame or worker tries to post into the webview's main context.
-  if (event.source !== window.parent && event.source !== null) return;
   const msg = event.data;
   if (msg.type === "state") renderState(msg);
   else if (msg.type === "chunk") appendChunk(msg.messageId, msg.text);

@@ -18,11 +18,16 @@ describe("webview CSP hardening", () => {
     assert.match(html, /script-src 'nonce-test-nonce'/);
   });
 
-  test("CSP tightens base-uri, form-action, and frame-ancestors", () => {
+  test("CSP tightens base-uri and form-action", () => {
+    // Why: frame-ancestors is deliberately NOT set — VS Code renders the
+    // webview inside its own iframe, so frame-ancestors 'none' would break
+    // the panel entirely. The webview is already isolated by VS Code's
+    // webview sandbox; default-src 'none' + nonced script-src carry the
+    // injection defense.
     const html = renderHtml("test-nonce", heads, "vscode-resource:/media/webview.js");
     assert.match(html, /base-uri 'none'/);
     assert.match(html, /form-action 'none'/);
-    assert.match(html, /frame-ancestors 'none'/);
+    assert.doesNotMatch(html, /frame-ancestors/);
   });
 
   test("data-head-assets attribute is HTML-attribute-encoded against malicious URIs", () => {
