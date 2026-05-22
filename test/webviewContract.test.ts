@@ -95,6 +95,7 @@ const boundIds = [
   "previewPromptBtn",
   "profileBtn",
   "queuePanelCount",
+  "resetObjectiveBtn",
   "resetTurnBtn",
   "retryAutopilotBtn",
   "reviewBtn",
@@ -134,6 +135,7 @@ const hostMessages = [
   "chooseModel",
   "chooseModelOrEffort",
   "changeCapabilityProfile",
+  "resetObjective",
   "testTelegram",
   "fixClaudePath",
   "fixCodexPath",
@@ -270,6 +272,12 @@ describe("webview contract", () => {
     assert.match(html, /\.rail-primary #usageRail \{/);
     assert.match(html, /\.rail-primary #usageRail \{[\s\S]*border-color: var\(--focus\);/);
     assert.match(html, /\.rail-primary #usageRail \{[\s\S]*font-weight: 650;/);
+  });
+
+  test("top rail can reset the pinned objective", () => {
+    assert.match(html, /id="resetObjectiveBtn"[^>]+title="Clear the pinned room objective"/);
+    assert.match(surface, /resetObjectiveBtn\.addEventListener\("click", \(\) => vscode\.postMessage\(\{ type: "resetObjective" \}\)\)/);
+    assert.match(surface, /resetObjectiveBtn\.disabled = !!state\.canOpenFolder \|\| !\(state\.objective \|\| ""\)\.trim\(\)/);
   });
 
   test("uses the current host message names for command actions", () => {

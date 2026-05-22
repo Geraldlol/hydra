@@ -29,6 +29,7 @@ const transportChip = document.getElementById("transportChip");
 const phaseChip = document.getElementById("phaseChip");
 const objectiveText = document.getElementById("objectiveText");
 const objectiveTextShim = document.getElementById("objectiveTextShim");
+const resetObjectiveBtn = document.getElementById("resetObjectiveBtn");
 const codexStatus = document.getElementById("codexStatus");
 const claudeStatus = document.getElementById("claudeStatus");
 const codexAuthority = document.getElementById("codexAuthority");
@@ -248,6 +249,7 @@ setObjectiveBtn.addEventListener("click", () => {
   if (!text) return composer.focus();
   vscode.postMessage({ type: "setObjective", text });
 });
+resetObjectiveBtn.addEventListener("click", () => vscode.postMessage({ type: "resetObjective" }));
 previewPromptBtn.addEventListener("click", () => {
   vscode.postMessage({ type: "previewNextPrompt", text: composer.value, opener: selectedOpener });
 });
@@ -427,6 +429,7 @@ function renderState(state) {
   objectiveText.textContent = state.objective || "Not set";
   objectiveText.title = state.objective || "";
   objectiveTextShim.textContent = state.objective || "Not set";
+  resetObjectiveBtn.disabled = !!state.canOpenFolder || !(state.objective || "").trim();
   renderAgentStatuses(state.agentStatuses || {});
   renderAuthorityBadges(state.authoritySummaries || {});
   renderTerminalSessions(state.terminalSessions || [], transport);

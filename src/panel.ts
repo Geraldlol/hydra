@@ -1561,6 +1561,16 @@ export class HydraRoomPanel {
     this.postState();
   }
 
+  async resetObjective(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    if (!this.objective.trim()) return;
+    this.objective = "";
+    await writeObjective(this.objectiveUri.fsPath, "");
+    await this.appendSystemMessage("Room objective reset.");
+    this.postState();
+  }
+
   async openNativeTerminals(): Promise<void> {
     await this.ready();
     if (!this.workspaceReady) return;
@@ -4893,6 +4903,9 @@ export class HydraRoomPanel {
           break;
         case "setObjective":
           await this.setObjective(msg.text);
+          break;
+        case "resetObjective":
+          await this.resetObjective();
           break;
         case "stop":
           await this.stop();

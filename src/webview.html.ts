@@ -939,6 +939,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
         <span id="phaseChip" class="phase-chip idle">Idle</span>
         <span id="usageRail" class="rail-chip" role="button" tabindex="0" title="Open session token usage and estimated cost. Costs are estimates using hydraRoom.modelPrices (defaults: Claude Sonnet 4.6, Codex GPT-5 blend).">usage: 0 turns</span>
         <span class="rail-objective"><span id="objectiveLabel">Objective</span><span id="objectiveText">Not set</span></span>
+        <button id="resetObjectiveBtn" class="secondary rail-link" type="button" title="Clear the pinned room objective">Reset</button>
       </div>
       <div class="rail-secondary">
         <span id="transportChip" class="rail-chip">Safe one-shot</span>

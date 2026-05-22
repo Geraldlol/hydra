@@ -16,6 +16,7 @@ export type WebviewMessage =
   | { type: "ready" }
   | { type: "send"; text: string; opener?: string }
   | { type: "setObjective"; text: string }
+  | { type: "resetObjective" }
   | { type: "stop" }
   | { type: "assignBuilder"; builder: AgentId }
   | { type: "assignParallelBuilders" }
