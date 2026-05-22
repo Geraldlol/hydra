@@ -108,7 +108,7 @@ Native session hints are correlation metadata only: recent Codex session ids fro
 
 Use the in-room `Poke Codex` and `Poke Claude` buttons, or `Hydra: Poke Codex Terminal` / `Hydra: Poke Claude Terminal`, when you want to talk to one native CLI directly without starting the full opener -> reactor -> closer room loop. Pokes still stream terminal output into the room and are written to the transcript.
 
-Normal room messages still use the opener -> reactor -> closer discussion loop. If the latest message explicitly addresses both agents, such as "both of you", "you both", or "Codex and Claude, ...", Hydra instead runs Codex and Claude in parallel with independent discussion prompts and returns control after both replies finish.
+Normal room messages use the opener -> reactor -> closer discussion loop by default. If the latest message explicitly addresses both agents, such as "both of you", "you both", or "Codex and Claude, ...", Hydra instead runs Codex and Claude in parallel with independent discussion prompts and returns control after both replies finish. Set `hydraRoom.discussionMode` to `parallel` when latency matters more than serialized critique choreography; set it to `serial` to force the traditional loop.
 
 Use `Codex + Editor` / `Claude + Editor`, or the matching command-palette actions, when the active editor matters. Hydra attaches the active selection first; if nothing is selected, it attaches the active file up to `hydraRoom.editorContextMaxChars`. Direct terminal pokes include the active room transcript plus any editor context you explicitly attach.
 

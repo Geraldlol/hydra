@@ -1,4 +1,5 @@
 export type AgentId = "codex" | "claude";
+export type DiscussionMode = "serial" | "parallelOnBoth" | "parallel";
 
 export type State =
   | { name: "Idle" }
@@ -120,7 +121,10 @@ export function transition(state: State, event: Event): State {
   }
 }
 
-export function shouldRunParallelDiscussion(text: string): boolean {
+export function shouldRunParallelDiscussion(text: string, mode: DiscussionMode = "parallelOnBoth"): boolean {
+  if (mode === "parallel") return true;
+  if (mode === "serial") return false;
+
   const normalized = text.toLowerCase().replace(/\s+/g, " ").trim();
   if (!normalized) return false;
   const patterns = [

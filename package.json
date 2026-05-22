@@ -2,7 +2,7 @@
   "name": "vscode-hydra-room",
   "displayName": "Hydra",
   "description": "Three-way collaboration room for the user, Codex CLI, and Claude Code CLI inside VS Code.",
-  "version": "0.4.25",
+  "version": "0.4.26",
   "publisher": "local-tools",
   "license": "MIT",
   "private": false,
@@ -370,6 +370,12 @@
           "enum": ["codex", "claude"],
           "default": "codex",
           "markdownDescription": "Default opener for serialized discussion turns. The webview can flip this per turn without changing the setting."
+        },
+        "hydraRoom.discussionMode": {
+          "type": "string",
+          "enum": ["parallelOnBoth", "serial", "parallel"],
+          "default": "parallelOnBoth",
+          "markdownDescription": "How normal room messages run Discussion. `parallelOnBoth` preserves the default behavior: serialized opener -> reactor -> optional closer unless the user explicitly addresses both agents. `serial` always uses the serialized loop. `parallel` always dispatches Codex and Claude at the same time and returns after both replies finish, trading less critique choreography for lower wall-clock latency."
         },
         "hydraRoom.oneShotTimeoutMs": {
           "type": "number",

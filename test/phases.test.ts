@@ -415,4 +415,10 @@ describe("shouldRunParallelDiscussion()", () => {
     assert.equal(shouldRunParallelDiscussion("Codex should open, Claude can react"), false);
     assert.equal(shouldRunParallelDiscussion("what should we do next?"), false);
   });
+
+  test("honors explicit discussion mode overrides", () => {
+    assert.equal(shouldRunParallelDiscussion("what should we do next?", "parallel"), true);
+    assert.equal(shouldRunParallelDiscussion("both of you review this", "serial"), false);
+    assert.equal(shouldRunParallelDiscussion("both of you review this", "parallelOnBoth"), true);
+  });
 });

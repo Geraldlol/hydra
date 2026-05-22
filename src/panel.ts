@@ -4,7 +4,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { runAgent, AgentSpawn, RunResult } from "./agents";
-import { State, Event, AgentId, transition, isInFlight, shouldRunParallelDiscussion } from "./phases";
+import { State, Event, AgentId, DiscussionMode, transition, isInFlight, shouldRunParallelDiscussion } from "./phases";
 import { Phase, buildPrompt, APPROVED_SENTINEL_RE, SOFT_APPROVAL_RE } from "./prompts";
 import {
   appendMessage,
@@ -575,7 +575,7 @@ export class HydraRoomPanel {
     selectedOpener: AgentId,
     options: { alreadyAppended: boolean }
   ): Promise<void> {
-    const parallel = shouldRunParallelDiscussion(trimmed);
+    const parallel = shouldRunParallelDiscussion(trimmed, this.discussionMode());
     // Transition state synchronously BEFORE any await. A second concurrent
     // sendUserMessage hitting after this.ready() but during appendUserMessage
     // would otherwise pass the guard above and orphan the first turn's
@@ -3701,7 +3701,7 @@ export class HydraRoomPanel {
           },
         ]
       : this.messages;
-    const phase: Phase = shouldRunParallelDiscussion(trimmed) ? "parallel" : "opener";
+    const phase: Phase = shouldRunParallelDiscussion(trimmed, this.discussionMode()) ? "parallel" : "opener";
     return await this.buildPromptEnvelope({
       agent: selectedOpener,
       otherAgent: reactor,
@@ -3961,6 +3961,11 @@ export class HydraRoomPanel {
 
   private autoSkipCloserOnAgreement(): boolean {
     return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("autoSkipCloserOnAgreement", true);
+  }
+
+  private discussionMode(): DiscussionMode {
+    const raw = vscode.workspace.getConfiguration("hydraRoom").get<string>("discussionMode", "parallelOnBoth");
+    return raw === "serial" || raw === "parallel" ? raw : "parallelOnBoth";
   }
 
   private autoRequestReviewAfterPassingVerification(): boolean {
