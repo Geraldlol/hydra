@@ -6,12 +6,12 @@ const extensionPath = path.resolve(__dirname, "..");
 const skipPackage = process.argv.includes("--skip-package");
 
 if (!skipPackage) {
-  runPowerShell(`& ${psQuote(resolveNpmCommand())} run package`);
+  runPowerShell(`& ${psQuote(resolvePnpmCommand())} run package`);
 }
 
 const vsixPath = newestVsix(extensionPath);
 if (!vsixPath) {
-  console.error("No .vsix found. Run npm run package first, or rerun without --skip-package.");
+  console.error("No .vsix found. Run pnpm run package first, or rerun without --skip-package.");
   process.exit(1);
 }
 
@@ -86,15 +86,14 @@ function resolveCodeCommand() {
   return found;
 }
 
-function resolveNpmCommand() {
-  const fromPath = firstWhere(process.platform === "win32" ? "npm.cmd" : "npm");
+function resolvePnpmCommand() {
+  // Why: the repo uses pnpm via Corepack (see packageManager in package.json).
+  // Shelling out to npm here would defeat the version pin and break on machines
+  // that only have pnpm via Corepack with no global npm install.
+  const fromPath = firstWhere(process.platform === "win32" ? "pnpm.cmd" : "pnpm");
   if (fromPath) return fromPath;
 
-  const programFiles = process.env.ProgramFiles || "";
-  const nodePath = programFiles ? path.join(programFiles, "nodejs", "npm.cmd") : "";
-  if (nodePath && fs.existsSync(nodePath)) return nodePath;
-
-  console.error("Could not find npm. Install Node.js or run with --skip-package to reuse an existing .vsix.");
+  console.error("Could not find pnpm. Enable Corepack (`corepack enable`) or install pnpm globally, or run with --skip-package to reuse an existing .vsix.");
   process.exit(1);
 }
 
