@@ -305,4 +305,16 @@ describe("webview contract", () => {
     assert.equal((html.match(/\.head-art img \{/g) ?? []).length, 1, "missing or duplicated head-art image CSS");
     assert.equal((scriptBody.match(/className = "head-art "/g) ?? []).length, 1, "missing or duplicated head-art DOM creation");
   });
+
+  test("keeps transcript scroll anchored unless the reader is already near the bottom", () => {
+    assert.match(surface, /MESSAGE_BOTTOM_STICKY_PX = 32/);
+    assert.match(surface, /let messageAutoStick = true/);
+    assert.match(surface, /addEventListener\("scroll"[\s\S]*messageAutoStick = false[\s\S]*isNearMessageBottom\(\)[\s\S]*messageAutoStick = true/);
+    assert.match(surface, /const scroll = captureMessageScroll\(\);[\s\S]*restoreMessageScroll\(scroll\);/);
+    assert.match(surface, /function isNearMessageBottom\(\)[\s\S]*scrollHeight - messagesEl\.scrollTop - messagesEl\.clientHeight <= MESSAGE_BOTTOM_STICKY_PX/);
+    assert.match(surface, /function captureMessageAnchor\(\)[\s\S]*querySelectorAll\("\.message\[data-mid\]"\)/);
+    assert.match(surface, /function restoreMessageScroll\(scroll\)[\s\S]*setMessageScrollTop\(messagesEl\.scrollHeight\)/);
+    assert.match(html, /#messages \{[\s\S]*scroll-behavior: auto;[\s\S]*overflow-anchor: none;/);
+    assert.equal((scriptBody.match(/messagesEl\.scrollTop = messagesEl\.scrollHeight/g) ?? []).length, 0, "bottom snap must go through the scroll restorer");
+  });
 });

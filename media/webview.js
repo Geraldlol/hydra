@@ -6,6 +6,11 @@
 
 const vscode = acquireVsCodeApi();
 const webviewState = vscode.getState ? (vscode.getState() || {}) : {};
+const MESSAGE_BOTTOM_STICKY_PX = 32;
+const MESSAGE_SCROLL_EPSILON_PX = 2;
+let messageAutoStick = true;
+let lastObservedMessageScrollTop = 0;
+let programmaticMessageScroll = false;
 /** HEAD_ASSETS is injected by the host as JSON in a body data attribute.
  *  Parse defensively — a malformed attribute should not crash the webview;
  *  head art falls back to glyphs when the URLs are missing.
@@ -348,6 +353,21 @@ if (editBoard) {
   });
 }
 if (messagesEl) {
+  lastObservedMessageScrollTop = messagesEl.scrollTop;
+  messagesEl.addEventListener("scroll", () => {
+    const nextScrollTop = messagesEl.scrollTop;
+    if (programmaticMessageScroll) {
+      lastObservedMessageScrollTop = nextScrollTop;
+      return;
+    }
+    if (nextScrollTop < lastObservedMessageScrollTop - MESSAGE_SCROLL_EPSILON_PX) {
+      messageAutoStick = false;
+    } else if (isNearMessageBottom()) {
+      messageAutoStick = true;
+    }
+    lastObservedMessageScrollTop = nextScrollTop;
+  }, { passive: true });
+
   messagesEl.addEventListener("click", (event) => {
     const target = event.target;
     const button = target && target.closest ? target.closest("button[data-run-failure-action]") : undefined;
@@ -378,13 +398,17 @@ window.addEventListener("message", (event) => {
 function appendChunk(messageId, text) {
   const el = document.querySelector('[data-mid="' + messageId + '"] .text');
   if (!el) return;
+  const scroll = captureMessageScroll();
   el.textContent += text;
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+  restoreMessageScroll(scroll);
 }
 
 function replaceMessageText(messageId, text) {
   const el = document.querySelector('[data-mid="' + messageId + '"] .text');
-  if (el) el.textContent = text;
+  if (!el) return;
+  const scroll = captureMessageScroll();
+  el.textContent = text;
+  restoreMessageScroll(scroll);
 }
 
 function renderState(state) {
@@ -502,6 +526,7 @@ function addOptimisticUserMessage(text) {
   };
   pendingLocalUserMessages.push(msg);
   lastMessages = lastMessages.concat([msg]);
+  messageAutoStick = true;
   renderMessages();
 }
 
@@ -572,8 +597,10 @@ function updateRibbonMinimizedSummary(state) {
 }
 
 function renderMessages() {
+  const scroll = captureMessageScroll();
   if (lastMessages.length === 0) {
     messagesEl.innerHTML = '<p class="empty">The room is quiet. Run Doctor if this is a fresh setup, then type one message below to bring everyone in.</p>';
+    restoreMessageScroll(scroll);
     return;
   }
   messagesEl.innerHTML = "";
@@ -634,7 +661,74 @@ function renderMessages() {
     article.append(time, card);
     messagesEl.append(article);
   }
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+  restoreMessageScroll(scroll);
+}
+
+function captureMessageScroll() {
+  if (!messagesEl) return { stickToBottom: false, scrollTop: 0, anchor: undefined };
+  const stickToBottom = messageAutoStick && isNearMessageBottom();
+  return {
+    stickToBottom,
+    scrollTop: messagesEl.scrollTop,
+    anchor: stickToBottom ? undefined : captureMessageAnchor()
+  };
+}
+
+function isNearMessageBottom() {
+  if (!messagesEl) return false;
+  return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight <= MESSAGE_BOTTOM_STICKY_PX;
+}
+
+function captureMessageAnchor() {
+  if (!messagesEl) return undefined;
+  const containerRect = messagesEl.getBoundingClientRect();
+  const messages = messagesEl.querySelectorAll(".message[data-mid]");
+  for (const message of messages) {
+    const rect = message.getBoundingClientRect();
+    if (rect.bottom > containerRect.top + 1 && rect.top < containerRect.bottom - 1) {
+      return {
+        mid: message.dataset.mid || "",
+        top: rect.top - containerRect.top
+      };
+    }
+  }
+  return undefined;
+}
+
+function restoreMessageScroll(scroll) {
+  if (!messagesEl || !scroll) return;
+  if (scroll.stickToBottom) {
+    messageAutoStick = true;
+    setMessageScrollTop(messagesEl.scrollHeight);
+    return;
+  }
+  let nextScrollTop = scroll.scrollTop;
+  if (scroll.anchor && scroll.anchor.mid) {
+    const anchor = messagesEl.querySelector('[data-mid="' + cssEscape(scroll.anchor.mid) + '"]');
+    if (anchor) {
+      const containerRect = messagesEl.getBoundingClientRect();
+      const anchorRect = anchor.getBoundingClientRect();
+      nextScrollTop += (anchorRect.top - containerRect.top) - scroll.anchor.top;
+    }
+  }
+  const maxScrollTop = Math.max(0, messagesEl.scrollHeight - messagesEl.clientHeight);
+  setMessageScrollTop(Math.min(Math.max(0, nextScrollTop), maxScrollTop));
+}
+
+function setMessageScrollTop(value) {
+  if (!messagesEl) return;
+  programmaticMessageScroll = true;
+  messagesEl.scrollTop = value;
+  lastObservedMessageScrollTop = messagesEl.scrollTop;
+  requestAnimationFrame(() => {
+    programmaticMessageScroll = false;
+    if (messagesEl) lastObservedMessageScrollTop = messagesEl.scrollTop;
+  });
+}
+
+function cssEscape(value) {
+  if (typeof CSS !== "undefined" && CSS.escape) return CSS.escape(value);
+  return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
 function renderRunFailureCard(card) {

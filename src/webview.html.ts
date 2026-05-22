@@ -222,7 +222,8 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     #messages {
       overflow: auto;
       padding: 12px 14px 18px;
-      scroll-behavior: smooth;
+      scroll-behavior: auto;
+      overflow-anchor: none;
     }
     .empty {
       max-width: 760px;
