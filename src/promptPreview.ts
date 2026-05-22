@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AuthorityLevel } from "./authority";
 import type { CapabilityProfileId } from "./capabilityProfiles";
+import { atomicWriteFile, serializePerFile } from "./fileQueue";
 import type { AgentId } from "./phases";
 import type { Phase } from "./prompts";
 
@@ -29,6 +30,9 @@ export interface PromptEnvelope {
   attachments: PromptAttachmentSummary[];
   budget: PromptBudget;
   renderedPrompt: string;
+  renderedPromptOmitted?: boolean;
+  renderedPromptOriginalChars?: number;
+  renderedPromptOmittedAt?: string;
 }
 
 export interface PromptAttachmentSummary {
@@ -102,8 +106,93 @@ export function createPromptEnvelope(input: CreatePromptEnvelopeInput): PromptEn
 
 export async function appendPromptEnvelope(workspaceRoot: string, envelope: PromptEnvelope): Promise<void> {
   const indexPath = promptEnvelopeIndexPath(workspaceRoot);
-  await fs.mkdir(path.dirname(indexPath), { recursive: true });
-  await fs.appendFile(indexPath, `${JSON.stringify(envelope)}\n`, "utf8");
+  await serializePerFile(indexPath, async () => {
+    await fs.mkdir(path.dirname(indexPath), { recursive: true });
+    await fs.appendFile(indexPath, `${JSON.stringify(envelope)}\n`, "utf8");
+  });
+}
+
+export interface PromptBodyCompactionSummary {
+  totalRecords: number;
+  compactedRecords: number;
+  alreadyCompactedRecords: number;
+  retainedBodyRecords: number;
+  malformedLines: number;
+  missing: boolean;
+}
+
+export interface CompactPromptBodiesOptions {
+  retentionDays: number;
+  now?: Date;
+}
+
+export async function compactPromptEnvelopeBodies(
+  workspaceRoot: string,
+  options: CompactPromptBodiesOptions
+): Promise<PromptBodyCompactionSummary> {
+  const indexPath = promptEnvelopeIndexPath(workspaceRoot);
+  return serializePerFile(indexPath, async () => {
+    let raw: string;
+    try {
+      raw = await fs.readFile(indexPath, "utf8");
+    } catch {
+      return emptyCompactionSummary(true);
+    }
+
+    const now = options.now ?? new Date();
+    const retentionDays = Number.isFinite(options.retentionDays) ? Math.max(0, options.retentionDays) : 3;
+    const cutoffMs = now.getTime() - retentionDays * 24 * 60 * 60 * 1000;
+    const summary = emptyCompactionSummary(false);
+    const nextLines: string[] = [];
+    let changed = false;
+
+    for (const line of raw.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        summary.malformedLines++;
+        nextLines.push(line);
+        continue;
+      }
+      if (!isObjectRecord(parsed)) {
+        summary.malformedLines++;
+        nextLines.push(line);
+        continue;
+      }
+
+      summary.totalRecords++;
+      const renderedPrompt = parsed.renderedPrompt;
+      if (typeof renderedPrompt !== "string" || renderedPrompt.length === 0 || parsed.renderedPromptOmitted === true) {
+        summary.alreadyCompactedRecords++;
+        nextLines.push(JSON.stringify(parsed));
+        continue;
+      }
+
+      const timestampMs = typeof parsed.timestamp === "string" ? Date.parse(parsed.timestamp) : Number.NaN;
+      if (!Number.isFinite(timestampMs) || timestampMs > cutoffMs) {
+        summary.retainedBodyRecords++;
+        nextLines.push(JSON.stringify(parsed));
+        continue;
+      }
+
+      summary.compactedRecords++;
+      changed = true;
+      nextLines.push(JSON.stringify({
+        ...parsed,
+        renderedPrompt: "",
+        renderedPromptOmitted: true,
+        renderedPromptOriginalChars: renderedPrompt.length,
+        renderedPromptOmittedAt: now.toISOString(),
+      }));
+    }
+
+    if (changed) {
+      await atomicWriteFile(indexPath, nextLines.length ? `${nextLines.join("\n")}\n` : "");
+    }
+    return summary;
+  });
 }
 
 export async function readLatestPromptEnvelope(workspaceRoot: string): Promise<PromptEnvelope | undefined> {
@@ -169,7 +258,7 @@ export function renderPromptEnvelopePreview(envelope: PromptEnvelope): string {
     "## Rendered Prompt",
     "",
     "```text",
-    envelope.renderedPrompt,
+    renderedPromptBodyForPreview(envelope),
     "```",
   ].join("\n");
 }
@@ -236,4 +325,28 @@ function formatCommandPart(value: string): string {
 function emptyToUndefined(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
+}
+
+function renderedPromptBodyForPreview(envelope: PromptEnvelope): string {
+  if (!envelope.renderedPromptOmitted) return envelope.renderedPrompt;
+  const chars = envelope.renderedPromptOriginalChars !== undefined
+    ? ` Original body was ${envelope.renderedPromptOriginalChars} chars.`
+    : "";
+  const omittedAt = envelope.renderedPromptOmittedAt ? ` Omitted at ${envelope.renderedPromptOmittedAt}.` : "";
+  return `[Rendered prompt body omitted by Hydra workspace cleanup.${chars}${omittedAt}]`;
+}
+
+function emptyCompactionSummary(missing: boolean): PromptBodyCompactionSummary {
+  return {
+    totalRecords: 0,
+    compactedRecords: 0,
+    alreadyCompactedRecords: 0,
+    retainedBodyRecords: 0,
+    malformedLines: 0,
+    missing,
+  };
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

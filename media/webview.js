@@ -165,6 +165,7 @@ const ACTIONS = [
   { id: "pin-objective", group: "Objective", name: "Pin Objective", what: "Use composer text as room objective", run: () => setObjectiveBtn.click(), enabled: () => !setObjectiveBtn.disabled },
   { id: "preview-prompt", group: "Objective", name: "Preview Prompt", what: "Inspect the exact next prompt", run: () => previewPromptBtn.click(), enabled: () => !previewPromptBtn.disabled },
   { id: "open-last-prompt", group: "Objective", name: "Open Last Prompt", what: "Reopen the latest persisted prompt envelope", run: () => openLastPromptBtn.click(), enabled: () => !openLastPromptBtn.disabled },
+  { id: "clean-workspace-state", group: "Objective", name: "Clean Workspace State", what: "Compact old prompt bodies and prune stale .hydra diagnostics", run: () => vscode.postMessage({ type: "cleanWorkspaceState" }), enabled: () => !lastState.canOpenFolder },
   { id: "archive-chat", group: "Objective", name: "Archive Chat", what: "Archive transcript and clear room", run: () => archiveChatBtn.click(), enabled: () => !archiveChatBtn.disabled },
   { id: "accept-default", group: "Workflow", name: "Accept Default", what: "Run the latest decision default", run: () => acceptDefaultBtn.click(), enabled: () => !acceptDefaultBtn.disabled },
   { id: "toggle-auto-accept-default", group: "Workflow", name: "Toggle Auto Accept Default", what: "Turn automatic default acceptance on or off", run: () => autoAdvanceDefaultsBtn.click(), enabled: () => !autoAdvanceDefaultsBtn.disabled },
@@ -1384,7 +1385,7 @@ function disabledReason(action) {
   if (action.id === "open-folder") return "workspace is already open";
   if (action.id === "fix-codex") return "Codex path check is not failing";
   if (action.id === "fix-claude") return "Claude path check is not failing";
-  if (action.id === "choose-model" || action.id === "choose-effort" || action.id === "test-telegram" || action.id === "open-objective" || action.id === "open-agent-calls") return "open a workspace folder first";
+  if (action.id === "choose-model" || action.id === "choose-effort" || action.id === "test-telegram" || action.id === "open-objective" || action.id === "open-agent-calls" || action.id === "clean-workspace-state") return "open a workspace folder first";
   if (action.id.indexOf("assign-") === 0) return "builder assignment unavailable";
   if (action.id === "request-review") return "no build ready for review";
   if (action.id.indexOf("poke-") === 0 || action.id.indexOf("-command") > 0 || action.id.indexOf("-raw") > 0 || action.id === "native-action") return "native terminal actions unavailable";

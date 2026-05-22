@@ -189,6 +189,7 @@ const commandCenterActionCoverage: Record<CommandCenterActionId, readonly RegExp
   pokeBothTerminalsWithDiff: [/id="pokeBothDiffBtn"/, /pokeBothDiffBtn\.addEventListener\("click"/],
   openObjective: [/id: "open-objective"/, /type: "openObjective"/],
   openLastPrompt: [/id: "open-last-prompt"/, /type: "openLastPrompt"/],
+  cleanWorkspaceState: [/id: "clean-workspace-state"/, /type: "cleanWorkspaceState"/],
   openVerification: [/id: "open-verification-file"/, /type: "openVerification"/],
   openDecisions: [/id: "open-decisions"/, /type: "openDecisions"/],
   openSessionBrief: [/id: "session-brief"/, /type: "openSessionBrief"/],

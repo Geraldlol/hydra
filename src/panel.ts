@@ -115,6 +115,7 @@ import {
   readLatestPromptEnvelope,
   renderPromptEnvelopePreview,
 } from "./promptPreview";
+import { cleanWorkspaceState as cleanWorkspaceStateFiles } from "./workspaceCleanup";
 import {
   appendVerification,
   captureGitHead,
@@ -959,6 +960,12 @@ export class HydraRoomPanel {
     await this.appendSystemMessage(
       `Archived ${result.archivedMessages} room message${result.archivedMessages === 1 ? "" : "s"} to \`${archiveLabel}\`. Room window cleared.`
     );
+    try {
+      await this.appendSystemMessage(await this.runWorkspaceStateCleanup());
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await this.appendSystemMessage(`Hydra workspace cleanup after archive failed: ${message}`);
+    }
     this.postState();
 
     const picked = await vscode.window.showInformationMessage(
@@ -1519,6 +1526,9 @@ export class HydraRoomPanel {
       case "openLastPrompt":
         await this.openLastPrompt();
         return;
+      case "cleanWorkspaceState":
+        await this.cleanWorkspaceState();
+        return;
     }
   }
 
@@ -1546,6 +1556,39 @@ export class HydraRoomPanel {
       content: renderPromptEnvelopePreview(envelope),
     });
     await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+  }
+
+  async cleanWorkspaceState(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    const message = await this.runWorkspaceStateCleanup();
+    await this.appendSystemMessage(message);
+    vscode.window.showInformationMessage(message.replace(/`/g, ""));
+    this.postState();
+  }
+
+  private async runWorkspaceStateCleanup(): Promise<string> {
+    const promptRetentionDays = this.promptBodyRetentionDays();
+    const diagnosticRetentionDays = this.diagnosticRetentionDays();
+    const summary = await cleanWorkspaceStateFiles(this.workspaceRoot, {
+      promptBodyRetentionDays: promptRetentionDays,
+      diagnosticRetentionDays,
+    });
+    const prompt = summary.promptBodies;
+    const diagnostics = summary.diagnostics;
+    const promptSummary = prompt.missing
+      ? "Hydra workspace cleanup found no prompt index yet."
+      : [
+          `Hydra workspace cleanup compacted ${prompt.compactedRecords} old prompt bod${prompt.compactedRecords === 1 ? "y" : "ies"} from \`.hydra/prompts/index.jsonl\`.`,
+          `Prompt body retention: ${promptRetentionDays} day${promptRetentionDays === 1 ? "" : "s"}.`,
+          `Records: ${prompt.totalRecords} parsed, ${prompt.retainedBodyRecords} still keeping bodies, ${prompt.alreadyCompactedRecords} already compacted${prompt.malformedLines ? `, ${prompt.malformedLines} malformed preserved` : ""}.`,
+        ].join(" ");
+    const message = [
+      promptSummary,
+      `Deleted ${diagnostics.deletedFiles} stale diagnostic file${diagnostics.deletedFiles === 1 ? "" : "s"} (${formatBytes(diagnostics.deletedBytes)}) from terminal request prompts, replies, logs, and dispatch scripts.`,
+      `Diagnostic retention: ${diagnosticRetentionDays} day${diagnosticRetentionDays === 1 ? "" : "s"}.`,
+    ].join(" ");
+    return message;
   }
 
   async setObjective(text: string): Promise<void> {
@@ -4272,6 +4315,16 @@ export class HydraRoomPanel {
     return Math.max(0, Math.floor(raw));
   }
 
+  private promptBodyRetentionDays(): number {
+    const raw = vscode.workspace.getConfiguration("hydraRoom").get<number>("promptBodyRetentionDays", 3);
+    return Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : 3;
+  }
+
+  private diagnosticRetentionDays(): number {
+    const raw = vscode.workspace.getConfiguration("hydraRoom").get<number>("diagnosticRetentionDays", 7);
+    return Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : 7;
+  }
+
   private wikiWrapupAgent(): AgentId {
     const configured = vscode.workspace.getConfiguration("hydraRoom").get<string>("wikiWrapupAgent", "auto").trim();
     if (configured === "codex" || configured === "claude") return configured;
@@ -4975,6 +5028,9 @@ export class HydraRoomPanel {
           break;
         case "openLastPrompt":
           await this.openLastPrompt();
+          break;
+        case "cleanWorkspaceState":
+          await this.cleanWorkspaceState();
           break;
         case "acceptDefaultDecision":
           await this.acceptDefaultDecision();
@@ -5736,6 +5792,18 @@ async function isGitWorkspace(cwd: string): Promise<boolean> {
     child.on("error", () => { if (!settled) { settled = true; resolve(false); } });
     child.on("close", (code) => { if (!settled) { settled = true; resolve(code === 0); } });
   });
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KiB", "MiB", "GiB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
 }
 
 function makeNonce(): string {

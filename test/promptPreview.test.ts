@@ -6,6 +6,7 @@ import * as path from "node:path";
 import {
   appendPromptEnvelope,
   analyzePromptBudget,
+  compactPromptEnvelopeBodies,
   createPromptEnvelope,
   formatCommand,
   promptEnvelopeIndexPath,
@@ -122,6 +123,102 @@ describe("prompt preview envelopes", () => {
     const latest = await readLatestPromptEnvelope(dir);
     assert.equal(latest?.id, "new");
     assert.equal(latest?.renderedPrompt, "New prompt.");
+  });
+
+  test("compacts old rendered prompt bodies while preserving recent bodies", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-compact-prompt-envelope-"));
+    await appendPromptEnvelope(dir, createPromptEnvelope({
+      id: "old",
+      timestamp: "2026-05-01T00:00:00.000Z",
+      agent: "codex",
+      otherAgent: "claude",
+      phase: "opener",
+      transport: "oneShot",
+      cwd: dir,
+      command: "codex",
+      args: ["exec", "-"],
+      renderedPrompt: "Old prompt body.",
+    }));
+    await appendPromptEnvelope(dir, createPromptEnvelope({
+      id: "recent",
+      timestamp: "2026-05-21T00:00:00.000Z",
+      agent: "claude",
+      otherAgent: "codex",
+      phase: "review",
+      transport: "terminalBridge",
+      cwd: dir,
+      command: "claude",
+      args: ["-p"],
+      renderedPrompt: "Recent prompt body.",
+    }));
+
+    const summary = await compactPromptEnvelopeBodies(dir, {
+      retentionDays: 3,
+      now: new Date("2026-05-22T00:00:00.000Z"),
+    });
+
+    assert.equal(summary.totalRecords, 2);
+    assert.equal(summary.compactedRecords, 1);
+    assert.equal(summary.retainedBodyRecords, 1);
+
+    const raw = await fs.readFile(promptEnvelopeIndexPath(dir), "utf8");
+    const records = raw.trim().split(/\r?\n/).map((line) => JSON.parse(line));
+    assert.equal(records[0].id, "old");
+    assert.equal(records[0].renderedPrompt, "");
+    assert.equal(records[0].renderedPromptOmitted, true);
+    assert.equal(records[0].renderedPromptOriginalChars, "Old prompt body.".length);
+    assert.equal(records[1].id, "recent");
+    assert.equal(records[1].renderedPrompt, "Recent prompt body.");
+  });
+
+  test("preserves malformed prompt index lines during compaction", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-compact-malformed-prompt-envelope-"));
+    await appendPromptEnvelope(dir, createPromptEnvelope({
+      id: "old",
+      timestamp: "2026-05-01T00:00:00.000Z",
+      agent: "codex",
+      otherAgent: "claude",
+      phase: "opener",
+      transport: "oneShot",
+      cwd: dir,
+      command: "codex",
+      args: ["exec", "-"],
+      renderedPrompt: "Old prompt body.",
+    }));
+    await fs.appendFile(promptEnvelopeIndexPath(dir), "{not json}\n", "utf8");
+
+    const summary = await compactPromptEnvelopeBodies(dir, {
+      retentionDays: 3,
+      now: new Date("2026-05-22T00:00:00.000Z"),
+    });
+
+    assert.equal(summary.compactedRecords, 1);
+    assert.equal(summary.malformedLines, 1);
+    const raw = await fs.readFile(promptEnvelopeIndexPath(dir), "utf8");
+    assert.match(raw, /\{not json\}/);
+  });
+
+  test("renders omitted prompt bodies with a cleanup note", () => {
+    const envelope = createPromptEnvelope({
+      id: "omitted",
+      timestamp: "2026-05-09T10:00:00.000Z",
+      agent: "codex",
+      otherAgent: "claude",
+      phase: "build",
+      transport: "oneShot",
+      cwd: "C:\\repo",
+      command: "codex",
+      args: ["exec", "-"],
+      renderedPrompt: "will be omitted",
+    });
+    envelope.renderedPrompt = "";
+    envelope.renderedPromptOmitted = true;
+    envelope.renderedPromptOriginalChars = 1234;
+    envelope.renderedPromptOmittedAt = "2026-05-22T00:00:00.000Z";
+
+    const preview = renderPromptEnvelopePreview(envelope);
+    assert.match(preview, /Rendered prompt body omitted by Hydra workspace cleanup/);
+    assert.match(preview, /Original body was 1234 chars/);
   });
 
   test("formats readable command strings", () => {

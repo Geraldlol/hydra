@@ -206,6 +206,17 @@ describe("workspace edit viewer source contracts", () => {
     assert.match(head, /async archiveAndClearRoom/);
   });
 
+  test("archiveAndClearRoom runs workspace cleanup after archiving", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    const start = source.indexOf("async archiveAndClearRoom()");
+    const end = source.indexOf("async openDecisions()", start);
+    assert.ok(start >= 0 && end > start, "archiveAndClearRoom not found");
+    const body = source.slice(start, end);
+    assert.match(body, /archiveAndResetTranscript/);
+    assert.match(body, /runWorkspaceStateCleanup\(\)/);
+    assert.match(body, /Hydra workspace cleanup after archive failed/);
+  });
+
   test("runVerificationInternal gates inferred commands on vscode.workspace.isTrusted", () => {
     // Why: a workspace's package.json scripts are attacker-controlled in
     // an untrusted workspace. The handler must short-circuit BEFORE

@@ -40,6 +40,7 @@ export type WebviewMessage =
   | { type: "showCommandCenter" }
   | { type: "previewNextPrompt"; text?: string; opener?: string }
   | { type: "openLastPrompt" }
+  | { type: "cleanWorkspaceState" }
   | { type: "acceptDefaultDecision" }
   | { type: "toggleAutoAdvanceActionableDefaults" }
   | { type: "handBack" }

@@ -78,6 +78,7 @@ describe("command center", () => {
     assert.ok(actions.some((action) => action.id === "captureNativeDataSnapshot"));
     assert.ok(actions.some((action) => action.id === "openObjective"));
     assert.ok(actions.some((action) => action.id === "openLastPrompt"));
+    assert.ok(actions.some((action) => action.id === "cleanWorkspaceState"));
     assert.ok(actions.some((action) => action.id === "openVerification"));
     assert.ok(actions.some((action) => action.id === "openDecisions"));
     assert.ok(actions.some((action) => action.id === "openWikiContext"));
