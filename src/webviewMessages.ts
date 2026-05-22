@@ -45,6 +45,7 @@ export type WebviewMessage =
   | { type: "openTranscript" }
   | { type: "archiveAndClearRoom" }
   | { type: "openDecisions" }
+  | { type: "chooseModelOrEffort" }
   | { type: "chooseModel" }
   | { type: "chooseEffort" }
   | { type: "testTelegram" }

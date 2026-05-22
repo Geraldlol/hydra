@@ -1240,6 +1240,23 @@ export class HydraRoomPanel {
     await chooseModelInteractively(this.modelChooserDeps());
   }
 
+  async chooseModelOrEffort(): Promise<void> {
+    await this.ready();
+    const pick = await vscode.window.showQuickPick(
+      [
+        { label: "Choose Model", description: "Pick Codex or Claude model overrides", value: "model" },
+        { label: "Choose Thinking Level", description: "Pick Codex reasoning or Claude effort overrides", value: "effort" },
+      ],
+      { placeHolder: "What do you want to change?" },
+    );
+    if (!pick) return;
+    if (pick.value === "effort") {
+      await this.chooseEffort();
+    } else {
+      await this.chooseModel();
+    }
+  }
+
   async chooseEffort(): Promise<void> {
     await this.ready();
     await chooseEffortInteractively({
@@ -4963,6 +4980,9 @@ export class HydraRoomPanel {
           break;
         case "openDecisions":
           await this.openDecisions();
+          break;
+        case "chooseModelOrEffort":
+          await this.chooseModelOrEffort();
           break;
         case "chooseModel":
           await this.chooseModel();

@@ -951,7 +951,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
         <span id="nativeActionRail" class="rail-chip optional">actions: 0</span>
         <span id="workQueueRail" class="rail-chip optional">queue clear</span>
         <span id="decisionRail" class="rail-chip optional">decision: none</span>
-        <span id="modelRail" class="rail-chip" role="button" tabindex="0" title="Click to pick a model for Claude or Codex (Ctrl+Alt+M).">models: CLI default</span>
+        <span id="modelRail" class="rail-chip" role="button" tabindex="0" title="Click to change model or thinking level.">models: CLI default</span>
         <button id="profileBtn" class="secondary rail-link" type="button" title="Change Codex or Claude capability profile">Profiles</button>
       </div>
     </header>

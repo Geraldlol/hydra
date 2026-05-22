@@ -131,7 +131,7 @@ if (usageRail) {
   usageRail.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } });
 }
 if (modelRail) {
-  const open = () => vscode.postMessage({ type: "chooseModel" });
+  const open = () => vscode.postMessage({ type: "chooseModelOrEffort" });
   modelRail.addEventListener("click", open);
   modelRail.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } });
 }

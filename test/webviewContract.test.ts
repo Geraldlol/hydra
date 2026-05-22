@@ -132,6 +132,7 @@ const hostMessages = [
   "captureNativeDataSnapshot",
   "chooseEffort",
   "chooseModel",
+  "chooseModelOrEffort",
   "changeCapabilityProfile",
   "testTelegram",
   "fixClaudePath",
@@ -290,6 +291,11 @@ describe("webview contract", () => {
     ]) {
       assert.match(surface, new RegExp(`id: "${id}"`), `missing command action ${id}`);
     }
+  });
+
+  test("model rail opens model-or-thinking chooser", () => {
+    assert.match(html, /id="modelRail"[^>]+title="Click to change model or thinking level\."/);
+    assert.match(surface, /const open = \(\) => vscode\.postMessage\(\{ type: "chooseModelOrEffort" \}\)/);
   });
 
   test("keeps every host Command Center action covered by the webview Command Center or a direct control", () => {
