@@ -209,6 +209,8 @@ Use `Hydra: Run Verification` or the in-room button after a build. Hydra runs `h
 3. `npm run check`
 4. `npm run lint`
 
+Inference is gated by Workspace Trust. In a trusted workspace, Hydra may run the inferred command. In an untrusted workspace, Hydra refuses inferred `package.json` commands because those scripts are attacker-controlled; set `hydraRoom.verifyCommand` in User or Machine Settings to opt in explicitly, or grant Workspace Trust.
+
 The latest verification result is shown in the room, persisted to `.hydra/verification.jsonl`, and included in the next Review prompt.
 
 Hydra also runs verification automatically after a successful Build phase by default (`hydraRoom.autoVerifyAfterBuild`). If you want the room to move straight from a passing automatic verification into Review, enable `hydraRoom.autoRequestReviewAfterPassingVerification`.

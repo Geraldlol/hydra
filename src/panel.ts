@@ -119,7 +119,7 @@ import {
   appendVerification,
   captureGitHead,
   ensureVerificationFile,
-  inferVerificationCommand,
+  resolveVerificationCommand,
   readVerifications,
   runVerificationCommand,
   verificationAsReviewContext,
@@ -751,14 +751,27 @@ export class HydraRoomPanel {
       return undefined;
     }
 
-    const command = await this.verificationCommand();
-    if (!command) {
+    const cfg = vscode.workspace.getConfiguration("hydraRoom");
+    const resolution = await resolveVerificationCommand({
+      configured: cfg.get<string>("verifyCommand", ""),
+      isWorkspaceTrusted: vscode.workspace.isTrusted,
+      workspaceRoot: this.workspaceRoot,
+    });
+    if (resolution.kind === "refusedUntrustedInference") {
+      await this.appendSystemMessage(
+        "Verification unavailable: this workspace is not trusted, so Hydra will not run inferred package.json scripts. Set hydraRoom.verifyCommand in User or Machine Settings to opt in, or grant Workspace Trust."
+      );
+      this.postState();
+      return undefined;
+    }
+    if (resolution.kind === "missing") {
       await this.appendSystemMessage(
         "Verification unavailable: set `hydraRoom.verifyCommand` or add a package.json script named `check`, `test`, or `lint`."
       );
       this.postState();
       return undefined;
     }
+    const command = resolution.command;
 
     const ctrl = new AbortController();
     this.currentAbort = ctrl;
@@ -3791,12 +3804,6 @@ export class HydraRoomPanel {
       transcript: this.buildPromptContextFromMessages(previewMessages, phase, undefined, selectedOpener),
       currentUserMessage: trimmed,
     });
-  }
-
-  private async verificationCommand(): Promise<string | undefined> {
-    const configured = vscode.workspace.getConfiguration("hydraRoom").get<string>("verifyCommand", "").trim();
-    if (configured) return configured;
-    return await inferVerificationCommand(this.workspaceRoot);
   }
 
   private currentDecisionAction(): DecisionAction {
