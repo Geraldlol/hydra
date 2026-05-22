@@ -20,6 +20,13 @@ export interface TranscriptArchiveResult {
   archivedChars: number;
 }
 
+export interface TranscriptContextWindow {
+  markdown: string;
+  omittedMessages: number;
+  omittedChars: number;
+  truncated: boolean;
+}
+
 const ROLE_TO_LABEL: Record<MessageRole, string> = {
   user: "You",
   codex: "Codex",
@@ -209,15 +216,73 @@ export function transcriptAsContext(messages: TranscriptMessage[]): string {
   return messages.map(serializeMessage).join("\n");
 }
 
+export function transcriptAsWindowedContext(
+  messages: TranscriptMessage[],
+  maxChars: number
+): TranscriptContextWindow {
+  const full = transcriptAsContext(messages);
+  const cap = Math.max(0, Math.floor(maxChars));
+  if (cap <= 0 || full.length <= cap) {
+    return {
+      markdown: full,
+      omittedMessages: 0,
+      omittedChars: 0,
+      truncated: false,
+    };
+  }
+
+  const chunks = messages.map(serializeMessage);
+  const kept: string[] = [];
+  let keptChars = 0;
+  let omittedMessages = 0;
+  let omittedChars = 0;
+
+  for (let i = chunks.length - 1; i >= 0; i--) {
+    const chunk = chunks[i];
+    const separatorChars = kept.length > 0 ? 1 : 0;
+    const nextChars = keptChars + separatorChars + chunk.length;
+    if (kept.length > 0 && nextChars > cap) {
+      omittedMessages = i + 1;
+      omittedChars = chunks.slice(0, i + 1).join("\n").length;
+      break;
+    }
+    kept.unshift(chunk);
+    keptChars = nextChars;
+  }
+
+  if (omittedMessages === 0) {
+    return {
+      markdown: full,
+      omittedMessages: 0,
+      omittedChars: 0,
+      truncated: false,
+    };
+  }
+
+  const notice = [
+    "## Hydra Context Window",
+    "",
+    `[Earlier active transcript omitted by hydraRoom.promptTranscriptMaxChars: ${omittedMessages} message${omittedMessages === 1 ? "" : "s"}, ${omittedChars} chars. Use Hydra wiki context and .hydra/transcript.md for durable history.]`,
+  ].join("\n");
+
+  return {
+    markdown: [notice, ...kept].join("\n"),
+    omittedMessages,
+    omittedChars,
+    truncated: true,
+  };
+}
+
 export function buildPromptContext(
   messages: TranscriptMessage[],
   _phase: Phase,
   _completedUserTurns = 2,
   _maxAgeMs = 24 * 60 * 60 * 1000,
-  _nowMs = Date.now()
+  _nowMs = Date.now(),
+  maxChars = 0
 ): string {
   const promptMessages = messages.filter((message) => !isPromptNoiseSystemMessage(message));
-  return transcriptAsContext(promptMessages);
+  return transcriptAsWindowedContext(promptMessages, maxChars).markdown;
 }
 
 function isPromptNoiseSystemMessage(message: TranscriptMessage): boolean {

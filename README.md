@@ -134,6 +134,7 @@ Turn it off with `hydraRoom.autopilotOnStart: false`. Keep one-shot as the autom
 ## Transcript
 
 Hydra keeps the full room log at `.hydra/transcript.md`. Agent prompts include the active room transcript so the agents see the same room history Hydra has on disk.
+To keep long rooms from sending the same old discussion back to both agents on every turn, prompt injection keeps only the newest active transcript messages once `hydraRoom.promptTranscriptMaxChars` is exceeded. The omitted history remains in `.hydra/transcript.md` or `.hydra/archive/`, and durable facts should be carried forward through `.hydra/wiki/context.md`.
 
 Hydra also writes:
 

@@ -2,7 +2,7 @@
   "name": "vscode-hydra-room",
   "displayName": "Hydra",
   "description": "Three-way collaboration room for the user, Codex CLI, and Claude Code CLI inside VS Code.",
-  "version": "0.4.21",
+  "version": "0.4.22",
   "publisher": "local-tools",
   "license": "MIT",
   "private": false,
@@ -312,6 +312,12 @@
           "default": 0,
           "minimum": 0,
           "markdownDescription": "Maximum characters of repository instruction files injected into visible native-terminal prompts after filtering out the recipient CLI's own native instruction files. Set to 0 to skip Hydra-injected repository instructions in terminal bridge prompts."
+        },
+        "hydraRoom.promptTranscriptMaxChars": {
+          "type": "number",
+          "default": 40000,
+          "minimum": 0,
+          "markdownDescription": "Maximum characters of active room transcript injected into agent prompts after objective, workspace instructions, and wiki context. Hydra keeps the newest transcript messages and adds an omission notice when older active history is trimmed. Set to 0 to keep the full active transcript."
         },
         "hydraRoom.editorContextMaxChars": {
           "type": "number",

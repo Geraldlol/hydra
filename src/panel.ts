@@ -3975,7 +3975,7 @@ export class HydraRoomPanel {
     sections.push(
       "",
       contextTitle,
-      buildPromptContext(messages, phase)
+      buildPromptContext(messages, phase, 2, 24 * 60 * 60 * 1000, Date.now(), this.promptTranscriptMaxChars())
     );
     return sections.join("\n");
   }
@@ -3986,6 +3986,11 @@ export class HydraRoomPanel {
 
   private terminalBridgeWorkspaceInstructionsMaxChars(): number {
     return vscode.workspace.getConfiguration("hydraRoom").get<number>("terminalBridgeWorkspaceInstructionsMaxChars", 0);
+  }
+
+  private promptTranscriptMaxChars(): number {
+    const raw = vscode.workspace.getConfiguration("hydraRoom").get<number>("promptTranscriptMaxChars", 40000);
+    return Math.max(0, Math.floor(raw));
   }
 
   private editorContextMaxChars(): number {

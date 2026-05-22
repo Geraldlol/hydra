@@ -15,6 +15,7 @@ import {
   ensureTranscriptFile,
   TranscriptMessage,
   transcriptAsContext,
+  transcriptAsWindowedContext,
 } from "../src/transcript";
 
 async function makeTmpDir(): Promise<string> {
@@ -183,6 +184,40 @@ describe("transcript", () => {
     assert.doesNotMatch(out, /default="Run npm test"/);
     assert.match(out, /Accepted default next action/);
     assert.match(out, /Run npm test/);
+  });
+
+  test("buildPromptContext windows long active transcripts by chars", () => {
+    const messages: TranscriptMessage[] = [
+      { role: "user", text: "old task " + "A".repeat(80), timestamp: "t1" },
+      { role: "codex", text: "old answer " + "B".repeat(80), timestamp: "t2", phase: "opener" },
+      { role: "user", text: "fresh task", timestamp: "t3" },
+      { role: "claude", text: "fresh answer", timestamp: "t4", phase: "reactor" },
+    ];
+
+    const out = buildPromptContext(messages, "closer", 2, 24 * 60 * 60 * 1000, Date.now(), 160);
+
+    assert.match(out, /Hydra Context Window/);
+    assert.match(out, /promptTranscriptMaxChars/);
+    assert.doesNotMatch(out, /old task/);
+    assert.doesNotMatch(out, /old answer/);
+    assert.match(out, /fresh task/);
+    assert.match(out, /fresh answer/);
+  });
+
+  test("transcriptAsWindowedContext reports omitted transcript cost", () => {
+    const messages: TranscriptMessage[] = [
+      { role: "user", text: "old task " + "A".repeat(60), timestamp: "t1" },
+      { role: "codex", text: "old answer " + "B".repeat(60), timestamp: "t2", phase: "opener" },
+      { role: "user", text: "fresh task", timestamp: "t3" },
+    ];
+
+    const out = transcriptAsWindowedContext(messages, 80);
+
+    assert.equal(out.truncated, true);
+    assert.equal(out.omittedMessages, 2);
+    assert.ok(out.omittedChars > 0);
+    assert.doesNotMatch(out.markdown, /old answer/);
+    assert.match(out.markdown, /fresh task/);
   });
 
   test("readTranscript returns [] when file does not exist", async () => {
