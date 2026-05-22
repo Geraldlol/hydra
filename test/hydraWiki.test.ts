@@ -7,6 +7,7 @@ import {
   applyHydraWikiWrapupDraft,
   buildHydraWikiWrapupPrompt,
   ensureHydraWikiFiles,
+  hydraWikiContextRefreshSourceFromMessages,
   hydraWikiContextPath,
   hydraWikiWrapupSourceFromMessages,
   hydraWikiWrapupSourcePath,
@@ -144,7 +145,26 @@ describe("Hydra wiki context", () => {
     assert.doesNotMatch(source.markdown, /old answer/);
     assert.match(source.rawMarkdown, /new durable answer/);
     assert.match(source.sha256, /^[a-f0-9]{64}$/);
+    assert.equal(source.kind, "room-turn");
     assert.equal(source.truncated, false);
+  });
+
+  test("builds a context-refresh source from the active transcript window", () => {
+    const source = hydraWikiContextRefreshSourceFromMessages([
+      { role: "user", text: "old ask " + "A".repeat(120), timestamp: "2026-05-21T10:00:00.000Z" },
+      { role: "codex", phase: "opener", text: "old answer", timestamp: "2026-05-21T10:00:01.000Z" },
+      { role: "user", text: "new ask", timestamp: "2026-05-21T11:00:00.000Z" },
+      { role: "claude", phase: "reactor", text: "new durable answer", timestamp: "2026-05-21T11:00:01.000Z" },
+    ], 120);
+
+    assert.ok(source);
+    assert.equal(source.kind, "context-refresh");
+    assert.match(source.key, /^context-refresh:/);
+    assert.match(source.rawMarkdown, /old ask/);
+    assert.match(source.rawMarkdown, /new durable answer/);
+    assert.match(source.markdown, /new durable answer/);
+    assert.equal(source.originalChars, source.rawMarkdown.length);
+    assert.equal(source.truncated, true);
   });
 
   test("stores immutable raw wrapup sources with provenance metadata", async () => {
@@ -168,6 +188,21 @@ describe("Hydra wiki context", () => {
     assert.match(raw, /Durable source content/);
   });
 
+  test("stores context-refresh raw sources with their source kind", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-wiki-"));
+    const source = hydraWikiContextRefreshSourceFromMessages([
+      { role: "user", text: "refresh this memory", timestamp: "2026-05-21T12:00:00.000Z" },
+      { role: "codex", phase: "opener", text: "Durable refresh content.", timestamp: "2026-05-21T12:00:01.000Z" },
+    ], 8000);
+
+    assert.ok(source);
+    const stored = await writeHydraWikiWrapupSource(dir, source, "2026-05-21T12:00:02.000Z");
+
+    const raw = await fs.readFile(path.join(dir, ...stored.relativePath.split("/")), "utf8");
+    assert.match(raw, /kind: hydra-context-refresh/);
+    assert.match(raw, /refresh this memory/);
+  });
+
   test("renders a strict wiki wrapup prompt with current wiki files", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-wiki-"));
     await ensureHydraWikiFiles(dir);
@@ -186,6 +221,7 @@ describe("Hydra wiki context", () => {
     });
 
     assert.match(prompt, /Return JSON only/);
+    assert.match(prompt, /Task: update the wiki from the just-finished Hydra room turn\./);
     assert.match(prompt, /--- existing context\.md ---/);
     assert.match(prompt, /Existing fact/);
     assert.match(prompt, /remember the new runbook/);
@@ -193,6 +229,27 @@ describe("Hydra wiki context", () => {
     assert.match(prompt, /Raw source snapshot:/);
     assert.match(prompt, new RegExp(source.sha256));
     assert.match(prompt, new RegExp(`\\[src:${source.sha256.slice(0, 12)}\\]`));
+  });
+
+  test("renders context-refresh wrapup prompts with refresh-specific guidance", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-wiki-"));
+    await ensureHydraWikiFiles(dir);
+    const files = await readHydraWikiFiles(dir);
+    const source = hydraWikiContextRefreshSourceFromMessages([
+      { role: "user", text: "first durable lesson", timestamp: "2026-05-21T12:00:00.000Z" },
+      { role: "claude", phase: "reactor", text: "second durable lesson", timestamp: "2026-05-21T12:00:01.000Z" },
+    ], 8000);
+
+    assert.ok(source);
+    const prompt = buildHydraWikiWrapupPrompt({
+      nowIso: "2026-05-21T12:00:02.000Z",
+      files,
+      source,
+    });
+
+    assert.match(prompt, /Task: update the wiki from the active transcript context refresh\./);
+    assert.match(prompt, /compact/);
+    assert.match(prompt, /--- active transcript context refresh ---/);
   });
 
   test("parses fenced wiki wrapup JSON", () => {

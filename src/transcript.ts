@@ -262,7 +262,7 @@ export function transcriptAsWindowedContext(
   const notice = [
     "## Hydra Context Window",
     "",
-    `[Earlier active transcript omitted by hydraRoom.promptTranscriptMaxChars: ${omittedMessages} message${omittedMessages === 1 ? "" : "s"}, ${omittedChars} chars. Use Hydra wiki context and .hydra/transcript.md for durable history.]`,
+    `[Earlier active transcript omitted by hydraRoom.promptTranscriptMaxChars (cap ${cap} chars): ${omittedMessages} message${omittedMessages === 1 ? "" : "s"}, ${omittedChars} chars. Use Hydra wiki context and .hydra/transcript.md for durable history.]`,
   ].join("\n");
 
   return {

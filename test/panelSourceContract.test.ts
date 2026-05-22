@@ -174,6 +174,20 @@ describe("wiki wrapup source contracts", () => {
     assert.match(method, /rawSourcesPruned: 0/);
   });
 
+  test("wiki context refreshes run when transcript reaches the prompt cap", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    const methodStart = source.indexOf("private async maybeRunWikiContextRefresh(");
+    const methodEnd = source.indexOf("private async runWikiWrapupAgent", methodStart);
+    assert.ok(methodStart >= 0 && methodEnd > methodStart);
+
+    const method = source.slice(methodStart, methodEnd);
+    assert.match(method, /hydraWikiContextRefreshSourceFromMessages\(this\.messages, cap\)/);
+    assert.match(method, /refreshSource\.originalChars < cap/);
+    assert.match(method, /lastWikiRefreshTranscriptBucket/);
+    assert.match(method, /Hydra wiki context refresh threshold reached after \$\{source\}\./);
+    assert.match(method, /sourceOverride: refreshSource/);
+  });
+
   test("agent replies emit wiki usage telemetry after transcript persistence", () => {
     const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
     const methodStart = source.indexOf("private async finalizePendingMessage(");

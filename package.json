@@ -2,7 +2,7 @@
   "name": "vscode-hydra-room",
   "displayName": "Hydra",
   "description": "Three-way collaboration room for the user, Codex CLI, and Claude Code CLI inside VS Code.",
-  "version": "0.4.22",
+  "version": "0.4.23",
   "publisher": "local-tools",
   "license": "MIT",
   "private": false,
@@ -315,9 +315,9 @@
         },
         "hydraRoom.promptTranscriptMaxChars": {
           "type": "number",
-          "default": 40000,
+          "default": 400000,
           "minimum": 0,
-          "markdownDescription": "Maximum characters of active room transcript injected into agent prompts after objective, workspace instructions, and wiki context. Hydra keeps the newest transcript messages and adds an omission notice when older active history is trimmed. Set to 0 to keep the full active transcript."
+          "markdownDescription": "Maximum characters of active room transcript injected into agent prompts after objective, workspace instructions, and wiki context. This is a per-call cost and attention guardrail, not a model context-window limit. Hydra keeps the newest transcript messages, adds an omission notice when older active history is trimmed, and triggers a wiki context refresh when the active transcript crosses this cap. Set to 0 to keep the full active transcript and disable threshold refreshes."
         },
         "hydraRoom.editorContextMaxChars": {
           "type": "number",

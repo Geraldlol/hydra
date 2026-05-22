@@ -197,6 +197,7 @@ import {
   applyHydraWikiWrapupDraft,
   buildHydraWikiWrapupPrompt,
   ensureHydraWikiFiles,
+  hydraWikiContextRefreshSourceFromMessages,
   hydraWikiContextPath,
   hydraWikiWrapupSourceFromMessages,
   hydraWikiWrapupSourcePath,
@@ -205,6 +206,7 @@ import {
   readHydraWikiFiles,
   readHydraWikiPromptContext,
   readHydraWikiStatus,
+  type HydraWikiWrapupSource,
   writeHydraWikiWrapupSource,
 } from "./hydraWiki";
 import { renderSessionBrief, sessionBriefPath, writeSessionBrief } from "./sessionBrief";
@@ -266,6 +268,7 @@ interface NativeTerminalPokeOptions {
 interface WikiWrapupOptions {
   force?: boolean;
   manual?: boolean;
+  sourceOverride?: HydraWikiWrapupSource;
 }
 
 interface NativeActionPick extends vscode.QuickPickItem {
@@ -305,6 +308,7 @@ export class HydraRoomPanel {
   private readonly pendingRunFailures = new Map<string, RunFailureCard>();
   private wikiWrapupInFlight = false;
   private lastWikiWrapupSourceKey: string | undefined;
+  private lastWikiRefreshTranscriptBucket = 0;
   private transcriptUri!: vscode.Uri;
   private objectiveUri!: vscode.Uri;
   private decisionsUri!: vscode.Uri;
@@ -2170,6 +2174,7 @@ export class HydraRoomPanel {
         this.currentAbort = undefined;
         this.postState();
         await this.maybeRunWikiWrapup("discussion");
+        await this.maybeRunWikiContextRefresh("discussion");
         await this.autoAdvanceActionableDefault("discussion");
         return;
       }
@@ -2217,6 +2222,7 @@ export class HydraRoomPanel {
       this.currentAbort = undefined;
       this.postState();
       await this.maybeRunWikiWrapup("discussion");
+      await this.maybeRunWikiContextRefresh("discussion");
       await this.autoAdvanceActionableDefault("discussion");
     } finally {
       // Safety net: only fires if a synchronous throw escaped the try block.
@@ -2282,6 +2288,7 @@ export class HydraRoomPanel {
       this.postState();
       if (!ctrl.signal.aborted && results.every(({ result }) => !didAgentFail(result))) {
         await this.maybeRunWikiWrapup("parallel discussion");
+        await this.maybeRunWikiContextRefresh("parallel discussion");
       }
       await this.autoAdvanceActionableDefault("parallel discussion");
     } finally {
@@ -2438,7 +2445,7 @@ export class HydraRoomPanel {
       await skip("cost-cap", "the session cost cap has been reached");
       return;
     }
-    const wrapupSource = hydraWikiWrapupSourceFromMessages(this.messages, this.wikiWrapupMaxSourceChars());
+    const wrapupSource = options.sourceOverride ?? hydraWikiWrapupSourceFromMessages(this.messages, this.wikiWrapupMaxSourceChars());
     if (!wrapupSource) {
       await skip("no-source", "no completed room turn with an agent reply is available");
       return;
@@ -2446,6 +2453,7 @@ export class HydraRoomPanel {
     if (!force && wrapupSource.key === this.lastWikiWrapupSourceKey) {
       await skip("duplicate-source", "the latest room turn was already considered", {
         sourceSha256: wrapupSource.sha256,
+        sourceKind: wrapupSource.kind,
       });
       return;
     }
@@ -2461,6 +2469,7 @@ export class HydraRoomPanel {
         forced: force,
         manual,
         sourceSha256: wrapupSource.sha256,
+        sourceKind: wrapupSource.kind,
         sourceChars: wrapupSource.markdown.length,
         sourceTruncated: wrapupSource.truncated,
       });
@@ -2558,6 +2567,33 @@ export class HydraRoomPanel {
       this.wikiWrapupInFlight = false;
       this.postState();
     }
+  }
+
+  private async maybeRunWikiContextRefresh(source: string): Promise<void> {
+    const cap = this.promptTranscriptMaxChars();
+    if (cap <= 0) {
+      this.lastWikiRefreshTranscriptBucket = 0;
+      return;
+    }
+
+    const refreshSource = hydraWikiContextRefreshSourceFromMessages(this.messages, cap);
+    if (!refreshSource || refreshSource.originalChars < cap) {
+      this.lastWikiRefreshTranscriptBucket = 0;
+      return;
+    }
+
+    const bucket = Math.floor(refreshSource.originalChars / cap);
+    if (bucket <= this.lastWikiRefreshTranscriptBucket) return;
+    this.lastWikiRefreshTranscriptBucket = bucket;
+
+    await this.recordEvent("diagnostic", `Hydra wiki context refresh threshold reached after ${source}.`, {
+      source,
+      transcriptChars: refreshSource.originalChars,
+      promptTranscriptMaxChars: cap,
+      bucket,
+      sourceSha256: refreshSource.sha256,
+    });
+    await this.maybeRunWikiWrapup(`${source} context refresh`, { sourceOverride: refreshSource });
   }
 
   private async runWikiWrapupAgent(
@@ -3989,7 +4025,7 @@ export class HydraRoomPanel {
   }
 
   private promptTranscriptMaxChars(): number {
-    const raw = vscode.workspace.getConfiguration("hydraRoom").get<number>("promptTranscriptMaxChars", 40000);
+    const raw = vscode.workspace.getConfiguration("hydraRoom").get<number>("promptTranscriptMaxChars", 400000);
     return Math.max(0, Math.floor(raw));
   }
 

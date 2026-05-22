@@ -29,6 +29,7 @@ export interface HydraWikiWrapupSource {
   rawMarkdown: string;
   key: string;
   sha256: string;
+  kind: "room-turn" | "context-refresh";
   rawSourcePath?: string;
   originalChars: number;
   truncated: boolean;
@@ -117,6 +118,7 @@ Hydra wiki is the persistent compiled layer for room knowledge. It should let fu
 - Ingest: read one source, extract durable information, update relevant wiki pages, update \`index.md\`, and append \`log.md\`.
 - Query: read \`context.md\` and \`index.md\` first, then drill into wiki pages or raw sources only as needed.
 - Wrapup: after a substantial room turn, preserve the room turn as a raw source snapshot, fold durable facts into \`context.md\`, cite new or materially changed facts with \`[src:<sha12>]\`, add or update page links, and append \`log.md\` with the raw source path and SHA.
+- Context refresh: when the active transcript reaches the prompt transcript cap, preserve a transcript snapshot and refresh \`context.md\` / \`index.md\` so older details can be compacted into durable memory before prompt windowing omits them.
 - Lint: flag contradictions, stale claims, orphan pages, missing links, and unresolved questions.
 
 ## Provenance
@@ -293,6 +295,29 @@ export function hydraWikiWrapupSourceFromMessages(
     rawMarkdown: body,
     key: stableWrapupKey(turnMessages),
     sha256: sha256(body),
+    kind: "room-turn",
+    originalChars,
+    truncated: capped.truncated,
+  };
+}
+
+export function hydraWikiContextRefreshSourceFromMessages(
+  messages: HydraWikiWrapupMessage[],
+  maxChars: number
+): HydraWikiWrapupSource | undefined {
+  const sourceMessages = messages.filter((message) => message.text.trim());
+  if (sourceMessages.length < 2) return undefined;
+
+  const body = sourceMessages.map(formatWrapupMessage).join("\n\n").trim();
+  if (!body) return undefined;
+  const originalChars = body.length;
+  const capped = truncateForWrapupSource(body, Math.max(0, Math.floor(maxChars)));
+  return {
+    markdown: capped.markdown,
+    rawMarkdown: body,
+    key: `context-refresh:${stableWrapupKey(sourceMessages)}`,
+    sha256: sha256(body),
+    kind: "context-refresh",
     originalChars,
     truncated: capped.truncated,
   };
@@ -314,7 +339,7 @@ export async function writeHydraWikiWrapupSource(
   const absolutePath = path.join(workspaceRoot, ...relativePath.split("/"));
   const content = [
     "---",
-    "kind: hydra-room-turn",
+    `kind: ${source.kind === "context-refresh" ? "hydra-context-refresh" : "hydra-room-turn"}`,
     `created: "${nowIso}"`,
     `sha256: "${source.sha256}"`,
     `originalChars: ${source.originalChars}`,
@@ -372,14 +397,18 @@ export async function pruneHydraWikiRawTurns(
 export function buildHydraWikiWrapupPrompt(input: HydraWikiWrapupPromptInput): string {
   const logTail = tailMarkdown(input.files.log, 6000);
   const sourceId = input.source.sha256.slice(0, 12);
+  const sourceLabel = input.source.kind === "context-refresh"
+    ? "active transcript context refresh"
+    : "just-finished Hydra room turn";
   return [
     "You maintain Hydra's persistent `.hydra/wiki` memory using the LLM Wiki pattern: compile durable knowledge once, keep the wiki current, and avoid re-deriving old context every future turn.",
     "",
-    "Task: update the wiki from the just-finished Hydra room turn.",
+    `Task: update the wiki from the ${sourceLabel}.`,
     "",
     "Rules:",
     "- Keep only durable project knowledge, decisions, conventions, recurring user preferences, architecture facts, unresolved questions, and reusable workflow lessons.",
     "- Drop ephemeral chat filler, greetings, transient progress, and facts that are only useful for the current minute.",
+    "- For a context refresh, prioritize compacting still-relevant facts that would be painful to rediscover after old transcript content is omitted from prompts.",
     "- If the turn creates no durable wiki value, return `changed: false` and leave the markdown fields empty.",
     "- `contextMarkdown` and `indexMarkdown` must be full replacement file contents when changed, not patches.",
     "- Keep `context.md` compact. It is injected into future prompts.",
@@ -412,7 +441,7 @@ export function buildHydraWikiWrapupPrompt(input: HydraWikiWrapupPromptInput): s
     "--- log.md tail ---",
     logTail.trim(),
     "",
-    "--- just-finished room turn ---",
+    `--- ${sourceLabel} ---`,
     input.source.markdown,
   ].join("\n");
 }
