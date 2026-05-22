@@ -22,6 +22,8 @@ export interface TranscriptArchiveResult {
 
 export interface TranscriptContextWindow {
   markdown: string;
+  originalChars: number;
+  keptChars: number;
   omittedMessages: number;
   omittedChars: number;
   truncated: boolean;
@@ -225,6 +227,8 @@ export function transcriptAsWindowedContext(
   if (cap <= 0 || full.length <= cap) {
     return {
       markdown: full,
+      originalChars: full.length,
+      keptChars: full.length,
       omittedMessages: 0,
       omittedChars: 0,
       truncated: false,
@@ -253,6 +257,8 @@ export function transcriptAsWindowedContext(
   if (omittedMessages === 0) {
     return {
       markdown: full,
+      originalChars: full.length,
+      keptChars: full.length,
       omittedMessages: 0,
       omittedChars: 0,
       truncated: false,
@@ -264,13 +270,28 @@ export function transcriptAsWindowedContext(
     "",
     `[Earlier active transcript omitted by hydraRoom.promptTranscriptMaxChars (cap ${cap} chars): ${omittedMessages} message${omittedMessages === 1 ? "" : "s"}, ${omittedChars} chars. Use Hydra wiki context and .hydra/transcript.md for durable history.]`,
   ].join("\n");
+  const keptMarkdown = kept.join("\n");
 
   return {
-    markdown: [notice, ...kept].join("\n"),
+    markdown: [notice, keptMarkdown].join("\n"),
+    originalChars: full.length,
+    keptChars: keptMarkdown.length,
     omittedMessages,
     omittedChars,
     truncated: true,
   };
+}
+
+export function buildPromptContextWindow(
+  messages: TranscriptMessage[],
+  _phase: Phase,
+  _completedUserTurns = 2,
+  _maxAgeMs = 24 * 60 * 60 * 1000,
+  _nowMs = Date.now(),
+  maxChars = 0
+): TranscriptContextWindow {
+  const promptMessages = messages.filter((message) => !isPromptNoiseSystemMessage(message));
+  return transcriptAsWindowedContext(promptMessages, maxChars);
 }
 
 export function buildPromptContext(
@@ -281,8 +302,7 @@ export function buildPromptContext(
   _nowMs = Date.now(),
   maxChars = 0
 ): string {
-  const promptMessages = messages.filter((message) => !isPromptNoiseSystemMessage(message));
-  return transcriptAsWindowedContext(promptMessages, maxChars).markdown;
+  return buildPromptContextWindow(messages, _phase, _completedUserTurns, _maxAgeMs, _nowMs, maxChars).markdown;
 }
 
 function isPromptNoiseSystemMessage(message: TranscriptMessage): boolean {

@@ -27,6 +27,30 @@ export function effectivePhasedSetting(
   return "";
 }
 
+/** Resolve a numeric phased setting, using fallback when the phase is unset or invalid. */
+export function effectivePhasedNumberSetting(
+  raw: unknown,
+  phase: "discussion" | "build" | "review",
+  fallback: number,
+): number {
+  const parseNumber = (value: unknown): number | undefined => {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string" && value.trim()) {
+      const parsed = Number(value.trim());
+      if (Number.isFinite(parsed)) return parsed;
+    }
+    return undefined;
+  };
+
+  const global = parseNumber(raw);
+  if (global !== undefined) return global;
+  if (raw && typeof raw === "object") {
+    const entry = parseNumber((raw as Record<string, unknown>)[phase]);
+    if (entry !== undefined) return entry;
+  }
+  return fallback;
+}
+
 /** Resolve the configured value for a specific scope; "" if unset. */
 export function phasedSettingForScope(raw: unknown, scope: PhaseScope): string {
   if (typeof raw === "string") return scope === "all" ? raw.trim() : "";

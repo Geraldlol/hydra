@@ -9,10 +9,11 @@ import { Phase, buildPrompt, APPROVED_SENTINEL_RE, SOFT_APPROVAL_RE } from "./pr
 import {
   appendMessage,
   archiveAndResetTranscript,
-  buildPromptContext,
+  buildPromptContextWindow,
   ensureGitignore,
   ensureTranscriptFile,
   readTranscript,
+  TranscriptContextWindow,
   TranscriptMessage,
 } from "./transcript";
 import {
@@ -148,7 +149,7 @@ import {
 } from "./codexModels";
 import { chooseEffortInteractively } from "./effortChooser";
 import { chooseModelInteractively, refreshCodexModelCatalog, type ModelChooserDeps } from "./modelChooser";
-import { summarizePhasedSetting } from "./phasedSetting";
+import { effectivePhasedNumberSetting, summarizePhasedSetting } from "./phasedSetting";
 import { modelForPhase, withEffortArgs, withModelArgs } from "./agentArgs";
 import type { WebviewMessage } from "./webviewMessages";
 import {
@@ -233,6 +234,20 @@ interface UiMessage extends TranscriptMessage {
   runFailure?: RunFailureCard;
 }
 
+interface PromptContextSnapshot {
+  text: string;
+  transcriptWindow: PromptTranscriptWindowStats;
+}
+
+interface PromptTranscriptWindowStats {
+  cap: number;
+  originalChars: number;
+  keptChars: number;
+  omittedMessages: number;
+  omittedChars: number;
+  truncated: boolean;
+}
+
 interface WorkspaceChange {
   path: string;
   status: string;
@@ -240,6 +255,17 @@ interface WorkspaceChange {
 }
 
 const AGENT_NAMES: Record<AgentId, string> = { codex: "Codex", claude: "Claude" };
+const PROMPT_TRANSCRIPT_MAX_CHARS_DEFAULTS = {
+  discussion: 80000,
+  build: 400000,
+  review: 400000,
+} as const;
+
+function promptTranscriptScope(phase: Phase): "discussion" | "build" | "review" {
+  if (phase === "build") return "build";
+  if (phase === "review") return "review";
+  return "discussion";
+}
 
 // Surfaced when a code path tries to use the native terminal bridge before
 // it has initialized (panel just opened, workspace not trusted, etc.). One
@@ -306,6 +332,7 @@ export class HydraRoomPanel {
   private state: State = { name: "Idle" };
   private messages: UiMessage[] = [];
   private readonly pendingRunFailures = new Map<string, RunFailureCard>();
+  private readonly pendingPromptTranscriptWindows = new Map<string, PromptTranscriptWindowStats>();
   private wikiWrapupInFlight = false;
   private lastWikiWrapupSourceKey: string | undefined;
   private lastWikiRefreshTranscriptBucket = 0;
@@ -2114,16 +2141,17 @@ export class HydraRoomPanel {
     let reactorId: string | undefined;
     let closerId: string | undefined;
     try {
-      const openerTranscript = this.buildPromptContext("opener", undefined, opener);
+      const openerContext = this.buildPromptContextSnapshot("opener", undefined, opener);
       const openerEnvelope = await this.buildPromptEnvelope({
         agent: opener,
         otherAgent: reactor,
         phase: "opener",
-        transcript: openerTranscript,
+        transcript: openerContext.text,
         currentUserMessage,
       });
       await this.persistPromptEnvelope(openerEnvelope);
       openerId = this.openPendingMessage(opener, "opener");
+      this.pendingPromptTranscriptWindows.set(openerId, openerContext.transcriptWindow);
       this.postState();
 
       const openerResult = await this.callAgent(opener, "opener", openerEnvelope.renderedPrompt, openerId, ctrl.signal);
@@ -2141,16 +2169,17 @@ export class HydraRoomPanel {
       // Build the reactor prompt only after the opener has finalized into
       // the transcript. This ordering is what makes the second head actually
       // respond to the first instead of reading a stale snapshot.
-      const transcriptAfterOpener = this.buildPromptContext("reactor", undefined, reactor);
+      const reactorContext = this.buildPromptContextSnapshot("reactor", undefined, reactor);
       const reactorEnvelope = await this.buildPromptEnvelope({
         agent: reactor,
         otherAgent: opener,
         phase: "reactor",
-        transcript: transcriptAfterOpener,
+        transcript: reactorContext.text,
         currentUserMessage,
       });
       await this.persistPromptEnvelope(reactorEnvelope);
       reactorId = this.openPendingMessage(reactor, "reactor");
+      this.pendingPromptTranscriptWindows.set(reactorId, reactorContext.transcriptWindow);
       this.postState();
 
       const reactorMessageId = reactorId;
@@ -2182,16 +2211,17 @@ export class HydraRoomPanel {
       // Build the closer prompt only after the reactor has finalized into the
       // transcript. The opener owns this short final turn so critique becomes an
       // action decision instead of a dangling handoff.
-      const transcriptAfterReactor = this.buildPromptContext("closer", undefined, opener);
+      const closerContext = this.buildPromptContextSnapshot("closer", undefined, opener);
       const closerEnvelope = await this.buildPromptEnvelope({
         agent: opener,
         otherAgent: reactor,
         phase: "closer",
-        transcript: transcriptAfterReactor,
+        transcript: closerContext.text,
         currentUserMessage,
       });
       await this.persistPromptEnvelope(closerEnvelope);
       closerId = this.openPendingMessage(opener, "closer");
+      this.pendingPromptTranscriptWindows.set(closerId, closerContext.transcriptWindow);
       this.postState();
 
       const closerResult = await this.callAgent(opener, "closer", closerEnvelope.renderedPrompt, closerId, ctrl.signal);
@@ -2257,16 +2287,17 @@ export class HydraRoomPanel {
       const agents: AgentId[] = ["codex", "claude"];
       const calls: Promise<{ text: string; result: RunResult }>[] = [];
       for (const agent of agents) {
-        const transcript = this.buildPromptContext("parallel", undefined, agent);
+        const context = this.buildPromptContextSnapshot("parallel", undefined, agent);
         const envelope = await this.buildPromptEnvelope({
           agent,
           otherAgent: otherAgent(agent),
           phase: "parallel",
-          transcript,
+          transcript: context.text,
           currentUserMessage,
         });
         await this.persistPromptEnvelope(envelope);
         const messageId = this.openPendingMessage(agent, "parallel");
+        this.pendingPromptTranscriptWindows.set(messageId, context.transcriptWindow);
         openedIds.push(messageId);
         calls.push(this.callAgent(agent, "parallel", envelope.renderedPrompt, messageId, ctrl.signal));
       }
@@ -2311,16 +2342,17 @@ export class HydraRoomPanel {
     try {
       // Snapshot the transcript BEFORE opening the pending bubble, otherwise the
       // builder's own empty entry would appear at the tail of its prompt context.
-      const transcriptForPrompt = this.buildPromptContext("build", undefined, builder);
+      const buildContext = this.buildPromptContextSnapshot("build", undefined, builder);
       const otherAgent: AgentId = builder === "codex" ? "claude" : "codex";
       const buildEnvelope = await this.buildPromptEnvelope({
         agent: builder,
         otherAgent,
         phase: "build",
-        transcript: transcriptForPrompt,
+        transcript: buildContext.text,
       });
       await this.persistPromptEnvelope(buildEnvelope);
       buildId = this.openPendingMessage(builder, "build");
+      this.pendingPromptTranscriptWindows.set(buildId, buildContext.transcriptWindow);
       this.postState();
       const result = await this.callAgent(builder, "build", buildEnvelope.renderedPrompt, buildId, ctrl.signal);
       buildId = undefined; // callAgent finalized the pending bubble.
@@ -2357,15 +2389,16 @@ export class HydraRoomPanel {
       // worker sees the other's empty pending message as context.
       const calls: Promise<{ text: string; result: RunResult }>[] = [];
       for (const agent of agents) {
-        const transcriptForPrompt = this.buildPromptContext("build", undefined, agent);
+        const buildContext = this.buildPromptContextSnapshot("build", undefined, agent);
         const buildEnvelope = await this.buildPromptEnvelope({
           agent,
           otherAgent: otherAgent(agent),
           phase: "build",
-          transcript: transcriptForPrompt,
+          transcript: buildContext.text,
         });
         await this.persistPromptEnvelope(buildEnvelope);
         const messageId = this.openPendingMessage(agent, "build");
+        this.pendingPromptTranscriptWindows.set(messageId, buildContext.transcriptWindow);
         openedIds.push(messageId);
         calls.push(this.callAgent(agent, "build", buildEnvelope.renderedPrompt, messageId, ctrl.signal));
       }
@@ -2412,7 +2445,7 @@ export class HydraRoomPanel {
 
   private enqueueWikiMaintenanceAfterTurn(source: string): void {
     const wrapupSource = hydraWikiWrapupSourceFromMessages(this.messages, this.wikiWrapupMaxSourceChars());
-    const cap = this.promptTranscriptMaxChars();
+    const cap = this.wikiContextRefreshTranscriptMaxChars();
     const refreshSource = cap > 0
       ? hydraWikiContextRefreshSourceFromMessages(this.messages, cap)
       : undefined;
@@ -2591,7 +2624,7 @@ export class HydraRoomPanel {
     source: string,
     options: { cap?: number; sourceOverride?: HydraWikiWrapupSource } = {}
   ): Promise<void> {
-    const cap = options.cap ?? this.promptTranscriptMaxChars();
+    const cap = options.cap ?? this.wikiContextRefreshTranscriptMaxChars();
     if (cap <= 0) {
       this.lastWikiRefreshTranscriptBucket = 0;
       return;
@@ -2798,8 +2831,9 @@ export class HydraRoomPanel {
     try {
       // Snapshot the transcript BEFORE opening the pending bubble, otherwise the
       // reviewer's own empty entry would appear at the tail of its prompt context.
-      const transcriptForPrompt = this.buildPromptContext("review", undefined, reviewer);
+      const reviewContext = this.buildPromptContextSnapshot("review", undefined, reviewer);
       reviewId = this.openPendingMessage(reviewer, "review");
+      this.pendingPromptTranscriptWindows.set(reviewId, reviewContext.transcriptWindow);
       this.postState();
 
       const diff = await captureGitDiff(this.workspaceRoot, this.diffMaxLines());
@@ -2815,6 +2849,7 @@ export class HydraRoomPanel {
             role: m.role, text: m.text, timestamp: m.timestamp, phase: m.phase, error: true,
           });
         }
+        this.pendingPromptTranscriptWindows.delete(reviewId);
         reviewIdFinalized = true;
         this.applyEvent({ type: "reviewDone", approved: false });
         this.currentAbort = undefined;
@@ -2829,7 +2864,7 @@ export class HydraRoomPanel {
         agent: reviewer,
         otherAgent,
         phase: "review",
-        transcript: transcriptForPrompt,
+        transcript: reviewContext.text,
         diff,
         verification: verificationAsReviewContext(this.latestVerification(), currentHead),
       });
@@ -2874,17 +2909,18 @@ export class HydraRoomPanel {
       const currentHead = this.gitAvailable ? await captureGitHead(this.workspaceRoot) : undefined;
       const calls: Promise<{ text: string; result: RunResult }>[] = [];
       for (const reviewer of reviewers) {
-        const transcriptForPrompt = this.buildPromptContext("review", undefined, reviewer);
+        const reviewContext = this.buildPromptContextSnapshot("review", undefined, reviewer);
         const reviewEnvelope = await this.buildPromptEnvelope({
           agent: reviewer,
           otherAgent: otherAgent(reviewer),
           phase: "review",
-          transcript: transcriptForPrompt,
+          transcript: reviewContext.text,
           diff,
           verification: verificationAsReviewContext(this.latestVerification(), currentHead),
         });
         await this.persistPromptEnvelope(reviewEnvelope);
         const messageId = this.openPendingMessage(reviewer, "review");
+        this.pendingPromptTranscriptWindows.set(messageId, reviewContext.transcriptWindow);
         openedIds.push(messageId);
         calls.push(this.callAgent(reviewer, "review", reviewEnvelope.renderedPrompt, messageId, ctrl.signal));
       }
@@ -3999,7 +4035,15 @@ export class HydraRoomPanel {
     transport: "oneShot" | "terminalBridge" = this.transportMode(),
     agent?: AgentId
   ): string {
-    return this.buildPromptContextFromMessages(this.messages, phase, transport, agent);
+    return this.buildPromptContextSnapshot(phase, transport, agent).text;
+  }
+
+  private buildPromptContextSnapshot(
+    phase: Phase,
+    transport: "oneShot" | "terminalBridge" = this.transportMode(),
+    agent?: AgentId
+  ): PromptContextSnapshot {
+    return this.buildPromptContextSnapshotFromMessages(this.messages, phase, transport, agent);
   }
 
   private buildPromptContextFromMessages(
@@ -4008,6 +4052,15 @@ export class HydraRoomPanel {
     transport: "oneShot" | "terminalBridge" = this.transportMode(),
     agent?: AgentId
   ): string {
+    return this.buildPromptContextSnapshotFromMessages(messages, phase, transport, agent).text;
+  }
+
+  private buildPromptContextSnapshotFromMessages(
+    messages: TranscriptMessage[],
+    phase: Phase,
+    transport: "oneShot" | "terminalBridge" = this.transportMode(),
+    agent?: AgentId
+  ): PromptContextSnapshot {
     const contextTitle = transport === "terminalBridge"
       ? "--- Current terminal poke transcript ---"
       : "--- Full transcript ---";
@@ -4034,12 +4087,24 @@ export class HydraRoomPanel {
     if (wikiContext) {
       sections.push("", wikiContext.markdown);
     }
+    const transcriptCap = transport === "terminalBridge" ? 0 : this.promptTranscriptMaxChars(phase);
+    const transcriptWindow = buildPromptContextWindow(
+      messages,
+      phase,
+      2,
+      24 * 60 * 60 * 1000,
+      Date.now(),
+      transcriptCap
+    );
     sections.push(
       "",
       contextTitle,
-      buildPromptContext(messages, phase, 2, 24 * 60 * 60 * 1000, Date.now(), this.promptTranscriptMaxChars())
+      transcriptWindow.markdown
     );
-    return sections.join("\n");
+    return {
+      text: sections.join("\n"),
+      transcriptWindow: this.promptTranscriptWindowStats(transcriptWindow, transcriptCap),
+    };
   }
 
   private oneShotWorkspaceInstructionsMaxChars(): number {
@@ -4050,9 +4115,39 @@ export class HydraRoomPanel {
     return vscode.workspace.getConfiguration("hydraRoom").get<number>("terminalBridgeWorkspaceInstructionsMaxChars", 0);
   }
 
-  private promptTranscriptMaxChars(): number {
-    const raw = vscode.workspace.getConfiguration("hydraRoom").get<number>("promptTranscriptMaxChars", 400000);
-    return Math.max(0, Math.floor(raw));
+  private promptTranscriptMaxChars(phase: Phase): number {
+    const scope = promptTranscriptScope(phase);
+    const raw = vscode.workspace.getConfiguration("hydraRoom").get<unknown>(
+      "promptTranscriptMaxChars",
+      PROMPT_TRANSCRIPT_MAX_CHARS_DEFAULTS
+    );
+    const fallback = PROMPT_TRANSCRIPT_MAX_CHARS_DEFAULTS[scope];
+    return Math.max(0, Math.floor(effectivePhasedNumberSetting(raw, scope, fallback)));
+  }
+
+  private wikiContextRefreshTranscriptMaxChars(): number {
+    const raw = vscode.workspace.getConfiguration("hydraRoom").get<unknown>(
+      "promptTranscriptMaxChars",
+      PROMPT_TRANSCRIPT_MAX_CHARS_DEFAULTS
+    );
+    const values = (["discussion", "build", "review"] as const).map((scope) =>
+      Math.max(0, Math.floor(effectivePhasedNumberSetting(raw, scope, PROMPT_TRANSCRIPT_MAX_CHARS_DEFAULTS[scope])))
+    );
+    return Math.max(...values);
+  }
+
+  private promptTranscriptWindowStats(
+    window: TranscriptContextWindow,
+    cap: number
+  ): PromptTranscriptWindowStats {
+    return {
+      cap,
+      originalChars: window.originalChars,
+      keptChars: window.keptChars,
+      omittedMessages: window.omittedMessages,
+      omittedChars: window.omittedChars,
+      truncated: window.truncated,
+    };
   }
 
   private editorContextMaxChars(): number {
@@ -4140,7 +4235,11 @@ export class HydraRoomPanel {
   private async finalizePendingMessage(messageId: string, result: RunResult): Promise<void> {
     const m = this.messages.find((x) => x.id === messageId);
     if (!m) return;
-    if (!m.pending && m.cancelled) return;
+    if (!m.pending && m.cancelled) {
+      this.pendingPromptTranscriptWindows.delete(messageId);
+      return;
+    }
+    const promptTranscriptWindow = this.pendingPromptTranscriptWindows.get(messageId);
     m.pending = false;
     const runFailure = this.pendingRunFailures.get(messageId);
     this.pendingRunFailures.delete(messageId);
@@ -4181,10 +4280,14 @@ export class HydraRoomPanel {
       error: m.error,
       cancelled: m.cancelled,
     });
-    await this.recordWikiUsageTelemetry(m);
+    await this.recordWikiUsageTelemetry(m, promptTranscriptWindow);
+    this.pendingPromptTranscriptWindows.delete(messageId);
   }
 
-  private async recordWikiUsageTelemetry(message: UiMessage): Promise<void> {
+  private async recordWikiUsageTelemetry(
+    message: UiMessage,
+    promptTranscriptWindow?: PromptTranscriptWindowStats
+  ): Promise<void> {
     if (!this.workspaceReady) return;
     if (message.role !== "codex" && message.role !== "claude") return;
     if (message.error || message.cancelled) return;
@@ -4211,6 +4314,12 @@ export class HydraRoomPanel {
         replyChars: telemetry.replyChars,
         promptChars: wikiContext.markdown.length,
         promptFiles: wikiContext.files.join(","),
+        transcriptCap: promptTranscriptWindow?.cap ?? null,
+        transcriptOriginalChars: promptTranscriptWindow?.originalChars ?? null,
+        transcriptKeptChars: promptTranscriptWindow?.keptChars ?? null,
+        transcriptOmittedChars: promptTranscriptWindow?.omittedChars ?? null,
+        transcriptOmittedMessages: promptTranscriptWindow?.omittedMessages ?? null,
+        transcriptTruncated: promptTranscriptWindow?.truncated ?? null,
       }
     );
   }

@@ -81,6 +81,20 @@ describe("terminal bridge usage source contracts", () => {
     assert.match(method, /workspaceInstructionsAsContext\(workspaceInstructions, \{ maxChars: workspaceInstructionsMaxChars \}\)/);
   });
 
+  test("prompt transcript cap resolves by phase and leaves terminal pokes unwindowed", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    const methodStart = source.indexOf("private buildPromptContextSnapshotFromMessages(");
+    const methodEnd = source.indexOf("private oneShotWorkspaceInstructionsMaxChars()", methodStart);
+    assert.ok(methodStart >= 0 && methodEnd > methodStart);
+
+    const method = source.slice(methodStart, methodEnd);
+    assert.match(method, /const transcriptCap = transport === "terminalBridge" \? 0 : this\.promptTranscriptMaxChars\(phase\)/);
+    assert.match(method, /buildPromptContextWindow\(/);
+    assert.match(source, /function promptTranscriptScope\(phase: Phase\)/);
+    assert.match(source, /effectivePhasedNumberSetting\(raw, scope, fallback\)/);
+    assert.match(source, /wikiContextRefreshTranscriptMaxChars/);
+  });
+
   test("terminal bridge reply polling starts fast and backs off to the configured cap", () => {
     const source = fs.readFileSync(path.join(process.cwd(), "src", "terminalBridge.ts"), "utf8");
     const methodStart = source.indexOf("async function waitForReply(");
@@ -221,7 +235,9 @@ describe("wiki wrapup source contracts", () => {
 
     const method = source.slice(methodStart, methodEnd);
     assert.match(method, /await appendMessage\(this\.transcriptUri\.fsPath/);
-    assert.match(method, /await this\.recordWikiUsageTelemetry\(m\)/);
+    assert.match(method, /const promptTranscriptWindow = this\.pendingPromptTranscriptWindows\.get\(messageId\)/);
+    assert.match(method, /await this\.recordWikiUsageTelemetry\(m, promptTranscriptWindow\)/);
+    assert.match(method, /this\.pendingPromptTranscriptWindows\.delete\(messageId\)/);
   });
 
   test("wiki usage telemetry records citation and prompt-file counts", () => {
@@ -239,6 +255,8 @@ describe("wiki wrapup source contracts", () => {
     assert.match(method, /sourceCitationCount: telemetry\.sourceCitationCount/);
     assert.match(method, /mentionsWikiByName: telemetry\.mentionsWikiByName/);
     assert.match(method, /promptFiles: wikiContext\.files\.join\(","\)/);
+    assert.match(method, /transcriptKeptChars: promptTranscriptWindow\?\.keptChars \?\? null/);
+    assert.match(method, /transcriptOmittedChars: promptTranscriptWindow\?\.omittedChars \?\? null/);
     assert.doesNotMatch(method, /mentionsWikiContext: telemetry\.mentionsWikiContext/);
   });
 });

@@ -214,6 +214,8 @@ describe("transcript", () => {
     const out = transcriptAsWindowedContext(messages, 80);
 
     assert.equal(out.truncated, true);
+    assert.ok(out.originalChars > out.keptChars);
+    assert.ok(out.keptChars > 0);
     assert.equal(out.omittedMessages, 2);
     assert.ok(out.omittedChars > 0);
     assert.doesNotMatch(out.markdown, /old answer/);

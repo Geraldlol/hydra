@@ -3,6 +3,7 @@ import * as assert from "node:assert/strict";
 import {
   applyPhasedSettingChange,
   describePhasedSettingCurrent,
+  effectivePhasedNumberSetting,
   phasedSettingForScope,
   summarizePhasedSetting,
 } from "../src/phasedSetting";
@@ -70,6 +71,25 @@ describe("applyPhasedSettingChange", () => {
       applyPhasedSettingChange({ discussion: "sonnet" }, "discussion", ""),
       "",
     );
+  });
+});
+
+describe("effectivePhasedNumberSetting", () => {
+  test("single number applies to every phase", () => {
+    assert.equal(effectivePhasedNumberSetting(120000, "discussion", 80000), 120000);
+    assert.equal(effectivePhasedNumberSetting(120000, "build", 400000), 120000);
+  });
+
+  test("object value applies per phase and falls back for missing phases", () => {
+    const raw = { discussion: 80000, review: 400000 };
+    assert.equal(effectivePhasedNumberSetting(raw, "discussion", 1), 80000);
+    assert.equal(effectivePhasedNumberSetting(raw, "build", 400000), 400000);
+    assert.equal(effectivePhasedNumberSetting(raw, "review", 1), 400000);
+  });
+
+  test("invalid values fall back", () => {
+    assert.equal(effectivePhasedNumberSetting({ discussion: "nope" }, "discussion", 80000), 80000);
+    assert.equal(effectivePhasedNumberSetting(null, "review", 400000), 400000);
   });
 });
 
