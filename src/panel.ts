@@ -309,6 +309,7 @@ export class HydraRoomPanel {
   private wikiWrapupInFlight = false;
   private lastWikiWrapupSourceKey: string | undefined;
   private lastWikiRefreshTranscriptBucket = 0;
+  private wikiMaintenanceQueue: Promise<void> = Promise.resolve();
   private transcriptUri!: vscode.Uri;
   private objectiveUri!: vscode.Uri;
   private decisionsUri!: vscode.Uri;
@@ -2173,8 +2174,7 @@ export class HydraRoomPanel {
         this.applyEvent({ type: "closerDone" });
         this.currentAbort = undefined;
         this.postState();
-        await this.maybeRunWikiWrapup("discussion");
-        await this.maybeRunWikiContextRefresh("discussion");
+        this.enqueueWikiMaintenanceAfterTurn("discussion");
         await this.autoAdvanceActionableDefault("discussion");
         return;
       }
@@ -2221,8 +2221,7 @@ export class HydraRoomPanel {
       this.applyEvent({ type: "closerDone" });
       this.currentAbort = undefined;
       this.postState();
-      await this.maybeRunWikiWrapup("discussion");
-      await this.maybeRunWikiContextRefresh("discussion");
+      this.enqueueWikiMaintenanceAfterTurn("discussion");
       await this.autoAdvanceActionableDefault("discussion");
     } finally {
       // Safety net: only fires if a synchronous throw escaped the try block.
@@ -2287,8 +2286,7 @@ export class HydraRoomPanel {
       this.currentAbort = undefined;
       this.postState();
       if (!ctrl.signal.aborted && results.every(({ result }) => !didAgentFail(result))) {
-        await this.maybeRunWikiWrapup("parallel discussion");
-        await this.maybeRunWikiContextRefresh("parallel discussion");
+        this.enqueueWikiMaintenanceAfterTurn("parallel discussion");
       }
       await this.autoAdvanceActionableDefault("parallel discussion");
     } finally {
@@ -2410,6 +2408,26 @@ export class HydraRoomPanel {
       await this.appendSystemMessage("Hydra auto-review started because verification passed after build.");
       await this.requestReview();
     }
+  }
+
+  private enqueueWikiMaintenanceAfterTurn(source: string): void {
+    const wrapupSource = hydraWikiWrapupSourceFromMessages(this.messages, this.wikiWrapupMaxSourceChars());
+    const cap = this.promptTranscriptMaxChars();
+    const refreshSource = cap > 0
+      ? hydraWikiContextRefreshSourceFromMessages(this.messages, cap)
+      : undefined;
+
+    const run = async () => {
+      await this.maybeRunWikiWrapup(source, wrapupSource ? { sourceOverride: wrapupSource } : {});
+      await this.maybeRunWikiContextRefresh(source, { cap, sourceOverride: refreshSource });
+    };
+    const previous = this.wikiMaintenanceQueue.catch(() => {
+      // Earlier background wiki maintenance errors are recorded per run below.
+    });
+    this.wikiMaintenanceQueue = previous.then(run).catch(async (err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      await this.recordEvent("error", `Hydra background wiki maintenance failed after ${source}: ${message}`, { source });
+    });
   }
 
   private async maybeRunWikiWrapup(source: string, options: WikiWrapupOptions = {}): Promise<void> {
@@ -2569,14 +2587,17 @@ export class HydraRoomPanel {
     }
   }
 
-  private async maybeRunWikiContextRefresh(source: string): Promise<void> {
-    const cap = this.promptTranscriptMaxChars();
+  private async maybeRunWikiContextRefresh(
+    source: string,
+    options: { cap?: number; sourceOverride?: HydraWikiWrapupSource } = {}
+  ): Promise<void> {
+    const cap = options.cap ?? this.promptTranscriptMaxChars();
     if (cap <= 0) {
       this.lastWikiRefreshTranscriptBucket = 0;
       return;
     }
 
-    const refreshSource = hydraWikiContextRefreshSourceFromMessages(this.messages, cap);
+    const refreshSource = options.sourceOverride ?? hydraWikiContextRefreshSourceFromMessages(this.messages, cap);
     if (!refreshSource || refreshSource.originalChars < cap) {
       this.lastWikiRefreshTranscriptBucket = 0;
       return;

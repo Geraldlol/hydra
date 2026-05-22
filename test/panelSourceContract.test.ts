@@ -188,6 +188,31 @@ describe("wiki wrapup source contracts", () => {
     assert.match(method, /sourceOverride: refreshSource/);
   });
 
+  test("automatic wiki maintenance is queued off the turn critical path", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    const methodStart = source.indexOf("private enqueueWikiMaintenanceAfterTurn(");
+    const methodEnd = source.indexOf("private async maybeRunWikiWrapup", methodStart);
+    assert.ok(methodStart >= 0 && methodEnd > methodStart);
+
+    const method = source.slice(methodStart, methodEnd);
+    assert.match(method, /hydraWikiWrapupSourceFromMessages\(this\.messages, this\.wikiWrapupMaxSourceChars\(\)\)/);
+    assert.match(method, /hydraWikiContextRefreshSourceFromMessages\(this\.messages, cap\)/);
+    assert.match(method, /this\.wikiMaintenanceQueue = previous\.then\(run\)\.catch/);
+    assert.match(method, /Hydra background wiki maintenance failed after \$\{source\}/);
+
+    const discussionStart = source.indexOf("private async runDiscussionTurn(");
+    const discussionEnd = source.indexOf("private async runParallelDiscussionTurn", discussionStart);
+    const discussion = source.slice(discussionStart, discussionEnd);
+    assert.match(discussion, /this\.enqueueWikiMaintenanceAfterTurn\("discussion"\);/);
+    assert.doesNotMatch(discussion, /await this\.maybeRunWikiWrapup\("discussion"\)/);
+
+    const parallelStart = source.indexOf("private async runParallelDiscussionTurn(");
+    const parallelEnd = source.indexOf("private async runBuildPhase", parallelStart);
+    const parallel = source.slice(parallelStart, parallelEnd);
+    assert.match(parallel, /this\.enqueueWikiMaintenanceAfterTurn\("parallel discussion"\);/);
+    assert.doesNotMatch(parallel, /await this\.maybeRunWikiWrapup\("parallel discussion"\)/);
+  });
+
   test("agent replies emit wiki usage telemetry after transcript persistence", () => {
     const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
     const methodStart = source.indexOf("private async finalizePendingMessage(");
