@@ -60,6 +60,45 @@ describe("buildPrompt()", () => {
     assert.match(out, /Treat it as established truth unless/);
     assert.match(out, /do not re-derive facts it already gives/);
     assert.match(out, /name that gap explicitly so the wrapup loop can capture it/);
+    assert.doesNotMatch(out, /reuse the matching source tag/);
+  });
+
+  test("asks agents to cite wiki facts only when wiki source tags are present", () => {
+    const out = buildPrompt({
+      agent: "claude",
+      otherAgent: "codex",
+      phase: "reactor",
+      transcript: [
+        "--- Hydra wiki context ---",
+        "Persistent compiled room knowledge.",
+        "",
+        "- Stable fact. [src:deadbeefcafe]",
+        "",
+        TRANSCRIPT,
+      ].join("\n"),
+    });
+
+    assert.match(out, /reuse the matching source tag in your reply/);
+    assert.match(out, /measure real wiki usage separately from wiki-name chatter/);
+  });
+
+  test("does not treat transcript source tags as wiki source tags", () => {
+    const out = buildPrompt({
+      agent: "codex",
+      otherAgent: "claude",
+      phase: "opener",
+      transcript: [
+        "--- Hydra wiki context ---",
+        "Persistent compiled room knowledge without citations.",
+        "",
+        "--- Full transcript ---",
+        "## 2026-05-08T14:00:00Z You",
+        "",
+        "Mention [src:deadbeefcafe] outside the wiki.",
+      ].join("\n"),
+    });
+
+    assert.doesNotMatch(out, /reuse the matching source tag/);
   });
 
   test("opener prompt is byte-identical for same inputs", () => {

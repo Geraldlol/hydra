@@ -57,6 +57,17 @@ export interface CommandCenterWikiStatus {
   rawTurnCount: number;
   lastWrapupDate?: string;
   lastWrapupTitle?: string;
+  usageTelemetry?: CommandCenterWikiUsageStatus;
+}
+
+export interface CommandCenterWikiUsageStatus {
+  sampleSize: number;
+  minSampleSize: number;
+  warmingUp: boolean;
+  citationRate: number;
+  mentionRate: number;
+  citationReplies: number;
+  mentionReplies: number;
 }
 
 export interface CommandCenterInput {
@@ -202,5 +213,18 @@ function wikiStatusDetail(status: CommandCenterWikiStatus): string {
   const last = status.lastWrapupDate
     ? `last wrapup ${status.lastWrapupDate}${status.lastWrapupTitle ? ` | ${status.lastWrapupTitle}` : ""}`
     : "last wrapup none";
-  return `${prompt}; raw turns ${status.rawTurnCount}; ${last}. Open the persistent compiled wiki.`;
+  return `${prompt}; raw turns ${status.rawTurnCount}; ${last}${wikiUsageDetail(status)}. Open the persistent compiled wiki.`;
+}
+
+function wikiUsageDetail(status: CommandCenterWikiStatus): string {
+  const usage = status.usageTelemetry;
+  if (!usage) return "";
+  const sample = usage.warmingUp
+    ? `signal warming up ${usage.sampleSize}/${usage.minSampleSize}`
+    : `signal last ${usage.sampleSize}`;
+  return `; ${sample}: citations ${formatPercent(usage.citationRate)} (${usage.citationReplies}), name/path mentions ${formatPercent(usage.mentionRate)} (${usage.mentionReplies})`;
+}
+
+function formatPercent(rate: number): string {
+  return `${Math.round(Math.max(0, Math.min(1, rate)) * 100)}%`;
 }

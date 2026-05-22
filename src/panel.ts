@@ -51,7 +51,7 @@ import {
   type CapabilityProfile,
   type ConfigurableCapabilityProfileId,
 } from "./capabilityProfiles";
-import { buildCommandCenterActions, type CommandCenterActionId } from "./commandCenter";
+import { buildCommandCenterActions, type CommandCenterActionId, type CommandCenterWikiStatus } from "./commandCenter";
 import { shouldAutoSkipCloserOnAgreement } from "./closerSkip";
 import {
   appendDecision,
@@ -192,7 +192,7 @@ import {
   readWorkQueueDispositions,
   type WorkQueueDisposition,
 } from "./workQueueState";
-import { summarizeHydraWikiUsage } from "./wikiTelemetry";
+import { summarizeHydraWikiUsage, summarizeHydraWikiUsageEvents } from "./wikiTelemetry";
 import {
   applyHydraWikiWrapupDraft,
   buildHydraWikiWrapupPrompt,
@@ -1236,12 +1236,14 @@ export class HydraRoomPanel {
 
   async showCommandCenter(): Promise<void> {
     await this.ready();
-    let wikiStatus: Awaited<ReturnType<typeof readHydraWikiStatus>> | undefined;
+    let wikiStatus: CommandCenterWikiStatus | undefined;
     if (this.workspaceReady) {
       try {
-        wikiStatus = await readHydraWikiStatus(this.workspaceRoot, this.wikiContextMaxChars(), {
+        const status = await readHydraWikiStatus(this.workspaceRoot, this.wikiContextMaxChars(), {
           includeLog: this.wikiPromptIncludeLog(),
         });
+        const usageTelemetry = summarizeHydraWikiUsageEvents(await readHydraEvents(this.eventsUri.fsPath, 200));
+        wikiStatus = { ...status, usageTelemetry };
       } catch {
         // Wiki status is advisory; keep Command Center usable if wiki files are hand-edited mid-read.
       }
@@ -4127,16 +4129,17 @@ export class HydraRoomPanel {
     const telemetry = summarizeHydraWikiUsage(message.text);
     await this.recordEvent(
       "diagnostic",
-      `Hydra wiki usage telemetry: ${AGENT_NAMES[message.role]} ${message.phase ?? "turn"} reply ${telemetry.hasSignal ? "referenced wiki memory" : "had no wiki usage signal"}.`,
+      `Hydra wiki usage telemetry: ${AGENT_NAMES[message.role]} ${message.phase ?? "turn"} reply ${telemetry.hasCitationSignal ? "cited wiki sources" : telemetry.hasMentionSignal ? "mentioned wiki memory" : "had no wiki usage signal"}.`,
       {
         agent: message.role,
         phase: message.phase ?? null,
         hasSignal: telemetry.hasSignal,
+        hasCitationSignal: telemetry.hasCitationSignal,
+        hasMentionSignal: telemetry.hasMentionSignal,
         sourceCitationCount: telemetry.sourceCitationCount,
         distinctSourceCitationCount: telemetry.distinctSourceCitationCount,
         sourceIds: telemetry.sourceIds.join(","),
-        mentionsHydraWikiContext: telemetry.mentionsHydraWikiContext,
-        mentionsWikiContext: telemetry.mentionsWikiContext,
+        mentionsWikiByName: telemetry.mentionsWikiByName,
         mentionsHydraWikiPath: telemetry.mentionsHydraWikiPath,
         replyChars: telemetry.replyChars,
         promptChars: wikiContext.markdown.length,

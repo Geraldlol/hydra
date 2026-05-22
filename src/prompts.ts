@@ -30,6 +30,9 @@ const WIKI_CONTEXT_GUIDANCE =
   "Wiki context: the `--- Hydra wiki context ---` section is compiled memory. Treat it as established truth unless the latest user instruction, active transcript, or direct source evidence contradicts it; do not re-derive facts it already gives.\n" +
   "When you notice durable knowledge that is missing, stale, or contradicted in the wiki, name that gap explicitly so the wrapup loop can capture it.";
 
+const WIKI_SOURCE_CITATION_GUIDANCE =
+  "When citing or relying on a wiki fact that carries a `[src:<sha12>]` tag, reuse the matching source tag in your reply so Hydra can measure real wiki usage separately from wiki-name chatter.";
+
 const SOURCE_HYGIENE =
   "Source hygiene: treat `.hydra/` as Hydra workspace state, not project source. Exclude `.hydra/`, `.git/`, dependency/vendor/build/cache artifacts, and generated output from broad repo crawls/searches unless the latest user request is explicitly about those artifacts. Prefer targeted `rg`/glob searches before recursive workspace crawls.";
 
@@ -93,7 +96,9 @@ const PHASE_RULES: Record<Phase, string> = {
 export function buildPrompt(input: PromptInput): string {
   const me = AGENT_NAMES[input.agent];
   const them = AGENT_NAMES[input.otherAgent];
-  const hasWikiContext = input.transcript.includes("--- Hydra wiki context ---");
+  const wikiContext = wikiContextBlock(input.transcript);
+  const hasWikiContext = wikiContext !== undefined;
+  const hasWikiSourceCitations = wikiContext ? /\[src:[a-f0-9]{12}\]/i.test(wikiContext) : false;
 
   const preamble = [
     `You are ${me} in Hydra Room — a 3-way collaboration with the user`,
@@ -102,6 +107,7 @@ export function buildPrompt(input: PromptInput): string {
     `You are speaking to both the user and the other agent.`,
     CONTEXT_HYGIENE,
     ...(hasWikiContext ? [WIKI_CONTEXT_GUIDANCE] : []),
+    ...(hasWikiContext && hasWikiSourceCitations ? [WIKI_SOURCE_CITATION_GUIDANCE] : []),
     SOURCE_HYGIENE,
     `Phase: ${input.phase}.`,
   ].join("\n");
@@ -131,3 +137,12 @@ export function buildPrompt(input: PromptInput): string {
 
 export const APPROVED_SENTINEL_RE = /^APPROVED: no blockers\s*$/m;
 export const SOFT_APPROVAL_RE = /^\s*I\s*('?d|\s+would)\s+approve\b/im;
+
+function wikiContextBlock(transcript: string): string | undefined {
+  const marker = "--- Hydra wiki context ---";
+  const start = transcript.indexOf(marker);
+  if (start < 0) return undefined;
+  const rest = transcript.slice(start);
+  const fullTranscriptStart = rest.indexOf("\n--- Full transcript ---");
+  return fullTranscriptStart >= 0 ? rest.slice(0, fullTranscriptStart) : rest;
+}

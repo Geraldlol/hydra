@@ -195,7 +195,11 @@ describe("wiki wrapup source contracts", () => {
     assert.match(method, /readHydraWikiPromptContext\(this\.workspaceRoot, this\.wikiContextMaxChars\(\)/);
     assert.match(method, /summarizeHydraWikiUsage\(message\.text\)/);
     assert.match(method, /Hydra wiki usage telemetry:/);
+    assert.match(method, /hasCitationSignal: telemetry\.hasCitationSignal/);
+    assert.match(method, /hasMentionSignal: telemetry\.hasMentionSignal/);
     assert.match(method, /sourceCitationCount: telemetry\.sourceCitationCount/);
+    assert.match(method, /mentionsWikiByName: telemetry\.mentionsWikiByName/);
     assert.match(method, /promptFiles: wikiContext\.files\.join\(","\)/);
+    assert.doesNotMatch(method, /mentionsWikiContext: telemetry\.mentionsWikiContext/);
   });
 });

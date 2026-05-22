@@ -54,6 +54,15 @@ describe("command center", () => {
         rawTurnCount: 7,
         lastWrapupDate: "2026-05-21",
         lastWrapupTitle: "Wiki consumer guidance",
+        usageTelemetry: {
+          sampleSize: 12,
+          minSampleSize: 20,
+          warmingUp: true,
+          citationRate: 0.25,
+          mentionRate: 0.75,
+          citationReplies: 3,
+          mentionReplies: 9,
+        },
       },
     });
 
@@ -85,6 +94,9 @@ describe("command center", () => {
     assert.match(wiki.detail, /files context\.md, index\.md/);
     assert.match(wiki.detail, /raw turns 7/);
     assert.match(wiki.detail, /last wrapup 2026-05-21 \| Wiki consumer guidance/);
+    assert.match(wiki.detail, /signal warming up 12\/20/);
+    assert.match(wiki.detail, /citations 25% \(3\)/);
+    assert.match(wiki.detail, /name\/path mentions 75% \(9\)/);
   });
 
   test("shows disabled wiki injection in Command Center status", () => {
