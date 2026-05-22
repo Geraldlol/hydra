@@ -79,7 +79,8 @@ export async function refreshCodexModelCatalog(deps: ModelChooserDeps): Promise<
  *   1. Pick an agent (Claude / Codex)
  *   2. Pick a scope (all / discussion / build / review)
  *   3. Pick a preset, type a custom ID, or refresh the catalog
- * Writes the result to hydraRoom.{agent}Model at workspace scope.
+ * Writes the result to hydraRoom.{agent}Model at global scope because these
+ * settings are application-scoped in package.json.
  */
 export async function chooseModelInteractively(deps: ModelChooserDeps): Promise<void> {
   const agentPick = await vscode.window.showQuickPick(
@@ -154,7 +155,7 @@ export async function chooseModelInteractively(deps: ModelChooserDeps): Promise<
   const nextSetting = applyPhasedSettingChange(current, scope, value);
   await vscode.workspace
     .getConfiguration("hydraRoom")
-    .update(`${agent}Model`, nextSetting, vscode.ConfigurationTarget.Workspace);
+    .update(`${agent}Model`, nextSetting, vscode.ConfigurationTarget.Global);
   const detail = scope === "all" ? "all phases" : `${scope} phase`;
   await deps.appendSystemMessage(
     value

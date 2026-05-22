@@ -70,11 +70,12 @@ describe("terminal bridge usage source contracts", () => {
   test("workspace instructions filter out the recipient agent's native instruction files in both transports", () => {
     const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
     const methodStart = source.indexOf("private buildPromptContextFromMessages(");
-    const methodEnd = source.indexOf("private oneShotWorkspaceInstructionsMaxChars()", methodStart);
+    const methodEnd = source.indexOf("private oneShotWorkspaceInstructionsMaxChars(", methodStart);
     assert.ok(methodStart >= 0 && methodEnd > methodStart);
 
     const method = source.slice(methodStart, methodEnd);
     assert.match(method, /transport === "terminalBridge"\s*\?\s*this\.terminalBridgeWorkspaceInstructionsMaxChars\(\)/);
+    assert.match(method, /this\.oneShotWorkspaceInstructionsMaxChars\(phase\)/);
     assert.match(method, /transport !== "terminalBridge" \|\| workspaceInstructionsMaxChars > 0/);
     assert.match(method, /agent\s*\?\s*this\.workspaceInstructionsByAgent\[agent\]\s*:\s*this\.workspaceInstructions/);
     assert.doesNotMatch(method, /transport === "terminalBridge" && agent\s*\?\s*this\.workspaceInstructionsByAgent/);
@@ -84,7 +85,7 @@ describe("terminal bridge usage source contracts", () => {
   test("prompt transcript cap resolves by phase and leaves terminal pokes unwindowed", () => {
     const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
     const methodStart = source.indexOf("private buildPromptContextSnapshotFromMessages(");
-    const methodEnd = source.indexOf("private oneShotWorkspaceInstructionsMaxChars()", methodStart);
+    const methodEnd = source.indexOf("private oneShotWorkspaceInstructionsMaxChars(", methodStart);
     assert.ok(methodStart >= 0 && methodEnd > methodStart);
 
     const method = source.slice(methodStart, methodEnd);
@@ -93,6 +94,17 @@ describe("terminal bridge usage source contracts", () => {
     assert.match(source, /function promptTranscriptScope\(phase: Phase\)/);
     assert.match(source, /effectivePhasedNumberSetting\(raw, scope, fallback\)/);
     assert.match(source, /wikiContextRefreshTranscriptMaxChars/);
+    assert.match(source, /ONE_SHOT_WORKSPACE_INSTRUCTIONS_MAX_CHARS_DEFAULTS/);
+  });
+
+  test("model and effort choosers write application-scoped settings globally", () => {
+    const modelSource = fs.readFileSync(path.join(process.cwd(), "src", "modelChooser.ts"), "utf8");
+    const effortSource = fs.readFileSync(path.join(process.cwd(), "src", "effortChooser.ts"), "utf8");
+
+    assert.match(modelSource, /\.update\(`\$\{agent\}Model`, nextSetting, vscode\.ConfigurationTarget\.Global\)/);
+    assert.doesNotMatch(modelSource, /\.update\(`\$\{agent\}Model`, nextSetting, vscode\.ConfigurationTarget\.Workspace\)/);
+    assert.match(effortSource, /\.update\(settingKey, next, vscode\.ConfigurationTarget\.Global\)/);
+    assert.doesNotMatch(effortSource, /\.update\(settingKey, next, vscode\.ConfigurationTarget\.Workspace\)/);
   });
 
   test("terminal bridge reply polling starts fast and backs off to the configured cap", () => {

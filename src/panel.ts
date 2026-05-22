@@ -260,6 +260,11 @@ const PROMPT_TRANSCRIPT_MAX_CHARS_DEFAULTS = {
   build: 400000,
   review: 400000,
 } as const;
+const ONE_SHOT_WORKSPACE_INSTRUCTIONS_MAX_CHARS_DEFAULTS = {
+  discussion: 12000,
+  build: 12000,
+  review: 12000,
+} as const;
 
 function promptTranscriptScope(phase: Phase): "discussion" | "build" | "review" {
   if (phase === "build") return "build";
@@ -4119,7 +4124,7 @@ export class HydraRoomPanel {
       : "--- Full transcript ---";
     const workspaceInstructionsMaxChars = transport === "terminalBridge"
       ? this.terminalBridgeWorkspaceInstructionsMaxChars()
-      : this.oneShotWorkspaceInstructionsMaxChars();
+      : this.oneShotWorkspaceInstructionsMaxChars(phase);
     const sections = [objectiveAsContext(this.objective)];
     if (transport !== "terminalBridge" || workspaceInstructionsMaxChars > 0) {
       // Why: the recipient CLI (Claude Code → CLAUDE.md, Codex → AGENTS.md /
@@ -4160,8 +4165,14 @@ export class HydraRoomPanel {
     };
   }
 
-  private oneShotWorkspaceInstructionsMaxChars(): number {
-    return vscode.workspace.getConfiguration("hydraRoom").get<number>("oneShotWorkspaceInstructionsMaxChars", 12000);
+  private oneShotWorkspaceInstructionsMaxChars(phase: Phase): number {
+    const scope = promptTranscriptScope(phase);
+    const raw = vscode.workspace.getConfiguration("hydraRoom").get<unknown>(
+      "oneShotWorkspaceInstructionsMaxChars",
+      ONE_SHOT_WORKSPACE_INSTRUCTIONS_MAX_CHARS_DEFAULTS
+    );
+    const fallback = ONE_SHOT_WORKSPACE_INSTRUCTIONS_MAX_CHARS_DEFAULTS[scope];
+    return Math.max(0, Math.floor(effectivePhasedNumberSetting(raw, scope, fallback)));
   }
 
   private terminalBridgeWorkspaceInstructionsMaxChars(): number {

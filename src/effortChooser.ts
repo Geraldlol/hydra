@@ -57,7 +57,7 @@ export async function chooseEffortInteractively(deps: EffortChooserDeps): Promis
   const settingKey = agent === "claude" ? "claudeEffort" : "codexReasoning";
   await vscode.workspace
     .getConfiguration("hydraRoom")
-    .update(settingKey, next, vscode.ConfigurationTarget.Workspace);
+    .update(settingKey, next, vscode.ConfigurationTarget.Global);
   const detail = scope === "all" ? "all phases" : `${scope} phase`;
   const flag = agent === "claude" ? `--effort ${pick.value}` : `-c model_reasoning_effort="${pick.value}"`;
   await deps.appendSystemMessage(
