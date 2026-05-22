@@ -13,6 +13,7 @@ export interface TerminalProtocolPaths {
 export interface TerminalReply {
   text: string;
   error?: string;
+  nonce?: string;
 }
 
 export const HYDRA_SYNTHETIC_ECHO_COMMAND = "__hydra_echo__";
@@ -103,7 +104,11 @@ export function buildPowerShellDispatchCommand(
     "function __HydraResolveCommand { param([string]$Name, [string[]]$Candidates) if ([System.IO.Path]::IsPathRooted($Name) -or $Name.Contains('\\\\') -or $Name.Contains('/')) { if (Test-Path -LiteralPath $Name) { return (Resolve-Path -LiteralPath $Name).Path }; throw \"Hydra could not find native CLI '$Name'. Set the Hydra command setting to a full path or switch to Safe One-Shot.\" } $cmd = Get-Command -Name $Name -CommandType Application -ErrorAction SilentlyContinue; if ($cmd) { return $cmd.Source } foreach ($candidate in $Candidates) { $matches = @(Get-Item -Path $candidate -ErrorAction SilentlyContinue | Sort-Object FullName -Descending); if ($matches.Count -gt 0) { return $matches[0].FullName } } throw \"Hydra could not find native CLI '$Name'. Set the Hydra command setting to a full path or switch to Safe One-Shot.\" }",
     `try { if ($__hydraCommandName -eq ${quotePowerShell(HYDRA_SYNTHETIC_ECHO_COMMAND)}) { Write-Host "[Hydra] Running terminal bridge synthetic echo..." -ForegroundColor DarkGray; $__hydraText = if ($__hydraArgs.Count -gt 0) { [string]$__hydraArgs[0] } else { 'ok' }; [System.IO.File]::AppendAllText($__hydraLog, $__hydraText, $__hydraUtf8NoBom); Write-Host -NoNewline $__hydraText; $__hydraCode = 0 } else { $__hydraCommand = __HydraResolveCommand $__hydraCommandName $__hydraCandidates; $__hydraCommandLeaf = [System.IO.Path]::GetFileNameWithoutExtension($__hydraCommand).ToLowerInvariant(); $__hydraStructuredOutput = (($__hydraCommandLeaf -eq 'claude' -and ($__hydraArgs -contains '--output-format') -and ($__hydraArgs -contains 'stream-json')) -or ($__hydraCommandLeaf -eq 'codex' -and ($__hydraArgs -contains '--json'))); if ($__hydraCommandLeaf -eq 'codex' -and $__hydraArgs.Count -gt 0 -and [string]$__hydraArgs[0] -eq 'exec' -and -not ($__hydraArgs -contains '--output-last-message')) { $__hydraList = [System.Collections.Generic.List[string]]::new(); foreach ($__hydraArg in $__hydraArgs) { [void]$__hydraList.Add([string]$__hydraArg) }; $__hydraDashIndex = $__hydraList.LastIndexOf('-'); if ($__hydraDashIndex -ge 0) { $__hydraList.Insert($__hydraDashIndex, $__hydraLastMessage); $__hydraList.Insert($__hydraDashIndex, '--output-last-message'); $__hydraArgs = $__hydraList.ToArray() } else { $__hydraArgs += @('--output-last-message', $__hydraLastMessage) } }; Write-Host "[Hydra] Dispatching $__hydraCommandName via terminal bridge..." -ForegroundColor DarkGray; if ($__hydraStructuredOutput) { Write-Host "[Hydra] Structured native events are captured in the request log." -ForegroundColor DarkGray } else { Write-Host "[Hydra] Native output is tee'd to this terminal and the request log." -ForegroundColor DarkGray }; $__hydraText = ''; $__hydraPromptText = [System.IO.File]::ReadAllText($__hydraPrompt); $__hydraOldErrorActionPreference = $ErrorActionPreference; $ErrorActionPreference = 'Continue'; try { $__hydraPromptText | & $__hydraCommand @__hydraArgs 2>&1 | ForEach-Object { $__hydraChunk = __HydraObjectText $_; $__hydraText += $__hydraChunk; [System.IO.File]::AppendAllText($__hydraLog, $__hydraChunk, $__hydraUtf8NoBom); if (-not $__hydraStructuredOutput) { Write-Host -NoNewline $__hydraChunk } } } finally { $ErrorActionPreference = $__hydraOldErrorActionPreference }; $__hydraCode = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }; $__hydraLastMessageText = ''; if (Test-Path -LiteralPath $__hydraLastMessage) { $__hydraLastMessageText = [System.IO.File]::ReadAllText($__hydraLastMessage, $__hydraUtf8NoBom).TrimEnd() }; $__hydraText = if ([string]::IsNullOrWhiteSpace($__hydraLastMessageText)) { $__hydraText.TrimEnd() } else { $__hydraLastMessageText } } } catch { $__hydraText = (__HydraObjectText $_).TrimEnd(); [System.IO.File]::AppendAllText($__hydraLog, $__hydraText, $__hydraUtf8NoBom); Write-Host -NoNewline $__hydraText; $__hydraCode = 127 }`,
     "if ([string]::IsNullOrWhiteSpace($__hydraText)) { $__hydraText = '[no output]' }",
-    "$__hydraPayload = [ordered]@{ text = $__hydraText }",
+    // Why: include the per-request nonce supplied via $env:HYDRA_REPLY_NONCE
+    // so Hydra can reject spoofed reply files written by a co-tenant process.
+    // The env var is set in the same sendText that runs Invoke-Expression, so
+    // the nonce only lives in the live PS session and never on disk.
+    "$__hydraPayload = [ordered]@{ text = $__hydraText; nonce = ($env:HYDRA_REPLY_NONCE) }",
     "if ($__hydraCode -ne 0) { $__hydraPayload.error = \"exit $__hydraCode\" }",
     "$__hydraReplyJson = $__hydraPayload | ConvertTo-Json -Compress",
     "[System.IO.File]::WriteAllText($__hydraReply, $__hydraReplyJson, $__hydraUtf8NoBom)",
@@ -123,13 +128,22 @@ function environmentStatements(env: Record<string, string | undefined>): string[
     .map(([key, value]) => `$env:${key} = ${quotePowerShell(value ?? "")}`);
 }
 
-export function buildPowerShellDispatchInvocation(dispatchPath: string): string {
+export function buildPowerShellDispatchInvocation(dispatchPath: string, replyNonce?: string): string {
   // Leading newline + `; ` guards against a race where the previous dispatch's
   // newline is dropped by the pty (or the prompt hasn't repainted yet) and
   // two `Invoke-Expression` calls would otherwise concatenate onto one
   // PowerShell input line, producing
   //   "Invoke-Expression : A positional parameter cannot be found".
-  return `\r\n; Invoke-Expression (Get-Content -LiteralPath ${quotePowerShell(dispatchPath)} -Raw)`;
+  //
+  // Why: the optional replyNonce is injected as $env:HYDRA_REPLY_NONCE in the
+  // SAME sendText call that runs Invoke-Expression. The dispatch script reads
+  // the env var and embeds it in the reply JSON so Hydra can reject spoofed
+  // replies from a co-tenant. The try/finally scrubs the env var from the PS
+  // session after each dispatch so the nonce never persists past one request.
+  const nonceStmt = replyNonce
+    ? `$env:HYDRA_REPLY_NONCE = ${quotePowerShell(replyNonce)}; `
+    : "";
+  return `\r\n; ${nonceStmt}try { Invoke-Expression (Get-Content -LiteralPath ${quotePowerShell(dispatchPath)} -Raw) } finally { Remove-Item env:HYDRA_REPLY_NONCE -ErrorAction SilentlyContinue }`;
 }
 
 export function quotePowerShell(value: string): string {
@@ -163,8 +177,9 @@ export function parseTerminalReply(raw: string): TerminalReply {
   const record = parsed as Record<string, unknown>;
   const text = typeof record.text === "string" ? record.text : "";
   const error = typeof record.error === "string" ? record.error : undefined;
+  const nonce = typeof record.nonce === "string" ? record.nonce : undefined;
   if (!text.trim() && !error) {
     throw new Error("Terminal reply JSON must include a non-empty `text` string or `error` string.");
   }
-  return { text, error };
+  return { text, error, nonce };
 }

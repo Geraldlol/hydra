@@ -1,5 +1,42 @@
 import * as cp from "node:child_process";
 
+// Cap accumulated agent stdout per call. A poisoned CLAUDE.md / AGENTS.md
+// can prompt-inject the CLI into emitting hundreds of MB of stream-json
+// events in one turn; without a cap, the extension host OOMs. The cap is
+// intentionally generous (16 MB ≈ 4M tokens of UTF-8 text) — well above
+// any legitimate turn but well below V8's string limit (~512 MB) where
+// further appends would throw ERR_STRING_TOO_LONG.
+export const MAX_AGENT_STDOUT_BYTES = 16 * 1024 * 1024;
+// Stderr is bounded much tighter: it's a diagnostic surface, not a data
+// channel, so legitimate output is rarely more than a few KB.
+export const MAX_AGENT_STDERR_BYTES = 1 * 1024 * 1024;
+
+export interface BoundedStreamState {
+  text: string;
+  truncated: boolean;
+}
+
+// Append `chunk` to `state.text` without exceeding `maxBytes`. Once the
+// cap is hit, a single truncation marker line is appended and subsequent
+// chunks are dropped. The marker is sandwiched in newlines so the stream-
+// json parsers downstream skip it as a non-JSON line.
+export function appendBoundedStream(
+  state: BoundedStreamState,
+  chunk: string,
+  maxBytes: number,
+  marker: string
+): void {
+  if (state.truncated) return;
+  if (state.text.length + chunk.length > maxBytes) {
+    const remaining = maxBytes - state.text.length;
+    if (remaining > 0) state.text += chunk.slice(0, remaining);
+    state.text += `\n${marker}\n`;
+    state.truncated = true;
+    return;
+  }
+  state.text += chunk;
+}
+
 export interface RunResult {
   stdout: string;
   stderr: string;
@@ -124,8 +161,8 @@ export async function runAgent(
       return;
     }
 
-    let stdout = "";
-    let stderr = "";
+    const stdoutState: BoundedStreamState = { text: "", truncated: false };
+    const stderrState: BoundedStreamState = { text: "", truncated: false };
     let timedOut = false;
     let cancelled = false;
     let settled = false;
@@ -152,8 +189,17 @@ export async function runAgent(
 
     child.stdout?.on("data", (chunk: Buffer) => {
       const text = stripAnsi(chunk.toString("utf8"));
-      stdout += text;
+      appendBoundedStream(
+        stdoutState,
+        text,
+        MAX_AGENT_STDOUT_BYTES,
+        `[Hydra: agent stdout truncated at ${MAX_AGENT_STDOUT_BYTES} bytes — likely prompt injection from CLAUDE.md/AGENTS.md or runaway tool output]`
+      );
       try {
+        // Forward the raw text to the caller's callback even after we
+        // stop accumulating: the live consumer may already be writing to
+        // disk or another bounded sink, and dropping its feed mid-turn
+        // would orphan partial state.
         onChunk(text);
       } catch {
         // Caller's callback failed (e.g. webview disposed mid-stream).
@@ -162,7 +208,12 @@ export async function runAgent(
       }
     });
     child.stderr?.on("data", (chunk: Buffer) => {
-      stderr += stripAnsi(chunk.toString("utf8"));
+      appendBoundedStream(
+        stderrState,
+        stripAnsi(chunk.toString("utf8")),
+        MAX_AGENT_STDERR_BYTES,
+        `[Hydra: agent stderr truncated at ${MAX_AGENT_STDERR_BYTES} bytes]`
+      );
     });
 
     const finish = (exitCode: number | null) => {
@@ -170,11 +221,24 @@ export async function runAgent(
       settled = true;
       clearTimeout(timer);
       signal.removeEventListener("abort", abortHandler);
-      resolve({ stdout, stderr, exitCode, timedOut, cancelled, timeoutMs });
+      resolve({
+        stdout: stdoutState.text,
+        stderr: stderrState.text,
+        exitCode,
+        timedOut,
+        cancelled,
+        timeoutMs,
+      });
     };
 
     child.on("error", (err) => {
-      stderr += `${stderr ? "\n" : ""}${formatSpawnError(spawn, err)}`;
+      const prefix = stderrState.text ? "\n" : "";
+      appendBoundedStream(
+        stderrState,
+        `${prefix}${formatSpawnError(spawn, err)}`,
+        MAX_AGENT_STDERR_BYTES,
+        `[Hydra: agent stderr truncated at ${MAX_AGENT_STDERR_BYTES} bytes]`
+      );
       finish(null);
     });
     child.on("close", (exitCode) => {

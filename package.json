@@ -478,6 +478,7 @@
           "markdownDescription": "Telegram chat id Hydra sends notifications to. Your personal chat with the bot, a group, or a channel. Find it by messaging your bot and visiting `https://api.telegram.org/bot<token>/getUpdates`. Required for Telegram notifications to fire."
         },
         "hydraRoom.telegramNotifyOnDecisionNeeded": {
+          "scope": "application",
           "type": "boolean",
           "default": true,
           "markdownDescription": "Send a Telegram message when a decision packet's `Decision needed from user` is non-empty. Requires `hydraRoom.telegramBotToken` and `hydraRoom.telegramChatId`."
@@ -515,6 +516,7 @@
           "markdownDescription": "Saved composer templates. Run `Hydra: Insert Prompt Template` (or its keybinding `Ctrl+Alt+T`) to pick one; the body replaces the current composer text. Example: `[{ \"name\": \"Survey before code\", \"body\": \"Survey the affected files first. List what you'd change before making any edits.\" }]`."
         },
         "hydraRoom.claudeModel": {
+          "scope": "application",
           "default": "",
           "anyOf": [
             { "type": "string", "description": "Model applied to every Claude phase. Empty = CLI default." },
@@ -532,6 +534,7 @@
           "markdownDescription": "Model passed to Claude Code CLI as `--model <id>` on every dispatch. Either a single string (applied to every phase) or an object with per-phase overrides like `{ \"discussion\": \"sonnet\", \"build\": \"opus\", \"review\": \"opus\" }`. Aliases (`sonnet`, `opus`, `haiku`) or full IDs (`claude-sonnet-4-6`, `claude-opus-4-7`, `claude-haiku-4-5-20251001`) both work. Use `Hydra: Choose Model` (Ctrl+Alt+M) to change live."
         },
         "hydraRoom.codexModel": {
+          "scope": "application",
           "default": "",
           "anyOf": [
             { "type": "string", "description": "Model applied to every Codex phase. Empty = CLI default." },
@@ -549,6 +552,7 @@
           "markdownDescription": "Model passed to Codex CLI as `--model <id>` on every `exec` dispatch. Either a single string (applied to every phase) or an object with per-phase overrides. Codex CLI 0.130.0 ships: `gpt-5.5` (default), `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark` (interactive only, no API), `gpt-5.2`. Run `codex debug models` to inspect what your install actually exposes. Use `Hydra: Choose Model` (Ctrl+Alt+M) to change live."
         },
         "hydraRoom.claudeEffort": {
+          "scope": "application",
           "default": "",
           "anyOf": [
             { "type": "string", "enum": ["", "low", "medium", "high", "xhigh", "max"] },
@@ -565,6 +569,7 @@
           "markdownDescription": "Reasoning/effort level passed to Claude as `--effort <level>` on every dispatch. Either a single string (applied to every phase) or an object with per-phase overrides like `{ \"discussion\": \"low\", \"build\": \"high\" }`. Levels: `low`, `medium`, `high`, `xhigh`, `max`. Leave blank to use the CLI's default. If you've already added `--effort` to `hydraRoom.claudeExecArgs*`, the explicit arg wins. Use `Hydra: Choose Thinking Level` (Ctrl+Alt+E)."
         },
         "hydraRoom.codexReasoning": {
+          "scope": "application",
           "default": "",
           "anyOf": [
             { "type": "string", "enum": ["", "low", "medium", "high", "xhigh"] },
@@ -608,6 +613,10 @@
         "hydraRoom.claudeExecArgsDiscussion",
         "hydraRoom.claudeExecArgsBuild",
         "hydraRoom.claudeExecArgsReview",
+        "hydraRoom.claudeModel",
+        "hydraRoom.codexModel",
+        "hydraRoom.claudeEffort",
+        "hydraRoom.codexReasoning",
         "hydraRoom.nativePathPrepend",
         "hydraRoom.nativeEnv",
         "hydraRoom.codexNativePathPrepend",
@@ -620,6 +629,7 @@
         "hydraRoom.handoffWebhookUrl",
         "hydraRoom.telegramBotToken",
         "hydraRoom.telegramChatId",
+        "hydraRoom.telegramNotifyOnDecisionNeeded",
         "hydraRoom.telegramInboundPollingEnabled",
         "hydraRoom.telegramInboundCommandPrefix",
         "hydraRoom.telegramInboundPollIntervalSeconds"

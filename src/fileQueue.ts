@@ -27,9 +27,31 @@ export async function serializePerFile<T>(
 export async function ensureFile(filePath: string, defaultContent = ""): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   try {
-    await fs.stat(filePath);
-  } catch {
-    await fs.writeFile(filePath, defaultContent, "utf8");
+    // Why: fs.stat follows symlinks, so a malicious workspace that ships
+    // .hydra/<artifact> as a symlink to ~/.ssh/authorized_keys would pass
+    // the "already exists" check and we'd skip seeding (good) — but if the
+    // symlink target didn't exist yet, stat would throw ENOENT and we'd
+    // fs.writeFile straight through the symlink. lstat sees the link itself.
+    const st = await fs.lstat(filePath);
+    if (st.isSymbolicLink()) {
+      throw new Error(`Refusing to write Hydra artifact through symlink: ${filePath}`);
+    }
+    // exists as a regular file/directory — nothing to do
+    return;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      // ENOENT means we should create; anything else (including our refusal) propagates.
+      throw err;
+    }
+  }
+  // Why: O_EXCL ("wx"). A race that plants a symlink between the lstat above
+  // and this open still fails closed — open() with O_EXCL refuses to follow
+  // a pre-existing symlink and refuses to create over any existing entry.
+  const handle = await fs.open(filePath, "wx");
+  try {
+    await handle.writeFile(defaultContent, "utf8");
+  } finally {
+    await handle.close();
   }
 }
 
@@ -40,8 +62,25 @@ export async function ensureFile(filePath: string, defaultContent = ""): Promise
 // objective.ts, sessionBrief.ts, sessionState.ts.
 export async function atomicWriteFile(filePath: string, content: string): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
+  // Why: refuse to write through a symlink at the destination. A malicious
+  // workspace can pre-plant .hydra/<artifact>.{md,jsonl} as a symlink to
+  // ~/.ssh/authorized_keys etc.; fs.rename below would otherwise overwrite
+  // the destination, but if the user later opened that file expecting our
+  // content they'd be reading attacker-controlled bytes. We also guard the
+  // tmp side because fs.writeFile follows a pre-existing tmp symlink.
+  await refuseSymlink(filePath);
   const tmp = `${filePath}.tmp`;
-  await fs.writeFile(tmp, content, "utf8");
+  // Clear a stale-tmp from a prior crash, but only when it's a regular file;
+  // if it's a symlink (planted) or directory, leave it so the fs.open below
+  // fails closed with EEXIST instead of silently unlinking attacker bait.
+  await unlinkIfRegularFile(tmp);
+  // O_EXCL ("wx"): if tmp still exists (including as a symlink), fail closed.
+  const handle = await fs.open(tmp, "wx");
+  try {
+    await handle.writeFile(content, "utf8");
+  } finally {
+    await handle.close();
+  }
   await fs.rename(tmp, filePath);
 }
 
@@ -79,4 +118,33 @@ export async function readJsonlGuarded<T>(
     }
   }
   return options.limit && options.limit > 0 ? items.slice(-options.limit) : items;
+}
+
+// Why: lstat (NOT stat) so we see the link itself, not its target. A
+// missing path is not an error — the caller will create it.
+async function refuseSymlink(filePath: string): Promise<void> {
+  try {
+    const st = await fs.lstat(filePath);
+    if (st.isSymbolicLink()) {
+      throw new Error(`Refusing to write Hydra artifact through symlink: ${filePath}`);
+    }
+  } catch (err) {
+    // ENOENT: nothing to refuse yet — caller will create the path.
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+}
+
+// Why: we want to clear stale .tmp files left by a prior crash, but we
+// must NOT unlink a symlink (attacker-planted) or directory — leaving
+// those in place causes the subsequent fs.open(..., "wx") to fail closed.
+async function unlinkIfRegularFile(filePath: string): Promise<void> {
+  try {
+    const st = await fs.lstat(filePath);
+    if (st.isFile()) {
+      await fs.unlink(filePath);
+    }
+  } catch (err) {
+    // ENOENT: nothing to clean up.
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
 }

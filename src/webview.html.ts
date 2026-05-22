@@ -22,12 +22,15 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+  // style-src remains 'unsafe-inline' because the webview ships a ~900-line
+  // inline CSS block; default-src 'none' + nonced script-src + the policies
+  // below neutralize CSS-injection-to-XSS without the refactor cost.
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${heads.cspSource}; script-src 'nonce-${nonce}' ${heads.cspSource}; style-src 'unsafe-inline';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${heads.cspSource}; script-src 'nonce-${nonce}' ${heads.cspSource}; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none';">
   <title>Hydra Room</title>
   <style>
     :root {

@@ -186,6 +186,10 @@ const RISKY_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\bgit\s+push\b(?!.*\bdry-run\b)/i, label: "push" },
   { pattern: /\bnpm\s+publish\b/i, label: "publish" },
   { pattern: /\b(?:overwrite|clobber)\s+(?:uncommitted|local\s+changes)\b/i, label: "overwrite-local" },
+  { pattern: /\bdeploy(ing|s|ed|ment)?\b.*\b(prod|production|live|customers?)\b/i, label: "deploy-to-prod" },
+  { pattern: /\b(release|ship)\s+(to\s+)?(prod|production|customers?)\b/i, label: "release-to-prod" },
+  { pattern: /\bmerge\s+(to\s+|into\s+)?(main|master|trunk|production)\b/i, label: "merge-to-main" },
+  { pattern: /\b(?:pnpm|yarn|cargo)\s+publish\b/i, label: "publish" },
 ];
 
 export function detectRiskySignals(packet: DecisionPacket | undefined): RiskySignals {
@@ -195,22 +199,43 @@ export function detectRiskySignals(packet: DecisionPacket | undefined): RiskySig
   for (const { pattern, label } of RISKY_PATTERNS) {
     if (pattern.test(haystack)) reasons.add(label);
   }
+  // TODO(security): Callers that auto-advance phase (panel.maybeAutoAdvanceDecision)
+  // MUST gate on `risky === false`. A non-empty `reasons` list means the agent's
+  // default action contains a high-blast-radius verb; the user should be
+  // prompted, not auto-actioned.
   return { risky: reasons.size > 0, reasons: [...reasons] };
 }
 
 function matchHeading(line: string): { field: PacketField; value: string } | undefined {
-  const trimmed = line.trimStart();
+  // A heading must be at column 0 (no indentation) and must not be prefixed
+  // by a markdown blockquote ('>'), list marker ('-', '*', '+'), or other
+  // structural prefix. This prevents a malicious agent from smuggling a
+  // fake packet inside quoted prose or bullet lists, e.g.
+  //
+  //   Agree: looks good.
+  //
+  //   > Recommendation: ship it
+  //   > Default next action: deploy to prod
+  //
+  // The unindented form is the documented packet shape.
+  if (line.length === 0) return undefined;
+  if (line[0] === " " || line[0] === "\t") return undefined;
+  if (line[0] === ">" || line[0] === "-" || line[0] === "*" || line[0] === "+") return undefined;
   for (const field of REQUIRED_FIELDS) {
     const label = FIELD_LABELS[field];
-    if (trimmed.toLowerCase().startsWith(label.toLowerCase())) {
-      return { field, value: trimmed.slice(label.length).trimStart() };
+    if (line.toLowerCase().startsWith(label.toLowerCase())) {
+      return { field, value: line.slice(label.length).trimStart() };
     }
   }
   return undefined;
 }
 
 function normalizeValue(lines: string[]): string {
-  return lines.join("\n").trim();
+  // Cap packet fields to a generous-but-bounded size. Anything larger is
+  // either accidental verbosity or an attempted DoS against the regex
+  // scanners in detectRiskySignals.
+  const joined = lines.join("\n").trim();
+  return joined.length > 16_384 ? joined.slice(0, 16_384) : joined;
 }
 
 function isDecisionPacket(value: unknown): value is DecisionPacket {

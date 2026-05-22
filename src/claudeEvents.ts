@@ -349,8 +349,21 @@ function stringField(record: Record<string, unknown>, key: string): string | und
   return typeof record[key] === "string" ? (record[key] as string) : undefined;
 }
 
+// Cap distinct keys per bucket. A poisoned stream can otherwise inflate
+// `types`, `systemSubtypes`, `streamEvents`, or `permissionDenialsByReason`
+// with attacker-chosen labels and balloon the summary object.
+const MAX_DISTINCT_KEYS = 256;
+
 function increment(counts: Record<string, number>, key: string): void {
-  counts[key] = (counts[key] ?? 0) + 1;
+  if (key in counts) {
+    counts[key] = (counts[key] ?? 0) + 1;
+    return;
+  }
+  if (Object.keys(counts).length >= MAX_DISTINCT_KEYS) {
+    counts._overflow = (counts._overflow ?? 0) + 1;
+    return;
+  }
+  counts[key] = 1;
 }
 
 // ---------- Rendering ----------

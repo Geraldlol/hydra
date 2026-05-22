@@ -101,11 +101,18 @@ export class TerminalBridge {
         }
       })
     );
+    // Why: dispatch .ps1 scripts can contain $env:KEY = '...' lines for every
+    // hydraRoom.nativeEnv* setting. Past sessions or aborted dispatches may
+    // have left these on disk; clear anything older than an hour at startup
+    // so secrets don't accumulate. Best-effort — never blocks the constructor.
+    void sweepStaleDispatchArtifacts(this.workspaceRoot);
   }
 
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    // Best-effort cleanup of stale dispatch + prompt files on shutdown.
+    void sweepStaleDispatchArtifacts(this.workspaceRoot);
     while (this.disposables.length) this.disposables.pop()?.dispose();
     for (const managed of this.terminals.values()) {
       try { managed.terminal.dispose(); } catch { /* already gone */ }
@@ -270,31 +277,47 @@ export class TerminalBridge {
       lastReplyPath: paths.replyPath,
       lastLogPath: paths.logPath,
     });
-    await fs.writeFile(
-      paths.dispatchPath,
-      buildPowerShellDispatchCommand(
-        expandRequestFileSpawn(terminalSpawn, {
-          hydraPromptFile: paths.promptPath,
-          hydraReplyFile: paths.replyPath,
-          hydraLogFile: paths.logPath,
-        }),
-        paths.promptPath,
-        paths.replyPath,
-        paths.logPath
-      ),
-      "utf8"
-    );
-    terminal.sendText(buildPowerShellDispatchInvocation(paths.dispatchPath), true);
-    const chunkHandler = onChunk
-      ? (chunk: string) => {
-          void this.setSession(agent, {
-            state: "streaming",
-            detail: `${phase} output streaming`,
-          });
-          onChunk(chunk);
-        }
-      : undefined;
-    const result = await waitForReply(paths.replyPath, paths.logPath, timeoutMs, signal, this.replyPollMs(), chunkHandler);
+    // Why: per-request reply nonce. The dispatch script (running in the live
+    // PS session) reads $env:HYDRA_REPLY_NONCE and embeds it in the reply
+    // JSON; Hydra rejects any reply whose nonce doesn't match. This blocks a
+    // co-tenant process from pre-writing a spoofed reply file.
+    const replyNonce = crypto.randomBytes(16).toString("base64url");
+    let result: RunResult;
+    try {
+      await fs.writeFile(
+        paths.dispatchPath,
+        buildPowerShellDispatchCommand(
+          expandRequestFileSpawn(terminalSpawn, {
+            hydraPromptFile: paths.promptPath,
+            hydraReplyFile: paths.replyPath,
+            hydraLogFile: paths.logPath,
+          }),
+          paths.promptPath,
+          paths.replyPath,
+          paths.logPath
+        ),
+        "utf8"
+      );
+      terminal.sendText(buildPowerShellDispatchInvocation(paths.dispatchPath, replyNonce), true);
+      const chunkHandler = onChunk
+        ? (chunk: string) => {
+            void this.setSession(agent, {
+              state: "streaming",
+              detail: `${phase} output streaming`,
+            });
+            onChunk(chunk);
+          }
+        : undefined;
+      result = await waitForReply(paths.replyPath, paths.logPath, timeoutMs, signal, this.replyPollMs(), chunkHandler, replyNonce);
+    } finally {
+      // Why: dispatch .ps1 carries $env:KEY = '...' lines for every configured
+      // hydraRoom.nativeEnv* setting. Unlink immediately so secrets don't
+      // persist on disk. ENOENT is swallowed by unlinkIfExists.
+      await Promise.all([
+        unlinkIfExists(paths.dispatchPath),
+        unlinkIfExists(paths.promptPath),
+      ]);
+    }
     if (result.timedOut || result.cancelled) {
       this.retireTerminal(agent);
     } else {
@@ -481,7 +504,8 @@ async function waitForReply(
   timeoutMs: number,
   signal: AbortSignal,
   pollMs: number,
-  onChunk?: (chunk: string) => void
+  onChunk?: (chunk: string) => void,
+  replyNonce?: string
 ): Promise<RunResult> {
   const start = Date.now();
   let lastParseError = "";
@@ -522,6 +546,16 @@ async function waitForReply(
     try {
       const raw = await fs.readFile(replyPath, "utf8");
       const reply = parseTerminalReply(raw);
+      if (replyNonce && reply.nonce !== replyNonce) {
+        // Why: a co-tenant process (same user) that can write to .hydra/replies
+        // could pre-write a spoofed reply file with attacker-controlled text.
+        // Reject the reply and let the polling loop continue waiting for the
+        // legitimate one from the live PS session.
+        lastParseError = "reply nonce mismatch — possible spoofed reply from a co-tenant process";
+        await sleepWithAbort(nextPollMs);
+        nextPollMs = Math.min(maxPollMs, nextPollMs * 2);
+        continue;
+      }
       const finalChunk = await readLogChunk(logPath, logOffset);
       if (finalChunk.text) {
         logOffset = finalChunk.nextOffset;
@@ -610,6 +644,41 @@ async function unlinkIfExists(filePath: string): Promise<void> {
     await fs.unlink(filePath);
   } catch {
     // The marker may not exist if startup probing timed out.
+  }
+}
+
+// Why: dispatch .ps1 files and prompt files can carry secrets via
+// hydraRoom.nativeEnv* settings. Live dispatches unlink them in finally, but
+// crashes or aborted sessions can leave stragglers on disk. Sweep anything
+// older than an hour at constructor + dispose time.
+async function sweepStaleDispatchArtifacts(workspaceRoot: string): Promise<void> {
+  const STALE_MS = 60 * 60 * 1000;
+  const dirs = [
+    path.join(workspaceRoot, ".hydra", "dispatch"),
+    path.join(workspaceRoot, ".hydra", "prompts"),
+  ];
+  const now = Date.now();
+  for (const dir of dirs) {
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      // Dir may not exist yet on first run, or the workspace may be read-only.
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      const full = path.join(dir, entry.name);
+      try {
+        const st = await fs.stat(full);
+        if (now - st.mtimeMs > STALE_MS) {
+          await fs.unlink(full);
+        }
+      } catch {
+        // Best-effort: another process may have unlinked the file, or perms
+        // may block us. Either way, not worth surfacing.
+      }
+    }
   }
 }
 

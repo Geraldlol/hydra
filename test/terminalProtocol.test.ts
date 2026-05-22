@@ -216,7 +216,7 @@ describe("terminal bridge protocol", () => {
     const out = buildPowerShellDispatchInvocation("C:\\repo\\.hydra\\dispatch\\turn-1-codex-opener.ps1");
     assert.equal(
       out,
-      "\r\n; Invoke-Expression (Get-Content -LiteralPath 'C:\\repo\\.hydra\\dispatch\\turn-1-codex-opener.ps1' -Raw)"
+      "\r\n; try { Invoke-Expression (Get-Content -LiteralPath 'C:\\repo\\.hydra\\dispatch\\turn-1-codex-opener.ps1' -Raw) } finally { Remove-Item env:HYDRA_REPLY_NONCE -ErrorAction SilentlyContinue }"
     );
     assert.doesNotMatch(out, /__HydraResolveCommand/);
     assert.doesNotMatch(out, /__hydraPrompt/);
@@ -229,7 +229,7 @@ describe("terminal bridge protocol", () => {
     // result must still tokenize as two separate Invoke-Expression statements,
     // not a single call where the second IE is read as a positional arg.
     const concatenated = a + b;
-    assert.match(concatenated, /\)\r\n; Invoke-Expression /);
+    assert.match(concatenated, /\}\r\n; try \{ Invoke-Expression /);
   });
 
   test("prompt file contains original prompt and reply path", () => {
@@ -257,9 +257,9 @@ describe("terminal bridge protocol", () => {
   });
 
   test("parses terminal replies", () => {
-    assert.deepEqual(parseTerminalReply('{"text":"done"}'), { text: "done", error: undefined });
-    assert.deepEqual(parseTerminalReply('\uFEFF{"text":"done"}'), { text: "done", error: undefined });
-    assert.deepEqual(parseTerminalReply('{"text":"","error":"failed"}'), { text: "", error: "failed" });
+    assert.deepEqual(parseTerminalReply('{"text":"done"}'), { text: "done", error: undefined, nonce: undefined });
+    assert.deepEqual(parseTerminalReply('\uFEFF{"text":"done"}'), { text: "done", error: undefined, nonce: undefined });
+    assert.deepEqual(parseTerminalReply('{"text":"","error":"failed"}'), { text: "", error: "failed", nonce: undefined });
     assert.throws(() => parseTerminalReply("{}"), /must include/);
   });
 });
