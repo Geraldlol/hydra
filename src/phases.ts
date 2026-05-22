@@ -31,6 +31,7 @@ export type Event =
   | { type: "reviewDone"; approved: boolean }
   | { type: "parallelReviewDone"; approved: boolean }
   | { type: "handBack" }
+  | { type: "requestReviewSkipped" }
   | { type: "stop" };
 
 const otherAgent = (a: AgentId): AgentId => (a === "codex" ? "claude" : "codex");
@@ -91,12 +92,14 @@ export function transition(state: State, event: Event): State {
       if (event.type === "userSent") return { name: "Opener", opener: event.opener, reactor: otherAgent(event.opener) };
       if (event.type === "requestReview")
         return { name: "Review", reviewer: otherAgent(state.builder) };
+      if (event.type === "requestReviewSkipped") return { name: "AwaitingUser" };
       return state;
     case "ParallelBuildDone":
       if (event.type === "userSent" && event.parallel) return { name: "ParallelDiscussion", agents: ["codex", "claude"] };
       if (event.type === "userSent") return { name: "Opener", opener: event.opener, reactor: otherAgent(event.opener) };
       if (event.type === "requestReview")
         return { name: "ParallelReview", agents: state.agents };
+      if (event.type === "requestReviewSkipped") return { name: "AwaitingUser" };
       return state;
     case "Review":
       if (event.type === "reviewDone")

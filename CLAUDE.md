@@ -46,7 +46,7 @@ The extension code, user settings, and the workspace folder are *semi-trusted*; 
 
 ### Phase state machine
 
-`src/phases.ts` is the canonical state machine. A serialized turn is `Idle → Opener → Reactor → Closer → AwaitingUser`. A turn that addresses both agents ("both of you", "Codex and Claude…") shortcuts to `ParallelDiscussion`. After `AwaitingUser`, `assignBuilder` → `Build` → `BuildDone` → `requestReview` → `Review` → `ReviewDone` → `handBack` cycles back to Build. `transition()` in `src/phases.ts` is the canonical event handler; `panel.ts:applyEvent` is the only call site that uses it. Two ad-hoc resets to `AwaitingUser` in panel.ts (the `resetStuckTurn` and `archiveAndClearRoom` flows) intentionally bypass the state machine; new phase logic should always route through `transition()`.
+`src/phases.ts` is the canonical state machine. A serialized turn is `Idle → Opener → Reactor → Closer → AwaitingUser`. A turn that addresses both agents ("both of you", "Codex and Claude…") shortcuts to `ParallelDiscussion`. After `AwaitingUser`, `assignBuilder` → `Build` → `BuildDone` → `requestReview` → `Review` → `ReviewDone` → `handBack` cycles back to Build. `transition()` in `src/phases.ts` is the canonical event handler; `panel.ts:applyEvent` is the only call site that uses it. `archiveAndClearRoom` is the sole place in panel.ts that assigns `this.state` directly — it wipes the room (messages, agent statuses, transcript) so modeling it as a phase event would conflate concerns; the invariant is enforced by `test/panelSourceContract.test.ts`. New phase logic must always route through `transition()`.
 
 ### Transport layer (two modes)
 
