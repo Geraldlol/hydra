@@ -90,6 +90,8 @@ export const TRUST_SCOPED_SETTINGS = [
   "codexTerminalCommand",
   "claudeTerminalCommand",
   "verifyCommand",
+  "promptBodyRetentionDays",
+  "diagnosticRetentionDays",
   "handoffWebhookUrl",
   "telegramBotToken",
   "telegramChatId",

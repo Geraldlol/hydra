@@ -412,12 +412,14 @@
           "markdownDescription": "Days of immutable `.hydra/wiki/raw/turns/` snapshots to keep after automatic wiki wrapups. Set to 0 to keep raw turn snapshots indefinitely."
         },
         "hydraRoom.promptBodyRetentionDays": {
+          "scope": "application",
           "type": "number",
           "default": 3,
           "minimum": 0,
           "markdownDescription": "Days to keep full rendered prompt bodies in `.hydra/prompts/index.jsonl` before `Hydra: Clean Workspace State` compacts them to metadata-only records. Set to 0 to compact prompt bodies whenever cleanup runs."
         },
         "hydraRoom.diagnosticRetentionDays": {
+          "scope": "application",
           "type": "number",
           "default": 7,
           "minimum": 0,
@@ -671,6 +673,8 @@
         "hydraRoom.codexTerminalCommand",
         "hydraRoom.claudeTerminalCommand",
         "hydraRoom.verifyCommand",
+        "hydraRoom.promptBodyRetentionDays",
+        "hydraRoom.diagnosticRetentionDays",
         "hydraRoom.handoffWebhookUrl",
         "hydraRoom.telegramBotToken",
         "hydraRoom.telegramChatId",
