@@ -158,6 +158,7 @@ import {
   shouldUseCodexJson,
   withCodexJsonArgs,
   withCodexLastMessageArgs,
+  withCodexSkipGitRepoCheckArgs,
 } from "./codexTransport";
 import {
   shouldCreateClaudeRequestFiles,
@@ -3502,6 +3503,7 @@ export class HydraRoomPanel {
       : undefined;
     const rawArgs = presetArgs ?? cfg.get<string[]>(argsKey, []);
     let spawn = buildAgentSpawn(agent, phase, command, rawArgs, this.workspaceRoot);
+    if (agent === "codex") spawn = withCodexSkipGitRepoCheckArgs(spawn);
     spawn = withModelArgs(spawn, agent, phase);
     spawn = withEffortArgs(spawn, agent, phase);
     return applySpawnEnvironment(

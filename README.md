@@ -113,6 +113,8 @@ Use the in-room `Poke Codex` and `Poke Claude` buttons, or `Hydra: Poke Codex Te
 
 Normal room messages use the opener -> reactor -> closer discussion loop by default. If the latest message explicitly addresses both agents, such as "both of you", "you both", or "Codex and Claude, ...", Hydra instead runs Codex and Claude in parallel with independent discussion prompts and returns control after both replies finish. Set `hydraRoom.discussionMode` to `parallel` when latency matters more than serialized critique choreography; set it to `serial` to force the traditional loop.
 
+Hydra adds Codex `exec`'s `--skip-git-repo-check` for normal room turns so new folders can be used before they have a Git repository. Exact `Hydra: Run Codex Native Command` calls remain raw native passthrough.
+
 Use `Codex + Editor` / `Claude + Editor`, or the matching command-palette actions, when the active editor matters. Hydra attaches the active selection first; if nothing is selected, it attaches the active file up to `hydraRoom.editorContextMaxChars`. Direct terminal pokes include the active room transcript plus any editor context you explicitly attach.
 
 Use `Codex + Diff` / `Claude + Diff`, or the matching command-palette actions, when the working tree matters. Hydra attaches `git diff HEAD` plus untracked files, capped by `hydraRoom.diffMaxLines`, to one direct native-terminal request.

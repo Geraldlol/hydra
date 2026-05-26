@@ -246,7 +246,7 @@ export function describeCapabilityProfile(
 function codexArgsForProfile(profile: ConfigurableCapabilityProfileId): string[] | undefined {
   switch (profile) {
     case "safeDiscussion":
-      return ["exec", "--sandbox", "read-only", "--color", "never", "--cd", "${workspaceFolder}", "-"];
+      return ["exec", "--sandbox", "read-only", "--color", "never", "--cd", "${workspaceFolder}", "--skip-git-repo-check", "-"];
     case "nativeDiscussion":
     case "nativeBuild":
       return [
@@ -259,12 +259,13 @@ function codexArgsForProfile(profile: ConfigurableCapabilityProfileId): string[]
         "never",
         "--cd",
         "${workspaceFolder}",
+        "--skip-git-repo-check",
         "-",
       ];
     case "nativeReview":
       return ["review", "--uncommitted", "-"];
     case "fullNative":
-      return ["exec", "--sandbox", "danger-full-access", "--color", "never", "--cd", "${workspaceFolder}", "-"];
+      return ["exec", "--sandbox", "danger-full-access", "--color", "never", "--cd", "${workspaceFolder}", "--skip-git-repo-check", "-"];
     case "custom":
       return undefined;
   }

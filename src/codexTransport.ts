@@ -39,3 +39,31 @@ export function shouldUseCodexJson(spawn: AgentSpawn): boolean {
 export function withCodexJsonArgs(spawn: AgentSpawn): AgentSpawn {
   return { ...spawn, args: insertBeforeStdinDash(spawn.args, ["--json"]) };
 }
+
+export function withCodexSkipGitRepoCheckArgs(spawn: AgentSpawn): AgentSpawn {
+  if (!isCodexExecArgs(spawn.args)) return spawn;
+  if (spawn.args.includes("--skip-git-repo-check")) return spawn;
+  return { ...spawn, args: insertBeforeStdinDash(spawn.args, ["--skip-git-repo-check"]) };
+}
+
+function isCodexExecArgs(args: string[]): boolean {
+  return firstCodexPositional(args) === "exec" || firstCodexPositional(args) === "e";
+}
+
+function firstCodexPositional(args: string[]): string | undefined {
+  const valueFlags = new Set([
+    "--color", "--cd", "-C", "--config", "-c", "--profile", "-p",
+    "--model", "-m", "--add-dir", "--image", "-i", "--local-provider",
+    "--sandbox", "-s", "--output-schema", "-o", "--output-last-message",
+  ]);
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg.startsWith("-")) {
+      const eq = arg.indexOf("=");
+      if (eq < 0 && valueFlags.has(arg)) i++;
+      continue;
+    }
+    return arg;
+  }
+  return undefined;
+}

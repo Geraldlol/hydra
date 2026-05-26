@@ -5,6 +5,7 @@ import {
   withCodexLastMessageArgs,
   shouldUseCodexJson,
   withCodexJsonArgs,
+  withCodexSkipGitRepoCheckArgs,
 } from "../src/codexTransport";
 
 // codexTransport.ts does `import * as vscode from "vscode"` at module
@@ -141,5 +142,49 @@ describe("withCodexJsonArgs", () => {
   test("appends --json at end when no '-' is present", () => {
     const out = withCodexJsonArgs(spawn(["exec", "--sandbox", "read-only"]));
     assert.deepEqual(out.args, ["exec", "--sandbox", "read-only", "--json"]);
+  });
+});
+
+describe("withCodexSkipGitRepoCheckArgs", () => {
+  test("inserts --skip-git-repo-check before the trailing '-' stdin sentinel", () => {
+    const out = withCodexSkipGitRepoCheckArgs(
+      spawn(["exec", "--sandbox", "workspace-write", "--cd", "C:\\new-workspace", "-"]),
+    );
+    assert.deepEqual(out.args, [
+      "exec",
+      "--sandbox",
+      "workspace-write",
+      "--cd",
+      "C:\\new-workspace",
+      "--skip-git-repo-check",
+      "-",
+    ]);
+  });
+
+  test("does not duplicate --skip-git-repo-check", () => {
+    const s = spawn(["exec", "--skip-git-repo-check", "-"]);
+    const out = withCodexSkipGitRepoCheckArgs(s);
+    assert.strictEqual(out, s);
+  });
+
+  test("leaves non-exec Codex subcommands alone", () => {
+    const s = spawn(["review", "--uncommitted", "-"]);
+    const out = withCodexSkipGitRepoCheckArgs(s);
+    assert.strictEqual(out, s);
+  });
+
+  test("detects exec when global Codex flags precede the subcommand", () => {
+    const out = withCodexSkipGitRepoCheckArgs(
+      spawn(["--profile", "hydra", "exec", "--sandbox", "read-only", "-"]),
+    );
+    assert.deepEqual(out.args, [
+      "--profile",
+      "hydra",
+      "exec",
+      "--sandbox",
+      "read-only",
+      "--skip-git-repo-check",
+      "-",
+    ]);
   });
 });

@@ -2,7 +2,7 @@
   "name": "vscode-hydra-room",
   "displayName": "Hydra",
   "description": "Three-way collaboration room for the user, Codex CLI, and Claude Code CLI inside VS Code.",
-  "version": "0.4.33",
+  "version": "0.4.34",
   "packageManager": "pnpm@11.1.3",
   "publisher": "local-tools",
   "license": "MIT",
@@ -110,14 +110,14 @@
           "scope": "application",
           "type": "array",
           "items": { "type": "string" },
-          "default": ["exec", "--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true", "--color", "never", "--cd", "${workspaceFolder}", "-"],
+          "default": ["exec", "--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true", "--color", "never", "--cd", "${workspaceFolder}", "--skip-git-repo-check", "-"],
           "markdownDescription": "Raw Codex CLI args for serialized discussion turns. `${workspaceFolder}` is expanded; the trailing `-` reads the Hydra prompt from stdin. Hydra also expands `${hydraPromptFile}`, `${hydraReplyFile}`, and `${hydraLogFile}` per request so native file/output flags can target Hydra artifacts."
         },
         "hydraRoom.codexExecArgsBuild": {
           "scope": "application",
           "type": "array",
           "items": { "type": "string" },
-          "default": ["exec", "--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true", "--color", "never", "--cd", "${workspaceFolder}", "-"],
+          "default": ["exec", "--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true", "--color", "never", "--cd", "${workspaceFolder}", "--skip-git-repo-check", "-"],
           "markdownDescription": "Raw Codex CLI args for Build. Defaults to workspace-write `codex exec`; add native flags such as config profiles, model, search, MCP/plugin-related config, sandbox changes, or Hydra request-file placeholders here."
         },
         "hydraRoom.codexExecArgsReview": {
