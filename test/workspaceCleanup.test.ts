@@ -18,18 +18,22 @@ describe("workspace cleanup", () => {
     const oldReply = await writeDiagnostic(dir, ".hydra/replies/old.json", "{}", old);
     const oldDispatch = await writeDiagnostic(dir, ".hydra/dispatch/old.ps1", "Write-Host old", old);
     const oldPromptFile = await writeDiagnostic(dir, ".hydra/prompts/old.md", "old prompt", old);
+    const oldAttachment = await writeDiagnostic(dir, ".hydra/attachments/turn-1/old.txt", "old attachment", old);
+    const recentAttachment = await writeDiagnostic(dir, ".hydra/attachments/turn-2/recent.txt", "recent attachment", recent);
     const promptIndex = await writeDiagnostic(dir, ".hydra/prompts/index.jsonl", "{\"id\":\"keep\"}\n", old);
 
     const summary = await pruneDiagnosticArtifacts(dir, { retentionDays: 7, now });
 
-    assert.equal(summary.deletedFiles, 4);
+    assert.equal(summary.deletedFiles, 5);
     assert.equal(summary.failedDeletes, 0);
     assert.ok(summary.deletedBytes > 0);
     await assert.rejects(fs.stat(oldLog), /ENOENT/);
     await assert.rejects(fs.stat(oldReply), /ENOENT/);
     await assert.rejects(fs.stat(oldDispatch), /ENOENT/);
     await assert.rejects(fs.stat(oldPromptFile), /ENOENT/);
+    await assert.rejects(fs.stat(oldAttachment), /ENOENT/);
     assert.equal(await fs.readFile(recentLog, "utf8"), "recent log");
+    assert.equal(await fs.readFile(recentAttachment, "utf8"), "recent attachment");
     assert.equal(await fs.readFile(promptIndex, "utf8"), "{\"id\":\"keep\"}\n");
   });
 
@@ -102,4 +106,3 @@ async function writeDiagnostic(root: string, relativePath: string, body: string,
   await fs.utimes(filePath, mtime, mtime);
   return filePath;
 }
-

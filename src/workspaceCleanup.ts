@@ -41,6 +41,7 @@ interface DiagnosticTarget {
   label: string;
   relativeDir: string;
   keepFileNames?: Set<string>;
+  recursive?: boolean;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -54,6 +55,7 @@ const DIAGNOSTIC_TARGETS: DiagnosticTarget[] = [
   { label: "terminal replies", relativeDir: path.join(".hydra", "replies") },
   { label: "terminal logs", relativeDir: path.join(".hydra", "logs") },
   { label: "terminal dispatch scripts", relativeDir: path.join(".hydra", "dispatch") },
+  { label: "room attachments", relativeDir: path.join(".hydra", "attachments"), recursive: true },
 ];
 
 export async function cleanWorkspaceState(
@@ -156,27 +158,59 @@ async function pruneDiagnosticTarget(
   }
 
   for (const entry of entries) {
-    if (!entry.isFile() || target.keepFileNames?.has(entry.name)) continue;
-    targetSummary.scannedFiles++;
-    const filePath = path.join(dir, entry.name);
-    let stats: import("node:fs").Stats;
-    try {
-      stats = await fs.stat(filePath);
-    } catch {
-      // File disappeared between readdir and stat; another cleanup already handled it.
-      targetSummary.failedDeletes++;
-      continue;
-    }
-    if (stats.mtimeMs > cutoffMs) continue;
-    try {
-      await fs.unlink(filePath);
-      targetSummary.deletedFiles++;
-      targetSummary.deletedBytes += stats.size;
-    } catch {
-      // Best-effort diagnostics cleanup should not block the room if a file is locked.
-      targetSummary.failedDeletes++;
-    }
+    await pruneDiagnosticEntry(dir, entry, target, cutoffMs, targetSummary);
   }
 
   return targetSummary;
+}
+
+async function pruneDiagnosticEntry(
+  parentDir: string,
+  entry: import("node:fs").Dirent,
+  target: DiagnosticTarget,
+  cutoffMs: number,
+  targetSummary: DiagnosticArtifactTargetSummary
+): Promise<void> {
+  if (target.keepFileNames?.has(entry.name)) return;
+  const entryPath = path.join(parentDir, entry.name);
+
+  if (target.recursive && entry.isDirectory()) {
+    let children: import("node:fs").Dirent[];
+    try {
+      children = await fs.readdir(entryPath, { withFileTypes: true });
+    } catch {
+      // Directory disappeared or became unreadable during best-effort cleanup.
+      targetSummary.failedDeletes++;
+      return;
+    }
+    for (const child of children) {
+      await pruneDiagnosticEntry(entryPath, child, target, cutoffMs, targetSummary);
+    }
+    try {
+      await fs.rmdir(entryPath);
+    } catch {
+      // Non-empty or locked attachment directories can be retried by a later cleanup.
+    }
+    return;
+  }
+
+  if (!entry.isFile()) return;
+  targetSummary.scannedFiles++;
+  let stats: import("node:fs").Stats;
+  try {
+    stats = await fs.stat(entryPath);
+  } catch {
+    // File disappeared between readdir and stat; another cleanup already handled it.
+    targetSummary.failedDeletes++;
+    return;
+  }
+  if (stats.mtimeMs > cutoffMs) return;
+  try {
+    await fs.unlink(entryPath);
+    targetSummary.deletedFiles++;
+    targetSummary.deletedBytes += stats.size;
+  } catch {
+    // Best-effort diagnostics cleanup should not block the room if a file is locked.
+    targetSummary.failedDeletes++;
+  }
 }

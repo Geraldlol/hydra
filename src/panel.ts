@@ -154,6 +154,13 @@ import { effectivePhasedNumberSetting, summarizePhasedSetting } from "./phasedSe
 import { modelForPhase, withEffortArgs, withModelArgs } from "./agentArgs";
 import type { WebviewMessage } from "./webviewMessages";
 import {
+  attachmentDisplaySummary,
+  prepareRoomAttachment,
+  renderRoomAttachmentsForPrompt,
+  roomAttachmentSummaries,
+  type PendingRoomAttachment,
+} from "./attachments";
+import {
   shouldCaptureCodexLastMessage,
   shouldUseCodexJson,
   withCodexJsonArgs,
@@ -322,10 +329,16 @@ interface PreparedOneShotSpawn {
 }
 
 interface QueuedUserMessage {
-  text: string;
+  displayText: string;
+  promptText: string;
   opener: AgentId;
   timestamp: string;
   telegramChatId?: string;
+}
+
+interface PreparedRoomMessage {
+  displayText: string;
+  promptText: string;
 }
 
 // SSRF block-list for handoff webhook destinations. Hostnames are compared
@@ -418,6 +431,7 @@ export class HydraRoomPanel {
   private workQueueDispositions: WorkQueueDisposition[] = [];
   private latestDoctorReport: DoctorReport | undefined;
   private queuedUserMessages: QueuedUserMessage[] = [];
+  private pendingAttachments: PendingRoomAttachment[] = [];
   private drainingQueuedUserMessages = false;
   private verificationRunning = false;
   private autopilotRunning = false;
@@ -620,11 +634,11 @@ export class HydraRoomPanel {
   async sendUserMessage(
     text: string,
     opener: AgentId = this.getFirstSpeaker(),
-    options: { telegramChatId?: string } = {}
+    options: { telegramChatId?: string; consumePendingAttachments?: boolean } = {}
   ): Promise<void> {
     await this.ready();
-    const trimmed = text.trim();
-    if (!trimmed) return;
+    const prepared = this.prepareUserMessageWithAttachments(text, !!options.consumePendingAttachments);
+    if (!prepared.displayText) return;
     if (!this.workspaceReady) {
       this.appendSystemMessageToUi("Hydra cannot send yet because no workspace folder is ready. Open a project folder, then send again.");
       this.postState();
@@ -632,15 +646,15 @@ export class HydraRoomPanel {
     }
     const selectedOpener = normalizeAgentId(opener, this.getFirstSpeaker());
     if (this.terminalPokeInFlight) {
-      const queued = this.appendUserMessageToUi(trimmed);
-      this.queuedUserMessages.push({ text: trimmed, opener: selectedOpener, timestamp: queued.timestamp, telegramChatId: options.telegramChatId });
+      const queued = this.appendUserMessageToUi(prepared.displayText);
+      this.queuedUserMessages.push({ ...prepared, opener: selectedOpener, timestamp: queued.timestamp, telegramChatId: options.telegramChatId });
       await this.appendSystemMessage("Hydra queued your message until the native terminal action finishes.");
       this.postState();
       return;
     }
     if (isInFlight(this.state)) {
-      const queued = this.appendUserMessageToUi(trimmed);
-      this.queuedUserMessages.push({ text: trimmed, opener: selectedOpener, timestamp: queued.timestamp, telegramChatId: options.telegramChatId });
+      const queued = this.appendUserMessageToUi(prepared.displayText);
+      this.queuedUserMessages.push({ ...prepared, opener: selectedOpener, timestamp: queued.timestamp, telegramChatId: options.telegramChatId });
       await this.appendSystemMessage("Hydra queued your message until the current turn finishes.");
       this.postState();
       return;
@@ -651,26 +665,28 @@ export class HydraRoomPanel {
       return;
     }
     if (!this.autoAdvanceInProgress) this.autoAdvanceSendInstructionCount = 0;
-    await this.startUserMessageTurn(trimmed, selectedOpener, { alreadyAppended: false });
+    await this.startUserMessageTurn(prepared.displayText, prepared.promptText, selectedOpener, { alreadyAppended: false });
   }
 
   private async startUserMessageTurn(
-    trimmed: string,
+    displayText: string,
+    promptText: string,
     selectedOpener: AgentId,
-    options: { alreadyAppended: boolean }
+    options: { alreadyAppended: boolean; timestamp?: string }
   ): Promise<void> {
-    const parallel = shouldRunParallelDiscussion(trimmed, this.discussionMode());
+    const parallel = shouldRunParallelDiscussion(promptText, this.discussionMode());
     // Transition state synchronously BEFORE any await. A second concurrent
     // sendUserMessage hitting after this.ready() but during appendUserMessage
     // would otherwise pass the guard above and orphan the first turn's
     // currentAbort. Now the second call sees an in-flight discussion and bails at
     // isSendable.
     this.applyEvent({ type: "userSent", opener: selectedOpener, parallel });
-    if (!options.alreadyAppended) await this.appendUserMessage(trimmed);
+    let timestamp = options.timestamp;
+    if (!options.alreadyAppended) timestamp = (await this.appendUserMessage(displayText)).timestamp;
     if (parallel) {
-      await this.runParallelDiscussionTurn(trimmed);
+      await this.runParallelDiscussionTurn(promptText, displayText, timestamp);
     } else {
-      await this.runDiscussionTurn(selectedOpener, trimmed);
+      await this.runDiscussionTurn(selectedOpener, promptText, displayText, timestamp);
     }
     await this.drainQueuedUserMessages();
   }
@@ -915,10 +931,13 @@ export class HydraRoomPanel {
         const beforeReplyAt = this.messages.length;
         await appendMessage(this.transcriptUri.fsPath, {
           role: "user",
-          text: next.text,
+          text: next.displayText,
           timestamp: next.timestamp,
         });
-        await this.startUserMessageTurn(next.text, next.opener, { alreadyAppended: true });
+        await this.startUserMessageTurn(next.displayText, next.promptText, next.opener, {
+          alreadyAppended: true,
+          timestamp: next.timestamp,
+        });
         if (next.telegramChatId) {
           const cfg = this.telegramConfig();
           if (cfg) await this.sendTelegramInboundReply({ ...cfg, chatId: next.telegramChatId }, beforeReplyAt);
@@ -1527,6 +1546,9 @@ export class HydraRoomPanel {
       case "openLastPrompt":
         await this.openLastPrompt();
         return;
+      case "attachFiles":
+        await this.attachFiles();
+        return;
       case "cleanWorkspaceState":
         await this.cleanWorkspaceState();
         return;
@@ -1586,10 +1608,80 @@ export class HydraRoomPanel {
         ].join(" ");
     const message = [
       promptSummary,
-      `Deleted ${diagnostics.deletedFiles} stale diagnostic file${diagnostics.deletedFiles === 1 ? "" : "s"} (${formatBytes(diagnostics.deletedBytes)}) from terminal request prompts, replies, logs, and dispatch scripts.`,
+      `Deleted ${diagnostics.deletedFiles} stale diagnostic file${diagnostics.deletedFiles === 1 ? "" : "s"} (${formatBytes(diagnostics.deletedBytes)}) from terminal request prompts, replies, logs, dispatch scripts, and room attachments.`,
       `Diagnostic retention: ${diagnosticRetentionDays} day${diagnosticRetentionDays === 1 ? "" : "s"}.`,
     ].join(" ");
     return message;
+  }
+
+  async attachFiles(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    const picks = await vscode.window.showOpenDialog({
+      title: "Hydra: Attach Files",
+      canSelectFiles: true,
+      canSelectFolders: false,
+      canSelectMany: true,
+      openLabel: "Attach",
+    });
+    if (!picks?.length) return;
+
+    const turnId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${crypto.randomBytes(3).toString("hex")}`;
+    const relativeDir = path.posix.join(".hydra", "attachments", turnId);
+    const attachmentDir = path.join(this.workspaceRoot, ".hydra", "attachments", turnId);
+    const added: PendingRoomAttachment[] = [];
+    const failed: string[] = [];
+    const maxFileBytes = this.attachmentMaxBytes();
+    const maxTotalBytes = this.attachmentTotalMaxBytes();
+    let pendingTotalBytes = this.pendingAttachments.reduce((sum, attachment) => sum + attachment.sizeBytes, 0);
+    for (const uri of picks) {
+      if (uri.scheme !== "file") {
+        failed.push(`${uri.toString()} is not a local file.`);
+        continue;
+      }
+      try {
+        const stats = await fs.stat(uri.fsPath);
+        if (Number.isFinite(maxTotalBytes) && maxTotalBytes >= 0 && pendingTotalBytes + stats.size > maxTotalBytes) {
+          failed.push(`${this.attachmentSourceLabel(uri)} would exceed the ${formatBytes(maxTotalBytes)} total attachment limit.`);
+          continue;
+        }
+        added.push(await prepareRoomAttachment({
+          id: `${turnId}-${added.length}`,
+          sourcePath: uri.fsPath,
+          sourceLabel: this.attachmentSourceLabel(uri),
+          attachmentDir,
+          relativeAttachmentDir: relativeDir,
+          previewMaxChars: this.attachmentPreviewMaxChars(),
+          maxBytes: maxFileBytes,
+        }));
+        pendingTotalBytes += stats.size;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        failed.push(message);
+      }
+    }
+    if (added.length > 0) {
+      this.pendingAttachments.push(...added);
+      void vscode.window.showInformationMessage(`Hydra attached ${added.length} file${added.length === 1 ? "" : "s"}.`);
+    }
+    if (failed.length > 0) {
+      await this.appendSystemMessage(`Hydra could not attach ${failed.length} file${failed.length === 1 ? "" : "s"}: ${failed.join("; ")}`);
+    }
+    this.postState();
+  }
+
+  async clearAttachment(id: string): Promise<void> {
+    await this.ready();
+    if (!id) return;
+    this.pendingAttachments = this.pendingAttachments.filter((attachment) => attachment.id !== id);
+    this.postState();
+  }
+
+  async clearAttachments(): Promise<void> {
+    await this.ready();
+    if (this.pendingAttachments.length === 0) return;
+    this.pendingAttachments = [];
+    this.postState();
   }
 
   async setObjective(text: string): Promise<void> {
@@ -2263,7 +2355,12 @@ export class HydraRoomPanel {
 
   // ---------------- phase orchestration ----------------
 
-  private async runDiscussionTurn(opener: AgentId, currentUserMessage: string): Promise<void> {
+  private async runDiscussionTurn(
+    opener: AgentId,
+    currentUserMessage: string,
+    displayUserMessage: string,
+    currentUserTimestamp?: string
+  ): Promise<void> {
     const ctrl = new AbortController();
     this.currentAbort = ctrl;
     this.suggestedBuilder = undefined;
@@ -2276,7 +2373,13 @@ export class HydraRoomPanel {
     let reactorId: string | undefined;
     let closerId: string | undefined;
     try {
-      const openerContext = this.buildPromptContextSnapshot("opener", undefined, opener);
+      const openerContext = this.buildPromptContextSnapshotForCurrentTurn(
+        "opener",
+        opener,
+        currentUserMessage,
+        displayUserMessage,
+        currentUserTimestamp
+      );
       const openerEnvelope = await this.buildPromptEnvelope({
         agent: opener,
         otherAgent: reactor,
@@ -2304,7 +2407,13 @@ export class HydraRoomPanel {
       // Build the reactor prompt only after the opener has finalized into
       // the transcript. This ordering is what makes the second head actually
       // respond to the first instead of reading a stale snapshot.
-      const reactorContext = this.buildPromptContextSnapshot("reactor", undefined, reactor);
+      const reactorContext = this.buildPromptContextSnapshotForCurrentTurn(
+        "reactor",
+        reactor,
+        currentUserMessage,
+        displayUserMessage,
+        currentUserTimestamp
+      );
       const reactorEnvelope = await this.buildPromptEnvelope({
         agent: reactor,
         otherAgent: opener,
@@ -2346,7 +2455,13 @@ export class HydraRoomPanel {
       // Build the closer prompt only after the reactor has finalized into the
       // transcript. The opener owns this short final turn so critique becomes an
       // action decision instead of a dangling handoff.
-      const closerContext = this.buildPromptContextSnapshot("closer", undefined, opener);
+      const closerContext = this.buildPromptContextSnapshotForCurrentTurn(
+        "closer",
+        opener,
+        currentUserMessage,
+        displayUserMessage,
+        currentUserTimestamp
+      );
       const closerEnvelope = await this.buildPromptEnvelope({
         agent: opener,
         otherAgent: reactor,
@@ -2408,7 +2523,11 @@ export class HydraRoomPanel {
     }
   }
 
-  private async runParallelDiscussionTurn(currentUserMessage: string): Promise<void> {
+  private async runParallelDiscussionTurn(
+    currentUserMessage: string,
+    displayUserMessage: string,
+    currentUserTimestamp?: string
+  ): Promise<void> {
     const ctrl = new AbortController();
     this.currentAbort = ctrl;
     this.suggestedBuilder = undefined;
@@ -2422,7 +2541,13 @@ export class HydraRoomPanel {
       const agents: AgentId[] = ["codex", "claude"];
       const calls: Promise<{ text: string; result: RunResult }>[] = [];
       for (const agent of agents) {
-        const context = this.buildPromptContextSnapshot("parallel", undefined, agent);
+        const context = this.buildPromptContextSnapshotForCurrentTurn(
+          "parallel",
+          agent,
+          currentUserMessage,
+          displayUserMessage,
+          currentUserTimestamp
+        );
         const envelope = await this.buildPromptEnvelope({
           agent,
           otherAgent: otherAgent(agent),
@@ -3583,6 +3708,7 @@ export class HydraRoomPanel {
     diff?: string;
     verification?: string;
     currentUserMessage?: string;
+    attachments?: ReturnType<typeof roomAttachmentSummaries>;
   }): Promise<PromptEnvelope> {
     const renderedPrompt = buildPrompt({
       agent: input.agent,
@@ -3625,6 +3751,7 @@ export class HydraRoomPanel {
       capabilityProfileDetail: profile.detail,
       objective: this.objective,
       currentUserMessage: input.currentUserMessage,
+      attachments: input.attachments,
       latestDecisionDefault: this.decisions[this.decisions.length - 1]?.defaultNextAction,
       latestVerificationSummary: verificationSummary(this.latestVerification()),
       renderedPrompt,
@@ -3816,6 +3943,7 @@ export class HydraRoomPanel {
   }
 
   private async buildNextPromptPreviewEnvelope(draftText: string, opener: AgentId): Promise<PromptEnvelope> {
+    const draftWithAttachments = this.prepareUserMessageWithAttachments(draftText, false);
     if (this.state.name === "BuildDone" && this.gitAvailable) {
       const reviewer: AgentId = this.state.builder === "codex" ? "claude" : "codex";
       const diff = await captureGitDiff(this.workspaceRoot, this.diffMaxLines());
@@ -3862,7 +3990,7 @@ export class HydraRoomPanel {
 
     const selectedOpener = normalizeAgentId(opener, this.getFirstSpeaker());
     const reactor = otherAgent(selectedOpener);
-    const trimmed = draftText.trim();
+    const trimmed = draftWithAttachments.promptText.trim();
     const previewMessages = trimmed
       ? [
           ...this.messages,
@@ -3880,6 +4008,7 @@ export class HydraRoomPanel {
       phase,
       transcript: this.buildPromptContextFromMessages(previewMessages, phase, undefined, selectedOpener),
       currentUserMessage: trimmed,
+      attachments: roomAttachmentSummaries(this.pendingAttachments),
     });
   }
 
@@ -4017,6 +4146,24 @@ export class HydraRoomPanel {
       return vscode.workspace.asRelativePath(document.uri, false);
     }
     return document.uri.toString();
+  }
+
+  private attachmentSourceLabel(uri: vscode.Uri): string {
+    return this.isInsideWorkspace(uri) ? vscode.workspace.asRelativePath(uri, false) : path.basename(uri.fsPath);
+  }
+
+  private prepareUserMessageWithAttachments(text: string, consume: boolean): PreparedRoomMessage {
+    const trimmed = text.trim();
+    const attachments = consume ? this.pendingAttachments.splice(0) : [...this.pendingAttachments];
+    if (attachments.length === 0) return { displayText: trimmed, promptText: trimmed };
+    const attachmentBlock = renderRoomAttachmentsForPrompt(attachments);
+    const instruction = trimmed || "Please inspect the attached file(s).";
+    const displaySummary = attachmentDisplaySummary(attachments);
+    const displayText = trimmed ? `${trimmed}\n\n${displaySummary}` : displaySummary;
+    return {
+      displayText,
+      promptText: `${instruction}\n\n${attachmentBlock}`,
+    };
   }
 
   private async buildDoctorReport(includeTerminalBridge: boolean): Promise<{ report: DoctorReport; bridgeOk: boolean }> {
@@ -4176,6 +4323,25 @@ export class HydraRoomPanel {
     return this.buildPromptContextSnapshotFromMessages(this.messages, phase, transport, agent);
   }
 
+  private buildPromptContextSnapshotForCurrentTurn(
+    phase: Phase,
+    agent: AgentId,
+    promptText: string,
+    displayText: string,
+    timestamp?: string
+  ): PromptContextSnapshot {
+    if (promptText === displayText) {
+      return this.buildPromptContextSnapshot(phase, undefined, agent);
+    }
+    const messages = this.messages.map((message) => {
+      const isCurrentUserMessage = message.role === "user" && (
+        timestamp ? message.timestamp === timestamp : message.text === displayText
+      );
+      return isCurrentUserMessage ? { ...message, text: promptText } : message;
+    });
+    return this.buildPromptContextSnapshotFromMessages(messages, phase, this.transportMode(), agent);
+  }
+
   private buildPromptContextFromMessages(
     messages: TranscriptMessage[],
     phase: Phase,
@@ -4288,6 +4454,21 @@ export class HydraRoomPanel {
 
   private editorContextMaxChars(): number {
     return vscode.workspace.getConfiguration("hydraRoom").get<number>("editorContextMaxChars", 12000);
+  }
+
+  private attachmentPreviewMaxChars(): number {
+    const raw = vscode.workspace.getConfiguration("hydraRoom").get<number>("attachmentPreviewMaxChars", 12000);
+    return Math.max(0, Math.floor(raw));
+  }
+
+  private attachmentMaxBytes(): number {
+    const raw = vscode.workspace.getConfiguration("hydraRoom").get<number>("attachmentMaxBytes", 10 * 1024 * 1024);
+    return Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : 10 * 1024 * 1024;
+  }
+
+  private attachmentTotalMaxBytes(): number {
+    const raw = vscode.workspace.getConfiguration("hydraRoom").get<number>("attachmentTotalMaxBytes", 32 * 1024 * 1024);
+    return Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : 32 * 1024 * 1024;
   }
 
   private wikiContextMaxChars(): number {
@@ -4900,7 +5081,7 @@ export class HydraRoomPanel {
     return msg;
   }
 
-  private async appendUserMessage(text: string): Promise<void> {
+  private async appendUserMessage(text: string): Promise<UiMessage> {
     const msg = this.appendUserMessageToUi(text);
     await appendMessage(this.transcriptUri.fsPath, {
       role: "user",
@@ -4908,6 +5089,7 @@ export class HydraRoomPanel {
       timestamp: msg.timestamp,
     });
     this.postState();
+    return msg;
   }
 
   private appendSystemMessageToUi(text: string): UiMessage {
@@ -4954,7 +5136,16 @@ export class HydraRoomPanel {
           this.postState();
           break;
         case "send":
-          await this.sendUserMessage(msg.text, normalizeAgentId(msg.opener, this.getFirstSpeaker()));
+          await this.sendUserMessage(msg.text, normalizeAgentId(msg.opener, this.getFirstSpeaker()), { consumePendingAttachments: true });
+          break;
+        case "attachFiles":
+          await this.attachFiles();
+          break;
+        case "clearAttachment":
+          await this.clearAttachment(String(msg.id ?? ""));
+          break;
+        case "clearAttachments":
+          await this.clearAttachments();
           break;
         case "setObjective":
           await this.setObjective(msg.text);
@@ -5202,6 +5393,15 @@ export class HydraRoomPanel {
         canRunWikiWrapup: this.canRunManualWikiWrapup(),
         canPreviewPrompt: this.workspaceReady && !isInFlight(this.state) && !this.terminalPokeInFlight,
         canArchiveRoom: this.workspaceReady && !canStop,
+        canAttachFiles: this.workspaceReady && !isInFlight(this.state) && !this.terminalPokeInFlight,
+        pendingAttachments: this.pendingAttachments.map((attachment) => ({
+          id: attachment.id,
+          name: attachment.name,
+          relativePath: attachment.relativePath,
+          sizeBytes: attachment.sizeBytes,
+          binary: attachment.binary,
+          previewChars: attachment.previewText?.length ?? 0,
+        })),
         canHandBack: this.workspaceReady && (this.state.name === "ReviewDone" || this.state.name === "ParallelReviewDone") && !this.state.approved,
         canOpenFolder: !this.workspaceReady,
         suggestedBuilder: this.state.name === "AwaitingUser" ? this.suggestedBuilder : undefined,

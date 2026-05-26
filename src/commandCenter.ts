@@ -18,6 +18,7 @@ export type CommandCenterActionId =
   | "pokeBothTerminalsWithDiff"
   | "openObjective"
   | "openLastPrompt"
+  | "attachFiles"
   | "cleanWorkspaceState"
   | "openVerification"
   | "openDecisions"
@@ -146,6 +147,7 @@ export function buildCommandCenterActions(input: CommandCenterInput): CommandCen
   actions.push(
     action("openObjective", "Open Objective", "State", "Open the pinned room objective file."),
     action("openLastPrompt", "Open Last Prompt", "State", "Open the latest persisted prompt envelope preview."),
+    action("attachFiles", "Attach Files", "Composer", "Copy user-selected files into .hydra/attachments for the next room turn."),
     action("cleanWorkspaceState", "Clean Workspace State", "State", "Compact old prompt bodies and delete stale terminal diagnostics from .hydra."),
     action("openVerification", "Open Verification Log", "State", "Open the durable verification result log."),
     action("openDecisions", "Open Decisions", "State", "Open the durable decision packet log."),

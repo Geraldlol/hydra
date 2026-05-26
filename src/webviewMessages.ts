@@ -15,6 +15,9 @@ import type { AgentId } from "./phases";
 export type WebviewMessage =
   | { type: "ready" }
   | { type: "send"; text: string; opener?: string }
+  | { type: "attachFiles" }
+  | { type: "clearAttachment"; id?: string }
+  | { type: "clearAttachments" }
   | { type: "setObjective"; text: string }
   | { type: "resetObjective" }
   | { type: "stop" }

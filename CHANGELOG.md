@@ -14,6 +14,7 @@
 - Makes terminal bridge calls visibly live by echoing captured agent output in the native terminal while streaming it into the room.
 - Adds terminal session snapshots under `.hydra/sessions/` plus in-room terminal session cards and a Terminal Bridge Health command.
 - Adds prompt envelopes, `.hydra/prompts/index.jsonl`, and a Preview Next Prompt command/button for inspecting the exact native CLI call before it runs.
+- Adds room file attachments that copy selected local files into `.hydra/attachments/`, show pending attachment chips in the composer, keep durable transcript messages short, and inject attachment paths plus bounded text previews into the next agent prompt.
 - Adds native authority classification, capability profile labels, authority badges, and a Show Effective Native Authority command.
 - Adds an in-room Open Terminals button so users can bring the native Codex and Claude terminals forward without changing transport mode.
 - Adds direct native terminal pokes for Codex and Claude, letting users run one native CLI endpoint from the room without starting the full Hydra loop.

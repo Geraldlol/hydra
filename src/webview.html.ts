@@ -583,6 +583,35 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       pointer-events: none;
     }
     #composerToolbar > * { pointer-events: auto; }
+    #attachmentTray {
+      display: none;
+      flex-wrap: wrap;
+      gap: 5px;
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 11px;
+    }
+    #attachmentTray.has-attachments { display: flex; }
+    .attachment-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      min-height: 24px;
+      max-width: 260px;
+      padding: 2px 6px;
+      border: 1px solid var(--border);
+      background: color-mix(in srgb, var(--input) 80%, transparent);
+    }
+    .attachment-chip span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .attachment-chip button {
+      min-height: 18px;
+      padding: 0 5px;
+      line-height: 1;
+    }
     #openerBtn {
       min-height: 22px;
       padding: 1px 7px;
@@ -1018,8 +1047,10 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       <footer class="composer">
         <div id="composerFrame">
           <textarea id="composer" placeholder="message - type / for commands, Ctrl+Enter to send"></textarea>
+          <div id="attachmentTray" aria-live="polite"></div>
           <div id="composerToolbar">
             <button id="openerBtn" class="secondary" type="button" title="Flip the opener for this turn only" aria-label="Flip opener, currently Codex">Opener: Codex</button>
+            <button id="attachFilesBtn" class="secondary" type="button" title="Attach files to the next room turn">Attach</button>
             <span id="composerHint">Ctrl+Enter send - Shift+Enter newline - Ctrl+K commands</span>
           </div>
         </div>
@@ -1043,6 +1074,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
           <button id="setObjectiveBtn" class="secondary" type="button">Pin Objective</button>
           <button id="previewPromptBtn" class="secondary" type="button">Preview Prompt</button>
           <button id="openLastPromptBtn" class="secondary" type="button">Open Last Prompt</button>
+          <button id="clearAttachmentsBtn" class="secondary" type="button">Clear Attachments</button>
           <button id="archiveChatBtn" class="secondary" type="button">Archive Chat</button>
           <button id="nativeTerminalsBtn" class="secondary hidden" type="button">Use Safe One-Shot</button>
           <button id="openNativeTerminalsBtn" class="secondary hidden" type="button">Open Terminals</button>

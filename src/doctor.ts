@@ -92,6 +92,8 @@ export const TRUST_SCOPED_SETTINGS = [
   "verifyCommand",
   "promptBodyRetentionDays",
   "diagnosticRetentionDays",
+  "attachmentMaxBytes",
+  "attachmentTotalMaxBytes",
   "handoffWebhookUrl",
   "telegramBotToken",
   "telegramChatId",

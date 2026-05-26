@@ -51,6 +51,9 @@ const commandCenterBtn = document.getElementById("commandCenterBtn");
 const setObjectiveBtn = document.getElementById("setObjectiveBtn");
 const previewPromptBtn = document.getElementById("previewPromptBtn");
 const openLastPromptBtn = document.getElementById("openLastPromptBtn");
+const attachFilesBtn = document.getElementById("attachFilesBtn");
+const clearAttachmentsBtn = document.getElementById("clearAttachmentsBtn");
+const attachmentTray = document.getElementById("attachmentTray");
 const profileBtn = document.getElementById("profileBtn");
 const nativeActionBtn = document.getElementById("nativeActionBtn");
 const sendBtn = document.getElementById("sendBtn");
@@ -165,6 +168,7 @@ const ACTIONS = [
   { id: "pin-objective", group: "Objective", name: "Pin Objective", what: "Use composer text as room objective", run: () => setObjectiveBtn.click(), enabled: () => !setObjectiveBtn.disabled },
   { id: "preview-prompt", group: "Objective", name: "Preview Prompt", what: "Inspect the exact next prompt", run: () => previewPromptBtn.click(), enabled: () => !previewPromptBtn.disabled },
   { id: "open-last-prompt", group: "Objective", name: "Open Last Prompt", what: "Reopen the latest persisted prompt envelope", run: () => openLastPromptBtn.click(), enabled: () => !openLastPromptBtn.disabled },
+  { id: "attach-files", group: "Objective", name: "Attach Files", what: "Attach files or documents to the next room turn", run: () => attachFilesBtn.click(), enabled: () => !attachFilesBtn.disabled },
   { id: "clean-workspace-state", group: "Objective", name: "Clean Workspace State", what: "Compact old prompt bodies and prune stale .hydra diagnostics", run: () => vscode.postMessage({ type: "cleanWorkspaceState" }), enabled: () => !lastState.canOpenFolder },
   { id: "archive-chat", group: "Objective", name: "Archive Chat", what: "Archive transcript and clear room", run: () => archiveChatBtn.click(), enabled: () => !archiveChatBtn.disabled },
   { id: "accept-default", group: "Workflow", name: "Accept Default", what: "Run the latest decision default", run: () => acceptDefaultBtn.click(), enabled: () => !acceptDefaultBtn.disabled },
@@ -223,8 +227,9 @@ const ACTIONS = [
 
 sendBtn.addEventListener("click", () => {
   const text = composer.value.trim();
-  if (!text) return composer.focus();
-  addOptimisticUserMessage(text);
+  const hasAttachments = Array.isArray(lastState.pendingAttachments) && lastState.pendingAttachments.length > 0;
+  if (!text && !hasAttachments) return composer.focus();
+  addOptimisticUserMessage(optimisticComposerText(text, lastState.pendingAttachments || []));
   vscode.postMessage({ type: "send", text, opener: selectedOpener });
   composer.value = "";
   hasOpenerOverride = false;
@@ -255,6 +260,8 @@ previewPromptBtn.addEventListener("click", () => {
   vscode.postMessage({ type: "previewNextPrompt", text: composer.value, opener: selectedOpener });
 });
 openLastPromptBtn.addEventListener("click", () => vscode.postMessage({ type: "openLastPrompt" }));
+attachFilesBtn.addEventListener("click", () => vscode.postMessage({ type: "attachFiles" }));
+clearAttachmentsBtn.addEventListener("click", () => vscode.postMessage({ type: "clearAttachments" }));
 nativeActionBtn.addEventListener("click", () => vscode.postMessage({ type: "nativeAction", text: composer.value }));
 composer.addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === "Enter" && !sendBtn.disabled) {
@@ -446,12 +453,16 @@ function renderState(state) {
   renderModels(state.models, state.efforts);
   renderProfiles(state.capabilityProfiles);
   renderDecisionBoard(state.recentDecisions || []);
+  renderAttachmentTray(state.pendingAttachments || []);
+  const hasAttachments = Array.isArray(state.pendingAttachments) && state.pendingAttachments.length > 0;
   sendBtn.disabled = !state.canSend;
   sendBtn.textContent = state.canStop ? "QUEUE" : "SEND";
   sendBtn.title = state.canStop
     ? "Queue this follow-up and send it after the active turn finishes"
     : "Send message";
   openerBtn.disabled = !state.canSend;
+  attachFilesBtn.disabled = !state.canAttachFiles;
+  clearAttachmentsBtn.disabled = !hasAttachments;
   previewPromptBtn.disabled = !!state.canOpenFolder;
   openLastPromptBtn.disabled = !!state.canOpenFolder;
   setObjectiveBtn.disabled = !state.canSend;
@@ -534,12 +545,40 @@ function addOptimisticUserMessage(text) {
   renderMessages();
 }
 
+function optimisticComposerText(text, attachments) {
+  if (!Array.isArray(attachments) || attachments.length === 0) return text;
+  const names = attachments.map((attachment) => attachment && attachment.name ? attachment.name : "attachment").join(", ");
+  const summary = `[Attached ${attachments.length} file${attachments.length === 1 ? "" : "s"}: ${names}]`;
+  return text ? `${text}\n\n${summary}` : summary;
+}
+
 function sameUserMessage(a, b) {
   if (!a || !b || a.role !== "user" || b.role !== "user" || a.text !== b.text) return false;
   const aTime = Date.parse(a.timestamp || "");
   const bTime = Date.parse(b.timestamp || "");
   if (!Number.isFinite(aTime) || !Number.isFinite(bTime)) return true;
   return Math.abs(aTime - bTime) < 5 * 60 * 1000;
+}
+
+function renderAttachmentTray(attachments) {
+  if (!attachmentTray) return;
+  attachmentTray.innerHTML = "";
+  attachmentTray.classList.toggle("has-attachments", attachments.length > 0);
+  for (const attachment of attachments) {
+    const chip = document.createElement("span");
+    chip.className = "attachment-chip";
+    chip.title = (attachment.relativePath || attachment.name || "attachment") + " - " + formatBytes(attachment.sizeBytes || 0);
+    const label = document.createElement("span");
+    label.textContent = attachment.name || "attachment";
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "secondary";
+    remove.textContent = "x";
+    remove.title = "Remove attachment";
+    remove.addEventListener("click", () => vscode.postMessage({ type: "clearAttachment", id: attachment.id || "" }));
+    chip.append(label, remove);
+    attachmentTray.append(chip);
+  }
 }
 
 function setRibbonsMinimized(value) {
@@ -810,6 +849,14 @@ function labelRequestFile(kind) {
 function shortSha(value) {
   const sha = String(value || "");
   return sha.length > 12 ? sha.slice(0, 12) : sha || "none";
+}
+
+function formatBytes(bytes) {
+  const n = Number(bytes) || 0;
+  if (n < 1024) return n + " B";
+  const kib = n / 1024;
+  if (kib < 1024) return kib.toFixed(1) + " KiB";
+  return (kib / 1024).toFixed(1) + " MiB";
 }
 
 function formatDuration(ms) {
