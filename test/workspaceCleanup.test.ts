@@ -65,6 +65,34 @@ describe("workspace cleanup", () => {
     assert.equal(record.renderedPrompt, "");
     assert.equal(record.renderedPromptOmitted, true);
   });
+
+  test("refuses to delete files when a diagnostic subdir is a symlink that escapes the workspace", async () => {
+    const ws = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-cleanup-symlink-ws-"));
+    const escapeTarget = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-cleanup-symlink-target-"));
+    const old = new Date("2026-05-01T00:00:00.000Z");
+    const now = new Date("2026-05-22T00:00:00.000Z");
+    const planted = path.join(escapeTarget, "user-file.txt");
+    await fs.writeFile(planted, "important user data", "utf8");
+    await fs.utimes(planted, old, old);
+
+    await fs.mkdir(path.join(ws, ".hydra"), { recursive: true });
+    try {
+      await fs.symlink(escapeTarget, path.join(ws, ".hydra", "replies"), "dir");
+    } catch (err) {
+      // Why: Windows requires SeCreateSymbolicLinkPrivilege (or Developer Mode)
+      // to create symlinks. Skip the assertion on hosts that can't make one.
+      if ((err as NodeJS.ErrnoException).code === "EPERM") return;
+      throw err;
+    }
+
+    const summary = await pruneDiagnosticArtifacts(ws, { retentionDays: 7, now });
+
+    assert.equal((await fs.stat(planted)).size, "important user data".length);
+    const replies = summary.targets.find((t) => t.relativeDir.endsWith("replies"));
+    assert.ok(replies, "replies target not present in summary");
+    assert.equal(replies!.deletedFiles, 0);
+    assert.ok(replies!.failedDeletes >= 1, "expected symlinked target to be refused");
+  });
 });
 
 async function writeDiagnostic(root: string, relativePath: string, body: string, mtime: Date): Promise<string> {

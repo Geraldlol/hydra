@@ -124,6 +124,26 @@ async function pruneDiagnosticTarget(
     missing: false,
   };
 
+  // Why: a workspace can ship `.hydra/<subdir>` as a symlink that escapes
+  // out of the workspace (e.g. `.hydra/replies -> ~/.config`). fs.readdir
+  // follows symlinks on the path argument, so without this lstat guard the
+  // cleanup would unlink user files outside the workspace. Mirrors the
+  // symlink-refusal discipline in fileQueue.ts:refuseSymlink.
+  let dirStat: import("node:fs").Stats;
+  try {
+    dirStat = await fs.lstat(dir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      targetSummary.missing = true;
+      return targetSummary;
+    }
+    throw err;
+  }
+  if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
+    targetSummary.failedDeletes++;
+    return targetSummary;
+  }
+
   let entries: import("node:fs").Dirent[];
   try {
     entries = await fs.readdir(dir, { withFileTypes: true });
