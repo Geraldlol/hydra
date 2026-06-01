@@ -59,7 +59,7 @@ export async function chooseEffortInteractively(deps: EffortChooserDeps): Promis
     .getConfiguration("hydraRoom")
     .update(settingKey, next, vscode.ConfigurationTarget.Global);
   const detail = scope === "all" ? "all phases" : `${scope} phase`;
-  const flag = agent === "claude" ? `--effort ${pick.value}` : `-c model_reasoning_effort="${pick.value}"`;
+  const flag = agent === "claude" ? `--effort ${pick.value}` : `-c model_reasoning_effort=${pick.value}`;
   await deps.appendSystemMessage(
     pick.value
       ? `Thinking level for ${agent} (${detail}) set to "${pick.value}". Next matching dispatch will pass \`${flag}\`.`

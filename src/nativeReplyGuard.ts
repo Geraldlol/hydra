@@ -3,10 +3,19 @@ export interface NativeReplyLeak {
   marker: string;
 }
 
-const PROMPT_ENVELOPE_MARKERS = [
-  "--- End Hydra prompt ---",
-  "After your reply, exit so the wrapper can capture the transcript.",
+// Why: these are the distinctive TAIL fragments of the prompts Hydra actually builds
+// (prompts.ts DECISION_PACKET ends every opener/reactor/closer/parallel turn; BUILD_RULES
+// ends every build turn). A native CLI that echoes the prompt template instead of
+// answering finishes its output on one of these literal placeholder lines; a genuine
+// reply fills the `<…>` placeholders in, so they never appear verbatim at the tail of
+// real output. test/nativeReplyGuard.test.ts asserts each marker is a real substring of a
+// built prompt, so this set cannot silently drift dead when a prompt template is reworded.
+export const PROMPT_ENVELOPE_MARKERS = [
   "Recommendation: <one concrete recommendation>",
+  "Default next action: <what Hydra should do next if the user does not redirect>",
+  "Decision needed from user: <one narrow decision",
+  "Blockers: <real blockers, or",
+  "End with a one-paragraph summary of what you changed.",
 ];
 
 // Why: leaked prompt-envelope text only ever lands at the *tail* of a native CLI

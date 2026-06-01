@@ -3,12 +3,17 @@ import * as cp from "node:child_process";
 // Cap accumulated agent stdout per call. A poisoned CLAUDE.md / AGENTS.md
 // can prompt-inject the CLI into emitting hundreds of MB of stream-json
 // events in one turn; without a cap, the extension host OOMs. The cap is
-// intentionally generous (16 MB ≈ 4M tokens of UTF-8 text) — well above
-// any legitimate turn but well below V8's string limit (~512 MB) where
-// further appends would throw ERR_STRING_TOO_LONG.
+// intentionally generous (~16M UTF-16 chars ≈ 4M tokens of text) — well
+// above any legitimate turn but well below V8's string limit (~512M chars)
+// where further appends would throw ERR_STRING_TOO_LONG.
+// Why "chars" not "bytes": appendBoundedStream accounts in JS string length
+// (state.text.length / chunk.length), i.e. UTF-16 code units, not encoded
+// byte length. The constant keeps the legacy *_BYTES name (an exported test
+// imports it) but the unit is chars; for ASCII the two coincide.
 export const MAX_AGENT_STDOUT_BYTES = 16 * 1024 * 1024;
 // Stderr is bounded much tighter: it's a diagnostic surface, not a data
-// channel, so legitimate output is rarely more than a few KB.
+// channel, so legitimate output is rarely more than a few KB. Same UTF-16
+// char accounting as the stdout cap above.
 export const MAX_AGENT_STDERR_BYTES = 1 * 1024 * 1024;
 
 export interface BoundedStreamState {
@@ -166,16 +171,45 @@ export async function runAgent(
     let timedOut = false;
     let cancelled = false;
     let settled = false;
+    let backstop: ReturnType<typeof setTimeout> | undefined;
+
+    // After we ask a child to terminate (timeout or abort), guarantee the
+    // returned Promise still resolves even if the child never emits a
+    // "close" event — a wedged grandchild can hold the pipe open, or the
+    // process group signal can no-op (ESRCH) and leave us hanging forever.
+    // Why 2000ms: gives SIGTERM/taskkill time to land before we escalate
+    // and force-settle, while keeping the worst-case hang bounded.
+    const armBackstop = () => {
+      if (backstop) return;
+      backstop = setTimeout(() => {
+        if (process.platform !== "win32" && child.pid) {
+          try {
+            // Last-resort escalation: SIGKILL the whole process group.
+            // Windows already used taskkill /F /T (forceful), so no
+            // equivalent step is needed there.
+            process.kill(-child.pid, "SIGKILL");
+          } catch {
+            // ESRCH: the group is already gone — nothing left to kill.
+          }
+        }
+        // Unconditionally settle with a null exit code; timedOut/cancelled
+        // were set before terminateProcessTree fired, so the caller still
+        // classifies the outcome correctly.
+        finish(null);
+      }, 2000);
+    };
 
     const timer = setTimeout(() => {
       timedOut = true;
       terminateProcessTree(child);
+      armBackstop();
     }, timeoutMs);
 
     const abortHandler = () => {
       if (!settled) {
         cancelled = true;
         terminateProcessTree(child);
+        armBackstop();
       }
     };
 
@@ -220,6 +254,7 @@ export async function runAgent(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (backstop) clearTimeout(backstop);
       signal.removeEventListener("abort", abortHandler);
       resolve({
         stdout: stdoutState.text,

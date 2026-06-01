@@ -181,7 +181,7 @@ describe("withEffortArgs", () => {
     // — the user has hand-written the `-c key=value` override in their
     // ExecArgs, so we respect it rather than appending a duplicate.
     currentConfig.codexReasoning = "high";
-    const s = spawn(["exec", "-c", 'model_reasoning_effort="low"', "-"]);
+    const s = spawn(["exec", "-c", "model_reasoning_effort=low", "-"]);
     const out = withEffortArgs(s, "codex", "build");
     assert.strictEqual(out, s);
   });

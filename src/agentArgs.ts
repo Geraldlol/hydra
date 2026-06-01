@@ -71,9 +71,12 @@ export function effortForPhase(agent: AgentId, phase: Phase): string {
 /**
  * Inject the configured effort/reasoning flag for the current agent + phase.
  *   - Claude exposes `--effort <level>`.
- *   - Codex uses `-c model_reasoning_effort="<level>"` (config override)
+ *   - Codex uses `-c model_reasoning_effort=<level>` (config override)
  *     because exec has no direct --reasoning-effort flag, and only on the
- *     `exec` subcommand.
+ *     `exec` subcommand. The value is a bare TOML identifier (low/medium/
+ *     high/xhigh) — Codex's `-c key=value` parser treats an unquoted token
+ *     as a string, so quotes are unnecessary and would otherwise be passed
+ *     through literally as part of the value.
  * Respects an explicit override already present in *ExecArgs*.
  */
 export function withEffortArgs(spawn: AgentSpawn, agent: AgentId, phase: Phase): AgentSpawn {
@@ -87,6 +90,6 @@ export function withEffortArgs(spawn: AgentSpawn, agent: AgentId, phase: Phase):
   if (spawn.args.some((a) => a.startsWith("model_reasoning_effort="))) return spawn;
   return {
     ...spawn,
-    args: insertBeforeStdinDash(spawn.args, ["-c", `model_reasoning_effort="${level}"`]),
+    args: insertBeforeStdinDash(spawn.args, ["-c", `model_reasoning_effort=${level}`]),
   };
 }
