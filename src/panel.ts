@@ -1936,9 +1936,12 @@ export class HydraRoomPanel {
     this.currentAbort = ctrl;
     this.terminalPokeInFlight = true;
     try {
+      // Why: targetAgents is non-empty here — pokeNativeTerminals returns early
+      // above when uniqueAgents() yields length 0, so [0] is always defined.
+      const firstAgent = targetAgents[0]!;
       const targetLabel = targetAgents.length === 2
         ? "Codex and Claude terminals"
-        : `${AGENT_NAMES[targetAgents[0]]} terminal`;
+        : `${AGENT_NAMES[firstAgent]} terminal`;
       const attachmentSummary = [
         editorContext
           ? `Attached editor context: ${editorContext.label} (${editorContext.selected ? "selection" : "active file"}, ${editorContext.text.length} chars${editorContext.truncated ? " truncated" : ""})`
@@ -1999,14 +2002,19 @@ export class HydraRoomPanel {
     });
     if (!pick) return;
 
+    // Why: every NativeActionPick from nativeActionPicks() is built with a
+    // non-empty agents array; the command/rawLine kinds are always single-agent.
+    const firstAgent = pick.agents[0];
+    if (firstAgent === undefined) return;
+
     let instruction = pick.presetLine ?? draftText.trim();
     if (!instruction) {
       const input = await vscode.window.showInputBox({
         title: `Hydra: ${pick.plainLabel}`,
         prompt: pick.actionKind === "command"
-          ? `Native args/subcommand to run after ${AGENT_NAMES[pick.agents[0]]}'s configured executable. Example: doctor or mcp list.`
+          ? `Native args/subcommand to run after ${AGENT_NAMES[firstAgent]}'s configured executable. Example: doctor or mcp list.`
           : pick.actionKind === "rawLine"
-          ? `Raw PowerShell line to send to the visible ${AGENT_NAMES[pick.agents[0]]} terminal. Use this for interactive native CLI flows.`
+          ? `Raw PowerShell line to send to the visible ${AGENT_NAMES[firstAgent]} terminal. Use this for interactive native CLI flows.`
           : pick.options.includeEditorContext || pick.options.includeWorkspaceDiff
           ? "Optional instruction. Leave blank to use only the attached context."
           : "Instruction to send to the selected native terminal endpoint.",
@@ -2017,9 +2025,9 @@ export class HydraRoomPanel {
     }
 
     if (pick.actionKind === "command") {
-      await this.runNativeCliCommand(pick.agents[0], instruction);
+      await this.runNativeCliCommand(firstAgent, instruction);
     } else if (pick.actionKind === "rawLine") {
-      await this.sendRawTerminalLine(pick.agents[0], instruction);
+      await this.sendRawTerminalLine(firstAgent, instruction);
     } else {
       await this.pokeNativeTerminals(pick.agents, instruction, pick.options);
     }
@@ -5447,7 +5455,7 @@ function nativeActionPick(
     options,
     actionKind,
     presetLine,
-    description: description ?? (agents.length === 2 ? "Codex + Claude" : AGENT_NAMES[agents[0]]),
+    description: description ?? (agents.length === 2 ? "Codex + Claude" : agents[0] ? AGENT_NAMES[agents[0]] : ""),
     detail,
   };
 }

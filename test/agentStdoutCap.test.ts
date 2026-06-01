@@ -109,8 +109,10 @@ describe("Codex summarizer adversarial item lifecycles", () => {
     ] as Array<ReturnType<typeof JSON.parse>>;
     const summary = summarizeCodexEvents(events as Parameters<typeof summarizeCodexEvents>[0]);
     assert.equal(summary.commandExecutions.length, 1);
-    assert.equal(summary.commandExecutions[0].status, "failed");
-    assert.equal(summary.commandExecutions[0].exitCode, 1);
+    const cmd = summary.commandExecutions[0];
+    assert.ok(cmd);
+    assert.equal(cmd.status, "failed");
+    assert.equal(cmd.exitCode, 1);
   });
 
   test("a string file_change.changes is ignored, not thrown", () => {
@@ -122,7 +124,9 @@ describe("Codex summarizer adversarial item lifecycles", () => {
     ] as Array<ReturnType<typeof JSON.parse>>;
     const summary = summarizeCodexEvents(events as Parameters<typeof summarizeCodexEvents>[0]);
     assert.equal(summary.fileChanges.length, 1);
-    assert.deepEqual(summary.fileChanges[0].changes, []);
-    assert.equal(summary.fileChanges[0].status, "completed");
+    const fc = summary.fileChanges[0];
+    assert.ok(fc);
+    assert.deepEqual(fc.changes, []);
+    assert.equal(fc.status, "completed");
   });
 });

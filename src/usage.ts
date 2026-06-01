@@ -146,8 +146,11 @@ export function computeCostUsd(
  */
 export function parseCodexTextTokens(stdout: string): number | undefined {
   const matches = [...stdout.matchAll(/tokens used\s*\n\s*([\d,]+)/gi)];
-  if (matches.length === 0) return undefined;
-  const raw = matches[matches.length - 1][1].replace(/,/g, "");
+  const last = matches[matches.length - 1];
+  if (last === undefined) return undefined;
+  // Why: capture group 1 ([\d,]+) is required for the regex to match, so it is
+  // always present on a successful match; default to "" defensively for the type.
+  const raw = (last[1] ?? "").replace(/,/g, "");
   const n = Number.parseInt(raw, 10);
   return Number.isFinite(n) ? n : undefined;
 }
@@ -389,7 +392,9 @@ export function boundUsageRecords(
   const startByCount = Math.max(0, records.length - minRecords);
   let startByTime = records.length;
   for (let i = 0; i < records.length; i += 1) {
-    const ts = Date.parse(records[i].timestamp);
+    const record = records[i];
+    if (record === undefined) continue;
+    const ts = Date.parse(record.timestamp);
     // Why: a record with an unparseable timestamp is treated as "recent" so a
     // hand-edited line is never silently dropped from the in-memory view.
     if (!Number.isFinite(ts) || ts >= cutoffMs) {

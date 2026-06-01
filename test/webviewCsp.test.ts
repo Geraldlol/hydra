@@ -47,6 +47,7 @@ describe("webview CSP hardening", () => {
     const match = html.match(/data-head-assets="([^"]*)"/);
     assert.ok(match, "data-head-assets attribute missing or unquoted");
     const attrValue = match[1];
+    assert.ok(attrValue !== undefined, "data-head-assets capture group did not match");
 
     // The raw payload characters must be encoded inside the attribute. If
     // any of these appear unescaped, an attacker-controlled URI could break

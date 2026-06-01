@@ -36,8 +36,10 @@ describe("hydra events", () => {
 
     const events = await readHydraEvents(file, 1);
     assert.equal(events.length, 1);
-    assert.equal(events[0].kind, "verificationFinished");
-    assert.equal(events[0].data?.exitCode, 0);
+    const event0 = events[0];
+    assert.ok(event0);
+    assert.equal(event0.kind, "verificationFinished");
+    assert.equal(event0.data?.exitCode, 0);
   });
 
   test("skips malformed JSONL lines", async () => {
@@ -52,7 +54,9 @@ describe("hydra events", () => {
 
     const events = await readHydraEvents(file);
     assert.equal(events.length, 1);
-    assert.equal(events[0].detail, "Recovered");
+    const event0 = events[0];
+    assert.ok(event0);
+    assert.equal(event0.detail, "Recovered");
   });
 
   test("includes phaseTransition in the canonical event-kind set", () => {
@@ -72,7 +76,9 @@ describe("hydra events", () => {
 
     const events = await readHydraEvents(file);
     assert.equal(events.length, 1);
-    assert.equal(events[0].kind, "phaseTransition");
-    assert.equal(events[0].detail, "opener -> reactor");
+    const event0 = events[0];
+    assert.ok(event0);
+    assert.equal(event0.kind, "phaseTransition");
+    assert.equal(event0.detail, "opener -> reactor");
   });
 });

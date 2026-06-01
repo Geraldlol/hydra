@@ -296,7 +296,9 @@ export class TelegramController {
       roomToken: tokenMatch[1],
     });
     if (!record) return undefined;
-    return { roomSessionId: record.roomSessionId, workspace: record.workspace, command: tokenMatch[2].trim() };
+    // Why: capture group 2 ([\s\S]*) always matches when tokenMatch is truthy,
+    // but noUncheckedIndexedAccess widens it to string|undefined; default to "".
+    return { roomSessionId: record.roomSessionId, workspace: record.workspace, command: (tokenMatch[2] ?? "").trim() };
   }
 
   async sendTestMessage(): Promise<{ ok: true } | { ok: false; reason: "unconfigured" } | { ok: false; reason: "send-failed" }> {

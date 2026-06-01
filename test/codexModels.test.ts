@@ -73,6 +73,7 @@ describe("parseCodexDebugModels", () => {
       models: [{ slug: "gpt-test", display_name: "Test" }],
     });
     const [m] = parseCodexDebugModels(json);
+    assert.ok(m);
     assert.equal(m.supportedInApi, true);
     assert.equal(m.visibility, "list");
     assert.deepEqual(m.reasoningLevels, []);

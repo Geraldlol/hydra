@@ -321,17 +321,18 @@ function parseTomlSummary(text: string): {
     if (!line || line.startsWith("#")) continue;
     const sectionMatch = line.match(/^\[(.+)]$/);
     if (sectionMatch) {
-      section = sectionMatch[1];
+      section = sectionMatch[1] ?? "";
       const plugin = section.match(/^plugins\."(.+)"$/);
       const project = section.match(/^projects\.'(.+)'$/);
-      if (plugin) enabledPlugins.push(plugin[1]);
-      if (project) trustedProjects.push(project[1]);
+      if (plugin?.[1] !== undefined) enabledPlugins.push(plugin[1]);
+      if (project?.[1] !== undefined) trustedProjects.push(project[1]);
       continue;
     }
     const keyMatch = line.match(/^([A-Za-z0-9_.-]+)\s*=\s*(.+)$/);
     if (!keyMatch) continue;
     const key = keyMatch[1];
-    const value = parseTomlValue(keyMatch[2]);
+    if (key === undefined) continue;
+    const value = parseTomlValue(keyMatch[2] ?? "");
     if (!section) {
       publicConfig[key] = value;
     } else if (section === "windows") {
@@ -394,8 +395,9 @@ function summarizeReasoningLevels(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.map((item) => {
     if (typeof item === "string") return item;
-    if (item && typeof item === "object" && typeof (item as Record<string, unknown>).effort === "string") {
-      return (item as Record<string, string>).effort;
+    if (item && typeof item === "object") {
+      const effort = (item as Record<string, unknown>).effort;
+      if (typeof effort === "string") return effort;
     }
     return "";
   }).filter(Boolean).sort();

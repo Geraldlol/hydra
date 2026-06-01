@@ -58,6 +58,7 @@ function firstCodexPositional(args: string[]): string | undefined {
   ]);
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
+    if (arg === undefined) continue;
     if (arg.startsWith("-")) {
       const eq = arg.indexOf("=");
       if (eq < 0 && valueFlags.has(arg)) i++;

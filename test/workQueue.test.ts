@@ -15,8 +15,10 @@ describe("work queue", () => {
     });
 
     assert.equal(items.length, 1);
-    assert.equal(items[0].kind, "decision");
-    assert.equal(items[0].actionType, "acceptDefaultDecision");
+    const first = items[0];
+    assert.ok(first);
+    assert.equal(first.kind, "decision");
+    assert.equal(first.actionType, "acceptDefaultDecision");
   });
 
   test("omits generic send-instruction decisions from the queue", () => {
@@ -59,10 +61,14 @@ describe("work queue", () => {
     });
 
     assert.equal(items.length, 2);
-    assert.equal(items[0].kind, "verification");
-    assert.equal(items[0].actionType, "discussVerification");
-    assert.equal(items[1].kind, "nativeAction");
-    assert.equal(items[1].actionId, "native-1");
+    const first = items[0];
+    const second = items[1];
+    assert.ok(first);
+    assert.ok(second);
+    assert.equal(first.kind, "verification");
+    assert.equal(first.actionType, "discussVerification");
+    assert.equal(second.kind, "nativeAction");
+    assert.equal(second.actionId, "native-1");
   });
 
   test("omits passing verification and completed native actions", () => {

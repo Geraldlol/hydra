@@ -124,9 +124,11 @@ describe("summarizeCodexEvents", () => {
 
     const summary = summarizeCodexEvents(events);
     assert.equal(summary.commandExecutions.length, 1);
-    assert.equal(summary.commandExecutions[0].command, "ls -la");
-    assert.equal(summary.commandExecutions[0].status, "completed");
-    assert.equal(summary.commandExecutions[0].exitCode, 0);
+    const cmd = summary.commandExecutions[0];
+    assert.ok(cmd);
+    assert.equal(cmd.command, "ls -la");
+    assert.equal(cmd.status, "completed");
+    assert.equal(cmd.exitCode, 0);
   });
 
   test("collects file_change items with their patch shape", () => {
@@ -135,10 +137,16 @@ describe("summarizeCodexEvents", () => {
     ].join("\n"));
     const summary = summarizeCodexEvents(events);
     assert.equal(summary.fileChanges.length, 1);
-    assert.equal(summary.fileChanges[0].changes.length, 2);
-    assert.equal(summary.fileChanges[0].changes[0].path, "a.ts");
-    assert.equal(summary.fileChanges[0].changes[1].kind, "add");
-    assert.equal(summary.fileChanges[0].status, "completed");
+    const fc = summary.fileChanges[0];
+    assert.ok(fc);
+    assert.equal(fc.changes.length, 2);
+    const change0 = fc.changes[0];
+    const change1 = fc.changes[1];
+    assert.ok(change0);
+    assert.ok(change1);
+    assert.equal(change0.path, "a.ts");
+    assert.equal(change1.kind, "add");
+    assert.equal(fc.status, "completed");
   });
 
   test("tracks mcp_tool_call status and surfaces errors", () => {
@@ -148,10 +156,12 @@ describe("summarizeCodexEvents", () => {
     ].join("\n"));
     const summary = summarizeCodexEvents(events);
     assert.equal(summary.mcpToolCalls.length, 1);
-    assert.equal(summary.mcpToolCalls[0].server, "memory");
-    assert.equal(summary.mcpToolCalls[0].tool, "create_entities");
-    assert.equal(summary.mcpToolCalls[0].status, "failed");
-    assert.equal(summary.mcpToolCalls[0].errorMessage, "server is offline");
+    const mcp = summary.mcpToolCalls[0];
+    assert.ok(mcp);
+    assert.equal(mcp.server, "memory");
+    assert.equal(mcp.tool, "create_entities");
+    assert.equal(mcp.status, "failed");
+    assert.equal(mcp.errorMessage, "server is offline");
   });
 
   test("collects web search queries on item.started", () => {
@@ -169,8 +179,12 @@ describe("summarizeCodexEvents", () => {
     ].join("\n"));
     const summary = summarizeCodexEvents(events);
     assert.equal(summary.todoList.length, 2);
-    assert.equal(summary.todoList[0].completed, true);
-    assert.equal(summary.todoList[1].text, "b");
+    const todo0 = summary.todoList[0];
+    const todo1 = summary.todoList[1];
+    assert.ok(todo0);
+    assert.ok(todo1);
+    assert.equal(todo0.completed, true);
+    assert.equal(todo1.text, "b");
   });
 
   test("collects errors from turn.failed, item type=error, and stream-level error events", () => {

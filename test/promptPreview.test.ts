@@ -70,9 +70,9 @@ describe("prompt preview envelopes", () => {
       "--- Diff to review (git diff HEAD) ---",
       "+change",
     ].join("\n"));
-    assert.equal(budget.sections[0].label, "Preamble");
-    assert.equal(budget.sections[1].label, "Shared context");
-    assert.equal(budget.sections[2].label, "Diff to review (git diff HEAD)");
+    assert.equal(budget.sections[0]?.label, "Preamble");
+    assert.equal(budget.sections[1]?.label, "Shared context");
+    assert.equal(budget.sections[2]?.label, "Diff to review (git diff HEAD)");
     assert.equal(budget.estimatedTokens, Math.ceil(budget.chars / 4));
   });
 

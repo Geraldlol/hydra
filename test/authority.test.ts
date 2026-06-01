@@ -46,8 +46,8 @@ describe("validateNativeArgs", () => {
       "never",
     ]);
     assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /interactive root command|not on `codex exec`|not valid on `codex exec`/);
-    assert.match(warnings[0], /--dangerously-bypass-approvals-and-sandbox/);
+    assert.match(warnings[0]!, /interactive root command|not on `codex exec`|not valid on `codex exec`/);
+    assert.match(warnings[0]!, /--dangerously-bypass-approvals-and-sandbox/);
   });
 
   test("does not flag --ask-for-approval on codex (TUI root)", () => {
@@ -61,7 +61,7 @@ describe("validateNativeArgs", () => {
   test("flags removed --full-auto on codex regardless of subcommand", () => {
     const warnings = validateNativeArgs("codex", ["exec", "--full-auto"]);
     assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /--full-auto.*removed|removed.*--full-auto/i);
+    assert.match(warnings[0]!, /--full-auto.*removed|removed.*--full-auto/i);
   });
 
   test("flags mutually exclusive codex review modes", () => {
@@ -72,9 +72,9 @@ describe("validateNativeArgs", () => {
       "main",
     ]);
     assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /mutually exclusive/);
-    assert.match(warnings[0], /--uncommitted/);
-    assert.match(warnings[0], /--base/);
+    assert.match(warnings[0]!, /mutually exclusive/);
+    assert.match(warnings[0]!, /--uncommitted/);
+    assert.match(warnings[0]!, /--base/);
   });
 
   test("does not flag codex review with a single mode", () => {
@@ -111,7 +111,7 @@ describe("validateNativeArgs", () => {
       ".",
     ]);
     assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /--verbose/);
+    assert.match(warnings[0]!, /--verbose/);
   });
 
   test("does not flag claude stream-json when --verbose is present", () => {
@@ -124,13 +124,13 @@ describe("validateNativeArgs", () => {
   test("flags claude --input-format=stream-json without matching output format", () => {
     const warnings = validateNativeArgs("claude", ["-p", "--input-format", "stream-json"]);
     assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /--input-format=stream-json/);
+    assert.match(warnings[0]!, /--input-format=stream-json/);
   });
 
   test("flags claude --include-partial-messages without stream-json output", () => {
     const warnings = validateNativeArgs("claude", ["-p", "--include-partial-messages"]);
     assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /--include-partial-messages/);
+    assert.match(warnings[0]!, /--include-partial-messages/);
   });
 
   test("flags claude --include-hook-events without stream-json output", () => {
@@ -169,8 +169,8 @@ describe("validateNativeArgs", () => {
       "--replay-user-messages",
     ]);
     assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /--replay-user-messages/);
-    assert.match(warnings[0], /--input-format=stream-json/);
+    assert.match(warnings[0]!, /--replay-user-messages/);
+    assert.match(warnings[0]!, /--input-format=stream-json/);
   });
 
   test("does not flag claude --replay-user-messages when both formats are stream-json", () => {
@@ -191,8 +191,8 @@ describe("validateNativeArgs", () => {
   test("flags claude --session-id with malformed UUID", () => {
     const warnings = validateNativeArgs("claude", ["-p", "--session-id", "not-a-uuid"]);
     assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /must be a valid UUID/);
-    assert.match(warnings[0], /not-a-uuid/);
+    assert.match(warnings[0]!, /must be a valid UUID/);
+    assert.match(warnings[0]!, /not-a-uuid/);
   });
 
   test("does not flag claude --session-id with a valid UUID", () => {
@@ -205,8 +205,8 @@ describe("validateNativeArgs", () => {
   test("flags codex --sandbox with an unknown enum value", () => {
     const warnings = validateNativeArgs("codex", ["exec", "--sandbox", "danger-write"]);
     assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /--sandbox.*one of/);
-    assert.match(warnings[0], /danger-write/);
+    assert.match(warnings[0]!, /--sandbox.*one of/);
+    assert.match(warnings[0]!, /danger-write/);
   });
 
   test("does not flag codex --sandbox with the three valid modes", () => {
@@ -222,8 +222,8 @@ describe("validateNativeArgs", () => {
   test("flags codex --remote with non-websocket URL", () => {
     const warnings = validateNativeArgs("codex", ["--remote", "https://example.com"]);
     assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /ws:\/\/ or wss:\/\//);
-    assert.match(warnings[0], /https:\/\/example\.com/);
+    assert.match(warnings[0]!, /ws:\/\/ or wss:\/\//);
+    assert.match(warnings[0]!, /https:\/\/example\.com/);
   });
 
   test("does not flag codex --remote with ws:// or wss:// schemes", () => {
@@ -234,8 +234,8 @@ describe("validateNativeArgs", () => {
   test("flags codex --local-provider with an unknown value", () => {
     const warnings = validateNativeArgs("codex", ["--oss", "--local-provider", "ggml"]);
     assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /lmstudio or ollama/);
-    assert.match(warnings[0], /ggml/);
+    assert.match(warnings[0]!, /lmstudio or ollama/);
+    assert.match(warnings[0]!, /ggml/);
   });
 
   test("does not flag codex --local-provider with lmstudio or ollama", () => {
@@ -246,8 +246,8 @@ describe("validateNativeArgs", () => {
   test("flags claude --permission-mode with an unknown enum value", () => {
     const warnings = validateNativeArgs("claude", ["-p", "--permission-mode", "yolo"]);
     assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /--permission-mode.*one of/);
-    assert.match(warnings[0], /yolo/);
+    assert.match(warnings[0]!, /--permission-mode.*one of/);
+    assert.match(warnings[0]!, /yolo/);
   });
 
   test("flags claude --output-format and --input-format typos", () => {
@@ -260,8 +260,8 @@ describe("validateNativeArgs", () => {
   test("flags claude --effort with an unknown level", () => {
     const warnings = validateNativeArgs("claude", ["-p", "--effort", "ultra"]);
     assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /--effort.*one of/);
-    assert.match(warnings[0], /ultra/);
+    assert.match(warnings[0]!, /--effort.*one of/);
+    assert.match(warnings[0]!, /ultra/);
   });
 
   test("does not flag claude --effort with valid levels", () => {

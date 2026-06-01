@@ -161,8 +161,11 @@ describe("Hydra Doctor", () => {
 
     assert.equal(TRUST_SCOPED_SETTINGS.includes("codexCommand"), true);
     assert.equal(warnings.length, 2);
-    assert.match(warnings[0], /codexCommand/);
-    assert.match(warnings[1], /workspace-folder/);
+    const [firstWarning, secondWarning] = warnings;
+    assert.ok(firstWarning !== undefined);
+    assert.ok(secondWarning !== undefined);
+    assert.match(firstWarning, /codexCommand/);
+    assert.match(secondWarning, /workspace-folder/);
   });
 
   test("TRUST_SCOPED_SETTINGS covers every package.json restricted setting", () => {

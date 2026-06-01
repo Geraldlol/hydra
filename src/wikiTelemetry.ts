@@ -31,7 +31,9 @@ const WIKI_USAGE_DETAIL_PREFIX = "Hydra wiki usage telemetry:";
 export function summarizeHydraWikiUsage(text: string): HydraWikiUsageTelemetry {
   const sourceIds: string[] = [];
   for (const match of text.matchAll(SOURCE_CITATION_RE)) {
-    sourceIds.push(match[1].toLowerCase());
+    const id = match[1];
+    if (id === undefined) continue;
+    sourceIds.push(id.toLowerCase());
   }
   const distinctSourceIds = [...new Set(sourceIds)];
   const mentionsWikiByName = /\bHydra wiki context\b/i.test(text);

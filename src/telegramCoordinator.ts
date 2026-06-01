@@ -89,6 +89,7 @@ export async function findTelegramRoutingRecord(
   const records = await readJsonlGuarded(paths.routingFile, isTelegramRoutingRecord, { limit: TELEGRAM_RECENT_RECORD_LIMIT });
   for (let i = records.length - 1; i >= 0; i--) {
     const record = records[i];
+    if (!record) continue;
     if (record.chatId !== input.chatId) continue;
     if (typeof input.messageId === "number" && record.messageId === input.messageId) return record;
     if (input.roomToken && record.roomToken === input.roomToken) return record;

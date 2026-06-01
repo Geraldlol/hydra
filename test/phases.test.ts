@@ -409,7 +409,10 @@ describe("transition exhaustive sweep", () => {
   const cases: Array<{ from: SweepState; event: SweepEvent; expected: Expected }> = [];
   for (const from of states) {
     for (const event of events) {
-      const expected = expectations[from.name][eventKey(event)];
+      const stateExpectations = expectations[from.name];
+      assert.ok(stateExpectations, `missing expectations for state ${from.name}`);
+      const expected = stateExpectations[eventKey(event)];
+      assert.ok(expected, `missing expectation for ${from.name} + ${eventKey(event)}`);
       cases.push({ from, event, expected });
     }
   }

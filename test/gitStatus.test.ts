@@ -38,9 +38,11 @@ describe("parseGitStatusEntries", () => {
     const raw = "R  src/newName.ts\0src/oldName.ts\0";
     const changes = parseGitStatusEntries(raw);
     assert.equal(changes.length, 1, "rename must emit exactly one change");
-    assert.equal(changes[0].path, "src/newName.ts", "must keep the NEW path");
-    assert.equal(changes[0].kind, "renamed");
-    assert.equal(changes[0].status, "R");
+    const change = changes[0];
+    assert.ok(change);
+    assert.equal(change.path, "src/newName.ts", "must keep the NEW path");
+    assert.equal(change.kind, "renamed");
+    assert.equal(change.status, "R");
     // The ORIG path must NOT appear as its own change.
     assert.ok(
       !changes.some((c) => c.path === "src/oldName.ts"),
@@ -52,8 +54,10 @@ describe("parseGitStatusEntries", () => {
     const raw = "C  src/copy.ts\0src/source.ts\0";
     const changes = parseGitStatusEntries(raw);
     assert.equal(changes.length, 1);
-    assert.equal(changes[0].path, "src/copy.ts");
-    assert.equal(changes[0].kind, "copied");
+    const change = changes[0];
+    assert.ok(change);
+    assert.equal(change.path, "src/copy.ts");
+    assert.equal(change.kind, "copied");
     assert.ok(!changes.some((c) => c.path === "src/source.ts"));
   });
 

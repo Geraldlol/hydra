@@ -272,8 +272,10 @@ async function readLatestFromTail(indexPath: string, size: number): Promise<Prom
 function latestParseableEnvelope(raw: string): PromptEnvelope | undefined {
   const lines = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (line === undefined) continue;
     try {
-      return JSON.parse(lines[i]) as PromptEnvelope;
+      return JSON.parse(line) as PromptEnvelope;
     } catch {
       // Keep walking backward so one torn/legacy line does not hide the
       // latest usable prompt envelope from the user.
@@ -359,17 +361,19 @@ function promptSections(prompt: string): PromptBudgetSection[] {
   const ranges: Array<{ label: string; startLine: number }> = [{ label: "Preamble", startLine: 0 }];
   lines.forEach((line, index) => {
     const match = /^--- (.+) ---$/.exec(line.trim());
-    if (match) ranges.push({ label: match[1], startLine: index });
+    if (match?.[1] !== undefined) ranges.push({ label: match[1], startLine: index });
   });
 
   const sections: PromptBudgetSection[] = [];
   for (let i = 0; i < ranges.length; i++) {
-    const startLine = ranges[i].startLine;
+    // Why: i is bounded by 0..ranges.length-1, so ranges[i] is always present.
+    const range = ranges[i]!;
+    const startLine = range.startLine;
     const endLine = ranges[i + 1]?.startLine ?? lines.length;
     const text = lines.slice(startLine, endLine).join("\n").trim();
     if (!text) continue;
     sections.push({
-      label: ranges[i].label,
+      label: range.label,
       chars: text.length,
       estimatedTokens: estimateTokens(text.length),
     });

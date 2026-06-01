@@ -9,6 +9,9 @@ export function parseGitStatusEntries(raw: string): WorkspaceChange[] {
   const changes: WorkspaceChange[] = [];
   for (let i = 0; i < entries.length; i += 1) {
     const entry = entries[i];
+    // Why: i < entries.length guarantees entry is in-bounds; the guard only
+    // satisfies noUncheckedIndexedAccess without altering loop/advance behavior.
+    if (entry === undefined) continue;
     if (entry.length < 4) continue;
     const status = entry.slice(0, 2);
     const filePath = entry.slice(3);

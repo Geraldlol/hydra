@@ -200,7 +200,7 @@ describe("Hydra CLI bridge", () => {
     }, "win32");
 
     const extensionCandidates = candidates.filter((candidate) => candidate.includes(".vscode"));
-    assert.match(extensionCandidates[0], /openai\.chatgpt-26\.506\.21252-win32-x64/);
+    assert.match(extensionCandidates[0]!, /openai\.chatgpt-26\.506\.21252-win32-x64/);
     assert.ok(candidates.includes(path.join(appData, "npm", "codex.cmd")));
     assert.ok(candidates.includes(path.join(localAppData, "Packages", "OpenAI.Codex_test", "LocalCache", "Local", "OpenAI", "Codex", "bin", "codex.exe")));
   });

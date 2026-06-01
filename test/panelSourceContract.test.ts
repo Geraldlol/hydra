@@ -239,7 +239,7 @@ describe("workspace edit viewer source contracts", () => {
       1,
       `expected exactly 1 direct this.state literal assignment (archiveAndClearRoom), found ${literalMutations.length}`
     );
-    const idx = literalMutations[0].index ?? -1;
+    const idx = literalMutations[0]?.index ?? -1;
     // Window widened from 600 to 1000: the wiki-maintenance cancellation
     // (this.wikiMaintenanceAbort?.abort()) added to archiveAndClearRoom's
     // proceed path pushed the lone `this.state = {…}` assignment ~626 chars

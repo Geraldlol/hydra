@@ -158,10 +158,12 @@ describe("resolveModelPrices", () => {
     // Only the input rate is overridden; the omitted cache rates must come from
     // the gpt-5 built-in (0.125 read), NOT Claude's default (0.3 read).
     const merged = resolveModelPrices("codex", "gpt-5", { "gpt-5": { inputPerMTok: 2 } });
+    const gpt5 = DEFAULT_MODEL_PRICES["gpt-5"];
+    assert.ok(gpt5);
     assert.equal(merged.inputPerMTok, 2, "explicit field wins");
-    assert.equal(merged.outputPerMTok, DEFAULT_MODEL_PRICES["gpt-5"].outputPerMTok);
-    assert.equal(merged.cacheReadPerMTok, DEFAULT_MODEL_PRICES["gpt-5"].cacheReadPerMTok);
-    assert.equal(merged.cacheCreatePerMTok, DEFAULT_MODEL_PRICES["gpt-5"].cacheCreatePerMTok);
+    assert.equal(merged.outputPerMTok, gpt5.outputPerMTok);
+    assert.equal(merged.cacheReadPerMTok, gpt5.cacheReadPerMTok);
+    assert.equal(merged.cacheCreatePerMTok, gpt5.cacheCreatePerMTok);
   });
 
   test("a partial override for an unknown model fills omitted fields from the per-agent default", () => {
@@ -175,8 +177,10 @@ describe("resolveModelPrices", () => {
     const merged = resolveModelPrices("claude", "opus", {
       opus: { inputPerMTok: Number.NaN, outputPerMTok: -5, cacheReadPerMTok: 0.05 },
     });
-    assert.equal(merged.inputPerMTok, DEFAULT_MODEL_PRICES.opus.inputPerMTok, "NaN falls back to base");
-    assert.equal(merged.outputPerMTok, DEFAULT_MODEL_PRICES.opus.outputPerMTok, "negative falls back to base");
+    const opus = DEFAULT_MODEL_PRICES.opus;
+    assert.ok(opus);
+    assert.equal(merged.inputPerMTok, opus.inputPerMTok, "NaN falls back to base");
+    assert.equal(merged.outputPerMTok, opus.outputPerMTok, "negative falls back to base");
     assert.equal(merged.cacheReadPerMTok, 0.05, "valid field is applied");
   });
 
@@ -192,7 +196,9 @@ describe("resolveModelPrices", () => {
 
   test("case-insensitive model lookup", () => {
     const lower = resolveModelPrices("claude", "Claude-Sonnet-4-6");
-    assert.equal(lower.inputPerMTok, DEFAULT_MODEL_PRICES.sonnet.inputPerMTok);
+    const sonnet = DEFAULT_MODEL_PRICES.sonnet;
+    assert.ok(sonnet);
+    assert.equal(lower.inputPerMTok, sonnet.inputPerMTok);
   });
 });
 

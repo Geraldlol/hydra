@@ -206,7 +206,7 @@ function codexModelDescription(model: CodexModelInfo): string {
   if (model.displayName && model.displayName !== model.slug) bits.push(model.displayName);
   if (model.defaultReasoning) bits.push(`reasoning: ${model.defaultReasoning}`);
   if (!model.supportedInApi) bits.push("interactive only — no API (codex exec won't work)");
-  if (model.description) bits.push(model.description.split(/[.!?]/)[0].trim());
+  if (model.description) bits.push((model.description.split(/[.!?]/)[0] ?? "").trim());
   return bits.join(" · ") || model.slug;
 }
 

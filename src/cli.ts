@@ -116,6 +116,7 @@ export function splitNativeArgs(commandLine: string): string[] {
 
   for (let index = 0; index < commandLine.length; index++) {
     const char = commandLine[index];
+    if (char === undefined) continue;
     if (escaping) {
       current += char;
       escaping = false;

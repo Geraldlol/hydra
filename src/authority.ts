@@ -133,12 +133,12 @@ export function validateNativeArgs(agent: AgentId, args: string[]): string[] {
     }
     // The following flags only work with `--print` (per `claude --help`):
     // --max-budget-usd, --fallback-model, --no-session-persistence.
-    const printOnlyFlags = [
-      ["--max-budget-usd", "--max-budget-usd"],
-      ["--fallback-model", "--fallback-model"],
-      ["--no-session-persistence", "--no-session-persistence"],
+    const printOnlyFlags: string[] = [
+      "--max-budget-usd",
+      "--fallback-model",
+      "--no-session-persistence",
     ];
-    for (const [flagName] of printOnlyFlags) {
+    for (const flagName of printOnlyFlags) {
       if (args.includes(flagName) && !printMode) {
         warnings.push(
           `Claude \`${flagName}\` only works with \`--print\` / \`-p\`; it is ignored otherwise.`
@@ -213,6 +213,7 @@ function firstCodexPositional(args: string[]): string | undefined {
   ]);
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
+    if (arg === undefined) continue;
     if (arg.startsWith("-")) {
       const eq = arg.indexOf("=");
       if (eq < 0 && valueFlags.has(arg)) i++;
@@ -311,6 +312,7 @@ function hasReviewSubcommand(args: string[]): boolean {
   const valueFlags = new Set(["--color", "--cd", "--config", "--profile", "--model"]);
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
+    if (arg === undefined) continue;
     if (arg.startsWith("-")) {
       const eq = arg.indexOf("=");
       if (eq < 0 && valueFlags.has(arg)) i++; // skip value
@@ -333,6 +335,7 @@ function readLastFlagValue(args: string[], flag: string): string | undefined {
   let value: string | undefined;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
+    if (arg === undefined) continue;
     if (arg === flag && i + 1 < args.length) {
       value = args[i + 1];
       i++;

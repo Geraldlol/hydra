@@ -85,9 +85,13 @@ describe("summarizeClaudeEvents", () => {
     );
     const summary = summarizeClaudeEvents(events);
     assert.equal(summary.toolUses.length, 2);
-    assert.equal(summary.toolUses[0].name, "Bash");
-    assert.equal(summary.toolUses[0].id, "tu_1");
-    assert.equal(summary.toolUses[1].name, "Read");
+    const tu0 = summary.toolUses[0];
+    const tu1 = summary.toolUses[1];
+    assert.ok(tu0);
+    assert.ok(tu1);
+    assert.equal(tu0.name, "Bash");
+    assert.equal(tu0.id, "tu_1");
+    assert.equal(tu1.name, "Read");
   });
 
   test("dedupes identical (id, name) tool-use entries across envelopes", () => {
@@ -104,10 +108,12 @@ describe("summarizeClaudeEvents", () => {
     );
     const summary = summarizeClaudeEvents(events);
     assert.equal(summary.taskNotifications.length, 1);
-    assert.equal(summary.taskNotifications[0].taskId, "t-1");
-    assert.equal(summary.taskNotifications[0].toolUseId, "tu-1");
-    assert.equal(summary.taskNotifications[0].status, "completed");
-    assert.equal(summary.taskNotifications[0].summary, "all good");
+    const note = summary.taskNotifications[0];
+    assert.ok(note);
+    assert.equal(note.taskId, "t-1");
+    assert.equal(note.toolUseId, "tu-1");
+    assert.equal(note.status, "completed");
+    assert.equal(note.summary, "all good");
   });
 
   test("counts SSE inner event types from stream_event envelopes", () => {
@@ -145,7 +151,9 @@ describe("summarizeClaudeEvents", () => {
     const summary = summarizeClaudeEvents(events);
     assert.equal(summary.permissionDenials, 3);
     assert.equal(summary.permissionDenialRecords.length, 3);
-    assert.equal(summary.permissionDenialRecords[0].tool, "Bash");
+    const denial0 = summary.permissionDenialRecords[0];
+    assert.ok(denial0);
+    assert.equal(denial0.tool, "Bash");
     // No decisionReason was present so reason-bucket counts stay empty.
     assert.deepEqual(summary.permissionDenialsByReason, {});
   });
@@ -169,11 +177,17 @@ describe("summarizeClaudeEvents", () => {
       sandboxOverride: 1,
       safetyCheck: 1,
     });
-    assert.equal(summary.permissionDenialRecords[0].reasonType, "mode");
-    assert.equal(summary.permissionDenialRecords[0].message, "blocked by mode");
-    assert.equal(summary.permissionDenialRecords[3].reasonType, "safetyCheck");
+    const denialMode = summary.permissionDenialRecords[0];
+    const denialRule = summary.permissionDenialRecords[1];
+    const denialSafety = summary.permissionDenialRecords[3];
+    assert.ok(denialMode);
+    assert.ok(denialRule);
+    assert.ok(denialSafety);
+    assert.equal(denialMode.reasonType, "mode");
+    assert.equal(denialMode.message, "blocked by mode");
+    assert.equal(denialSafety.reasonType, "safetyCheck");
     // Raw decisionReason is preserved for callers that need rule details.
-    assert.deepEqual(summary.permissionDenialRecords[1].decisionReason, {
+    assert.deepEqual(denialRule.decisionReason, {
       type: "rule",
       rule: { ruleBehavior: "deny" },
     });
@@ -197,8 +211,12 @@ describe("summarizeClaudeEvents", () => {
     assert.equal(summary.permissionDenialRecords.length, 100);
     assert.equal(summary.permissionDenials, 150);
     // We keep the first 100 (initial pattern), not the last 100.
-    assert.equal(summary.permissionDenialRecords[0].tool, "Tool0");
-    assert.equal(summary.permissionDenialRecords[99].tool, "Tool99");
+    const firstRecord = summary.permissionDenialRecords[0];
+    const lastRecord = summary.permissionDenialRecords[99];
+    assert.ok(firstRecord);
+    assert.ok(lastRecord);
+    assert.equal(firstRecord.tool, "Tool0");
+    assert.equal(lastRecord.tool, "Tool99");
     // The by-reason buckets still reflect every denial seen.
     assert.equal(summary.permissionDenialsByReason.rule, 150);
   });

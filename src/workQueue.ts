@@ -86,7 +86,7 @@ function nativeActionDetail(action: NativeActionReceipt): string {
 }
 
 function capitalize(value: string): string {
-  return value.length ? `${value[0].toUpperCase()}${value.slice(1)}` : value;
+  return value.length ? `${value.charAt(0).toUpperCase()}${value.slice(1)}` : value;
 }
 
 function stableHash(value: string): string {

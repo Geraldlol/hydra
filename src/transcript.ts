@@ -178,20 +178,28 @@ export function parseTranscript(text: string): TranscriptMessage[] {
   const messages: TranscriptMessage[] = [];
   let i = 0;
   while (i < lines.length) {
-    const m = HEADER_RE.exec(lines[i]);
+    const line = lines[i] ?? "";
+    const m = HEADER_RE.exec(line);
     if (!m) {
       i++;
       continue;
     }
-    const [, ts, label, phaseRaw, tagsRaw] = m;
-    const role = LABEL_TO_ROLE[label];
+    // Why: HEADER_RE groups 1 (timestamp) and 2 (label) are non-optional in
+    // the pattern, so a successful match always captures them as strings.
+    const ts = m[1] ?? "";
+    const label = m[2] ?? "";
+    const phaseRaw = m[3];
+    const tagsRaw = m[4];
+    // Why: HEADER_RE constrains the label group to You|Codex|Claude|System,
+    // each of which is a key of LABEL_TO_ROLE, so the lookup is always defined.
+    const role = LABEL_TO_ROLE[label] ?? "system";
     const phase = normalizePhase(phaseRaw);
     const tags = (tagsRaw ?? "").split(",").map((s) => s.trim());
     i++;
     if (i < lines.length && lines[i] === "") i++;
     const bodyLines: string[] = [];
-    while (i < lines.length && !HEADER_RE.test(lines[i])) {
-      bodyLines.push(lines[i]);
+    while (i < lines.length && !HEADER_RE.test(lines[i] ?? "")) {
+      bodyLines.push(lines[i] ?? "");
       i++;
     }
     while (bodyLines.length > 0 && bodyLines[bodyLines.length - 1] === "") bodyLines.pop();
@@ -242,7 +250,8 @@ export function transcriptAsWindowedContext(
   let omittedChars = 0;
 
   for (let i = chunks.length - 1; i >= 0; i--) {
-    const chunk = chunks[i];
+    // Why: i ranges over valid indices of chunks, so the element is defined.
+    const chunk = chunks[i] ?? "";
     const separatorChars = kept.length > 0 ? 1 : 0;
     const nextChars = keptChars + separatorChars + chunk.length;
     if (kept.length > 0 && nextChars > cap) {

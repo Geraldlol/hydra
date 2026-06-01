@@ -258,7 +258,10 @@ function readFileIfExists(filePath: string): string {
 function latestWrapupFromLog(log: string): { date: string; title: string } | undefined {
   let latest: { date: string; title: string } | undefined;
   for (const match of log.matchAll(/^## \[(\d{4}-\d{2}-\d{2})\]\s+wrapup\s+\|\s+(.+)$/gim)) {
-    latest = { date: match[1], title: match[2].trim() };
+    const date = match[1];
+    const title = match[2];
+    if (date === undefined || title === undefined) continue;
+    latest = { date, title: title.trim() };
   }
   return latest;
 }
@@ -383,7 +386,8 @@ export async function pruneHydraWikiRawTurns(
   for (const entry of entries) {
     if (!entry.isFile()) continue;
     const match = /^(\d{4}-\d{2}-\d{2})-[a-f0-9]{12}\.md$/i.exec(entry.name);
-    if (!match || match[1] >= cutoffDay) continue;
+    const entryDay = match?.[1];
+    if (entryDay === undefined || entryDay >= cutoffDay) continue;
 
     const absolutePath = path.resolve(rawTurnsDir, entry.name);
     if (absolutePath !== rawTurnsRoot && !absolutePath.startsWith(`${rawTurnsRoot}${path.sep}`)) continue;
@@ -525,7 +529,8 @@ function wikiFilePath(workspaceRoot: string, fileName: "context.md" | "index.md"
 
 function findLastIndex<T>(items: T[], predicate: (item: T) => boolean): number {
   for (let index = items.length - 1; index >= 0; index--) {
-    if (predicate(items[index])) return index;
+    // Why: index is bounded by items.length-1..0, so items[index] is always present.
+    if (predicate(items[index]!)) return index;
   }
   return -1;
 }
@@ -556,7 +561,7 @@ function tailMarkdown(markdown: string, maxChars: number): string {
 
 function extractJsonObject(text: string): string | undefined {
   const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(text);
-  const candidate = fenced ? fenced[1].trim() : text;
+  const candidate = fenced?.[1] !== undefined ? fenced[1].trim() : text;
   if (candidate.startsWith("{") && candidate.endsWith("}")) return candidate;
   const start = candidate.indexOf("{");
   const end = candidate.lastIndexOf("}");

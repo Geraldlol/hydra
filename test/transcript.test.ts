@@ -63,12 +63,12 @@ describe("transcript", () => {
     for (const m of messages) await appendMessage(file, m);
     const read = await readTranscript(file);
     assert.equal(read.length, 3);
-    assert.equal(read[0].role, "user");
-    assert.equal(read[0].text, "first");
-    assert.equal(read[1].role, "codex");
-    assert.equal(read[1].phase, "opener");
-    assert.equal(read[2].role, "claude");
-    assert.equal(read[2].text, "answer B");
+    assert.equal(read[0]!.role, "user");
+    assert.equal(read[0]!.text, "first");
+    assert.equal(read[1]!.role, "codex");
+    assert.equal(read[1]!.phase, "opener");
+    assert.equal(read[2]!.role, "claude");
+    assert.equal(read[2]!.text, "answer B");
   });
 
   test("parseTranscript preserves cancelled and error tags", () => {
@@ -78,8 +78,8 @@ describe("transcript", () => {
       "## 2026-05-08T14:00:01Z Claude (reactor) [error]\n\nfailed\n";
     const messages = parseTranscript(text);
     assert.equal(messages.length, 2);
-    assert.equal(messages[0].cancelled, true);
-    assert.equal(messages[1].error, true);
+    assert.equal(messages[0]!.cancelled, true);
+    assert.equal(messages[1]!.error, true);
   });
 
   test("transcriptAsContext joins messages without trailing whitespace blowup", () => {
@@ -295,7 +295,7 @@ describe("transcript", () => {
     });
     const read = await readTranscript(file);
     assert.equal(read.length, 1);
-    assert.equal(read[0].text, body.trimEnd());
+    assert.equal(read[0]!.text, body.trimEnd());
   });
 
   test("parseTranscript drops invalid phase tokens rather than corrupting them", () => {
@@ -304,8 +304,8 @@ describe("transcript", () => {
       "## 2026-05-08T14:00:00Z Codex (notarealphase)\n\nbody\n";
     const messages = parseTranscript(text);
     assert.equal(messages.length, 1);
-    assert.equal(messages[0].phase, undefined);
-    assert.equal(messages[0].text, "body");
+    assert.equal(messages[0]!.phase, undefined);
+    assert.equal(messages[0]!.text, "body");
   });
 
   test("parseTranscript accepts legacy round phase aliases", () => {
@@ -315,8 +315,8 @@ describe("transcript", () => {
       "## 2026-05-08T14:00:01Z Claude (round2)\n\nold reactor\n";
     const messages = parseTranscript(text);
     assert.equal(messages.length, 2);
-    assert.equal(messages[0].phase, "opener");
-    assert.equal(messages[1].phase, "reactor");
+    assert.equal(messages[0]!.phase, "opener");
+    assert.equal(messages[1]!.phase, "reactor");
   });
 
   test("auto-archives when transcript file exceeds size threshold", async () => {
@@ -348,7 +348,7 @@ describe("transcript", () => {
     const archiveDir = path.join(dir, ".hydra", "archive");
     const archives = await fs.readdir(archiveDir);
     assert.equal(archives.length, 1);
-    const archived = await fs.readFile(path.join(archiveDir, archives[0]), "utf8");
+    const archived = await fs.readFile(path.join(archiveDir, archives[0]!), "utf8");
     assert.match(archived, /hello/);
     assert.match(archived, /padding/);
 
@@ -356,7 +356,7 @@ describe("transcript", () => {
     await appendMessage(file, { role: "user", text: "after rotate", timestamp: "2026-05-08T14:00:02Z" });
     const messages = await readTranscript(file);
     assert.equal(messages.length, 1);
-    assert.equal(messages[0].text, "after rotate");
+    assert.equal(messages[0]!.text, "after rotate");
   });
 
   test("parseTranscript accepts parallel discussion phase", () => {
@@ -365,6 +365,6 @@ describe("transcript", () => {
       "## 2026-05-08T14:00:00Z Codex (parallel)\n\nindependent pass\n";
     const messages = parseTranscript(text);
     assert.equal(messages.length, 1);
-    assert.equal(messages[0].phase, "parallel");
+    assert.equal(messages[0]!.phase, "parallel");
   });
 });

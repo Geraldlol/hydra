@@ -90,7 +90,7 @@ const PRESETS: Record<ConfigurableCapabilityProfileId, CapabilityProfilePreset> 
 };
 
 export function profileSettingKey(agent: AgentId, profile: CliProfile): string {
-  const phase = profile[0].toUpperCase() + profile.slice(1);
+  const phase = profile.charAt(0).toUpperCase() + profile.slice(1);
   return `${agent}${phase}Profile`;
 }
 

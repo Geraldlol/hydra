@@ -42,8 +42,7 @@ export async function readNativeIntegrationSummary(filePath: string, maxChars = 
 
 export function extractNativeIntegrationSummary(markdown: string): string {
   const match = markdown.match(/^## Integration Probe Summary\s*\r?\n([\s\S]*?)(?=^## |\z)/m);
-  if (!match) return "";
-  return match[1].trim();
+  return match?.[1]?.trim() ?? "";
 }
 
 export function shouldIncludeNativeIntegrationSummary(...values: Array<string | undefined>): boolean {
