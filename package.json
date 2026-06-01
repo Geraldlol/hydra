@@ -8,7 +8,8 @@
   "license": "MIT",
   "private": false,
   "engines": {
-    "vscode": "^1.120.0"
+    "vscode": "^1.120.0",
+    "node": ">=20 <21"
   },
   "categories": [
     "Other"
@@ -480,7 +481,7 @@
           "scope": "application",
           "type": "string",
           "default": "",
-          "markdownDescription": "Shell command Hydra runs for one-click verification. Leave blank to infer from package.json scripts: check+test, test, check, then lint."
+          "markdownDescription": "Shell command Hydra runs for one-click verification. Leave blank to infer from package.json scripts in this order: `verify:fast`, `verify`, `check && test`, `test`, `check`, then `lint`. Inference is gated by Workspace Trust; untrusted workspaces refuse inferred package.json commands."
         },
         "hydraRoom.verifyTimeoutMs": {
           "type": "number",
@@ -519,7 +520,7 @@
           "type": "number",
           "default": 0,
           "minimum": 0,
-          "markdownDescription": "If greater than 0, Hydra pauses auto-advance once the session's estimated cost reaches this USD value. Cost is computed from `.hydra/usage.jsonl` using `hydraRoom.modelPrices`. Set to 0 to disable. Useful guard rail when running autonomous loops."
+          "markdownDescription": "If greater than 0, Hydra pauses auto-advance once the session's estimated cost reaches this USD value. Cost is computed from `.hydra/usage.jsonl` using `hydraRoom.modelPrices`. Set to 0 to disable. Useful guard rail when running autonomous loops. Note: on the default Codex one-shot path (`hydraRoom.codexJson: false`) there is no per-token usage breakdown, so Hydra estimates conservatively by billing the whole plain-text reply at the output rate — the displayed figure (and therefore when this cap trips) runs high. Enable `hydraRoom.codexJson` for token-accurate Codex accounting."
         },
         "hydraRoom.handoffWebhookUrl": {
           "scope": "application",
@@ -650,7 +651,17 @@
         "hydraRoom.modelPrices": {
           "type": "object",
           "default": {},
-          "markdownDescription": "Per-agent token pricing for the session cost meter. Each value is USD per **million** tokens. Shape: `{ \"claude\": { \"inputPerMTok\": number, \"outputPerMTok\": number, \"cacheReadPerMTok\": number, \"cacheCreatePerMTok\": number }, \"codex\": { ... } }`. Hydra defaults to Sonnet 4.6 pricing for Claude and a GPT-5-family blend for Codex; override here to track your actual models."
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "inputPerMTok": { "type": "number", "minimum": 0, "description": "USD per million input (prompt) tokens." },
+              "outputPerMTok": { "type": "number", "minimum": 0, "description": "USD per million output (completion) tokens." },
+              "cacheReadPerMTok": { "type": "number", "minimum": 0, "description": "USD per million cache-read tokens." },
+              "cacheCreatePerMTok": { "type": "number", "minimum": 0, "description": "USD per million cache-creation tokens." }
+            },
+            "additionalProperties": false
+          },
+          "markdownDescription": "Per-agent token pricing for the session cost meter, USD per **million** tokens. The keys `claude` and `codex` set each agent's default price; any other key is treated as a per-model override matched by model id (lower-cased), for example `\"gpt-5.5\"` or `\"opus\"`. Each value object accepts `inputPerMTok`, `outputPerMTok`, `cacheReadPerMTok`, and `cacheCreatePerMTok`, all non-negative numbers. Omitted fields fall back to Hydra's built-in defaults (Sonnet 4.6 pricing for Claude, a GPT-5-family blend for Codex). Example: `{ \"claude\": { \"inputPerMTok\": 3, \"outputPerMTok\": 15, \"cacheReadPerMTok\": 0.3, \"cacheCreatePerMTok\": 3.75 }, \"codex\": { \"inputPerMTok\": 1.25, \"outputPerMTok\": 10 } }`."
         },
         "hydraRoom.autoRequestReviewAfterPassingVerification": {
           "type": "boolean",
@@ -710,6 +721,7 @@
   },
   "scripts": {
     "compile": "tsc --incremental -p ./",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "dev": "node scripts/open-dev-host.js",
     "watch": "tsc -watch -p ./",
     "check": "tsc --noEmit -p ./",
@@ -720,7 +732,7 @@
     "test": "tsc --incremental -p ./ && node -e \"const fs=require('node:fs');if(fs.existsSync('test/fixtures'))fs.cpSync('test/fixtures','dist/test/fixtures',{recursive:true})\" && node scripts/setup-vscode-stub.js && node --test --test-concurrency=4 dist/test/*.test.js",
     "test:fast": "tsc --incremental -p ./ && node --test --test-concurrency=4 dist/test/*.test.js",
     "verify:fast": "pnpm run test:fast",
-    "prepackage": "pnpm run test",
+    "prepackage": "pnpm run clean && pnpm run test",
     "package": "pnpm exec vsce package --no-dependencies --allow-missing-repository",
     "install:local": "node scripts/install-local.js",
     "install:local:existing": "node scripts/install-local.js --skip-package"

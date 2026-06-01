@@ -47,9 +47,17 @@ In the Extension Development Host, run `Hydra: Start`.
 - `Hydra: Start`
 - `Hydra: Send Message`
 - `Hydra: Assign Builder`
+- `Hydra: Assign Both Builders`
 - `Hydra: Run Verification`
 - `Hydra: Request Review`
 - `Hydra: Preview Next Prompt`
+- `Hydra: Open Last Prompt`
+- `Hydra: Insert Prompt Template` (`Ctrl+Alt+T`)
+- `Hydra: Choose Model` (`Ctrl+Alt+M`)
+- `Hydra: Choose Thinking Level` (`Ctrl+Alt+E`)
+- `Hydra: Change Capability Profile`
+- `Hydra: Refresh Codex Models`
+- `Hydra: Attach Files`
 - `Hydra: Command Center`
 - `Hydra: Native Action`
 - `Hydra: Poke Codex Terminal`
@@ -71,10 +79,16 @@ In the Extension Development Host, run `Hydra: Start`.
 - `Hydra: Open Room Objective`
 - `Hydra: Open Session Brief`
 - `Hydra: Open Wiki Context`
+- `Hydra: Run Wiki Wrapup Now`
 - `Hydra: Open Support Bundle`
 - `Hydra: Capture Native Capabilities`
 - `Hydra: Capture Native Data Snapshot`
 - `Hydra: Open Native Action Log`
+- `Hydra: Open Agent Call Log`
+- `Hydra: Toggle Auto Accept Default`
+- `Hydra: Clean Workspace State`
+- `Hydra: Archive and Clear Room`
+- `Hydra: Send Test Telegram Message`
 
 ## Advanced Commands
 
@@ -88,6 +102,21 @@ Most users do not need these.
 - `Hydra: Advanced: Reset Stuck Turn`
 - `Hydra: Setup: Fix Codex CLI Path`
 - `Hydra: Setup: Fix Claude CLI Path`
+
+## Keyboard Shortcuts
+
+Hydra ships these default keybindings (macOS uses `Cmd` in place of `Ctrl`):
+
+- `Ctrl+Alt+H` — `Hydra: Command Center`
+- `Ctrl+Alt+B` — `Hydra: Assign Builder`
+- `Ctrl+Alt+R` — `Hydra: Request Review`
+- `Ctrl+Alt+A` — `Hydra: Accept Default Decision`
+- `Ctrl+Alt+X` — `Hydra: Stop Current Turn`
+- `Ctrl+Alt+T` — `Hydra: Insert Prompt Template` (replaces the composer text with a saved `hydraRoom.promptTemplates` entry)
+- `Ctrl+Alt+M` — `Hydra: Choose Model` (pick the per-phase Codex/Claude model live without editing settings)
+- `Ctrl+Alt+E` — `Hydra: Choose Thinking Level` (pick the per-phase reasoning/effort level live)
+
+Rebind any of these from VS Code's Keyboard Shortcuts editor.
 
 Hydra starts in safe one-shot transport, then Autopilot runs Doctor and the terminal bridge self-test. By default it stays in safe one-shot mode even when the bridge test passes; set `hydraRoom.preferTerminalBridgeOnStart: true` to opt in to automatic visible terminal bridge use. If setup checks fail, Hydra stays in safe one-shot mode and shows fix buttons in the room.
 
@@ -111,7 +140,7 @@ Native session hints are correlation metadata only: recent Codex session ids fro
 
 Use the in-room `Poke Codex` and `Poke Claude` buttons, or `Hydra: Poke Codex Terminal` / `Hydra: Poke Claude Terminal`, when you want to talk to one native CLI directly without starting the full opener -> reactor -> closer room loop. Pokes still stream terminal output into the room and are written to the transcript.
 
-Normal room messages use the opener -> reactor -> closer discussion loop by default. If the latest message explicitly addresses both agents, such as "both of you", "you both", or "Codex and Claude, ...", Hydra instead runs Codex and Claude in parallel with independent discussion prompts and returns control after both replies finish. Set `hydraRoom.discussionMode` to `parallel` when latency matters more than serialized critique choreography; set it to `serial` to force the traditional loop.
+Normal room messages use the opener -> reactor -> closer discussion loop by default (`hydraRoom.discussionMode: parallelOnBoth`). If the latest message explicitly addresses both agents, such as "both of you", "you both", or "Codex and Claude, ...", Hydra instead runs Codex and Claude in parallel with independent discussion prompts and returns control after both replies finish. Set `hydraRoom.discussionMode` to `parallel` when latency matters more than serialized critique choreography; set it to `serial` to force the traditional loop even when a message addresses both agents.
 
 Hydra adds Codex `exec`'s `--skip-git-repo-check` for normal room turns so new folders can be used before they have a Git repository. Exact `Hydra: Run Codex Native Command` calls remain raw native passthrough.
 
@@ -213,10 +242,12 @@ Hydra can also poll Telegram for inbound commands. Enable `hydraRoom.telegramInb
 
 Use `Hydra: Run Verification` or the in-room button after a build. Hydra runs `hydraRoom.verifyCommand` from the workspace root. If that setting is blank, Hydra infers a command from `package.json` scripts in this order:
 
-1. `npm run check && npm test`
-2. `npm test`
-3. `npm run check`
-4. `npm run lint`
+1. `npm run verify:fast`
+2. `npm run verify`
+3. `npm run check && npm test`
+4. `npm test`
+5. `npm run check`
+6. `npm run lint`
 
 Inference is gated by Workspace Trust. In a trusted workspace, Hydra may run the inferred command. In an untrusted workspace, Hydra refuses inferred `package.json` commands because those scripts are attacker-controlled; set `hydraRoom.verifyCommand` in User or Machine Settings to opt in explicitly, or grant Workspace Trust.
 

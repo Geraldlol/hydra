@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.x
+
+Summary of the major themes shipped across the 0.4 line since 0.1.0 (see `git log` for per-commit detail):
+
+- **Room file attachments** — attach local files to a turn; Hydra copies them into `.hydra/attachments/`, keeps the transcript message short, and injects bounded text previews into the next agent prompt.
+- **Workspace cleanup** — `Hydra: Clean Workspace State` plus trust-scoped retention settings (`hydraRoom.promptBodyRetentionDays`, `hydraRoom.diagnosticRetentionDays`) compact old prompt bodies and prune stale terminal-bridge diagnostics; symlinked diagnostic dirs are refused.
+- **Project wiki memory** — a compiled `.hydra/wiki/` (`schema.md`, `context.md`, `index.md`, `log.md`, raw turn snapshots) injected into future prompts, with automatic post-turn wrapups, source provenance tags, usage telemetry, and a manual `Run Wiki Wrapup Now`.
+- **Model and thinking-level choosers** — live per-phase Codex/Claude model selection (`Hydra: Choose Model`, `Ctrl+Alt+M`) and reasoning/effort selection (`Hydra: Choose Thinking Level`, `Ctrl+Alt+E`), backed by `hydraRoom.codexModel`/`claudeModel` and `hydraRoom.codexReasoning`/`claudeEffort`, plus a session cost meter from `.hydra/usage.jsonl` and `hydraRoom.modelPrices`.
+- **Telegram** — outbound decision-needed notifications and optional inbound command polling (prefix-gated, off by default because inbound messages are untrusted), alongside the generic HTTPS handoff webhook.
+- **Terminal bridge** — the experimental visible-terminal transport with live output echo, session snapshots, health reporting, and self-test; safe one-shot remains the default transport.
+- **Discussion modes** — `hydraRoom.discussionMode` (`parallelOnBoth` default, `serial`, `parallel`) and an `Assign Both Builders` parallel build/review branch.
+- **Security hardening** — application-scoped sensitive settings enforced under Workspace Trust, POSIX env-var validation for the dispatch script, HTTPS-only webhook, redacted native data snapshots, and risk-gated auto-advance.
+
 ## 0.1.0
 
 - Initial Hydra Room extension.

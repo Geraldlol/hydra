@@ -49,6 +49,7 @@ export async function inferVerificationCommand(workspaceRoot: string): Promise<s
   try {
     parsed = JSON.parse(await fs.readFile(path.join(workspaceRoot, "package.json"), "utf8"));
   } catch {
+    // No package.json, or it is unreadable/unparseable -> no command to infer.
     return undefined;
   }
   if (!parsed || typeof parsed !== "object") return undefined;

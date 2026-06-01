@@ -48,7 +48,7 @@ The extension code, user settings, and the workspace folder are *semi-trusted*; 
 
 ### Phase state machine
 
-`src/phases.ts` is the canonical state machine. A serialized turn is `Idle → Opener → Reactor → Closer → AwaitingUser`. A turn that addresses both agents ("both of you", "Codex and Claude…") shortcuts to `ParallelDiscussion`. After `AwaitingUser`, `assignBuilder` → `Build` → `BuildDone` → `requestReview` → `Review` → `ReviewDone` → `handBack` cycles back to Build. `transition()` in `src/phases.ts` is the canonical event handler; `panel.ts:applyEvent` is the only call site that uses it. `archiveAndClearRoom` is the sole place in panel.ts that assigns `this.state` directly — it wipes the room (messages, agent statuses, transcript) so modeling it as a phase event would conflate concerns; the invariant is enforced by `test/panelSourceContract.test.ts`. New phase logic must always route through `transition()`.
+`src/phases.ts` is the canonical state machine. A serialized turn is `Idle → Opener → Reactor → Closer → AwaitingUser`. A turn that addresses both agents ("both of you", "Codex and Claude…") shortcuts to `ParallelDiscussion`. After `AwaitingUser`, `assignBuilder` → `Build` → `BuildDone` → `requestReview` → `Review` → `ReviewDone` → `handBack` cycles back to Build. The parallel build/review branch (driven by the `Assign Both Builders` command) mirrors that cycle for both agents at once: `assignBuilders` → `ParallelBuild` → `ParallelBuildDone` → `requestReview` → `ParallelReview` → `ParallelReviewDone` → `handBack` (back to `ParallelBuild`). `transition()` in `src/phases.ts` is the canonical event handler; `panel.ts:applyEvent` is the only call site that uses it. `archiveAndClearRoom` is the sole place in panel.ts that assigns `this.state` directly — it wipes the room (messages, agent statuses, transcript) so modeling it as a phase event would conflate concerns; the invariant is enforced by `test/panelSourceContract.test.ts`. New phase logic must always route through `transition()`.
 
 ### Transport layer (two modes)
 
@@ -63,11 +63,11 @@ Both transports route through `panel.ts:runAgentTransport`, which decides based 
 
 ### .hydra/ workspace state
 
-Every per-workspace artifact lives under `.hydra/` (gitignored). Files: `transcript.md`, `decisions.jsonl`, `verification.jsonl`, `native-actions.jsonl`, `events.jsonl`, `agent-calls.jsonl`, `usage.jsonl`, `objective.md`, `session-brief.md`, `support-bundle.md`, `native-capabilities.md`, `native-data-snapshot.md`, plus the `prompts/`, `replies/`, `logs/`, `dispatch/`, and `sessions/` subdirectories for terminal-bridge artifacts. `src/fileQueue.ts` is the single source for all .hydra reads/writes — see below.
+Every per-workspace artifact lives under `.hydra/` (gitignored). Key files include: `transcript.md`, `decisions.jsonl`, `verification.jsonl`, `native-actions.jsonl`, `events.jsonl`, `agent-calls.jsonl`, `usage.jsonl`, `work-queue.jsonl` (dismiss/snooze state), `objective.md`, `session-brief.md`, `support-bundle.md`, `native-capabilities.md`, `native-data-snapshot.md`, `telegram-inbound.json` (inbound poll offset), plus subdirectories: `prompts/` (including the durable `prompts/index.jsonl` prompt-envelope log), `replies/`, `logs/`, `dispatch/`, and `sessions/` for terminal-bridge artifacts; `attachments/<turn>/` for copied room attachments; `archive/` for cleared rooms; and `wiki/` (`schema.md`, `context.md`, `index.md`, `log.md`, and immutable `raw/turns/` snapshots) for the compiled project memory. `src/fileQueue.ts` is the single source for all .hydra reads/writes — see below.
 
 ### Webview
 
-The HTML template + CSS live in `src/webview.html.ts` (~994 lines, mostly inline CSS). The webview script is **external**: `media/webview.js`, loaded via `webview.asWebviewUri(...)`. `HEAD_ASSETS` (the avatar URIs) is passed from host → webview via an HTML-escaped JSON `data-head-assets` attribute on `<body>`. The webview reads it defensively with try/catch.
+The HTML template + CSS live in `src/webview.html.ts` (~1160 lines, mostly inline CSS). The webview script is **external**: `media/webview.js`, loaded via `webview.asWebviewUri(...)`. `HEAD_ASSETS` (the avatar URIs) is passed from host → webview via an HTML-escaped JSON `data-head-assets` attribute on `<body>`. The webview reads it defensively with try/catch.
 
 Editing the webview script: edit `media/webview.js` directly (it's plain JS with `// @ts-check` and runs as-is, no compile step). The file ships unmodified inside the `.vsix`.
 
