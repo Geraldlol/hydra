@@ -2,7 +2,7 @@
   "name": "vscode-hydra-room",
   "displayName": "Hydra",
   "description": "Three-way collaboration room for the user, Codex CLI, and Claude Code CLI inside VS Code.",
-  "version": "0.4.35",
+  "version": "0.4.36",
   "packageManager": "pnpm@11.1.3",
   "publisher": "local-tools",
   "license": "MIT",
@@ -594,7 +594,7 @@
               "description": "Per-phase models for Claude. Missing phases fall back to the CLI default."
             }
           ],
-          "markdownDescription": "Model passed to Claude Code CLI as `--model <id>` on every dispatch. Either a single string (applied to every phase) or an object with per-phase overrides like `{ \"discussion\": \"sonnet\", \"build\": \"opus\", \"review\": \"opus\" }`. Aliases (`sonnet`, `opus`, `haiku`) or full IDs (`claude-sonnet-4-6`, `claude-opus-4-7`, `claude-haiku-4-5-20251001`) both work. Use `Hydra: Choose Model` (Ctrl+Alt+M) to change live."
+          "markdownDescription": "Model passed to Claude Code CLI as `--model <id>` on every dispatch. Either a single string (applied to every phase) or an object with per-phase overrides like `{ \"discussion\": \"sonnet\", \"build\": \"opus\", \"review\": \"opus\" }`. Aliases (`sonnet`, `opus`, `haiku`) or full IDs (`claude-sonnet-4-6`, `claude-opus-4-8`, `claude-haiku-4-5-20251001`) both work. Use `Hydra: Choose Model` (Ctrl+Alt+M) to change live."
         },
         "hydraRoom.codexModel": {
           "scope": "application",

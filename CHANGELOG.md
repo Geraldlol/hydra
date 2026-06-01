@@ -5,6 +5,7 @@
 Summary of the major themes shipped across the 0.4 line since 0.1.0 (see `git log` for per-commit detail):
 
 - **Room file attachments** — attach local files to a turn; Hydra copies them into `.hydra/attachments/`, keeps the transcript message short, and injects bounded text previews into the next agent prompt.
+- **Claude Opus 4.8** — adds `claude-opus-4-8` to Hydra's Claude model chooser and cost-meter defaults.
 - **Workspace cleanup** — `Hydra: Clean Workspace State` plus trust-scoped retention settings (`hydraRoom.promptBodyRetentionDays`, `hydraRoom.diagnosticRetentionDays`) compact old prompt bodies and prune stale terminal-bridge diagnostics; symlinked diagnostic dirs are refused.
 - **Project wiki memory** — a compiled `.hydra/wiki/` (`schema.md`, `context.md`, `index.md`, `log.md`, raw turn snapshots) injected into future prompts, with automatic post-turn wrapups, source provenance tags, usage telemetry, and a manual `Run Wiki Wrapup Now`.
 - **Model and thinking-level choosers** — live per-phase Codex/Claude model selection (`Hydra: Choose Model`, `Ctrl+Alt+M`) and reasoning/effort selection (`Hydra: Choose Thinking Level`, `Ctrl+Alt+E`), backed by `hydraRoom.codexModel`/`claudeModel` and `hydraRoom.codexReasoning`/`claudeEffort`, plus a session cost meter from `.hydra/usage.jsonl` and `hydraRoom.modelPrices`.

@@ -171,6 +171,7 @@ const CLAUDE_MODEL_PRESETS: Array<{ label: string; description: string }> = [
   { label: "haiku", description: "Alias — current Haiku" },
   { label: "claude-sonnet-4-6", description: "Sonnet 4.6" },
   { label: "claude-sonnet-4-5", description: "Sonnet 4.5 (older)" },
+  { label: "claude-opus-4-8", description: "Opus 4.8" },
   { label: "claude-opus-4-7", description: "Opus 4.7" },
   { label: "claude-opus-4-5", description: "Opus 4.5 (older)" },
   { label: "claude-haiku-4-5-20251001", description: "Haiku 4.5 dated build" },

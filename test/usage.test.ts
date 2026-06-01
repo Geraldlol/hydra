@@ -139,9 +139,9 @@ describe("usageFromCodexSummary", () => {
 
 describe("resolveModelPrices", () => {
   test("uses the per-model entry when the model name matches", () => {
-    const opus = resolveModelPrices("claude", "claude-opus-4-7");
-    assert.equal(opus.inputPerMTok, 15);
-    assert.equal(opus.outputPerMTok, 75);
+    const opus = resolveModelPrices("claude", "claude-opus-4-8");
+    assert.equal(opus.inputPerMTok, 5);
+    assert.equal(opus.outputPerMTok, 25);
   });
 
   test("user overrides win over built-in per-model prices", () => {
@@ -203,12 +203,12 @@ describe("buildUsageRecord stores the model and prices accordingly", () => {
       agent: "claude",
       phase: "build",
       source: "claudeStreamJson",
-      model: "claude-opus-4-7",
+      model: "claude-opus-4-8",
       tokens: { inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheCreateTokens: 0, reasoningTokens: 0 },
     });
-    assert.equal(r.model, "claude-opus-4-7");
-    // 1M Opus input @ $15/M
-    assert.equal(r.costUsd, 15);
+    assert.equal(r.model, "claude-opus-4-8");
+    // 1M Opus 4.8 input @ $5/M
+    assert.equal(r.costUsd, 5);
   });
 });
 
