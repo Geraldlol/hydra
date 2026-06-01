@@ -482,16 +482,23 @@ async function sqliteTables(filePath: string): Promise<TableSummary[]> {
   } catch {
     return [];
   }
+  // Why: table names come from the DB's own sqlite_master and are therefore
+  // untrusted identifiers. Even in read-only mode, bare f-string interpolation
+  // into `pragma table_info("{name}")` / `select count(*) from "{name}"` lets a
+  // name containing a double-quote break out of the quoted identifier. q()
+  // wraps the name in double quotes and doubles any embedded quote — the SQL
+  // standard escape for a quoted identifier — closing that gap.
   const script = [
     "import json, sqlite3, sys",
     "p=sys.argv[1]",
     "con=sqlite3.connect(f'file:{p}?mode=ro', uri=True)",
     "cur=con.cursor()",
+    "def q(n): return '\"' + n.replace('\"', '\"\"') + '\"'",
     "out=[]",
     "for (name,) in cur.execute(\"select name from sqlite_master where type='table' order by name\").fetchall():",
-    "    cols=[r[1] for r in cur.execute(f'pragma table_info(\"{name}\")').fetchall()]",
+    "    cols=[r[1] for r in cur.execute(f'pragma table_info({q(name)})').fetchall()]",
     "    try:",
-    "        rows=cur.execute(f'select count(*) from \"{name}\"').fetchone()[0]",
+    "        rows=cur.execute(f'select count(*) from {q(name)}').fetchone()[0]",
     "    except Exception:",
     "        rows=None",
     "    out.append({'name':name,'columns':cols,'rows':rows})",

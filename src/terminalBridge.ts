@@ -498,7 +498,8 @@ function sessionPatchForResult(phase: Phase, result: RunResult, terminalRetired 
   };
 }
 
-async function waitForReply(
+/** @internal — exported for tests */
+export async function waitForReply(
   replyPath: string,
   logPath: string,
   timeoutMs: number,
@@ -562,6 +563,13 @@ async function waitForReply(
         streamed += finalChunk.text;
         onChunk?.(finalChunk.text);
       }
+      // Why: the streamed log content (`streamed`) is cosmetic-only — it exists
+      // solely to feed onChunk for live terminal display and to compute the
+      // de-dup tail below. The returned/stored stdout always derives from the
+      // nonce-validated `reply.text`; the unverified log stream is NEVER
+      // persisted as transcript content. `unstreamedTail` only trims the prefix
+      // of reply.text that was already shown live — it never substitutes log
+      // bytes for the authoritative reply.
       const stdout = onChunk ? unstreamedTail(reply.text, streamed) : reply.text;
       if (reply.error) {
         return { stdout, stderr: reply.error, exitCode: 1, timedOut: false, cancelled: false };
@@ -598,7 +606,8 @@ async function readLogChunk(logPath: string, offset: number): Promise<{ text: st
   }
 }
 
-function unstreamedTail(finalText: string, streamedText: string): string {
+/** @internal — exported for tests */
+export function unstreamedTail(finalText: string, streamedText: string): string {
   if (!finalText) return "";
   if (!streamedText) return finalText;
   if (finalText.startsWith(streamedText)) return finalText.slice(streamedText.length);
@@ -608,7 +617,8 @@ function unstreamedTail(finalText: string, streamedText: string): string {
   return finalText;
 }
 
-function isProbablyParseError(err: unknown): boolean {
+/** @internal — exported for tests */
+export function isProbablyParseError(err: unknown): boolean {
   if (!err || typeof err !== "object") return true;
   const code = (err as { code?: unknown }).code;
   return code !== "ENOENT";
@@ -650,12 +660,19 @@ async function unlinkIfExists(filePath: string): Promise<void> {
 // Why: dispatch .ps1 files and prompt files can carry secrets via
 // hydraRoom.nativeEnv* settings. Live dispatches unlink them in finally, but
 // crashes or aborted sessions can leave stragglers on disk. Sweep anything
-// older than an hour at constructor + dispose time.
-async function sweepStaleDispatchArtifacts(workspaceRoot: string): Promise<void> {
+// older than an hour at constructor + dispose time. Replies and logs are also
+// swept: dispatches don't unlink them on the happy path (the reply is read,
+// the log is cosmetic), so without this gate they grow unbounded across a
+// long-lived session. The per-request requestId guarantees a stale reply can
+// never be mistaken for a fresh one, so age-gated deletion is safe.
+/** @internal — exported for tests */
+export async function sweepStaleDispatchArtifacts(workspaceRoot: string): Promise<void> {
   const STALE_MS = 60 * 60 * 1000;
   const dirs = [
     path.join(workspaceRoot, ".hydra", "dispatch"),
     path.join(workspaceRoot, ".hydra", "prompts"),
+    path.join(workspaceRoot, ".hydra", "replies"),
+    path.join(workspaceRoot, ".hydra", "logs"),
   ];
   const now = Date.now();
   for (const dir of dirs) {
