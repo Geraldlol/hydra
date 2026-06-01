@@ -3,6 +3,9 @@ src/**
 test/**
 scripts/**
 docs/native-internals/**
+docs/native-cli-recon.md
+docs/native-data-recon.md
+docs/native-contract-probe.md
 dist/test/**
 .vscode/**
 .hydra/**
@@ -16,8 +19,8 @@ tsconfig.json
 package-lock.json
 pnpm-lock.yaml
 pnpm-workspace.yaml
-*.map
-*.tsbuildinfo
+**/*.map
+**/*.tsbuildinfo
 npm-debug.log
 debug.log
 *.vsix

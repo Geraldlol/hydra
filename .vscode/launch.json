@@ -7,13 +7,13 @@
       "request": "launch",
       "args": [
         "--extensionDevelopmentPath=${workspaceFolder}",
-        "C:\\Users\\geral\\Spireslap"
+        "${workspaceFolder}"
       ],
       "outFiles": [
         "${workspaceFolder}/dist/**/*.js"
       ],
       "env": {
-        "HYDRA_WORKSPACE_ROOT": "C:\\Users\\geral\\Spireslap"
+        "HYDRA_WORKSPACE_ROOT": "${workspaceFolder}"
       },
       "preLaunchTask": "npm: compile"
     }
