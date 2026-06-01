@@ -71,6 +71,14 @@ The HTML template + CSS live in `src/webview.html.ts` (~1160 lines, mostly inlin
 
 Editing the webview script: edit `media/webview.js` directly (it's plain JS with `// @ts-check` and runs as-is, no compile step). The file ships unmodified inside the `.vsix`.
 
+### panel.ts and its extracted modules
+
+`src/panel.ts` is the central `HydraRoomPanel` orchestrator: it owns the webview, runs the agent transport (`runAgentTransport` → the shared `runOneShotPipeline`), applies phase events, and writes `.hydra` state. It is large, so several cohesive, behavior-isolated clusters live in focused modules instead — extend these rather than re-growing the god-object:
+
+- `src/roomSettings.ts` — the thin read-only `hydraRoom` config getters (timeouts, char/line caps, booleans, model/effort/profile/Telegram readers) as free functions, including the runtime clamps. Getters that *write* config or close over panel state deliberately stay in panel.ts.
+- `src/telegramController.ts` — the inbound/outbound Telegram cluster (poll loop, routing, decision-needed notify, reply) behind a narrow deps object; it owns the inbound timers plus its **own** `AbortController` (so a turn Stop can't abort an unrelated inbound poll) and is the single home of the untrusted-Telegram command-prefix + chat-id fence.
+- `src/gitStatus.ts` — the `git status --porcelain=v1 -z` parser (`parseGitStatusEntries`/`gitStatusKind`), behaviorally tested in `test/gitStatus.test.ts`.
+
 ## Repeated-pattern helpers — use these instead of inlining
 
 | Need | Helper | Module |
@@ -83,7 +91,7 @@ Editing the webview script: edit `media/webview.js` directly (it's plain JS with
 | `${workspaceFolder}` + `${env:NAME}` expansion in CLI args | `expandWorkspaceValue` / `expandWorkspaceArgs` | `src/cli.ts` |
 | "Setting is either string or `{discussion,build,review}` object" | `phasedSettingForScope`, `applyPhasedSettingChange`, `summarizePhasedSetting`, `describePhasedSettingCurrent`, `effectivePhasedSetting` | `src/phasedSetting.ts` |
 
-Several test files have `*SourceContract*` or similar names that source-grep the implementation files. When moving a function across modules, update the contract test's `path.join(...)` target — `test/panelSourceContract.test.ts` currently points at `src/codexTransport.ts` after the transport extraction.
+Several test files have `*SourceContract*` or similar names that source-grep the implementation files. When moving a function across modules, update the contract test's `path.join(...)` target — `test/panelSourceContract.test.ts` pins anchors across `src/panel.ts`, `src/codexTransport.ts`, `src/gitStatus.ts`, and `src/roomSettings.ts` after the transport and panel.ts-decomposition extractions.
 
 ## Security invariants — do NOT regress
 
