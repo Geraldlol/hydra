@@ -97,7 +97,11 @@ describe("terminal bridge usage source contracts", () => {
     assert.ok(methodStart >= 0 && methodEnd > methodStart);
 
     const method = source.slice(methodStart, methodEnd);
-    assert.match(method, /transport === "terminalBridge"\s*\?\s*this\.terminalBridgeWorkspaceInstructionsMaxChars\(\)/);
+    // terminalBridgeWorkspaceInstructionsMaxChars moved to src/roomSettings.ts
+    // (the read-only config getter extraction), so it is now a free-function
+    // call rather than a method on the panel. The branch selection it gates is
+    // unchanged.
+    assert.match(method, /transport === "terminalBridge"\s*\?\s*terminalBridgeWorkspaceInstructionsMaxChars\(\)/);
     assert.match(method, /this\.oneShotWorkspaceInstructionsMaxChars\(phase\)/);
     assert.match(method, /transport !== "terminalBridge" \|\| workspaceInstructionsMaxChars > 0/);
     assert.match(method, /agent\s*\?\s*this\.workspaceInstructionsByAgent\[agent\]\s*:\s*this\.workspaceInstructions/);
@@ -180,16 +184,27 @@ describe("workspace edit viewer source contracts", () => {
   const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
 
   test("workspace edit viewer uses z-terminated git status parsing", () => {
-    const functionStart = source.indexOf("async function captureGitStatusChanges(");
-    const functionEnd = source.indexOf("function gitStatusKind(", functionStart);
-    assert.ok(functionStart >= 0, "missing captureGitStatusChanges");
-    assert.ok(functionEnd > functionStart, "missing git status parser boundary");
-    const section = source.slice(functionStart, functionEnd);
-    assert.match(section, /\["status", "--porcelain=v1", "-z"\]/);
-    assert.doesNotMatch(section, /"-uall"/);
-    assert.match(section, /function parseGitStatusEntries\(raw: string\)/);
-    assert.match(section, /raw\.split\("\\0"\)/);
-    assert.match(section, /status\.includes\("R"\) \|\| status\.includes\("C"\)/);
+    // The caller still lives in panel.ts and must use the z-terminated,
+    // default-untracked-mode invocation (no -uall deep scan). The parser
+    // itself moved to src/gitStatus.ts during the god-object decomposition,
+    // so its internals are asserted against that module below.
+    const callerStart = source.indexOf("async function captureGitStatusChanges(");
+    const callerEnd = source.indexOf("async function runGit(", callerStart);
+    assert.ok(callerStart >= 0, "missing captureGitStatusChanges");
+    assert.ok(callerEnd > callerStart, "missing git status caller boundary");
+    const caller = source.slice(callerStart, callerEnd);
+    assert.match(caller, /\["status", "--porcelain=v1", "-z"\]/);
+    assert.doesNotMatch(caller, /"-uall"/);
+    assert.match(caller, /parseGitStatusEntries\(status\.out\)/);
+
+    const parserSource = fs.readFileSync(path.join(process.cwd(), "src", "gitStatus.ts"), "utf8");
+    const parserStart = parserSource.indexOf("export function parseGitStatusEntries(raw: string)");
+    const parserEnd = parserSource.indexOf("export function gitStatusKind(", parserStart);
+    assert.ok(parserStart >= 0, "missing parseGitStatusEntries in gitStatus.ts");
+    assert.ok(parserEnd > parserStart, "missing git status parser boundary");
+    const parser = parserSource.slice(parserStart, parserEnd);
+    assert.match(parser, /raw\.split\("\\0"\)/);
+    assert.match(parser, /status\.includes\("R"\) \|\| status\.includes\("C"\)/);
   });
 
   test("workspace edit viewer rejects Windows drive-relative open paths", () => {
@@ -225,7 +240,12 @@ describe("workspace edit viewer source contracts", () => {
       `expected exactly 1 direct this.state literal assignment (archiveAndClearRoom), found ${literalMutations.length}`
     );
     const idx = literalMutations[0].index ?? -1;
-    const head = source.slice(Math.max(0, idx - 600), idx);
+    // Window widened from 600 to 1000: the wiki-maintenance cancellation
+    // (this.wikiMaintenanceAbort?.abort()) added to archiveAndClearRoom's
+    // proceed path pushed the lone `this.state = {…}` assignment ~626 chars
+    // below the method declaration. The intent — that the single literal
+    // assignment belongs to archiveAndClearRoom — is unchanged.
+    const head = source.slice(Math.max(0, idx - 1000), idx);
     assert.match(head, /async archiveAndClearRoom/);
   });
 
@@ -294,7 +314,10 @@ describe("wiki wrapup source contracts", () => {
     assert.ok(methodStart >= 0 && methodEnd > methodStart);
 
     const method = source.slice(methodStart, methodEnd);
-    assert.match(method, /hydraWikiWrapupSourceFromMessages\(this\.messages, this\.wikiWrapupMaxSourceChars\(\)\)/);
+    // wikiWrapupMaxSourceChars moved to src/roomSettings.ts (read-only config
+    // getter extraction); now a free-function call. The source-window cap it
+    // feeds into is unchanged.
+    assert.match(method, /hydraWikiWrapupSourceFromMessages\(this\.messages, wikiWrapupMaxSourceChars\(\)\)/);
     assert.match(method, /hydraWikiContextRefreshSourceFromMessages\(this\.messages, cap\)/);
     assert.match(method, /this\.wikiMaintenanceQueue = previous\.then\(run\)\.catch/);
     assert.match(method, /Hydra background wiki maintenance failed after \$\{source\}/);
@@ -332,7 +355,10 @@ describe("wiki wrapup source contracts", () => {
     assert.ok(methodStart >= 0 && methodEnd > methodStart);
 
     const method = source.slice(methodStart, methodEnd);
-    assert.match(method, /readHydraWikiPromptContext\(this\.workspaceRoot, this\.wikiContextMaxChars\(\)/);
+    // wikiContextMaxChars moved to src/roomSettings.ts (read-only config getter
+    // extraction); now a free-function call. The workspace root and char cap it
+    // passes into the wiki prompt-context reader are unchanged.
+    assert.match(method, /readHydraWikiPromptContext\(this\.workspaceRoot, wikiContextMaxChars\(\)/);
     assert.match(method, /summarizeHydraWikiUsage\(message\.text\)/);
     assert.match(method, /Hydra wiki usage telemetry:/);
     assert.match(method, /hasCitationSignal: telemetry\.hasCitationSignal/);
