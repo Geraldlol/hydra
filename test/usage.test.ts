@@ -1,6 +1,8 @@
 import { describe, test } from "node:test";
 import * as assert from "node:assert/strict";
 import {
+  addRecordToSummary,
+  boundUsageRecords,
   buildUsageRecord,
   computeCostUsd,
   DEFAULT_MODEL_PRICES,
@@ -152,6 +154,32 @@ describe("resolveModelPrices", () => {
     assert.equal(overridden.outputPerMTok, 99);
   });
 
+  test("a partial Codex override inherits the Codex per-model base, not Claude's", () => {
+    // Only the input rate is overridden; the omitted cache rates must come from
+    // the gpt-5 built-in (0.125 read), NOT Claude's default (0.3 read).
+    const merged = resolveModelPrices("codex", "gpt-5", { "gpt-5": { inputPerMTok: 2 } });
+    assert.equal(merged.inputPerMTok, 2, "explicit field wins");
+    assert.equal(merged.outputPerMTok, DEFAULT_MODEL_PRICES["gpt-5"].outputPerMTok);
+    assert.equal(merged.cacheReadPerMTok, DEFAULT_MODEL_PRICES["gpt-5"].cacheReadPerMTok);
+    assert.equal(merged.cacheCreatePerMTok, DEFAULT_MODEL_PRICES["gpt-5"].cacheCreatePerMTok);
+  });
+
+  test("a partial override for an unknown model fills omitted fields from the per-agent default", () => {
+    const merged = resolveModelPrices("codex", "totally-new-codex", { "totally-new-codex": { inputPerMTok: 7 } });
+    assert.equal(merged.inputPerMTok, 7);
+    assert.equal(merged.outputPerMTok, DEFAULT_PRICES.codex.outputPerMTok);
+    assert.equal(merged.cacheReadPerMTok, DEFAULT_PRICES.codex.cacheReadPerMTok);
+  });
+
+  test("rejects malformed override fields (NaN / negative) and keeps the base", () => {
+    const merged = resolveModelPrices("claude", "opus", {
+      opus: { inputPerMTok: Number.NaN, outputPerMTok: -5, cacheReadPerMTok: 0.05 },
+    });
+    assert.equal(merged.inputPerMTok, DEFAULT_MODEL_PRICES.opus.inputPerMTok, "NaN falls back to base");
+    assert.equal(merged.outputPerMTok, DEFAULT_MODEL_PRICES.opus.outputPerMTok, "negative falls back to base");
+    assert.equal(merged.cacheReadPerMTok, 0.05, "valid field is applied");
+  });
+
   test("falls back to agent default when model is unknown", () => {
     const unknown = resolveModelPrices("claude", "some-future-model-id");
     assert.deepEqual(unknown, DEFAULT_PRICES.claude);
@@ -255,5 +283,80 @@ describe("summarizeUsage", () => {
     assert.equal(summary.totalTokens, 150);
     assert.equal(summary.byAgent.codex.turns, 1);
     assert.equal(summary.byAgent.claude.turns, 0);
+  });
+});
+
+describe("addRecordToSummary", () => {
+  test("incrementally folds a record into an existing summary, matching summarizeUsage", () => {
+    const records = [
+      buildUsageRecord({
+        sessionId: "s1",
+        agent: "codex",
+        phase: "opener",
+        source: "codexJson",
+        tokens: { inputTokens: 100, outputTokens: 200, cacheReadTokens: 0, cacheCreateTokens: 0, reasoningTokens: 0 },
+        prices: DEFAULT_PRICES,
+      }),
+      buildUsageRecord({
+        sessionId: "s1",
+        agent: "claude",
+        phase: "reactor",
+        source: "claudeStreamJson",
+        tokens: { inputTokens: 500_000, outputTokens: 100_000, cacheReadTokens: 0, cacheCreateTokens: 0, reasoningTokens: 0 },
+        prices: DEFAULT_PRICES,
+      }),
+    ];
+    // Fold record 0 into a fresh summary, then record 1 — must match a full scan.
+    const folded = summarizeUsage([], "s1");
+    for (const r of records) addRecordToSummary(folded, r);
+    const scanned = summarizeUsage(records, "s1");
+    assert.deepEqual(folded, scanned);
+  });
+});
+
+describe("boundUsageRecords", () => {
+  const now = new Date("2026-05-15T12:00:00.000Z");
+  const recordAt = (iso: string): ReturnType<typeof buildUsageRecord> => {
+    const r = buildUsageRecord({
+      sessionId: "s",
+      agent: "codex",
+      phase: "opener",
+      source: "codexJson",
+      tokens: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheCreateTokens: 0, reasoningTokens: 0 },
+      prices: DEFAULT_PRICES,
+    });
+    r.timestamp = iso;
+    return r;
+  };
+
+  test("keeps records inside the 30-day window and drops older ones when over minRecords", () => {
+    const recent = recordAt("2026-05-14T12:00:00.000Z");
+    const stale = recordAt("2026-01-01T12:00:00.000Z");
+    const bounded = boundUsageRecords([stale, recent], { windowDays: 30, minRecords: 1, now });
+    assert.deepEqual(bounded, [recent]);
+  });
+
+  test("keeps at least the 7-day weekly cutoff regardless of a smaller window request", () => {
+    const sixDaysAgo = recordAt("2026-05-09T12:00:00.000Z");
+    // Requesting windowDays:1 must be floored to 7 so the weekly aggregate stays intact.
+    const bounded = boundUsageRecords([sixDaysAgo], { windowDays: 1, minRecords: 0, now });
+    assert.deepEqual(bounded, [sixDaysAgo]);
+  });
+
+  test("retains the last minRecords rows even when older than the time window", () => {
+    const old1 = recordAt("2026-01-01T12:00:00.000Z");
+    const old2 = recordAt("2026-01-02T12:00:00.000Z");
+    const old3 = recordAt("2026-01-03T12:00:00.000Z");
+    const bounded = boundUsageRecords([old1, old2, old3], { windowDays: 30, minRecords: 2, now });
+    assert.deepEqual(bounded, [old2, old3]);
+  });
+
+  test("treats an unparseable timestamp as recent (never silently dropped)", () => {
+    const broken = recordAt("not-a-date");
+    const stale = recordAt("2026-01-01T12:00:00.000Z");
+    const bounded = boundUsageRecords([broken, stale], { windowDays: 30, minRecords: 0, now });
+    // The broken row appears before the cutoff scan finds it, so it anchors the
+    // window start and everything from there on is kept.
+    assert.deepEqual(bounded, [broken, stale]);
   });
 });

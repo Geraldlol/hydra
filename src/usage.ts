@@ -1,7 +1,13 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
+import { serializePerFile } from "./fileQueue";
 import type { AgentId } from "./phases";
 import type { Phase } from "./prompts";
+
+// Why: skip the per-append mkdir(recursive) syscall once a usage file's parent
+// directory is known to exist. First write still creates it; the durable
+// .hydra/ dir is never deleted mid-session.
+const ensuredUsageDirs = new Set<string>();
 
 export interface UsageRecord {
   timestamp: string;
@@ -81,13 +87,36 @@ export const DEFAULT_MODEL_PRICES: Record<string, ModelPrices> = {
 export function resolveModelPrices(
   agent: AgentId,
   model: string | undefined,
-  modelOverrides: Record<string, ModelPrices> = {},
+  modelOverrides: Record<string, Partial<ModelPrices>> = {},
   agentDefaults: Record<AgentId, ModelPrices> = DEFAULT_PRICES,
 ): ModelPrices {
   const key = (model ?? "").trim().toLowerCase();
-  if (key && modelOverrides[key]) return { ...agentDefaults[agent], ...modelOverrides[key] };
+  const agentBase = agentDefaults[agent] ?? DEFAULT_PRICES[agent];
+  if (key && modelOverrides[key]) {
+    // Why: merge the partial override over the most specific known base — the
+    // built-in per-model rate if we have one, else the per-agent default — so
+    // an override that omits e.g. the cache rate inherits the right model's
+    // value (a partial Codex override no longer falls through to Claude's).
+    const base = DEFAULT_MODEL_PRICES[key] ?? agentBase;
+    return coerceModelPrices(modelOverrides[key], base);
+  }
   if (key && DEFAULT_MODEL_PRICES[key]) return DEFAULT_MODEL_PRICES[key];
-  return agentDefaults[agent] ?? DEFAULT_PRICES[agent];
+  return agentBase;
+}
+
+/**
+ * Apply a (possibly partial, possibly hand-edited) price override on top of a
+ * trusted base, accepting only finite non-negative numbers. A negative or
+ * NaN/string field falls back to the base so a malformed hydraRoom.modelPrices
+ * entry can't credit the meter or poison the cost with NaN.
+ */
+export function coerceModelPrices(override: Partial<ModelPrices> | undefined, base: ModelPrices): ModelPrices {
+  return {
+    inputPerMTok: nonNegNumberOr(override?.inputPerMTok, base.inputPerMTok),
+    outputPerMTok: nonNegNumberOr(override?.outputPerMTok, base.outputPerMTok),
+    cacheReadPerMTok: nonNegNumberOr(override?.cacheReadPerMTok, base.cacheReadPerMTok),
+    cacheCreatePerMTok: nonNegNumberOr(override?.cacheCreatePerMTok, base.cacheCreatePerMTok),
+  };
 }
 
 export function computeCostUsd(
@@ -186,7 +215,7 @@ export function buildUsageRecord(input: {
   source: UsageRecord["source"];
   tokens: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreateTokens: number; reasoningTokens: number };
   prices?: Record<AgentId, ModelPrices>;
-  modelPriceOverrides?: Record<string, ModelPrices>;
+  modelPriceOverrides?: Record<string, Partial<ModelPrices>>;
 }): UsageRecord {
   const resolved = resolveModelPrices(
     input.agent,
@@ -219,8 +248,13 @@ export function buildUsageRecord(input: {
 }
 
 export async function appendUsageRecord(filePath: string, record: UsageRecord): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.appendFile(filePath, `${JSON.stringify(record)}\n`, "utf8");
+  await serializePerFile(filePath, async () => {
+    if (!ensuredUsageDirs.has(filePath)) {
+      await fs.mkdir(path.dirname(filePath), { recursive: true });
+      ensuredUsageDirs.add(filePath);
+    }
+    await fs.appendFile(filePath, `${JSON.stringify(record)}\n`, "utf8");
+  });
 }
 
 export async function loadUsageRecords(filePath: string): Promise<UsageRecord[]> {
@@ -309,6 +343,63 @@ export function usageCutoffIso(days: number, now = new Date()): string {
   return cutoff.toISOString();
 }
 
+/**
+ * Fold a single record into an existing summary in place, avoiding a full
+ * re-scan of the in-memory record array on every append. The caller is
+ * responsible for only passing records that belong to the summary's filter
+ * (e.g. same sessionId); this does not re-check the filter.
+ */
+export function addRecordToSummary(summary: UsageSummary, record: UsageRecord): UsageSummary {
+  summary.turns += 1;
+  summary.inputTokens += record.inputTokens || 0;
+  summary.outputTokens += record.outputTokens || 0;
+  summary.cacheReadTokens += record.cacheReadTokens || 0;
+  summary.cacheCreateTokens += record.cacheCreateTokens || 0;
+  summary.reasoningTokens += record.reasoningTokens || 0;
+  summary.totalTokens += record.totalTokens || 0;
+  summary.costUsd = Math.round((summary.costUsd + (record.costUsd || 0)) * 10_000) / 10_000;
+  const a = summary.byAgent[record.agent];
+  if (a) {
+    a.turns += 1;
+    a.totalTokens += record.totalTokens || 0;
+    a.costUsd = Math.round((a.costUsd + (record.costUsd || 0)) * 10_000) / 10_000;
+  }
+  return summary;
+}
+
+/**
+ * Cap the in-memory usage array so a long-lived room session can't grow it
+ * without bound. The durable .hydra/usage.jsonl keeps full history; this only
+ * trims what Hydra holds in RAM and replays for aggregates. The retained
+ * window is the larger of `windowDays` and `minRecords`, and `windowDays`
+ * must stay >= the 7-day weekly cutoff so the weekly aggregate is unaffected.
+ */
+export function boundUsageRecords(
+  records: UsageRecord[],
+  options: { windowDays?: number; minRecords?: number; now?: Date } = {},
+): UsageRecord[] {
+  const windowDays = Math.max(7, options.windowDays ?? 30);
+  const minRecords = Math.max(0, options.minRecords ?? 2000);
+  const now = options.now ?? new Date();
+  const cutoffMs = Date.parse(usageCutoffIso(windowDays, now));
+  // Keep anything inside the time window OR within the last `minRecords` rows,
+  // whichever is more generous, so a burst day with thousands of turns and a
+  // quiet month both stay correctly bounded.
+  const startByCount = Math.max(0, records.length - minRecords);
+  let startByTime = records.length;
+  for (let i = 0; i < records.length; i += 1) {
+    const ts = Date.parse(records[i].timestamp);
+    // Why: a record with an unparseable timestamp is treated as "recent" so a
+    // hand-edited line is never silently dropped from the in-memory view.
+    if (!Number.isFinite(ts) || ts >= cutoffMs) {
+      startByTime = i;
+      break;
+    }
+  }
+  const start = Math.min(startByCount, startByTime);
+  return start > 0 ? records.slice(start) : records;
+}
+
 export function formatTokensCompact(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 10_000) return `${(n / 1_000).toFixed(0)}k`;
@@ -322,6 +413,10 @@ export function formatCostUsd(n: number): string {
   return `$${n.toFixed(2)}`;
 }
 
-function numberOr(value: unknown, fallback: number): number {
+export function numberOr(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function nonNegNumberOr(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : fallback;
 }

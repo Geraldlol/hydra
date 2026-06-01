@@ -101,7 +101,7 @@ import {
 } from "./doctor";
 import { EditorContextAttachment, truncateEditorContext } from "./editorContext";
 import { appendHydraEvent, createHydraEvent, ensureHydraEventsFile, hydraEventsPath, readHydraEvents, type HydraEventKind } from "./events";
-import { ensureFile } from "./fileQueue";
+import { ensureFile, serializePerFile } from "./fileQueue";
 import { detectNativeReplyLeak, formatNativeReplyLeakError } from "./nativeReplyGuard";
 import { ensureObjectiveFile, objectiveAsContext, readObjective, writeObjective } from "./objective";
 import { TerminalBridge } from "./terminalBridge";
@@ -130,8 +130,11 @@ import {
 } from "./verification";
 import { buildWorkQueue, type WorkQueueItem } from "./workQueue";
 import {
+  addRecordToSummary,
   appendUsageRecord,
+  boundUsageRecords,
   buildUsageRecord,
+  coerceModelPrices,
   DEFAULT_PRICES,
   loadUsageRecords,
   parseCodexTextTokens,
@@ -264,6 +267,22 @@ interface WorkspaceChange {
 }
 
 const AGENT_NAMES: Record<AgentId, string> = { codex: "Codex", claude: "Claude" };
+// Why: skip the per-append mkdir(recursive) syscall on the agent-call trace
+// once its parent .hydra/ dir is known to exist. First write still creates it.
+const ensuredAgentCallDirs = new Set<string>();
+
+// Keep only the well-formed (finite, non-negative) price fields the user
+// actually supplied so the override stays partial — resolveModelPrices fills
+// any omitted/dropped field from the correct per-model/per-agent base.
+function sanitizePartialModelPrices(v: Partial<ModelPrices>): Partial<ModelPrices> {
+  const out: Partial<ModelPrices> = {};
+  const keys = ["inputPerMTok", "outputPerMTok", "cacheReadPerMTok", "cacheCreatePerMTok"] as const;
+  for (const key of keys) {
+    const n = v[key];
+    if (typeof n === "number" && Number.isFinite(n) && n >= 0) out[key] = n;
+  }
+  return out;
+}
 const PROMPT_TRANSCRIPT_MAX_CHARS_DEFAULTS = {
   discussion: 80000,
   build: 400000,
@@ -593,7 +612,10 @@ export class HydraRoomPanel {
     await ensureJsonlFile(this.agentCallsUri.fsPath);
     await ensureJsonlFile(this.usageUri.fsPath);
     await ensureFile(this.telegramInboundStateUri.fsPath, "{\"seenIds\":[]}\n");
-    this.usageRecords = await loadUsageRecords(this.usageUri.fsPath);
+    // Why: usage.jsonl keeps full durable history, but the in-memory replay is
+    // bounded (last 30 days OR last K rows, window >= the 7-day weekly cutoff)
+    // so a long-lived workspace doesn't grow this array without limit.
+    this.usageRecords = boundUsageRecords(await loadUsageRecords(this.usageUri.fsPath));
     this.sessionUsage = summarizeUsage(this.usageRecords, this.sessionId);
     this.weeklyUsage = summarizeUsage(this.usageRecords, undefined, usageCutoffIso(7));
     this.codexModelsSnapshot = await loadCodexModelsSnapshot(this.codexModelsUri.fsPath);
@@ -612,7 +634,14 @@ export class HydraRoomPanel {
     await this.refreshWorkspaceChanges();
     if (this.gitAvailable) {
       const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(this.workspaceRoot, "**/*"));
-      const schedule = () => this.scheduleWorkspaceChangesRefresh();
+      const schedule = (uri: vscode.Uri) => {
+        // Why: Hydra's own .hydra writes (transcript, events, decisions, etc.)
+        // would otherwise re-trigger this watcher and flood-schedule redundant
+        // git status runs. node_modules/.git churn is equally irrelevant to the
+        // workspace-change panel, so drop those before re-arming the debounce.
+        if (this.isIgnoredWatchPath(uri.fsPath)) return;
+        this.scheduleWorkspaceChangesRefresh();
+      };
       this.disposables.push(
         watcher,
         watcher.onDidCreate(schedule),
@@ -1382,7 +1411,10 @@ export class HydraRoomPanel {
         const status = await readHydraWikiStatus(this.workspaceRoot, this.wikiContextMaxChars(), {
           includeLog: this.wikiPromptIncludeLog(),
         });
-        const usageTelemetry = summarizeHydraWikiUsageEvents(await readHydraEvents(this.eventsUri.fsPath, 200));
+        // Why: read a wider window so the wiki-usage rollup can still fill on
+        // event-heavy sessions, where high-frequency events (e.g. phaseTransition)
+        // would otherwise push the wiki events out of a smaller tail.
+        const usageTelemetry = summarizeHydraWikiUsageEvents(await readHydraEvents(this.eventsUri.fsPath, 1000));
         wikiStatus = { ...status, usageTelemetry };
       } catch {
         // Wiki status is advisory; keep Command Center usable if wiki files are hand-edited mid-read.
@@ -3846,9 +3878,15 @@ export class HydraRoomPanel {
   }
 
   private async appendAgentCallTrace(record: Record<string, unknown>): Promise<void> {
+    const filePath = this.agentCallsUri.fsPath;
     try {
-      await fs.mkdir(path.dirname(this.agentCallsUri.fsPath), { recursive: true });
-      await fs.appendFile(this.agentCallsUri.fsPath, `${JSON.stringify(record)}\n`, "utf8");
+      await serializePerFile(filePath, async () => {
+        if (!ensuredAgentCallDirs.has(filePath)) {
+          await fs.mkdir(path.dirname(filePath), { recursive: true });
+          ensuredAgentCallDirs.add(filePath);
+        }
+        await fs.appendFile(filePath, `${JSON.stringify(record)}\n`, "utf8");
+      });
     } catch {
       // Flight recording is diagnostic metadata. Never fail the user's agent
       // call because the trace file is temporarily unavailable.
@@ -3861,21 +3899,27 @@ export class HydraRoomPanel {
     else this.pendingRunFailures.delete(messageId);
   }
 
-  private modelPrices(): { agentDefaults: Record<AgentId, ModelPrices>; modelOverrides: Record<string, ModelPrices> } {
+  private modelPrices(): { agentDefaults: Record<AgentId, ModelPrices>; modelOverrides: Record<string, Partial<ModelPrices>> } {
     const raw = vscode.workspace.getConfiguration("hydraRoom").get<Record<string, unknown>>("modelPrices");
     const agentDefaults: Record<AgentId, ModelPrices> = {
       claude: { ...DEFAULT_PRICES.claude },
       codex: { ...DEFAULT_PRICES.codex },
     };
-    const modelOverrides: Record<string, ModelPrices> = {};
+    const modelOverrides: Record<string, Partial<ModelPrices>> = {};
     if (raw && typeof raw === "object") {
       for (const [key, value] of Object.entries(raw)) {
         if (!value || typeof value !== "object") continue;
         const v = value as Partial<ModelPrices>;
         if (key === "claude" || key === "codex") {
-          agentDefaults[key] = { ...agentDefaults[key], ...v };
+          // Why: coerce each field through the model-base rather than spreading
+          // raw user input, so a NaN/negative agent override can't poison the
+          // cost meter base it's merged into.
+          agentDefaults[key] = coerceModelPrices(v, DEFAULT_PRICES[key]);
         } else {
-          modelOverrides[key.toLowerCase()] = { ...DEFAULT_PRICES.claude, ...v };
+          // Why: keep the override PARTIAL — resolveModelPrices merges it over
+          // the matching per-model/per-agent base at billing time, so an
+          // omitted Codex cache rate no longer inherits Claude's default.
+          modelOverrides[key.toLowerCase()] = sanitizePartialModelPrices(v);
         }
       }
     }
@@ -3908,8 +3952,18 @@ export class HydraRoomPanel {
       // Usage tracking is best-effort. A write failure must not break a turn.
     }
     this.usageRecords.push(record);
-    this.sessionUsage = summarizeUsage(this.usageRecords, this.sessionId);
+    // Why: the new record always belongs to this.sessionId, so fold it into the
+    // session total incrementally instead of re-scanning the whole array. The
+    // weekly window is time-bounded (records age out as `now` advances), so it
+    // still needs the full filtered scan to stay correct.
+    this.sessionUsage = this.sessionUsage
+      ? addRecordToSummary(this.sessionUsage, record)
+      : summarizeUsage(this.usageRecords, this.sessionId);
     this.weeklyUsage = summarizeUsage(this.usageRecords, undefined, usageCutoffIso(7));
+    // Keep the in-memory array bounded; usage.jsonl retains full history. The
+    // 30-day window stays >= the 7-day weekly cutoff so the recompute above is
+    // unaffected, and current-session rows are never older than the window.
+    this.usageRecords = boundUsageRecords(this.usageRecords);
     this.postState();
   }
 
@@ -4237,9 +4291,13 @@ export class HydraRoomPanel {
   private agentTimeoutMs(phase?: Phase): number {
     if (phase === "opener" || phase === "reactor" || phase === "closer" || phase === "parallel") {
       const configured = vscode.workspace.getConfiguration("hydraRoom").get<number>("discussionTimeoutMs", 600000);
-      return configured === 120000 ? 600000 : configured;
+      // Why: preserve the legacy 2-minute -> 10-minute coercion BEFORE clamping
+      // so an explicitly-saved 120000 still upgrades to the new default.
+      const coerced = configured === 120000 ? 600000 : configured;
+      return Number.isFinite(coerced) ? Math.max(1000, Math.floor(coerced)) : 600000;
     }
-    return vscode.workspace.getConfiguration("hydraRoom").get<number>("oneShotTimeoutMs", 600000);
+    const oneShot = vscode.workspace.getConfiguration("hydraRoom").get<number>("oneShotTimeoutMs", 600000);
+    return Number.isFinite(oneShot) ? Math.max(1000, Math.floor(oneShot)) : 600000;
   }
 
   private async migrateLegacyDiscussionTimeoutDefault(): Promise<void> {
@@ -4260,7 +4318,8 @@ export class HydraRoomPanel {
   }
 
   private terminalBridgeTimeoutMs(): number {
-    return vscode.workspace.getConfiguration("hydraRoom").get<number>("terminalBridgeTimeoutMs", 45000);
+    const raw = vscode.workspace.getConfiguration("hydraRoom").get<number>("terminalBridgeTimeoutMs", 45000);
+    return Number.isFinite(raw) ? Math.max(5000, Math.floor(raw)) : 45000;
   }
 
   private autopilotOnStart(): boolean {
@@ -4272,15 +4331,18 @@ export class HydraRoomPanel {
   }
 
   private diffMaxLines(): number {
-    return vscode.workspace.getConfiguration("hydraRoom").get<number>("diffMaxLines", 6000);
+    const raw = vscode.workspace.getConfiguration("hydraRoom").get<number>("diffMaxLines", 6000);
+    return Number.isFinite(raw) ? Math.max(100, Math.floor(raw)) : 6000;
   }
 
   private verificationTimeoutMs(): number {
-    return vscode.workspace.getConfiguration("hydraRoom").get<number>("verifyTimeoutMs", 600000);
+    const raw = vscode.workspace.getConfiguration("hydraRoom").get<number>("verifyTimeoutMs", 600000);
+    return Number.isFinite(raw) ? Math.max(1000, Math.floor(raw)) : 600000;
   }
 
   private verificationMaxOutputChars(): number {
-    return vscode.workspace.getConfiguration("hydraRoom").get<number>("verifyMaxOutputChars", 12000);
+    const raw = vscode.workspace.getConfiguration("hydraRoom").get<number>("verifyMaxOutputChars", 12000);
+    return Number.isFinite(raw) ? Math.max(1000, Math.floor(raw)) : 12000;
   }
 
   private autoVerifyAfterBuild(): boolean {
@@ -4429,7 +4491,8 @@ export class HydraRoomPanel {
   }
 
   private terminalBridgeWorkspaceInstructionsMaxChars(): number {
-    return vscode.workspace.getConfiguration("hydraRoom").get<number>("terminalBridgeWorkspaceInstructionsMaxChars", 0);
+    const raw = vscode.workspace.getConfiguration("hydraRoom").get<number>("terminalBridgeWorkspaceInstructionsMaxChars", 0);
+    return Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : 0;
   }
 
   private promptTranscriptMaxChars(phase: Phase): number {
@@ -4468,12 +4531,13 @@ export class HydraRoomPanel {
   }
 
   private editorContextMaxChars(): number {
-    return vscode.workspace.getConfiguration("hydraRoom").get<number>("editorContextMaxChars", 12000);
+    const raw = vscode.workspace.getConfiguration("hydraRoom").get<number>("editorContextMaxChars", 12000);
+    return Number.isFinite(raw) ? Math.max(1000, Math.floor(raw)) : 12000;
   }
 
   private attachmentPreviewMaxChars(): number {
     const raw = vscode.workspace.getConfiguration("hydraRoom").get<number>("attachmentPreviewMaxChars", 12000);
-    return Math.max(0, Math.floor(raw));
+    return Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : 12000;
   }
 
   private attachmentMaxBytes(): number {
@@ -4487,7 +4551,8 @@ export class HydraRoomPanel {
   }
 
   private wikiContextMaxChars(): number {
-    return vscode.workspace.getConfiguration("hydraRoom").get<number>("wikiContextMaxChars", 8000);
+    const raw = vscode.workspace.getConfiguration("hydraRoom").get<number>("wikiContextMaxChars", 8000);
+    return Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : 8000;
   }
 
   private wikiPromptIncludeLog(): boolean {
@@ -4500,12 +4565,12 @@ export class HydraRoomPanel {
 
   private wikiWrapupMaxSourceChars(): number {
     const raw = vscode.workspace.getConfiguration("hydraRoom").get<number>("wikiWrapupMaxSourceChars", 16000);
-    return Math.max(1000, Math.floor(raw));
+    return Number.isFinite(raw) ? Math.max(1000, Math.floor(raw)) : 16000;
   }
 
   private wikiWrapupTimeoutMs(): number {
     const raw = vscode.workspace.getConfiguration("hydraRoom").get<number>("wikiWrapupTimeoutMs", 120000);
-    return Math.max(1000, Math.floor(raw));
+    return Number.isFinite(raw) ? Math.max(1000, Math.floor(raw)) : 120000;
   }
 
   private wikiRawTurnsKeepDays(): number {
@@ -5143,6 +5208,13 @@ export class HydraRoomPanel {
   // ---------------- webview I/O ----------------
 
   private async onWebviewMessage(msg: WebviewMessage): Promise<void> {
+    // Why: the webview is a separate iframe; a drifted/forged postMessage could
+    // arrive without a string .type. Narrow at runtime so the switch never reads
+    // .type off a non-object and so unknown types surface (default arm) instead
+    // of silently no-op'ing.
+    if (!msg || typeof msg !== "object" || typeof (msg as { type?: unknown }).type !== "string") {
+      return;
+    }
     try {
       switch (msg.type) {
         case "ready":
@@ -5352,6 +5424,14 @@ export class HydraRoomPanel {
         case "openWorkspaceFolder":
           await this.openWorkspaceFolder();
           break;
+        default: {
+          // Why: a message type the host doesn't handle means webview/host
+          // protocol drift. Record it loudly (diagnostic event) rather than
+          // silently dropping it, so the mismatch is visible in events.jsonl.
+          const unknownType = (msg as { type?: unknown }).type;
+          void this.recordEvent("diagnostic", `Unknown webview message type: ${String(unknownType)}`);
+          break;
+        }
       }
     } catch (err) {
       // Init failures (e.g. no workspace folder open) reach here as a rejected
@@ -5471,7 +5551,13 @@ export class HydraRoomPanel {
   }
 
   private applyEvent(event: Event): void {
+    const prev = this.state;
     this.state = transition(this.state, event);
+    if (this.state !== prev) {
+      // Best-effort phase-transition trail for telemetry. recordEvent swallows
+      // its own write errors and must never block the room, so fire-and-forget.
+      void this.recordEvent("phaseTransition", `${prev.name} -> ${this.state.name}`);
+    }
   }
 
   private canRunManualWikiWrapup(): boolean {
@@ -5488,6 +5574,18 @@ export class HydraRoomPanel {
     }
     const changes = await captureGitStatusChanges(this.workspaceRoot);
     this.workspaceChanges = changes ?? [];
+  }
+
+  private isIgnoredWatchPath(fsPath: string): boolean {
+    // Compare against workspace-relative path segments so a sibling dir whose
+    // name merely starts with ".hydra" isn't falsely matched. .hydra is the
+    // workspace-local state dir (the self-trigger source); node_modules/.git
+    // churn anywhere under the root is irrelevant to the workspace-change panel.
+    const relative = path.relative(this.workspaceRoot, fsPath);
+    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return false;
+    const segments = relative.split(/[\\/]/);
+    if (segments[0] === ".hydra") return true;
+    return segments.includes("node_modules") || segments.includes(".git");
   }
 
   private scheduleWorkspaceChangesRefresh(): void {
