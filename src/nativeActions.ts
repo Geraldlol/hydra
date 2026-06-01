@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { ensureFile, readJsonlGuarded } from "./fileQueue";
+import { ensureFile, readJsonlGuarded, serializePerFile } from "./fileQueue";
 import type { AgentId } from "./phases";
 
 export type NativeActionStatus = "completed" | "cancelled" | "failed";
@@ -50,8 +50,10 @@ export async function ensureNativeActionsFile(filePath: string): Promise<void> {
 }
 
 export async function appendNativeAction(filePath: string, receipt: NativeActionReceipt): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.appendFile(filePath, `${JSON.stringify(receipt)}\n`, "utf8");
+  await serializePerFile(filePath, async () => {
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.appendFile(filePath, `${JSON.stringify(receipt)}\n`, "utf8");
+  });
 }
 
 export async function writeNativeActions(filePath: string, receipts: NativeActionReceipt[]): Promise<void> {

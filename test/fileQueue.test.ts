@@ -3,7 +3,7 @@ import { strict as assert } from "node:assert";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { atomicWriteFile, ensureFile } from "../src/fileQueue";
+import { atomicWriteFile, ensureFile, readJsonlGuarded, serializePerFile } from "../src/fileQueue";
 
 // Helper: check whether the host supports creating symlinks. On Windows this
 // requires either admin rights or Developer Mode; without those, fs.symlink
@@ -136,5 +136,90 @@ describe("fileQueue symlink safety", () => {
     // Second call must NOT clobber existing content.
     await ensureFile(file, "different seed");
     assert.equal(await fs.readFile(file, "utf8"), "seeded");
+  });
+});
+
+describe("serializePerFile serialization", () => {
+  test("serializes concurrent read-modify-append against one path without interleaving", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-serialize-"));
+    const file = path.join(dir, "appends.txt");
+    await fs.writeFile(file, "", "utf8");
+
+    // Launch many concurrent read-modify-write cycles against the SAME path.
+    // Without the per-file mutex these would read a stale length, then write
+    // back over each other and lose tokens. With serialization, every token
+    // lands exactly once. Each `work` reads the whole file, appends its unique
+    // token, and writes the whole file back — the classic lost-update race.
+    const count = 50;
+    const tasks: Array<Promise<void>> = [];
+    for (let i = 0; i < count; i++) {
+      const token = `tok-${i}`;
+      tasks.push(serializePerFile(file, async () => {
+        const current = await fs.readFile(file, "utf8");
+        // Yield to the event loop mid-cycle to maximize the interleaving window;
+        // the mutex must still prevent any other cycle from running between the
+        // read above and the write below.
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        await fs.writeFile(file, current + token + "\n", "utf8");
+      }));
+    }
+    await Promise.all(tasks);
+
+    const lines = (await fs.readFile(file, "utf8")).split("\n").filter(Boolean);
+    assert.equal(lines.length, count, "every token must be present, none lost to interleaving");
+    const seen = new Set(lines);
+    assert.equal(seen.size, count, "no token should appear more than once");
+    for (let i = 0; i < count; i++) {
+      assert.ok(seen.has(`tok-${i}`), `missing token tok-${i}`);
+    }
+  });
+
+  test("returns the work's resolved value to the caller", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-serialize-ret-"));
+    const file = path.join(dir, "ret.txt");
+    const value = await serializePerFile(file, async () => 42);
+    assert.equal(value, 42);
+  });
+});
+
+describe("readJsonlGuarded", () => {
+  const isWidget = (value: unknown): value is { name: string } =>
+    !!value && typeof value === "object" && typeof (value as { name?: unknown }).name === "string";
+
+  test("skips malformed lines and blank lines, keeps guarded records", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-readjsonl-"));
+    const file = path.join(dir, "data.jsonl");
+    await fs.writeFile(file, [
+      JSON.stringify({ name: "a" }),
+      "{not json",                       // malformed -> skipped
+      "",                                // blank -> skipped
+      "   ",                             // whitespace-only -> skipped
+      JSON.stringify({ name: "b" }),
+      JSON.stringify({ noName: true }),  // fails the guard -> skipped
+      JSON.stringify({ name: "c" }),
+    ].join("\n"), "utf8");
+
+    const items = await readJsonlGuarded(file, isWidget);
+    assert.deepEqual(items.map((w) => w.name), ["a", "b", "c"]);
+  });
+
+  test("returns an empty list for a missing file", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-readjsonl-missing-"));
+    const items = await readJsonlGuarded(path.join(dir, "absent.jsonl"), isWidget);
+    assert.deepEqual(items, []);
+  });
+
+  test("limit slices to the trailing N guarded records", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-readjsonl-limit-"));
+    const file = path.join(dir, "data.jsonl");
+    await fs.writeFile(file, [
+      JSON.stringify({ name: "a" }),
+      JSON.stringify({ name: "b" }),
+      JSON.stringify({ name: "c" }),
+      JSON.stringify({ name: "d" }),
+    ].join("\n"), "utf8");
+
+    const items = await readJsonlGuarded(file, isWidget, { limit: 2 });
+    assert.deepEqual(items.map((w) => w.name), ["c", "d"]);
   });
 });

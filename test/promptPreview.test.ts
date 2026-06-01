@@ -125,6 +125,70 @@ describe("prompt preview envelopes", () => {
     assert.equal(latest?.renderedPrompt, "New prompt.");
   });
 
+  test("reads the latest envelope via the tail path on a large index", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-tail-prompt-envelope-"));
+    // First envelope's body is >256 KB so the index overflows the tail window
+    // and forces the trailing-read branch. The newest line must still win.
+    await appendPromptEnvelope(dir, createPromptEnvelope({
+      id: "bulky",
+      agent: "codex",
+      otherAgent: "claude",
+      phase: "opener",
+      transport: "oneShot",
+      cwd: dir,
+      command: "codex",
+      args: ["exec", "-"],
+      renderedPrompt: "x".repeat(300 * 1024),
+    }));
+    await appendPromptEnvelope(dir, createPromptEnvelope({
+      id: "newest",
+      agent: "claude",
+      otherAgent: "codex",
+      phase: "review",
+      transport: "terminalBridge",
+      cwd: dir,
+      command: "claude",
+      args: ["-p"],
+      renderedPrompt: "Newest prompt body.",
+    }));
+
+    const latest = await readLatestPromptEnvelope(dir);
+    assert.equal(latest?.id, "newest");
+    assert.equal(latest?.renderedPrompt, "Newest prompt body.");
+  });
+
+  test("falls back to a full read when the final envelope exceeds the tail window", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-tail-fallback-prompt-envelope-"));
+    await appendPromptEnvelope(dir, createPromptEnvelope({
+      id: "first",
+      agent: "codex",
+      otherAgent: "claude",
+      phase: "opener",
+      transport: "oneShot",
+      cwd: dir,
+      command: "codex",
+      args: ["exec", "-"],
+      renderedPrompt: "x".repeat(300 * 1024),
+    }));
+    // The newest (and only other) envelope's body is itself larger than the
+    // tail window, so the tail slice contains no parseable complete line and
+    // the reader must fall back to a full read to surface it.
+    await appendPromptEnvelope(dir, createPromptEnvelope({
+      id: "huge-latest",
+      agent: "claude",
+      otherAgent: "codex",
+      phase: "review",
+      transport: "terminalBridge",
+      cwd: dir,
+      command: "claude",
+      args: ["-p"],
+      renderedPrompt: "y".repeat(400 * 1024),
+    }));
+
+    const latest = await readLatestPromptEnvelope(dir);
+    assert.equal(latest?.id, "huge-latest");
+  });
+
   test("compacts old rendered prompt bodies while preserving recent bodies", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-compact-prompt-envelope-"));
     await appendPromptEnvelope(dir, createPromptEnvelope({

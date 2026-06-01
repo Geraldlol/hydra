@@ -81,4 +81,48 @@ describe("summarizer cardinality caps", () => {
     assert.ok(keys.length <= 257, `expected <=257 keys, got ${keys.length}`);
     assert.ok("_overflow" in summary.eventCounts, "expected _overflow counter");
   });
+
+  test("Codex summarizer caps distinct item.type values in itemCounts", () => {
+    // 400 item.started events each carrying a distinct, attacker-chosen
+    // item.type. itemCounts must stay bounded at the 256-key cap plus a single
+    // _overflow marker, not balloon to 400 entries.
+    const events = [] as Array<ReturnType<typeof JSON.parse>>;
+    for (let i = 0; i < 400; i++) {
+      events.push({ type: "item.started", item: { id: `i${i}`, type: `injected_item_${i}` } });
+    }
+    const summary = summarizeCodexEvents(events as Parameters<typeof summarizeCodexEvents>[0]);
+    const keys = Object.keys(summary.itemCounts);
+    assert.ok(keys.length <= 257, `expected <=257 item keys, got ${keys.length}`);
+    assert.ok("_overflow" in summary.itemCounts, "expected _overflow counter in itemCounts");
+    assert.ok((summary.itemCounts._overflow ?? 0) > 0);
+  });
+});
+
+describe("Codex summarizer adversarial item lifecycles", () => {
+  test("completed-then-failed for one id resolves latest-wins", () => {
+    // Two terminal events for the same command id with conflicting status.
+    // The summary tracks items by id, so the LAST event's status must win
+    // rather than the first-seen "completed" sticking.
+    const events = [
+      { type: "item.completed", item: { id: "c1", type: "command_execution", command: "pytest", aggregated_output: "", exit_code: 0, status: "completed" } },
+      { type: "item.completed", item: { id: "c1", type: "command_execution", command: "pytest", aggregated_output: "", exit_code: 1, status: "failed" } },
+    ] as Array<ReturnType<typeof JSON.parse>>;
+    const summary = summarizeCodexEvents(events as Parameters<typeof summarizeCodexEvents>[0]);
+    assert.equal(summary.commandExecutions.length, 1);
+    assert.equal(summary.commandExecutions[0].status, "failed");
+    assert.equal(summary.commandExecutions[0].exitCode, 1);
+  });
+
+  test("a string file_change.changes is ignored, not thrown", () => {
+    // A poisoned stream sends `changes` as a string instead of an array. The
+    // summarizer must not throw on the non-array shape; it leaves changes empty
+    // but still records the file_change item and its status.
+    const events = [
+      { type: "item.completed", item: { id: "fc1", type: "file_change", changes: "not-an-array", status: "completed" } },
+    ] as Array<ReturnType<typeof JSON.parse>>;
+    const summary = summarizeCodexEvents(events as Parameters<typeof summarizeCodexEvents>[0]);
+    assert.equal(summary.fileChanges.length, 1);
+    assert.deepEqual(summary.fileChanges[0].changes, []);
+    assert.equal(summary.fileChanges[0].status, "completed");
+  });
 });

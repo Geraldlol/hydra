@@ -278,7 +278,6 @@ describe("claudeEvents against real claude --print stream-json output", () => {
   });
 
   test("summary captures session id, init metadata, result, usage, and final text", () => {
-    if (!stdout) return;
     const summary = summarizeClaudeEvents(parseClaudeEventStream(stdout));
     assert.equal(summary.sessionId, "72fcac0e-ed56-4595-ba64-d1187b99484d");
     assert.equal(summary.types.system, 4);
@@ -304,7 +303,6 @@ describe("claudeEvents against real claude --print stream-json output", () => {
   });
 
   test("captures all six SSE inner content_block_delta event types", () => {
-    if (!stdout) return;
     const summary = summarizeClaudeEvents(parseClaudeEventStream(stdout));
     // The six message-level / content-block lifecycle events from a single
     // streamed assistant turn. These are the exact event names the

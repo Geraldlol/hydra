@@ -112,7 +112,10 @@ export function parseClaudeEventLine(line: string): ClaudeEvent | null {
 }
 
 export function parseClaudeEventStream(stdout: string): Array<ClaudeEvent | null> {
-  return stdout.split(/\r?\n/).filter((line) => line.length > 0).map((line) => parseClaudeEventLine(line));
+  // Why: drop whitespace-only lines (CRLF remnants, blank-padded streams)
+  // BEFORE they reach the parser, so they don't surface as nulls and inflate
+  // `malformedJsonLines`. parseClaudeEventLine trims internally anyway.
+  return stdout.split(/\r?\n/).filter((line) => line.trim().length > 0).map((line) => parseClaudeEventLine(line));
 }
 
 // ---------- Summary ----------

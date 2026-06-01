@@ -98,6 +98,23 @@ describe("summarizeCodexEvents", () => {
     assert.equal(summary.usage.cached_input_tokens, 100);
   });
 
+  test("lastAgentMessage is the last terminal agent_message, not a concatenation", () => {
+    // Two distinct agent_message item ids. The contract (mirroring
+    // `--output-last-message`) is that the FINAL message's text wins outright —
+    // we must not concatenate "First message." + "Second message.".
+    // item.started increments the count; item.completed carries the terminal
+    // text. The second message's completed text must win.
+    const events = parseCodexEventStream([
+      '{"type":"item.started","item":{"id":"a1","type":"agent_message","text":"First "}}',
+      '{"type":"item.completed","item":{"id":"a1","type":"agent_message","text":"First message."}}',
+      '{"type":"item.started","item":{"id":"a2","type":"agent_message","text":"Second "}}',
+      '{"type":"item.completed","item":{"id":"a2","type":"agent_message","text":"Second message."}}',
+    ].join("\n"));
+    const summary = summarizeCodexEvents(events);
+    assert.equal(summary.lastAgentMessage, "Second message.");
+    assert.equal(summary.itemCounts["agent_message"], 2);
+  });
+
   test("tracks command_execution lifecycle from in_progress to completed", () => {
     const events = parseCodexEventStream([
       '{"type":"item.started","item":{"id":"c1","type":"command_execution","command":"ls -la","aggregated_output":"","exit_code":null,"status":"in_progress"}}',
@@ -238,7 +255,6 @@ describe("codexEvents against real codex exec --json output", () => {
   });
 
   test("summary captures thread id, command lifecycle, agent message, and usage", () => {
-    if (!stdout) return;
     const summary = summarizeCodexEvents(parseCodexEventStream(stdout));
     assert.equal(summary.threadId, "019e1380-05d5-76a0-bb6a-84237a3638a7");
     assert.equal(summary.turns.started, 1);

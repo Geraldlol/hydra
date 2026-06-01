@@ -51,6 +51,25 @@ describe("wiki telemetry", () => {
     assert.equal(rollup.meanReplyCharsWithoutCitation, 300);
   });
 
+  test("window fills from wiki-usage events even when diluted by other event kinds", () => {
+    // Simulate an event-heavy session: many unrelated events interleaved with
+    // a steady trickle of wiki-usage telemetry. The rollup must count only the
+    // wiki-usage events toward the window, otherwise it warms up forever.
+    const events: HydraEvent[] = [];
+    for (let i = 0; i < 10; i++) {
+      events.push({ timestamp: "2026-05-21T00:00:00.000Z", kind: "terminalSessionChanged", detail: "noise" });
+      events.push(telemetryEvent({ hasCitationSignal: true, hasMentionSignal: false, distinctSourceCitationCount: 1, replyChars: 50 }));
+      events.push({ timestamp: "2026-05-21T00:00:00.000Z", kind: "verificationFinished", detail: "more noise" });
+    }
+
+    const rollup = summarizeHydraWikiUsageEvents(events, { windowSize: 50, minSampleSize: 8 });
+
+    assert.equal(rollup.sampleSize, 10);
+    assert.equal(rollup.warmingUp, false);
+    assert.equal(rollup.citationReplies, 10);
+    assert.equal(rollup.citationRate, 1);
+  });
+
   test("rollup can read older wiki telemetry event field names", () => {
     const rollup = summarizeHydraWikiUsageEvents([
       telemetryEvent({

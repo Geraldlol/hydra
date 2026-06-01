@@ -265,8 +265,10 @@ export interface CodexThreadSummary {
   eventCounts: Record<string, number>;
   itemCounts: Record<string, number>;
   turns: { started: number; completed: number; failed: number };
-  // Most recent assistant text (concatenated from agent_message items in
-  // emission order). Mirrors how `--output-last-message` would behave.
+  // Text of the last terminal agent_message item seen, in stream order: each
+  // agent_message item event (started/updated/completed) overwrites this, so
+  // the final value is the most recent message's text — NOT a concatenation of
+  // all messages. Mirrors how `--output-last-message` behaves (last wins).
   lastAgentMessage?: string;
   // Last reasoning summary, if any.
   lastReasoning?: string;
@@ -470,7 +472,10 @@ function increment(counts: Record<string, number>, key: string): void {
 // and counts malformed lines as nulls so summarizeCodexEvents can report
 // `malformedJsonLines` honestly.
 export function parseCodexEventStream(stdout: string): Array<ThreadEvent | null> {
-  return stdout.split(/\r?\n/).filter((line) => line.length > 0).map((line) => parseCodexEventLine(line));
+  // Why: drop whitespace-only lines (CRLF remnants, blank-padded streams)
+  // BEFORE they reach the parser, so they don't surface as nulls and inflate
+  // `malformedJsonLines`. parseCodexEventLine trims internally anyway.
+  return stdout.split(/\r?\n/).filter((line) => line.trim().length > 0).map((line) => parseCodexEventLine(line));
 }
 
 // Render a CodexThreadSummary into a stable, human-readable block. Used by

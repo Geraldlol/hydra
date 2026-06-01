@@ -104,10 +104,21 @@ export function createPromptEnvelope(input: CreatePromptEnvelopeInput): PromptEn
   };
 }
 
+// Why: directories we've already mkdir'd this process, so the hot append path
+// skips the redundant per-write fs.mkdir. We still mkdir once per path so the
+// first append on a fresh workspace is safe.
+const ensuredDirs = new Set<string>();
+
+async function ensureDirOnce(dir: string): Promise<void> {
+  if (ensuredDirs.has(dir)) return;
+  await fs.mkdir(dir, { recursive: true });
+  ensuredDirs.add(dir);
+}
+
 export async function appendPromptEnvelope(workspaceRoot: string, envelope: PromptEnvelope): Promise<void> {
   const indexPath = promptEnvelopeIndexPath(workspaceRoot);
   await serializePerFile(indexPath, async () => {
-    await fs.mkdir(path.dirname(indexPath), { recursive: true });
+    await ensureDirOnce(path.dirname(indexPath));
     await fs.appendFile(indexPath, `${JSON.stringify(envelope)}\n`, "utf8");
   });
 }
@@ -195,13 +206,70 @@ export async function compactPromptEnvelopeBodies(
   });
 }
 
+// Why: the prompt index grows unbounded over a long session and each envelope
+// carries a (potentially large) renderedPrompt body, so reading the whole file
+// just to find the last line is wasteful. We stat the size and read only a
+// bounded trailing slice, then parse the newest *complete* line in it. If that
+// window holds no parseable line — e.g. the final envelope is larger than the
+// slice, or every complete line in the tail is torn/legacy — we fall back to a
+// full read so we never regress the "find the latest usable envelope" contract.
+const PROMPT_TAIL_READ_BYTES = 256 * 1024;
+
 export async function readLatestPromptEnvelope(workspaceRoot: string): Promise<PromptEnvelope | undefined> {
+  const indexPath = promptEnvelopeIndexPath(workspaceRoot);
+
+  let size: number;
+  try {
+    size = (await fs.stat(indexPath)).size;
+  } catch {
+    // ENOENT on first run, or any stat failure: nothing to read.
+    return undefined;
+  }
+
+  if (size > PROMPT_TAIL_READ_BYTES) {
+    const fromTail = await readLatestFromTail(indexPath, size);
+    if (fromTail) return fromTail;
+    // The tail window held no parseable complete line; fall through to a full
+    // read so an oversized final envelope is still surfaced.
+  }
+
   let raw: string;
   try {
-    raw = await fs.readFile(promptEnvelopeIndexPath(workspaceRoot), "utf8");
+    raw = await fs.readFile(indexPath, "utf8");
   } catch {
     return undefined;
   }
+  return latestParseableEnvelope(raw);
+}
+
+async function readLatestFromTail(indexPath: string, size: number): Promise<PromptEnvelope | undefined> {
+  const start = Math.max(0, size - PROMPT_TAIL_READ_BYTES);
+  let handle: fs.FileHandle;
+  try {
+    handle = await fs.open(indexPath, "r");
+  } catch {
+    // Race: file vanished between stat and open. Caller falls back / returns.
+    return undefined;
+  }
+  let chunk: string;
+  try {
+    const buffer = Buffer.alloc(size - start);
+    await handle.read(buffer, 0, buffer.length, start);
+    chunk = buffer.toString("utf8");
+  } catch {
+    // Read failure mid-tail: let the caller fall back to a full read.
+    return undefined;
+  } finally {
+    await handle.close();
+  }
+  // Drop the first segment: when start > 0 it's a partial line whose head was
+  // truncated by the tail window and can't be trusted to parse.
+  const segments = chunk.split(/\r?\n/);
+  if (start > 0) segments.shift();
+  return latestParseableEnvelope(segments.join("\n"));
+}
+
+function latestParseableEnvelope(raw: string): PromptEnvelope | undefined {
   const lines = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   for (let i = lines.length - 1; i >= 0; i--) {
     try {

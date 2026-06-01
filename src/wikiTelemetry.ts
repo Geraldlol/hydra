@@ -56,8 +56,15 @@ export function summarizeHydraWikiUsageEvents(
   events: readonly HydraEvent[],
   options: { windowSize?: number; minSampleSize?: number } = {}
 ): HydraWikiUsageRollup {
+  // Why: filter to wiki-usage telemetry events FIRST, then take the trailing
+  // window. On event-heavy sessions the caller's event slice is dominated by
+  // unrelated kinds (terminalSessionChanged, verificationFinished, ...); if we
+  // sliced before filtering, the wiki-usage window would never fill and the
+  // rollup would report "warming up" forever. The defaults are deliberately
+  // modest (window 50, min 8) so the rollup crosses out of warm-up after a
+  // handful of agent replies rather than requiring dozens.
   const windowSize = Math.max(1, Math.floor(options.windowSize ?? 50));
-  const minSampleSize = Math.max(1, Math.floor(options.minSampleSize ?? 20));
+  const minSampleSize = Math.max(1, Math.floor(options.minSampleSize ?? 8));
   const usageEvents = events.filter(isWikiUsageTelemetryEvent).slice(-windowSize);
 
   let citationReplies = 0;

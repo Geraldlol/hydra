@@ -7,6 +7,7 @@ import {
   appendHydraEvent,
   createHydraEvent,
   ensureHydraEventsFile,
+  HYDRA_EVENT_KINDS,
   hydraEventsPath,
   readHydraEvents,
 } from "../src/events";
@@ -52,5 +53,26 @@ describe("hydra events", () => {
     const events = await readHydraEvents(file);
     assert.equal(events.length, 1);
     assert.equal(events[0].detail, "Recovered");
+  });
+
+  test("includes phaseTransition in the canonical event-kind set", () => {
+    assert.ok(HYDRA_EVENT_KINDS.includes("phaseTransition"));
+  });
+
+  test("drops rows whose kind is not a known HydraEventKind", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-events-kind-"));
+    const file = hydraEventsPath(dir);
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, [
+      // A hand-edited / attacker-supplied line with an unknown kind must not
+      // widen the union and must be skipped on read.
+      JSON.stringify({ timestamp: "2026-05-13T12:00:00.000Z", kind: "totally-made-up", detail: "evil" }),
+      JSON.stringify(createHydraEvent({ kind: "phaseTransition", detail: "opener -> reactor" }, new Date("2026-05-13T12:01:00.000Z"))),
+    ].join("\n"), "utf8");
+
+    const events = await readHydraEvents(file);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].kind, "phaseTransition");
+    assert.equal(events[0].detail, "opener -> reactor");
   });
 });
