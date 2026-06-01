@@ -3033,6 +3033,21 @@ export class HydraRoomPanel {
       return;
     }
 
+    // Why: a Decision Packet's defaultNextAction/recommendation is agent-controlled
+    // text and therefore prompt-injectable from any repo file an agent reads
+    // (CLAUDE.md, AGENTS.md, source comments). Auto-executing a default that contains
+    // high-blast-radius verbs (deploy/publish/force-push/migration/drop-table…) would
+    // defeat the human checkpoint, so we refuse to auto-advance risky defaults and
+    // require an explicit manual Accept Default. detectRiskySignals (decisions.ts)
+    // documents this gate as mandatory for any caller that auto-advances a phase.
+    const risk = detectRiskySignals(latest);
+    if (risk.risky) {
+      await this.appendSystemMessage(
+        `Hydra auto-advance paused: the agent's default action contains high-risk signals (${risk.reasons.join(", ")}). Review it and click Accept Default to run it manually.`,
+      );
+      return;
+    }
+
     const action = this.currentDecisionAction();
     if (action.kind === "assignBuilder" && action.builder && this.state.name === "AwaitingUser") {
       this.autoAdvanceSendInstructionCount = 0;

@@ -21,6 +21,29 @@ describe("codex transport source contracts", () => {
   });
 });
 
+describe("auto-advance security gate source contract", () => {
+  test("autoAdvanceActionableDefault refuses risky decision defaults before acting", () => {
+    // Why: a Decision Packet's defaultNextAction/recommendation is agent-controlled and
+    // prompt-injectable from any repo file an agent reads. Auto-advance MUST consult
+    // detectRiskySignals and bail BEFORE currentDecisionAction(), or a hostile repo file
+    // could drive deploy/publish/force-push/migration defaults into the room loop with no
+    // human checkpoint. decisions.ts:detectRiskySignals documents this gate as mandatory.
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    const methodStart = source.indexOf("private async autoAdvanceActionableDefault(");
+    assert.ok(methodStart >= 0, "autoAdvanceActionableDefault method not found");
+    const methodEnd = source.indexOf("private async runReviewPhase(", methodStart);
+    assert.ok(methodEnd > methodStart, "could not bound autoAdvanceActionableDefault body");
+    const method = source.slice(methodStart, methodEnd);
+
+    const riskIdx = method.indexOf("detectRiskySignals(");
+    const actionIdx = method.indexOf("this.currentDecisionAction()");
+    assert.ok(riskIdx >= 0, "auto-advance must call detectRiskySignals");
+    assert.ok(actionIdx >= 0, "auto-advance must read currentDecisionAction");
+    assert.ok(riskIdx < actionIdx, "risky-signal gate must run before any decision action is taken");
+    assert.match(method, /if \(risk\.risky\)/);
+  });
+});
+
 describe("terminal bridge usage source contracts", () => {
   test("terminal bridge usage is extracted from the raw log output", () => {
     const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
