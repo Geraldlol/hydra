@@ -24,6 +24,7 @@ const ribbonStack = document.getElementById("ribbonStack");
 const ribbonMinimizedSummary = document.getElementById("ribbonMinimizedSummary");
 const toggleRibbonsBtn = document.getElementById("toggleRibbonsBtn");
 const messagesEl = document.getElementById("messages");
+const srAnnounce = document.getElementById("srAnnounce");
 const composer = document.getElementById("composer");
 const transportChip = document.getElementById("transportChip");
 const phaseChip = document.getElementById("phaseChip");
@@ -161,6 +162,17 @@ let lastNativeActions = [];
 let lastState = {};
 let ribbonsMinimized = !!webviewState.ribbonsMinimized;
 let collapsedRibbons = new Set(Array.isArray(webviewState.collapsedRibbons) ? webviewState.collapsedRibbons : []);
+/** Cheap signature of the rendered message list. renderMessages() bails early
+ *  when it matches, so unrelated state pushes (the 5s elapsed-label ticker,
+ *  usage/status/work-queue updates) skip the DOM reconcile entirely. Starts as
+ *  null (never equal to a real signature) so the first render always runs and
+ *  replaces the ship-time "Loading the room..." placeholder. */
+let lastRenderSignature = null;
+/** Tracks whether the last agent-activity announcement has already fired per
+ *  message id, so the screen-reader live region is not spammed on every push. */
+let lastAnnouncedActivity = new Map();
+/** Element focus to restore when a dialog/palette closes (the opener). */
+let dialogRestoreFocus = null;
 
 const ACTIONS = [
   { id: "send", group: "Suggested", name: "Send", what: "Start a Hydra turn with the current opener", acc: "Ctrl+Enter", run: () => sendBtn.click(), enabled: () => !sendBtn.disabled },
@@ -391,6 +403,9 @@ if (messagesEl) {
 
 window.addEventListener("message", (event) => {
   const msg = event.data;
+  // Why: one malformed inbound message must not throw and kill the listener
+  // for the rest of the session — guard the shape before reading msg.type.
+  if (!msg || typeof msg !== "object") return;
   if (msg.type === "state") renderState(msg);
   else if (msg.type === "chunk") appendChunk(msg.messageId, msg.text);
   else if (msg.type === "replaceMessageText") replaceMessageText(msg.messageId, msg.text);
@@ -405,8 +420,24 @@ window.addEventListener("message", (event) => {
   }
 });
 
+// Locate (or lazily create) the streaming text node for a message. A pending
+// card that still shows its activity placeholder has no .text element yet, so
+// the first chunk would otherwise be dropped — create it inside the card.
+function ensureMessageTextEl(messageId) {
+  const article = document.querySelector('[data-mid="' + cssEscape(messageId) + '"]');
+  if (!article) return null;
+  let el = article.querySelector(".text");
+  if (el) return el;
+  const card = article.querySelector(".message-card");
+  if (!card) return null;
+  el = document.createElement("pre");
+  el.className = "text";
+  card.append(el);
+  return el;
+}
+
 function appendChunk(messageId, text) {
-  const el = document.querySelector('[data-mid="' + messageId + '"] .text');
+  const el = ensureMessageTextEl(messageId);
   if (!el) return;
   const scroll = captureMessageScroll();
   el.textContent += text;
@@ -414,7 +445,7 @@ function appendChunk(messageId, text) {
 }
 
 function replaceMessageText(messageId, text) {
-  const el = document.querySelector('[data-mid="' + messageId + '"] .text');
+  const el = ensureMessageTextEl(messageId);
   if (!el) return;
   const scroll = captureMessageScroll();
   el.textContent = text;
@@ -639,71 +670,140 @@ function updateRibbonMinimizedSummary(state) {
   ribbonMinimizedSummary.title = ribbonMinimizedSummary.textContent;
 }
 
+/** Cheap per-message fingerprint. Streaming chunks land via appendChunk (which
+ *  mutates .text directly without a renderMessages pass), so textLen is enough
+ *  to catch a structural change like the first chunk flipping a placeholder
+ *  card into a text card without forcing a rebuild on every appended token. */
+function messageSignature(m) {
+  return [
+    m.id,
+    m.role || "system",
+    m.phase || "",
+    (m.text || "").length,
+    m.pending ? (m.activity || "running") : "",
+    m.error ? "e" : "",
+    m.cancelled ? "c" : "",
+    m.runFailure ? "f" : ""
+  ].join("");
+}
+
+function renderSignature() {
+  const parts = [];
+  for (const m of lastMessages) parts.push(messageSignature(m));
+  return parts.join("");
+}
+
+function buildMessageArticle(m) {
+  const article = document.createElement("article");
+  article.dataset.mid = m.id;
+  applyMessageArticle(article, m);
+  return article;
+}
+
+// Rebuild an article's class + inner content from a message. Reused for both
+// freshly created and recycled (keyed by mid) nodes so long transcripts skip a
+// full relayout — only changed/added/removed cards touch the DOM.
+function applyMessageArticle(article, m) {
+  const cls = ["message", m.role || "system"];
+  if (m.pending) cls.push("pending");
+  if (m.error) cls.push("error");
+  if (m.cancelled) cls.push("cancelled");
+  article.className = cls.join(" ");
+
+  const time = document.createElement("time");
+  time.className = "message-time";
+  time.textContent = new Date(m.timestamp).toLocaleTimeString();
+
+  const card = document.createElement("div");
+  card.className = "message-card";
+  const head = document.createElement("div");
+  head.className = "message-head";
+  const art = document.createElement("span");
+  art.className = "head-art " + (m.role || "system");
+  const headSrc = headAsset(m.role);
+  if (headSrc) {
+    const img = document.createElement("img");
+    img.src = headSrc;
+    img.alt = "";
+    art.append(img);
+  } else {
+    art.textContent = headGlyph(m.role);
+  }
+  const speaker = document.createElement("span");
+  speaker.className = "speaker " + (m.role || "system");
+  speaker.textContent = labels[m.role] || m.role || "system";
+  const role = document.createElement("span");
+  role.className = "role-tag";
+  role.textContent = m.phase || "";
+  const status = document.createElement("span");
+  status.className = "message-status";
+  status.textContent = m.pending ? (m.activity || "running") : "";
+  head.append(art, speaker, role, status);
+
+  const text = document.createElement("pre");
+  text.className = "text";
+  if (m.pending && !m.activity) text.dataset.placeholder = pendingPlaceholder(m);
+  text.textContent = m.text || "";
+  if (!m.pending || m.text || !m.activity) card.append(head, text);
+  else card.append(head);
+  if (m.runFailure) card.append(renderRunFailureCard(m.runFailure));
+
+  article.replaceChildren(time, card);
+}
+
 function renderMessages() {
+  const signature = renderSignature();
+  // Why: skip the reconcile entirely when nothing structural changed — the
+  // host pushes full state on every ticker/usage/status tick, and those must
+  // not relayout the transcript.
+  if (signature === lastRenderSignature && messagesEl && messagesEl.childElementCount > 0) return;
+  lastRenderSignature = signature;
+
   const scroll = captureMessageScroll();
   if (lastMessages.length === 0) {
     messagesEl.innerHTML = '<p class="empty">The room is quiet. Run Doctor if this is a fresh setup, then type one message below to bring everyone in.</p>';
     restoreMessageScroll(scroll);
     return;
   }
-  messagesEl.innerHTML = "";
+
+  // Index existing message articles by mid so we can recycle them in place
+  // instead of rebuilding the whole list with innerHTML = "".
+  const existing = new Map();
+  for (const node of messagesEl.querySelectorAll(".message[data-mid]")) {
+    existing.set(node.dataset.mid || "", node);
+  }
+
+  const ordered = [];
   let lastPhase = "";
   for (const m of lastMessages) {
     if (m.phase && m.phase !== lastPhase) {
       const mark = document.createElement("div");
       mark.className = "phase-mark";
       mark.innerHTML = "<span>" + escapeHtml(m.phase) + "</span>";
-      messagesEl.append(mark);
+      ordered.push(mark);
       lastPhase = m.phase;
     }
-    const article = document.createElement("article");
-    const cls = ["message", m.role || "system"];
-    if (m.pending) cls.push("pending");
-    if (m.error) cls.push("error");
-    if (m.cancelled) cls.push("cancelled");
-    article.className = cls.join(" ");
-    article.dataset.mid = m.id;
-
-    const time = document.createElement("time");
-    time.className = "message-time";
-    time.textContent = new Date(m.timestamp).toLocaleTimeString();
-
-    const card = document.createElement("div");
-    card.className = "message-card";
-    const head = document.createElement("div");
-    head.className = "message-head";
-    const art = document.createElement("span");
-    art.className = "head-art " + (m.role || "system");
-    const headSrc = headAsset(m.role);
-    if (headSrc) {
-      const img = document.createElement("img");
-      img.src = headSrc;
-      img.alt = "";
-      art.append(img);
+    const sig = messageSignature(m);
+    const prior = existing.get(m.id);
+    if (prior) {
+      existing.delete(m.id);
+      // Recycle the node; only rebuild its content when its fingerprint moved.
+      if (prior.dataset.sig !== sig) {
+        applyMessageArticle(prior, m);
+        prior.dataset.sig = sig;
+      }
+      ordered.push(prior);
     } else {
-      art.textContent = headGlyph(m.role);
+      const article = buildMessageArticle(m);
+      article.dataset.sig = sig;
+      ordered.push(article);
     }
-    const speaker = document.createElement("span");
-    speaker.className = "speaker " + (m.role || "system");
-    speaker.textContent = labels[m.role] || m.role || "system";
-    const role = document.createElement("span");
-    role.className = "role-tag";
-    role.textContent = m.phase || "";
-    const status = document.createElement("span");
-    status.className = "message-status";
-    status.textContent = m.pending ? (m.activity || "running") : "";
-    head.append(art, speaker, role, status);
-
-    const text = document.createElement("pre");
-    text.className = "text";
-    if (m.pending && !m.activity) text.dataset.placeholder = pendingPlaceholder(m);
-    text.textContent = m.text || "";
-    if (!m.pending || m.text || !m.activity) card.append(head, text);
-    else card.append(head);
-    if (m.runFailure) card.append(renderRunFailureCard(m.runFailure));
-    article.append(time, card);
-    messagesEl.append(article);
   }
+
+  // Drop any stale phase-marks/articles, then sync the DOM order to `ordered`.
+  // replaceChildren keeps the recycled article nodes' identity (and their
+  // scroll position / focus) while reordering and pruning in one pass.
+  messagesEl.replaceChildren(...ordered);
   restoreMessageScroll(scroll);
 }
 
@@ -917,6 +1017,15 @@ function renderAgentStatus(el, label, status, agent) {
   el.className = "agent-status " + agent + " " + state;
   el.title = label + ": " + detail;
   el.textContent = label + ": " + compactStatusDetail(detail);
+  announceAgentTransition(agent, label, state, detail);
+}
+function announceAgentTransition(agent, label, state, detail) {
+  const prev = lastAnnouncedActivity.get(agent);
+  lastAnnouncedActivity.set(agent, state);
+  if (state === prev) return;
+  if (state === "running") announce(label + " is working: " + compactStatusDetail(detail));
+  else if (state === "replied") announce(label + " replied.");
+  else if (state === "error") announce(label + " failed: " + compactStatusDetail(detail));
 }
 function renderAuthorityBadges(summaries) {
   renderAuthorityBadge(codexAuthority, "Codex", summaries.codex);
@@ -1318,7 +1427,56 @@ function pendingPlaceholder(message) {
   return speaker + " is starting...";
 }
 
+// Tab-focus trap helpers. When a dialog is open, Tab/Shift+Tab cycle through
+// the visible focusable controls inside it instead of escaping to the page.
+const FOCUSABLE_SELECTOR = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+function focusEl(el) {
+  if (el && typeof el.focus === "function") el.focus();
+}
+function dialogFocusables(dialog) {
+  if (!dialog) return [];
+  return Array.from(dialog.querySelectorAll(FOCUSABLE_SELECTOR)).filter((el) => {
+    // Skip controls hidden by an inactive panel-view or the .hidden helper.
+    return el.offsetParent !== null || el === document.activeElement;
+  });
+}
+function activeDialog() {
+  if (cmdOverlay.dataset.open === "true") return document.getElementById("commandCenter");
+  if (panelOverlay.dataset.open === "true") return panelOverlay.querySelector(".inspector");
+  return null;
+}
+function trapDialogTab(event) {
+  if (event.key !== "Tab") return;
+  const dialog = activeDialog();
+  if (!dialog) return;
+  const focusables = dialogFocusables(dialog);
+  if (focusables.length === 0) {
+    event.preventDefault();
+    return;
+  }
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  const active = document.activeElement;
+  if (event.shiftKey) {
+    if (active === first || !dialog.contains(active)) {
+      event.preventDefault();
+      focusEl(last);
+    }
+  } else if (active === last || !dialog.contains(active)) {
+    event.preventDefault();
+    focusEl(first);
+  }
+}
+// Restore focus to the control that opened the dialog (falls back to the
+// Commands button). Cleared after use so a stale node never gets focus.
+function restoreDialogFocus() {
+  const target = dialogRestoreFocus && document.contains(dialogRestoreFocus) ? dialogRestoreFocus : commandCenterBtn;
+  dialogRestoreFocus = null;
+  focusEl(target);
+}
+
 function openPalette() {
+  dialogRestoreFocus = document.activeElement;
   cmdOverlay.dataset.open = "true";
   cmdOverlay.setAttribute("aria-hidden", "false");
   renderPalette("");
@@ -1331,17 +1489,24 @@ function closePalette() {
   cmdOverlay.dataset.open = "false";
   cmdOverlay.setAttribute("aria-hidden", "true");
   paletteInput.setAttribute("aria-activedescendant", "");
-  commandCenterBtn.focus();
+  restoreDialogFocus();
 }
 function openPanel(panel) {
+  dialogRestoreFocus = document.activeElement;
   panelOverlay.dataset.panel = panel;
   panelOverlay.dataset.open = "true";
   panelOverlay.setAttribute("aria-hidden", "false");
+  // Move focus into the inspector so keyboard/SR users land inside the dialog.
+  setTimeout(() => {
+    const dialog = panelOverlay.querySelector(".inspector");
+    const focusables = dialogFocusables(dialog);
+    focusEl(focusables[0] || dialog || panelOverlay);
+  }, 0);
 }
 function closePanel() {
   panelOverlay.dataset.open = "false";
   panelOverlay.setAttribute("aria-hidden", "true");
-  commandCenterBtn.focus();
+  restoreDialogFocus();
 }
 cmdOverlay.addEventListener("click", (event) => {
   if (event.target === cmdOverlay) closePalette();
@@ -1359,6 +1524,10 @@ commandList.addEventListener("click", (event) => {
 document.addEventListener("keydown", (event) => {
   const paletteOpen = cmdOverlay.dataset.open === "true";
   const panelOpen = panelOverlay.dataset.open === "true";
+  if (event.key === "Tab" && (paletteOpen || panelOpen)) {
+    trapDialogTab(event);
+    return;
+  }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
     event.preventDefault();
     paletteOpen ? closePalette() : openPalette();
@@ -1482,6 +1651,15 @@ function headGlyph(role) {
 }
 function escapeHtml(value) {
   return String(value || "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+}
+
+// Push a message into the polite live region so screen-reader users hear
+// agent activity start and reply completion without watching the transcript.
+// Re-set the text after clearing so identical consecutive messages still fire.
+function announce(text) {
+  if (!srAnnounce || !text) return;
+  srAnnounce.textContent = "";
+  requestAnimationFrame(() => { if (srAnnounce) srAnnounce.textContent = text; });
 }
 
 vscode.postMessage({ type: "ready" });

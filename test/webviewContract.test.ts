@@ -109,6 +109,7 @@ const boundIds = [
   "sendBtn",
   "setObjectiveBtn",
   "setupStrip",
+  "srAnnounce",
   "stopBtn",
   "terminalHealthBtn",
   "terminalPanelCount",
@@ -243,7 +244,27 @@ describe("webview contract", () => {
     assert.match(surface, /item\.setAttribute\("role", "option"\)/);
     assert.match(surface, /item\.setAttribute\("aria-selected", "false"\)/);
     assert.match(surface, /item\.setAttribute\("aria-disabled", enabled \? "false" : "true"\)/);
-    assert.match(surface, /commandCenterBtn\.focus\(\)/);
+    // Closing the palette restores focus to its opener, falling back to the
+    // Commands button when no opener was recorded.
+    assert.match(surface, /restoreDialogFocus\(\)/);
+    assert.match(surface, /dialogRestoreFocus[\s\S]*commandCenterBtn/);
+  });
+
+  test("keeps the dialog focus trap and aria-modal in place", () => {
+    assert.match(html, /id="commandCenter" role="dialog" aria-modal="true"/);
+    assert.match(html, /class="inspector" role="dialog" aria-modal="true"/);
+    assert.match(surface, /function trapDialogTab\(event\)/);
+    assert.match(surface, /event\.key === "Tab"/);
+  });
+
+  test("keeps the screen-reader live region and announcer wired", () => {
+    assert.match(html, /id="srAnnounce"[^>]+aria-live="polite"[^>]+aria-atomic="true"/);
+    assert.match(surface, /function announce\(text\)/);
+    assert.match(surface, /announceAgentTransition\(/);
+  });
+
+  test("guards the inbound message listener against malformed payloads", () => {
+    assert.match(surface, /if \(!msg \|\| typeof msg !== "object"\) return;/);
   });
 
   test("keeps Command Center disabled-state rendering and guards in place", () => {

@@ -81,6 +81,18 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     button.danger { background: var(--error); color: var(--vscode-button-foreground); }
     button.suggested { outline: 2px solid var(--focus); outline-offset: 1px; }
     .hidden { display: none !important; }
+    .visually-hidden {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      margin: -1px;
+      padding: 0;
+      border: 0;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
 
     .app {
       height: 100vh;
@@ -300,10 +312,16 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       object-fit: cover;
       display: block;
     }
-    .head-art.codex, .speaker.codex { color: var(--codex); }
-    .head-art.claude, .speaker.claude { color: var(--claude); }
-    .head-art.user, .speaker.user { color: var(--user); }
+    .head-art.codex { color: var(--codex); }
+    .head-art.claude { color: var(--claude); }
+    .head-art.user { color: var(--user); }
     .head-art.system, .speaker.system { color: var(--muted); }
+    /* Why: speaker labels carry text, so they use theme-aware chart tokens that
+       keep contrast on light/high-contrast themes; the head-art glyph dots sit
+       on a known dark chip and keep the brand literals above. */
+    .speaker.codex { color: var(--vscode-charts-blue, var(--codex)); }
+    .speaker.claude { color: var(--vscode-charts-orange, var(--claude)); }
+    .speaker.user { color: var(--vscode-charts-green, var(--user)); }
     .speaker { color: var(--text); font-weight: 650; text-transform: lowercase; }
     .role-tag { color: var(--muted); font-family: var(--vscode-editor-font-family); }
     .message-status { margin-left: auto; color: var(--muted); }
@@ -987,6 +1005,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     </header>
 
     <main id="messages"><p class="empty">Loading the room...</p></main>
+    <div id="srAnnounce" class="visually-hidden" aria-live="polite" aria-atomic="true"></div>
 
     <section id="composer-region">
       <div class="ribbon-stack" id="ribbonStack">
@@ -1109,7 +1128,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     </section>
 
     <div class="overlay" id="cmdOverlay" data-open="false" aria-hidden="true">
-      <div id="commandCenter" role="dialog" aria-label="Command Center">
+      <div id="commandCenter" role="dialog" aria-modal="true" aria-label="Command Center">
         <div class="palette-input">
           <span class="brand-mark"><img src="${heads.brand}" alt=""></span>
           <input id="paletteInput" role="combobox" aria-controls="commandList" aria-expanded="true" aria-activedescendant="" placeholder="Search commands" autocomplete="off">
@@ -1120,7 +1139,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     </div>
 
     <div class="overlay" id="panelOverlay" data-open="false" data-panel="actions" aria-hidden="true">
-      <div class="inspector" role="dialog" aria-label="Inspector">
+      <div class="inspector" role="dialog" aria-modal="true" aria-label="Inspector">
         <section class="panel-view" data-view="actions">
           <div class="insp-head"><h3>Native Actions</h3><span class="count" id="nativePanelCount"></span><button class="secondary close" type="button">Close</button></div>
           <div class="insp-body"><div id="nativeActionBoard" class="native-action-board hidden"></div></div>
