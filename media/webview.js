@@ -1287,9 +1287,13 @@ function renderSessionUsage(u, weekly) {
   const costStr = formatCost(cost);
   u = session;
   const weekCost = week.costUsd || 0;
-  usageRail.textContent = "session " + (session.turns || 0) + "t " + tokenStr + " tok " + costStr + " | 7d " + formatTokens(week.totalTokens || 0) + " tok " + formatCost(weekCost);
+  // Why cost-first: totalTokens lumps cache reads (billed at ~10% of the
+  // input rate) with fresh tokens, so the raw total reads ~4x scarier than
+  // what the turn actually cost. "fresh" = input + output + cache writes.
+  const fresh = (session.inputTokens || 0) + (session.outputTokens || 0) + (session.cacheCreateTokens || 0);
+  usageRail.textContent = "session " + (session.turns || 0) + "t " + costStr + " · " + formatTokens(fresh) + " fresh / " + tokenStr + " w/cache | 7d " + formatCost(weekCost);
   usageRail.className = "rail-chip " + (Math.max(cost, weekCost) >= 1 ? "warn" : "ok");
-  usageRail.title = "Open usage panel. Session input " + formatTokens(session.inputTokens || 0) + ", output " + formatTokens(session.outputTokens || 0) + ". Rolling 7-day total " + formatTokens(week.totalTokens || 0) + " tokens, " + formatCost(weekCost) + ".";
+  usageRail.title = "Open usage panel. Session cost " + costStr + ": fresh input " + formatTokens(session.inputTokens || 0) + ", output " + formatTokens(session.outputTokens || 0) + ", cache writes " + formatTokens(session.cacheCreateTokens || 0) + "; plus " + formatTokens(session.cacheReadTokens || 0) + " cache reads billed at ~10% of the input rate. Rolling 7-day cost " + formatCost(weekCost) + " (" + formatTokens(week.totalTokens || 0) + " tokens incl. cache).";
   renderUsagePanel(session, week, lastState.recentUsageRecords || []);
 }
 function renderUsagePanel(u, weekly, records) {
@@ -1299,21 +1303,24 @@ function renderUsagePanel(u, weekly, records) {
   const rows = records || [];
   usagePanelCount.textContent = (summary.turns || 0) + " session turns / " + (week.turns || 0) + " 7d turns";
   usageSummary.innerHTML = "";
+  // Why cost-first: cache reads are billed at ~10% of the input rate, so the
+  // raw cache-inclusive total is not the headline — cost is. The total stays
+  // visible but labeled for what it is.
   usageSummary.append(
-    usageStat(formatTokens(summary.totalTokens || 0), "session tokens"),
     usageStat(formatCost(summary.costUsd || 0), "session cost"),
-    usageStat(formatTokens(week.totalTokens || 0), "7d tokens"),
     usageStat(formatCost(week.costUsd || 0), "7d cost"),
     usageStat(formatTokens(summary.inputTokens || 0), "fresh input"),
     // Why: usageFromCodexSummary folds reasoning into outputTokens already; Claude reports reasoningTokens=0. Adding them here double-counts Codex reasoning.
-    usageStat(formatTokens(summary.outputTokens || 0), "output + reasoning")
+    usageStat(formatTokens(summary.outputTokens || 0), "output + reasoning"),
+    usageStat(formatTokens(summary.cacheReadTokens || 0), "cache read (~10% rate)"),
+    usageStat(formatTokens(summary.cacheCreateTokens || 0), "cache write")
   );
   const agents = summary.byAgent || {};
   usageSummary.append(
     usageStat(agentUsageLabel("codex", agents.codex), "codex"),
     usageStat(agentUsageLabel("claude", agents.claude), "claude"),
-    usageStat(formatTokens(summary.cacheReadTokens || 0), "cache read"),
-    usageStat(formatTokens(summary.cacheCreateTokens || 0), "cache write")
+    usageStat(formatTokens(summary.totalTokens || 0), "total incl. cache"),
+    usageStat(formatTokens(week.totalTokens || 0), "7d total incl. cache")
   );
   usageBoard.classList.remove("hidden");
   usageBoard.innerHTML = "";

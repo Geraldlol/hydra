@@ -3152,8 +3152,10 @@ export class HydraRoomPanel {
         ? { ...completedAgentCallTrace(traceId, agent, phase, "oneShot", startedAt, normalized), kind: traceKind }
         : completedAgentCallTrace(traceId, agent, phase, "oneShot", startedAt, normalized)
     );
-    const usageResult = prepared.outputMode === "plain" ? normalized : result;
-    await this.extractAndRecordUsage({ agent, phase, requestId: traceId, result: usageResult, outputMode: prepared.outputMode });
+    // Why: usage must parse the RAW stdout. normalizeOneShotResult swaps in
+    // the --output-last-message reply text for plain Codex, which drops the
+    // trailing "tokens used" footer and silently disabled Codex usage rows.
+    await this.extractAndRecordUsage({ agent, phase, requestId: traceId, result, outputMode: prepared.outputMode });
     return normalized;
   }
 
@@ -4084,18 +4086,25 @@ export class HydraRoomPanel {
       }
     }
     if (agent === "codex") {
-      const total = parseCodexTextTokens(result.stdout);
+      // Why: `codex exec` prints the "tokens used" footer to STDERR (stdout
+      // carries only the agent reply); parsing stdout alone never matched, so
+      // plain Codex turns recorded no usage row. Terminal-bridge merges the raw
+      // log into stdout, so concatenating both covers oneShot and bridge.
+      const total = parseCodexTextTokens(`${result.stdout}\n${result.stderr}`);
       if (total !== undefined && total > 0) {
-        // Plain-text Codex doesn't split input vs output; bill conservatively
-        // as output to avoid undercounting cost. User can refine with
-        // hydraRoom.modelPrices if they want a blended rate.
+        // Why: the plain-text footer is the session TOTAL (input + cached +
+        // output + reasoning) with no split. Agentic sessions are dominated
+        // by (cached) input, so billing the whole total as output inflated
+        // the cost estimate ~8x (gpt-5.5: $10/MTok out vs $1.25/MTok in).
+        // Bill at the input rate instead; enable hydraRoom.codexJson for
+        // exact splits from turn.completed events.
         await this.recordUsage({
           agent,
           phase,
           requestId,
           model,
           source: "codexTextTokens",
-          tokens: { inputTokens: 0, outputTokens: total, cacheReadTokens: 0, cacheCreateTokens: 0, reasoningTokens: 0 },
+          tokens: { inputTokens: total, outputTokens: 0, cacheReadTokens: 0, cacheCreateTokens: 0, reasoningTokens: 0 },
         });
       }
     }

@@ -228,6 +228,69 @@ describe("live streaming source contracts", () => {
   });
 });
 
+describe("usage tracker source contracts", () => {
+  test("one-shot usage extraction parses the RAW result, not the normalized one", () => {
+    // Why: normalizeOneShotResult swaps stdout for the --output-last-message
+    // reply text on plain Codex runs. That text has no trailing "tokens used"
+    // footer, so passing the normalized result to extractAndRecordUsage
+    // silently disabled Codex usage tracking (zero codex rows in usage.jsonl
+    // since May 2026 while claude rows kept flowing).
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    const methodStart = source.indexOf("private async runOneShotPipeline(");
+    const methodEnd = source.indexOf("private autoAdvanceExplainer(", methodStart);
+    assert.ok(methodStart >= 0 && methodEnd > methodStart, "could not bound runOneShotPipeline body");
+    const method = source.slice(methodStart, methodEnd);
+    assert.match(method, /await this\.extractAndRecordUsage\(\{ agent, phase, requestId: traceId, result, outputMode: prepared\.outputMode \}\)/);
+    assert.doesNotMatch(method, /usageResult/);
+  });
+
+  test("plain-text Codex token totals are billed at the input rate, not the output rate", () => {
+    // Why: the "tokens used" footer is the session TOTAL (input + cached +
+    // output + reasoning) with no split. Agentic sessions are dominated by
+    // (cached) input, so billing the whole total as output inflated the cost
+    // estimate roughly 8x (gpt-5.5: $10/MTok out vs $1.25/MTok in).
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    const methodStart = source.indexOf("private async extractAndRecordUsage(");
+    const methodEnd = source.indexOf("private async buildNextPromptPreviewEnvelope(", methodStart);
+    assert.ok(methodStart >= 0 && methodEnd > methodStart, "could not bound extractAndRecordUsage body");
+    const method = source.slice(methodStart, methodEnd);
+    assert.match(method, /tokens: \{ inputTokens: total, outputTokens: 0, cacheReadTokens: 0, cacheCreateTokens: 0, reasoningTokens: 0 \}/);
+    assert.doesNotMatch(method, /inputTokens: 0, outputTokens: total/);
+    // Why: `codex exec` prints the "tokens used" footer to STDERR; scanning
+    // stdout alone is the exact silent-zero-rows bug class this fix closes.
+    assert.match(method, /parseCodexTextTokens\(`\$\{result\.stdout\}\\n\$\{result\.stderr\}`\)/);
+  });
+
+  test("plain-text Codex usage parses stderr, where `codex exec` prints the footer", () => {
+    // Why: `codex exec` writes the "tokens used" footer to STDERR; stdout
+    // carries only the agent reply. Passing the raw result was necessary but
+    // not sufficient — parsing result.stdout alone still matched nothing, so
+    // plain Codex turns recorded zero usage rows. Confirmed empirically:
+    // stdout="OK", stderr contained "tokens used\n15,607".
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    const methodStart = source.indexOf("private async extractAndRecordUsage(");
+    const methodEnd = source.indexOf("private async buildNextPromptPreviewEnvelope(", methodStart);
+    const method = source.slice(methodStart, methodEnd);
+    assert.match(method, /parseCodexTextTokens\(`\$\{result\.stdout\}\\n\$\{result\.stderr\}`\)/);
+    assert.doesNotMatch(method, /parseCodexTextTokens\(result\.stdout\)/);
+  });
+
+  test("usage display leads with cost and labels the cache-inflated total honestly", () => {
+    // Why: totalTokens lumps cache reads (billed at ~10% of the input rate)
+    // with fresh tokens — a 309K "total" turn is ~75K real tokens / $0.65.
+    // The rail chip must lead with cost, and the panel must label the raw
+    // total as cache-inclusive instead of presenting it as the headline.
+    const source = fs.readFileSync(path.join(process.cwd(), "media", "webview.js"), "utf8");
+    assert.match(source, /usageRail\.textContent = "session " \+ \(session\.turns \|\| 0\) \+ "t " \+ costStr \+ " · " \+ formatTokens\(fresh\) \+ " fresh \/ " \+ tokenStr \+ " w\/cache/);
+    const costIdx = source.indexOf('"session cost"');
+    const totalIdx = source.indexOf('"total incl. cache"');
+    assert.ok(costIdx >= 0, "usage panel must keep a session cost stat");
+    assert.ok(totalIdx >= 0, "usage panel must label the raw total as cache-inclusive");
+    assert.ok(costIdx < totalIdx, "session cost must render before the cache-inclusive total");
+    assert.doesNotMatch(source, /usageStat\(formatTokens\(summary\.totalTokens \|\| 0\), "session tokens"\)/);
+  });
+});
+
 describe("workspace edit viewer source contracts", () => {
   const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
 
