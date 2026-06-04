@@ -55,6 +55,7 @@ import {
 } from "./capabilityProfiles";
 import { buildCommandCenterActions, type CommandCenterActionId, type CommandCenterWikiStatus } from "./commandCenter";
 import { shouldAutoSkipCloserOnAgreement } from "./closerSkip";
+import { createLiveTextExtractor } from "./liveText";
 import {
   appendDecision,
   decisionHasNoUserBlockers,
@@ -352,7 +353,6 @@ interface PreparedOneShotSpawn {
   replyPath?: string;
   logPath?: string;
   outputMode: "plain" | "claudeStreamJson" | "codexJson";
-  suppressLiveStdout: boolean;
 }
 
 interface QueuedUserMessage {
@@ -3110,9 +3110,14 @@ export class HydraRoomPanel {
       requestFiles: requestFileTrace(prepared),
       outputMode: prepared.outputMode,
     });
+    // claudeStreamJson/codexJson stdout is typed JSONL, not displayable text -
+    // extract assistant-text increments and stream those to the webview while
+    // the call runs. The normalized result still replaces the streamed text at
+    // completion via onReplaceText, so live text is cosmetic-only.
+    const liveText = createLiveTextExtractor(prepared.outputMode);
     const result = await runAgent(spawn, prompt, timeout, (chunk) => {
-      if (prepared.suppressLiveStdout) return;
-      onChunk?.(chunk);
+      const text = liveText ? liveText.push(chunk) : chunk;
+      if (text) onChunk?.(text);
     }, signal);
     const normalized = await this.normalizeOneShotResult(prepared, result);
     if (prepared.outputMode === "claudeStreamJson") {
@@ -3526,19 +3531,43 @@ export class HydraRoomPanel {
           promptSha256,
           outputMode: terminalPrepared.outputMode,
         });
+        // JSON-mode bridge logs are typed JSONL - extract assistant-text
+        // increments for live display, then REPLACE with the authoritative
+        // normalized reply at completion (streamed text is cosmetic-only).
+        // Plain mode deliberately passes NO chunk callback: the ANSI-stripped
+        // log stream and the raw reply.text are not byte-identical, so
+        // waitForReply's unstreamedTail de-dup can diverge and double-render
+        // the reply into the transcript - keep the pre-streaming single
+        // append for that mode.
+        const liveText = createLiveTextExtractor(terminalPrepared.outputMode);
+        const onLiveChunk = liveText
+          ? (chunk: string) => {
+              const text = liveText.push(chunk);
+              if (!text) return;
+              const live = this.messagesById.get(messageId);
+              if (live) live.text += text;
+              this.panel.webview.postMessage({ type: "chunk", messageId, text });
+            }
+          : undefined;
         const result = await this.terminalBridge.callAgent(
           agent,
           phase,
           terminalPrepared.spawn,
           prompt,
           timeout,
-          signal
+          signal,
+          onLiveChunk
         );
         const normalized = await this.normalizeTerminalBridgeResult(terminalPrepared.outputMode, result);
         const m = this.messagesById.get(messageId);
         if (m && normalized.stdout) {
-          m.text += normalized.stdout;
-          this.panel.webview.postMessage({ type: "chunk", messageId, text: normalized.stdout });
+          if (terminalPrepared.outputMode === "plain") {
+            m.text += normalized.stdout;
+            this.panel.webview.postMessage({ type: "chunk", messageId, text: normalized.stdout });
+          } else {
+            m.text = normalized.stdout;
+            this.panel.webview.postMessage({ type: "replaceMessageText", messageId, text: normalized.stdout });
+          }
         }
         this.recordRunFailureCard(messageId, {
           id: traceId,
@@ -3628,9 +3657,6 @@ export class HydraRoomPanel {
       return {
         spawn: preparedSpawn,
         outputMode,
-        // codexJson stdout is JSONL noise on its own; suppress live render
-        // and let normalizeOneShotResult substitute the final agent message.
-        suppressLiveStdout: claudeStreamJson || codexJson,
       };
     }
     const requestId = `${Date.now()}-${crypto.randomUUID()}`;
@@ -3655,7 +3681,6 @@ export class HydraRoomPanel {
       replyPath: paths.replyPath,
       logPath: paths.logPath,
       outputMode,
-      suppressLiveStdout: claudeStreamJson || codexJson,
     };
   }
 

@@ -180,6 +180,54 @@ describe("terminal bridge usage source contracts", () => {
   });
 });
 
+describe("live streaming source contracts", () => {
+  test("one-shot pipeline streams extracted live text instead of swallowing JSONL chunks", () => {
+    // Why: claudeStreamJson/codexJson stdout is typed JSONL, not displayable
+    // text. The old behavior suppressed ALL live chunks for those modes, so
+    // the webview showed a static placeholder for the entire call (p50 ~60s
+    // per discussion leg). Chunks must route through createLiveTextExtractor
+    // so assistant-text increments stream into the bubble while the call runs;
+    // the normalized result still replaces the streamed text at completion.
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    assert.match(source, /import \{ createLiveTextExtractor \} from "\.\/liveText"/);
+    assert.doesNotMatch(source, /suppressLiveStdout/);
+
+    const methodStart = source.indexOf("private async runOneShotPipeline(");
+    const methodEnd = source.indexOf("private autoAdvanceExplainer(", methodStart);
+    assert.ok(methodStart >= 0 && methodEnd > methodStart, "could not bound runOneShotPipeline body");
+    const method = source.slice(methodStart, methodEnd);
+    assert.match(method, /createLiveTextExtractor\(prepared\.outputMode\)/);
+    assert.doesNotMatch(method, /if \(prepared\.suppressLiveStdout\) return;/);
+  });
+
+  test("terminal bridge call site forwards live chunks for JSON modes and replaces with the normalized reply", () => {
+    // Why: terminalBridge.callAgent has supported a live onChunk feed (the
+    // .hydra/logs poll) since the bridge landed, but the panel call site
+    // omitted it, discarding the feed - the webview stayed a placeholder for
+    // the whole run. The call site must pass a chunk callback for JSON output
+    // modes, and because JSON-mode streamed text is interim/cosmetic, the
+    // authoritative normalized reply must REPLACE it at completion. Plain
+    // mode must NOT pass a callback: passing onChunk flips waitForReply's
+    // stdout to unstreamedTail(reply.text, streamed), whose byte-sensitive
+    // de-dup diverges when the agent emits ANSI (stripped from the streamed
+    // log but not from reply.text) and double-renders the reply into the
+    // transcript.
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    const branchStart = source.indexOf("if (forceTerminalBridge || this.transportMode() === \"terminalBridge\")");
+    const branchEnd = source.indexOf("const prepared = await this.prepareOneShotRequestFiles", branchStart);
+    assert.ok(branchStart >= 0 && branchEnd > branchStart);
+
+    const branch = source.slice(branchStart, branchEnd);
+    assert.match(branch, /createLiveTextExtractor\(terminalPrepared\.outputMode\)/);
+    // The callback must exist only when an extractor exists (JSON modes).
+    assert.match(branch, /const onLiveChunk = liveText\s*\?\s*\(chunk: string\) =>/);
+    assert.match(branch, /:\s*undefined/);
+    assert.match(branch, /onLiveChunk/);
+    assert.match(branch, /type: "chunk"/);
+    assert.match(branch, /type: "replaceMessageText"/);
+  });
+});
+
 describe("workspace edit viewer source contracts", () => {
   const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
 
