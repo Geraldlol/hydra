@@ -3921,7 +3921,7 @@ export class HydraRoomPanel {
     const renderedPrompt = buildDirectTerminalPokePrompt({
       agent,
       otherAgent: other,
-      roomContext: this.buildPromptContext(phase, "terminalBridge", agent),
+      roomContext: this.buildPromptContext(phase, "terminalBridge", agent, "terminalPoke"),
       instruction,
       editorContext,
       workspaceDiff,
@@ -4413,17 +4413,19 @@ export class HydraRoomPanel {
   private buildPromptContext(
     phase: Phase,
     transport: "oneShot" | "terminalBridge" = this.transportMode(),
-    agent?: AgentId
+    agent?: AgentId,
+    use: "room" | "terminalPoke" = "room"
   ): string {
-    return this.buildPromptContextSnapshot(phase, transport, agent).text;
+    return this.buildPromptContextSnapshot(phase, transport, agent, use).text;
   }
 
   private buildPromptContextSnapshot(
     phase: Phase,
     transport: "oneShot" | "terminalBridge" = this.transportMode(),
-    agent?: AgentId
+    agent?: AgentId,
+    use: "room" | "terminalPoke" = "room"
   ): PromptContextSnapshot {
-    return this.buildPromptContextSnapshotFromMessages(this.messages, phase, transport, agent);
+    return this.buildPromptContextSnapshotFromMessages(this.messages, phase, transport, agent, use);
   }
 
   private buildPromptContextSnapshotForCurrentTurn(
@@ -4449,18 +4451,20 @@ export class HydraRoomPanel {
     messages: TranscriptMessage[],
     phase: Phase,
     transport: "oneShot" | "terminalBridge" = this.transportMode(),
-    agent?: AgentId
+    agent?: AgentId,
+    use: "room" | "terminalPoke" = "room"
   ): string {
-    return this.buildPromptContextSnapshotFromMessages(messages, phase, transport, agent).text;
+    return this.buildPromptContextSnapshotFromMessages(messages, phase, transport, agent, use).text;
   }
 
   private buildPromptContextSnapshotFromMessages(
     messages: TranscriptMessage[],
     phase: Phase,
     transport: "oneShot" | "terminalBridge" = this.transportMode(),
-    agent?: AgentId
+    agent?: AgentId,
+    use: "room" | "terminalPoke" = "room"
   ): PromptContextSnapshot {
-    const contextTitle = transport === "terminalBridge"
+    const contextTitle = use === "terminalPoke"
       ? "--- Current terminal poke transcript ---"
       : "--- Full transcript ---";
     const workspaceInstructionsMaxChars = transport === "terminalBridge"
@@ -4486,7 +4490,7 @@ export class HydraRoomPanel {
     if (wikiContext) {
       sections.push("", wikiContext.markdown);
     }
-    const transcriptCap = transport === "terminalBridge" ? 0 : this.promptTranscriptMaxChars(phase);
+    const transcriptCap = use === "terminalPoke" ? 0 : this.promptTranscriptMaxChars(phase);
     const transcriptWindow = buildPromptContextWindow(
       messages,
       phase,

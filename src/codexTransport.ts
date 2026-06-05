@@ -33,7 +33,7 @@ export function withCodexLastMessageArgs(spawn: AgentSpawn, replyPath: string): 
 export function shouldUseCodexJson(spawn: AgentSpawn): boolean {
   if (spawn.args[0] !== "exec") return false;
   if (spawn.args.includes("--json") || spawn.args.includes("--experimental-json")) return false;
-  return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("codexJson", false);
+  return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("codexJson", true);
 }
 
 export function withCodexJsonArgs(spawn: AgentSpawn): AgentSpawn {

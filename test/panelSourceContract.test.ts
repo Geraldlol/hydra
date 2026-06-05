@@ -109,19 +109,20 @@ describe("terminal bridge usage source contracts", () => {
     assert.match(method, /workspaceInstructionsAsContext\(workspaceInstructions, \{ maxChars: workspaceInstructionsMaxChars \}\)/);
   });
 
-  test("prompt transcript cap resolves by phase and leaves terminal pokes unwindowed", () => {
+  test("prompt transcript cap resolves by phase and only leaves direct terminal pokes unwindowed", () => {
     const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
     const methodStart = source.indexOf("private buildPromptContextSnapshotFromMessages(");
     const methodEnd = source.indexOf("private oneShotWorkspaceInstructionsMaxChars(", methodStart);
     assert.ok(methodStart >= 0 && methodEnd > methodStart);
 
     const method = source.slice(methodStart, methodEnd);
-    assert.match(method, /const transcriptCap = transport === "terminalBridge" \? 0 : this\.promptTranscriptMaxChars\(phase\)/);
+    assert.match(method, /const transcriptCap = use === "terminalPoke" \? 0 : this\.promptTranscriptMaxChars\(phase\)/);
     assert.match(method, /buildPromptContextWindow\(/);
     assert.match(source, /function promptTranscriptScope\(phase: Phase\)/);
     assert.match(source, /effectivePhasedNumberSetting\(raw, scope, fallback\)/);
     assert.match(source, /wikiContextRefreshTranscriptMaxChars/);
     assert.match(source, /ONE_SHOT_WORKSPACE_INSTRUCTIONS_MAX_CHARS_DEFAULTS/);
+    assert.match(source, /roomContext: this\.buildPromptContext\(phase, "terminalBridge", agent, "terminalPoke"\)/);
   });
 
   test("model and effort choosers write application-scoped settings globally", () => {
