@@ -38,6 +38,18 @@ const API_KEY_PATTERN = /api[ _-]?key/i;
 const SUBSCRIPTION_AUTH_PATTERN = /claude\.?ai/i;
 
 /**
+ * Argv for Hydra's sanitized Claude auth probe. We request `--json` so
+ * parseClaudeAuthStatus gets structured fields rather than scraping human text.
+ *
+ * Verified on this install: `claude auth status --json` returns structured
+ * fields including loggedIn/authMethod/apiProvider/subscriptionType. If a future
+ * CLI build changes that surface, parseClaudeAuthStatus returns undefined, so
+ * the guard treats auth as unknown (non-subscription -> allow) rather than
+ * misbehaving.
+ */
+export const CLAUDE_AUTH_STATUS_PROBE_ARGS: readonly string[] = ["auth", "status", "--json"];
+
+/**
  * Extract only the four non-sensitive scalar fields from a parsed
  * `claude auth status` payload and derive the two auth-class booleans. Any
  * other field (email/orgId/orgName/unknowns) is never copied out, so the

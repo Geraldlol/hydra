@@ -86,8 +86,8 @@ export function sessionCostCapUsd(): number {
 }
 
 // Why NOT scope:"application": these two only feed Hydra's own cost/decision
-// logic — they inject into no spawn/exec/env/PATH/terminal/webhook/Telegram
-// path — so they follow the sessionCostCapUsd precedent as window/resource
+// logic - they inject into no spawn/exec/env/PATH/terminal/webhook/Telegram
+// path - so they follow the sessionCostCapUsd precedent as window/resource
 // scoped settings and stay out of TRUST_SCOPED_SETTINGS.
 export function claudeAutomationCreditGuard(): ClaudeAutomationGuardMode {
   const raw = vscode.workspace.getConfiguration("hydraRoom").get<string>("claudeAutomationCreditGuard", "warn");

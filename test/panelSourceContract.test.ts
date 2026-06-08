@@ -292,6 +292,66 @@ describe("usage tracker source contracts", () => {
   });
 });
 
+describe("claude automation credit guard source contract", () => {
+  test("callAgent gates Claude dispatch through the credit guard before any spawn", () => {
+    // Why: subscription-backed `claude -p` draws from the capped Agent SDK
+    // credit pool after 2026-06-15. The guard MUST run before runAgentTransport
+    // so a `block` decision prevents spend, not merely stops auto-advance after
+    // the spend already happened. A regression that moves the gate below the
+    // spawn would re-open exactly the hole Slice 3 closes.
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    const methodStart = source.indexOf("private async callAgent(");
+    const methodEnd = source.indexOf("private async ensureFullNativeConsent(", methodStart);
+    assert.ok(methodStart >= 0 && methodEnd > methodStart, "could not bound callAgent body");
+    const method = source.slice(methodStart, methodEnd);
+
+    assert.match(method, /if \(agent === "claude"\)/);
+    const guardIdx = method.indexOf("await this.evaluateClaudeCreditGuard(");
+    const timeoutIdx = method.indexOf("agentTimeoutMs(phase)");
+    const transportIdx = method.indexOf("this.runAgentTransport(");
+    assert.ok(guardIdx >= 0, "callAgent must evaluate the Claude credit guard");
+    assert.ok(timeoutIdx > guardIdx, "the credit guard must run before the spawn timeout/pending activity");
+    assert.ok(transportIdx > guardIdx, "the credit guard must run before runAgentTransport");
+
+    // The block branch cancels the turn and finalizes the pending bubble
+    // without ever reaching the transport.
+    assert.match(method, /guard\?\.decision === "block"/);
+    assert.match(method, /event: "claudeCreditGuardBlocked"/);
+    assert.match(method, /cancelled: true/);
+    assert.match(method, /await this\.finalizePendingMessage\(messageId, result\)/);
+    assert.match(method, /guard\?\.decision === "warn"/);
+  });
+
+  test("the credit guard composes monthly Claude spend with the pure decision and short-circuits when off", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    const methodStart = source.indexOf("private async evaluateClaudeCreditGuard(");
+    const methodEnd = source.indexOf("private buildPromptContext(", methodStart);
+    assert.ok(methodStart >= 0 && methodEnd > methodStart, "could not bound evaluateClaudeCreditGuard body");
+    const method = source.slice(methodStart, methodEnd);
+
+    // Off means the user opted out: skip the auth probe overhead entirely.
+    assert.match(method, /if \(mode === "off"\) return undefined/);
+    assert.match(method, /claudeAutomationCreditGuard\(\)/);
+    assert.match(method, /claudeAutomationSpendThisMonth\(this\.usageRecords\)/);
+    assert.match(method, /capUsd: claudeAgentCreditCapUsd\(\)/);
+    assert.match(method, /evaluateClaudeAutomationGuard\(\{/);
+  });
+
+  test("the auth probe requests JSON, sanitizes at capture time, and caches per session", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    const methodStart = source.indexOf("private async ensureClaudeAuthStatus(");
+    const methodEnd = source.indexOf("private async evaluateClaudeCreditGuard(", methodStart);
+    assert.ok(methodStart >= 0 && methodEnd > methodStart, "could not bound ensureClaudeAuthStatus body");
+    const method = source.slice(methodStart, methodEnd);
+
+    assert.match(method, /if \(this\.claudeAuthProbed\) return this\.claudeAuthStatus/);
+    assert.match(method, /buildNativeCommandSpawn\("claude", \[\.\.\.CLAUDE_AUTH_STATUS_PROBE_ARGS\]\)/);
+    // Sanitization happens at capture time via parseClaudeAuthStatus (drops
+    // email/orgId/orgName), so the cached field is never raw auth JSON.
+    assert.match(method, /parseClaudeAuthStatus\(result\.stdout\)/);
+  });
+});
+
 describe("workspace edit viewer source contracts", () => {
   const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
 

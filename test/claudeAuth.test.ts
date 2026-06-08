@@ -4,6 +4,7 @@ import {
   sanitizeClaudeAuthStatus,
   parseClaudeAuthStatus,
   evaluateClaudeAutomationGuard,
+  CLAUDE_AUTH_STATUS_PROBE_ARGS,
 } from "../src/claudeAuth";
 
 // Why: this machine's real `claude auth status` JSON shape, captured during the
@@ -87,6 +88,34 @@ describe("sanitizeClaudeAuthStatus", () => {
       assert.equal(safe.isApiKey, false);
       assert.equal(safe.loggedIn, undefined);
     }
+  });
+});
+
+describe("CLAUDE_AUTH_STATUS_PROBE_ARGS", () => {
+  test("probes auth status in JSON so the sanitized parser has structured fields", () => {
+    // Slice 3 spawns `claude auth status --json` and feeds stdout to
+    // parseClaudeAuthStatus. Pinning the argv keeps the probe and the parser
+    // (which assumes JSON) in lockstep.
+    assert.deepEqual([...CLAUDE_AUTH_STATUS_PROBE_ARGS], ["auth", "status", "--json"]);
+  });
+});
+
+describe("evaluateClaudeAutomationGuard fail-open on unknown auth", () => {
+  test("an unparseable/failed auth probe is treated as non-subscription and allowed", () => {
+    // Why: Slice 3's dispatch wiring passes an empty status when
+    // `claude auth status --json` cannot be parsed (binary missing, flag
+    // unsupported, timeout). That MUST resolve to allow - a probe hiccup must
+    // never strand a legitimate Claude turn, even in the hardest block mode
+    // over the cap. The cost guard only engages on a *confirmed* subscription.
+    const unknown = sanitizeClaudeAuthStatus(undefined);
+    const result = evaluateClaudeAutomationGuard({
+      mode: "blockClaudeAutomation",
+      capUsd: 200,
+      monthSpendUsd: 99999,
+      status: unknown,
+      manyHeads: true,
+    });
+    assert.equal(result.decision, "allow");
   });
 });
 

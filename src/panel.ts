@@ -136,6 +136,7 @@ import {
   appendUsageRecord,
   boundUsageRecords,
   buildUsageRecord,
+  claudeAutomationSpendThisMonth,
   coerceModelPrices,
   DEFAULT_PRICES,
   loadUsageRecords,
@@ -167,6 +168,8 @@ import {
   autoRequestReviewAfterPassingVerification,
   autoSkipCloserOnAgreement,
   autoVerifyAfterBuild,
+  claudeAgentCreditCapUsd,
+  claudeAutomationCreditGuard,
   diagnosticRetentionDays,
   diffMaxLines,
   discussionMode,
@@ -187,6 +190,13 @@ import {
   wikiWrapupTimeoutMs,
 } from "./roomSettings";
 import { modelForPhase, withEffortArgs, withModelArgs } from "./agentArgs";
+import {
+  CLAUDE_AUTH_STATUS_PROBE_ARGS,
+  evaluateClaudeAutomationGuard,
+  parseClaudeAuthStatus,
+  type ClaudeAuthStatus,
+  type ClaudeAutomationGuardResult,
+} from "./claudeAuth";
 import type { WebviewMessage } from "./webviewMessages";
 import {
   attachmentDisplaySummary,
@@ -479,6 +489,12 @@ export class HydraRoomPanel {
   private usageRecords: UsageRecord[] = [];
   private sessionUsage: UsageSummary | undefined;
   private weeklyUsage: UsageSummary | undefined;
+  // Claude Agent SDK credit guard (Slice 3): the sanitized auth probe result is
+  // cached for the session (auth class rarely changes mid-session), and the
+  // over-cap warning fires once so warn mode does not spam every Claude turn.
+  private claudeAuthStatus: ClaudeAuthStatus | undefined;
+  private claudeAuthProbed = false;
+  private claudeCreditWarned = false;
   private codexModelsUri!: vscode.Uri;
   private codexModelsSnapshot: CodexModelsSnapshot | undefined;
   private terminalBridge: TerminalBridge | undefined;
@@ -3380,6 +3396,37 @@ export class HydraRoomPanel {
     signal: AbortSignal,
     forceTerminalBridge = false
   ): Promise<{ text: string; result: RunResult }> {
+    // Claude Agent SDK credit guard: evaluate BEFORE any spawn (timeout/pending
+    // activity, consent, transport) so a `block` decision prevents
+    // subscription-credit spend instead of only stopping auto-advance after the
+    // spend already happened. Only Claude dispatch draws from that pool.
+    if (agent === "claude") {
+      const guard = await this.evaluateClaudeCreditGuard(signal);
+      if (guard?.decision === "block") {
+        await this.appendAgentCallTrace({
+          id: makeTraceId(agent, phase),
+          event: "claudeCreditGuardBlocked",
+          timestamp: new Date().toISOString(),
+          agent,
+          phase,
+          transport: this.transportMode(),
+          promptChars: prompt.length,
+          promptSha256: sha256(prompt),
+          reason: guard.reason,
+        });
+        await this.appendSystemMessage(
+          `Hydra blocked the Claude ${phase} call to protect the Agent SDK credit pool: ${guard.reason}`
+        );
+        const result: RunResult = { stdout: "", stderr: guard.reason, exitCode: null, timedOut: false, cancelled: true };
+        await this.finalizePendingMessage(messageId, result);
+        const finalized = this.messagesById.get(messageId);
+        return { text: finalized?.text ?? "", result };
+      }
+      if (guard?.decision === "warn" && !this.claudeCreditWarned) {
+        this.claudeCreditWarned = true;
+        await this.appendSystemMessage(`Hydra Claude automation credit warning: ${guard.reason}`);
+      }
+    }
     const timeout = agentTimeoutMs(phase);
     const stopActivity = this.startPendingActivity(messageId, agent, phase, timeout);
     let spawn: AgentSpawn;
@@ -4410,6 +4457,51 @@ export class HydraRoomPanel {
     const cap = sessionCostCapUsd();
     if (cap <= 0) return false;
     return (this.sessionUsage?.costUsd ?? 0) >= cap;
+  }
+
+  /**
+   * Probe `claude auth status --json` once per session and cache the SANITIZED
+   * result. Sanitization happens at capture time (parseClaudeAuthStatus drops
+   * email/orgId/orgName), so the cached field never holds raw auth JSON. A
+   * failed/unparseable probe leaves the status undefined; the guard then treats
+   * auth as unknown (non-subscription -> allow) rather than stranding the turn.
+   */
+  private async ensureClaudeAuthStatus(signal: AbortSignal): Promise<ClaudeAuthStatus | undefined> {
+    if (this.claudeAuthProbed) return this.claudeAuthStatus;
+    this.claudeAuthProbed = true;
+    try {
+      const spawn = await this.buildNativeCommandSpawn("claude", [...CLAUDE_AUTH_STATUS_PROBE_ARGS]);
+      const result = await runAgent(spawn, "", 30000, () => {}, signal);
+      // Some CLI builds print status to stdout, others to stderr; try both.
+      this.claudeAuthStatus = parseClaudeAuthStatus(result.stdout) ?? parseClaudeAuthStatus(result.stderr);
+    } catch {
+      // Probe failure (binary missing, --json unsupported, timeout, abort):
+      // leave auth class unknown so the credit guard fails open.
+      this.claudeAuthStatus = undefined;
+    }
+    return this.claudeAuthStatus;
+  }
+
+  /**
+   * Evaluate the Claude Agent SDK credit guard for a pending Claude dispatch.
+   * Returns undefined when no action is needed (guard off). `mode === "off"`
+   * short-circuits before the auth probe so opting out also skips its overhead.
+   */
+  private async evaluateClaudeCreditGuard(
+    signal: AbortSignal,
+    manyHeads = false
+  ): Promise<ClaudeAutomationGuardResult | undefined> {
+    const mode = claudeAutomationCreditGuard();
+    if (mode === "off") return undefined;
+    const status = (await this.ensureClaudeAuthStatus(signal)) ?? { isApiKey: false, isSubscription: false };
+    const monthSpendUsd = claudeAutomationSpendThisMonth(this.usageRecords);
+    return evaluateClaudeAutomationGuard({
+      mode,
+      capUsd: claudeAgentCreditCapUsd(),
+      monthSpendUsd,
+      status,
+      manyHeads,
+    });
   }
 
   private buildPromptContext(
