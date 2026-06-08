@@ -178,6 +178,7 @@ import {
   preferTerminalBridgeOnStart,
   promptBodyRetentionDays,
   manyHeadsMode,
+  manyHeadsClaudeWorkerCount,
   sessionCostCapUsd,
   telegramConfig,
   terminalBridgeTimeoutMs,
@@ -199,6 +200,11 @@ import {
   type ClaudeAuthStatus,
   type ClaudeAutomationGuardResult,
 } from "./claudeAuth";
+import {
+  appendClaudeWorkerAssignment,
+  buildParallelDiscussionWorkers,
+  claudeWorkerTraceIds,
+} from "./claudeWorkers";
 import type { WebviewMessage } from "./webviewMessages";
 import {
   attachmentDisplaySummary,
@@ -2683,15 +2689,16 @@ export class HydraRoomPanel {
           }
         }
       });
-      const agents: AgentId[] = ["codex", "claude"];
-      const liveRequestIds = manyHeadsMode() && this.transportMode() === "oneShot"
-        ? {
-            codex: makeTraceId("codex", "parallel"),
-            claude: makeTraceId("claude", "parallel"),
-          } satisfies Record<AgentId, string>
-        : undefined;
+      const workers = buildParallelDiscussionWorkers({
+        manyHeads: manyHeadsMode(),
+        transport: this.transportMode(),
+        claudeWorkerCount: manyHeadsClaudeWorkerCount(),
+        makeTraceId,
+      });
+      const claudeLiveRequestIds = claudeWorkerTraceIds(workers);
       const calls: Promise<{ text: string; result: RunResult }>[] = [];
-      for (const agent of agents) {
+      for (const worker of workers) {
+        const agent = worker.agent;
         const context = this.buildPromptContextSnapshotForCurrentTurn(
           "parallel",
           agent,
@@ -2699,9 +2706,10 @@ export class HydraRoomPanel {
           displayUserMessage,
           currentUserTimestamp
         );
-        const transcript = agent === "codex" && liveRequestIds
-          ? appendManyHeadsLiveChannelContext(context.text, this.workspaceRoot, liveRequestIds.claude)
+        const transcriptWithLiveChannels = agent === "codex" && claudeLiveRequestIds.length > 0
+          ? appendManyHeadsLiveChannelContext(context.text, this.workspaceRoot, claudeLiveRequestIds)
           : context.text;
+        const transcript = appendClaudeWorkerAssignment(transcriptWithLiveChannels, worker);
         const envelope = await this.buildPromptEnvelope({
           agent,
           otherAgent: otherAgent(agent),
@@ -2713,7 +2721,18 @@ export class HydraRoomPanel {
         const messageId = this.openPendingMessage(agent, "parallel");
         this.pendingPromptTranscriptWindows.set(messageId, context.transcriptWindow);
         openedIds.push(messageId);
-        calls.push(this.callAgent(agent, "parallel", envelope.renderedPrompt, messageId, ctrl.signal, false, liveRequestIds?.[agent]));
+        calls.push(
+          this.callAgent(
+            agent,
+            "parallel",
+            envelope.renderedPrompt,
+            messageId,
+            ctrl.signal,
+            false,
+            worker.traceIdOverride,
+            worker.manyHeadsDispatch
+          )
+        );
       }
       this.postState();
       // Once Promise.all is awaited, callAgent finalizes each bubble. Any
@@ -3426,14 +3445,15 @@ export class HydraRoomPanel {
     messageId: string,
     signal: AbortSignal,
     forceTerminalBridge = false,
-    traceIdOverride?: string
+    traceIdOverride?: string,
+    manyHeadsDispatch = false
   ): Promise<{ text: string; result: RunResult }> {
     // Claude Agent SDK credit guard: evaluate BEFORE any spawn (timeout/pending
     // activity, consent, transport) so a `block` decision prevents
     // subscription-credit spend instead of only stopping auto-advance after the
     // spend already happened. Only Claude dispatch draws from that pool.
     if (agent === "claude") {
-      const guard = await this.evaluateClaudeCreditGuard(signal);
+      const guard = await this.evaluateClaudeCreditGuard(signal, manyHeadsDispatch);
       if (guard?.decision === "block") {
         const traceId = traceIdOverride ?? makeTraceId(agent, phase);
         await this.appendAgentCallTrace({
@@ -5533,15 +5553,15 @@ function makeTraceId(agent: AgentId, phase: Phase): string {
   return `${Date.now()}-${crypto.randomBytes(3).toString("hex")}-${agent}-${phase}`;
 }
 
-function appendManyHeadsLiveChannelContext(transcript: string, workspaceRoot: string, claudeRequestId: string): string {
-  const claudeLivePath = liveChannelPath(workspaceRoot, claudeRequestId, "claude");
+function appendManyHeadsLiveChannelContext(transcript: string, workspaceRoot: string, claudeRequestIds: readonly string[]): string {
+  const claudeLivePaths = claudeRequestIds.map((requestId) => liveChannelPath(workspaceRoot, requestId, "claude"));
   return [
     transcript,
     "",
     "--- Many Heads live channel ---",
-    "Many Heads Mode is on. Claude's parallel structured stream is mirrored to this file while Claude runs:",
-    claudeLivePath,
-    "You may inspect or tail that file with your normal tools during this parallel turn. It may not exist yet when you start; retry briefly instead of treating that as a failure.",
+    "Many Heads Mode is on. Claude parallel structured streams are mirrored to these files while the Claude workers run:",
+    ...claudeLivePaths,
+    "You may inspect or tail those files with your normal tools during this parallel turn. They may not exist yet when you start; retry briefly instead of treating that as a failure.",
   ].join("\n");
 }
 

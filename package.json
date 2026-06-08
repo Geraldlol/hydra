@@ -535,7 +535,15 @@
         "hydraRoom.manyHeadsMode": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "Many Heads Mode (experimental): mirror each structured agent stream into a shared `.hydra/live/<turn>/<agent>.jsonl` channel so Codex can inspect Claude-side work while it is still streaming. Metadata/control-plane only — it does not change what is spawned or sent to the model. Off by default; these files are pruned by Hydra cleanup."
+          "markdownDescription": "Many Heads Mode (experimental): mirror each structured agent stream into a shared `.hydra/live/<turn>/<agent>.jsonl` channel so Codex can inspect Claude-side work while it is still streaming. In one-shot parallel discussion turns, Hydra launches `hydraRoom.manyHeadsClaudeWorkerCount` local subscription-backed Claude workers. Off by default; live files are pruned by Hydra cleanup."
+        },
+        "hydraRoom.manyHeadsClaudeWorkerCount": {
+          "scope": "application",
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 8,
+          "markdownDescription": "Number of local subscription-backed Claude workers to launch for Many Heads parallel discussion turns. This multiplies official Claude Code / Agent SDK dispatches and therefore Agent SDK credit usage; workspace overrides are ignored in untrusted workspaces."
         },
         "hydraRoom.nativePathPrepend": {
           "scope": "application",
@@ -1189,6 +1197,7 @@
         "hydraRoom.claudeDiscussionProfile",
         "hydraRoom.claudeBuildProfile",
         "hydraRoom.claudeReviewProfile",
+        "hydraRoom.manyHeadsClaudeWorkerCount",
         "hydraRoom.nativePathPrepend",
         "hydraRoom.nativeEnv",
         "hydraRoom.codexNativePathPrepend",

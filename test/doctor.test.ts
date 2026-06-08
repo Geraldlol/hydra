@@ -181,6 +181,7 @@ describe("Hydra Doctor", () => {
       "telegramInboundPollingEnabled",
       "telegramInboundCommandPrefix",
       "telegramInboundPollIntervalSeconds",
+      "manyHeadsClaudeWorkerCount",
       "nativeEnv",
       "codexNativeEnv",
       "claudeNativeEnv",

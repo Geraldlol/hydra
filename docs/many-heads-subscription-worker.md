@@ -78,7 +78,7 @@ remote or multi-machine worker fleet.
 
 ## Local Worker Contract
 
-Hydra should define a small internal contract before wiring fanout:
+Hydra defines a small internal contract before broadening fanout:
 
 ```ts
 interface ClaudeWorkerRequest {
@@ -113,10 +113,17 @@ interface ClaudeWorkerEvent {
 }
 ```
 
-The first implementation can be a wrapper around the current one-shot Claude
-spawn path. The important change is not the process launcher; it is that Hydra
-can launch more than one bounded Claude worker, stream each worker into a
-stable live file, and account for each worker before and after dispatch.
+The first implementation is a local wrapper around the current one-shot Claude
+spawn path for parallel discussion turns. When `hydraRoom.manyHeadsMode` is on
+and one-shot transport is active, Hydra plans one Codex worker plus
+`hydraRoom.manyHeadsClaudeWorkerCount` Claude workers. Each Claude worker still
+dispatches through `callAgent`, so the subscription credit guard runs before
+the official Claude runtime starts; each worker receives its own trace/live
+file, and Codex receives all Claude live-channel paths in its prompt.
+
+Build/review fanout can reuse the same worker contract later, but it should be a
+separate UI/state-machine slice because those phases carry editing/review
+ownership semantics beyond discussion.
 
 ## Dispatch Guard
 
@@ -128,10 +135,12 @@ Many Heads Mode must not dispatch a Claude head until the guard has evaluated:
 - `hydraRoom.claudeAgentCreditCapUsd`
 - whether this dispatch is normal Claude automation or Many Heads fanout
 
-`evaluateClaudeAutomationGuard(...)` is intentionally pure in Slice 2. Slice 3
-must wire it into the `callAgent`/worker-dispatch boundary so a block decision
-prevents spend, rather than only stopping auto-advance after spend already
-happened.
+`evaluateClaudeAutomationGuard(...)` runs at the `callAgent`/worker-dispatch
+boundary, so a block decision prevents spend before the official Claude runtime
+starts. The guard is a per-dispatch threshold check, not an in-flight
+reservation system; a fanned-out turn can overshoot the configured cap by up to
+`manyHeadsClaudeWorkerCount` worker runs before the next turn observes the new
+usage rows and blocks in the opt-in `block*` modes.
 
 ## Kubernetes Option
 

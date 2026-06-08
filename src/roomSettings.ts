@@ -16,6 +16,7 @@ import type { Phase } from "./prompts";
 import type { DiscussionMode } from "./phases";
 import type { TelegramConfig } from "./telegram";
 import { CLAUDE_AUTOMATION_GUARD_MODES, type ClaudeAutomationGuardMode } from "./claudeAuth";
+import { clampManyHeadsClaudeWorkerCount } from "./claudeWorkers";
 
 export function agentTimeoutMs(phase?: Phase): number {
   if (phase === "opener" || phase === "reactor" || phase === "closer" || phase === "parallel") {
@@ -45,6 +46,11 @@ export function autopilotOnStart(): boolean {
 // trust-scoped class.
 export function manyHeadsMode(): boolean {
   return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("manyHeadsMode", false);
+}
+
+export function manyHeadsClaudeWorkerCount(): number {
+  const raw = vscode.workspace.getConfiguration("hydraRoom").get<number>("manyHeadsClaudeWorkerCount", 3);
+  return clampManyHeadsClaudeWorkerCount(raw);
 }
 
 export function preferTerminalBridgeOnStart(): boolean {

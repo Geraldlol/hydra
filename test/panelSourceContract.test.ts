@@ -241,27 +241,35 @@ describe("live streaming source contracts", () => {
     assert.match(call, /onLiveChannelEvent: \(event\) => this\.appendMessageLiveChannelEvent\(messageId, event\)/);
   });
 
-  test("parallel Codex prompts can point at Claude's live channel", () => {
+  test("parallel Codex prompts can point at Claude worker live channels", () => {
     const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
     assert.match(source, /import \{ createLiveChannelWriter, liveChannelPath, type LiveChannelEvent \} from "\.\/liveChannel"/);
+    assert.match(source, /buildParallelDiscussionWorkers/);
+    assert.match(source, /claudeWorkerTraceIds/);
+    assert.match(source, /appendClaudeWorkerAssignment/);
 
     const methodStart = source.indexOf("private async runParallelDiscussionTurn(");
     const methodEnd = source.indexOf("private async runBuildPhase", methodStart);
     assert.ok(methodStart >= 0 && methodEnd > methodStart, "could not bound runParallelDiscussionTurn body");
     const method = source.slice(methodStart, methodEnd);
-    assert.match(method, /const liveRequestIds = manyHeadsMode\(\) && this\.transportMode\(\) === "oneShot"/);
-    assert.match(method, /claude: makeTraceId\("claude", "parallel"\)/);
-    assert.match(method, /agent === "codex" && liveRequestIds/);
-    assert.match(method, /appendManyHeadsLiveChannelContext\(context\.text, this\.workspaceRoot, liveRequestIds\.claude\)/);
-    assert.match(method, /this\.callAgent\(agent, "parallel", envelope\.renderedPrompt, messageId, ctrl\.signal, false, liveRequestIds\?\.\[agent\]\)/);
+    assert.match(method, /buildParallelDiscussionWorkers\(\{/);
+    assert.match(method, /manyHeads: manyHeadsMode\(\)/);
+    assert.match(method, /claudeWorkerCount: manyHeadsClaudeWorkerCount\(\)/);
+    assert.match(method, /const claudeLiveRequestIds = claudeWorkerTraceIds\(workers\)/);
+    assert.match(method, /agent === "codex" && claudeLiveRequestIds\.length > 0/);
+    assert.match(method, /appendManyHeadsLiveChannelContext\(context\.text, this\.workspaceRoot, claudeLiveRequestIds\)/);
+    assert.match(method, /appendClaudeWorkerAssignment\(transcriptWithLiveChannels, worker\)/);
+    assert.match(method, /worker\.traceIdOverride/);
+    assert.match(method, /worker\.manyHeadsDispatch/);
 
     const helperStart = source.indexOf("function appendManyHeadsLiveChannelContext(");
     const helperEnd = source.indexOf("function sha256(", helperStart);
     assert.ok(helperStart >= 0 && helperEnd > helperStart, "could not bound appendManyHeadsLiveChannelContext");
     const helper = source.slice(helperStart, helperEnd);
-    assert.match(helper, /liveChannelPath\(workspaceRoot, claudeRequestId, "claude"\)/);
+    assert.match(helper, /claudeRequestIds\.map/);
+    assert.match(helper, /liveChannelPath\(workspaceRoot, requestId, "claude"\)/);
     assert.match(helper, /Many Heads live channel/);
-    assert.match(helper, /tail that file/);
+    assert.match(helper, /tail those files/);
   });
 
   test("terminal bridge call site forwards live chunks for JSON modes and replaces with the normalized reply", () => {
@@ -368,8 +376,10 @@ describe("claude automation credit guard source contract", () => {
     assert.ok(methodStart >= 0 && methodEnd > methodStart, "could not bound callAgent body");
     const method = source.slice(methodStart, methodEnd);
 
+    assert.match(method, /manyHeadsDispatch = false/);
     assert.match(method, /if \(agent === "claude"\)/);
-    const guardIdx = method.indexOf("await this.evaluateClaudeCreditGuard(");
+    assert.match(method, /await this\.evaluateClaudeCreditGuard\(signal, manyHeadsDispatch\)/);
+    const guardIdx = method.indexOf("await this.evaluateClaudeCreditGuard(signal, manyHeadsDispatch)");
     const timeoutIdx = method.indexOf("agentTimeoutMs(phase)");
     const transportIdx = method.indexOf("this.runAgentTransport(");
     assert.ok(guardIdx >= 0, "callAgent must evaluate the Claude credit guard");

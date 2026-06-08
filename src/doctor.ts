@@ -81,6 +81,7 @@ export const TRUST_SCOPED_SETTINGS = [
   "claudeDiscussionProfile",
   "claudeBuildProfile",
   "claudeReviewProfile",
+  "manyHeadsClaudeWorkerCount",
   "nativePathPrepend",
   "nativeEnv",
   "codexNativePathPrepend",
