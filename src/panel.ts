@@ -56,6 +56,7 @@ import {
 import { buildCommandCenterActions, type CommandCenterActionId, type CommandCenterWikiStatus } from "./commandCenter";
 import { shouldAutoSkipCloserOnAgreement } from "./closerSkip";
 import { createLiveTextExtractor } from "./liveText";
+import { createLiveChannelWriter } from "./liveChannel";
 import {
   appendDecision,
   decisionHasNoUserBlockers,
@@ -176,6 +177,7 @@ import {
   editorContextMaxChars,
   preferTerminalBridgeOnStart,
   promptBodyRetentionDays,
+  manyHeadsMode,
   sessionCostCapUsd,
   telegramConfig,
   terminalBridgeTimeoutMs,
@@ -3131,10 +3133,23 @@ export class HydraRoomPanel {
     // the call runs. The normalized result still replaces the streamed text at
     // completion via onReplaceText, so live text is cosmetic-only.
     const liveText = createLiveTextExtractor(prepared.outputMode);
+    // Why: the shared live channel is opt-in (Many Heads Mode). Off by default
+    // it writes nothing, so ordinary turns don't accumulate .hydra/live files.
+    const liveChannel = manyHeadsMode()
+      ? createLiveChannelWriter({
+          workspaceRoot: this.workspaceRoot,
+          requestId: traceId,
+          agent,
+          phase,
+          outputMode: prepared.outputMode,
+        })
+      : undefined;
     const result = await runAgent(spawn, prompt, timeout, (chunk) => {
+      liveChannel?.push(chunk);
       const text = liveText ? liveText.push(chunk) : chunk;
       if (text) onChunk?.(text);
     }, signal);
+    await liveChannel?.flush();
     const normalized = await this.normalizeOneShotResult(prepared, result);
     if (prepared.outputMode === "claudeStreamJson") {
       await this.appendAgentCallTrace({

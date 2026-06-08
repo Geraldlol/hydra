@@ -532,6 +532,11 @@
           "default": true,
           "markdownDescription": "When `hydraRoom.claudeStreamJson` is enabled, pass Claude `--debug-file ${hydraLogFile}` so raw native debug output is captured in the per-request Hydra log artifact."
         },
+        "hydraRoom.manyHeadsMode": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Many Heads Mode (experimental): mirror each structured agent stream into a shared `.hydra/live/<turn>/<agent>.jsonl` channel so Codex can inspect Claude-side work while it is still streaming. Metadata/control-plane only — it does not change what is spawned or sent to the model. Off by default; these files are pruned by Hydra cleanup."
+        },
         "hydraRoom.nativePathPrepend": {
           "scope": "application",
           "type": "array",

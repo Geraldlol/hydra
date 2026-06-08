@@ -38,6 +38,15 @@ export function autopilotOnStart(): boolean {
   return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("autopilotOnStart", true);
 }
 
+// Why: gates the shared live-channel writer (Many Heads Mode). Not
+// scope:"application" — it only flips whether Hydra writes diagnostic
+// .hydra/live metadata; it touches no spawn/exec/env/PATH/terminal/webhook
+// surface, so it follows the codexJson/claudeStreamJson precedent, not the
+// trust-scoped class.
+export function manyHeadsMode(): boolean {
+  return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("manyHeadsMode", false);
+}
+
 export function preferTerminalBridgeOnStart(): boolean {
   return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("preferTerminalBridgeOnStart", false);
 }

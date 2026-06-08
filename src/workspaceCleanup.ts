@@ -56,6 +56,7 @@ const DIAGNOSTIC_TARGETS: DiagnosticTarget[] = [
   { label: "terminal logs", relativeDir: path.join(".hydra", "logs") },
   { label: "terminal dispatch scripts", relativeDir: path.join(".hydra", "dispatch") },
   { label: "room attachments", relativeDir: path.join(".hydra", "attachments"), recursive: true },
+  { label: "live agent channels", relativeDir: path.join(".hydra", "live"), recursive: true },
 ];
 
 export async function cleanWorkspaceState(

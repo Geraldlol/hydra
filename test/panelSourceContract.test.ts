@@ -201,6 +201,26 @@ describe("live streaming source contracts", () => {
     assert.doesNotMatch(method, /if \(prepared\.suppressLiveStdout\) return;/);
   });
 
+  test("one-shot pipeline mirrors structured streams to the shared live channel", () => {
+    // Why: Many Heads Mode needs a stable file-backed channel that Codex can
+    // inspect while Claude-side work is still streaming. The live channel is
+    // metadata-only and separate from the cosmetic webview text stream, but it
+    // must be fed from the same stdout chunks and flushed before the call
+    // returns so readers never miss a trailing unterminated JSONL line.
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    assert.match(source, /import \{ createLiveChannelWriter \} from "\.\/liveChannel"/);
+
+    const methodStart = source.indexOf("private async runOneShotPipeline(");
+    const methodEnd = source.indexOf("private autoAdvanceExplainer(", methodStart);
+    assert.ok(methodStart >= 0 && methodEnd > methodStart, "could not bound runOneShotPipeline body");
+    const method = source.slice(methodStart, methodEnd);
+    // Gated by Many Heads Mode so ordinary turns write no .hydra/live files.
+    assert.match(method, /manyHeadsMode\(\)/);
+    assert.match(method, /createLiveChannelWriter\(\{/);
+    assert.match(method, /liveChannel\?\.push\(chunk\)/);
+    assert.match(method, /await liveChannel\?\.flush\(\)/);
+  });
+
   test("terminal bridge call site forwards live chunks for JSON modes and replaces with the normalized reply", () => {
     // Why: terminalBridge.callAgent has supported a live onChunk feed (the
     // .hydra/logs poll) since the bridge landed, but the panel call site
