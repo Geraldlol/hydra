@@ -409,6 +409,7 @@ window.addEventListener("message", (event) => {
   if (msg.type === "state") renderState(msg);
   else if (msg.type === "chunk") appendChunk(msg.messageId, msg.text);
   else if (msg.type === "replaceMessageText") replaceMessageText(msg.messageId, msg.text);
+  else if (msg.type === "liveChannelEvent") appendLiveChannelEvent(msg.messageId, msg.event);
   else if (msg.type === "setComposerText") {
     if (composer) {
       composer.value = msg.text || "";
@@ -434,6 +435,29 @@ function ensureMessageTextEl(messageId) {
   el.className = "text";
   card.append(el);
   return el;
+}
+
+function appendLiveChannelEvent(messageId, event) {
+  if (!messageId || !event || typeof event !== "object") return;
+  const message = lastMessages.find((m) => m && m.id === messageId);
+  if (message) {
+    const events = Array.isArray(message.liveChannelEvents) ? message.liveChannelEvents : [];
+    events.push(event);
+    message.liveChannelEvents = events.slice(-50);
+  }
+  const article = document.querySelector('[data-mid="' + cssEscape(messageId) + '"]');
+  const card = article ? article.querySelector(".message-card") : null;
+  if (!card) return;
+  const scroll = captureMessageScroll();
+  let list = card.querySelector(".live-channel-events");
+  if (!list) {
+    list = document.createElement("div");
+    list.className = "live-channel-events";
+    card.append(list);
+  }
+  list.append(renderLiveChannelEvent(event));
+  while (list.children.length > 50 && list.firstElementChild) list.firstElementChild.remove();
+  restoreMessageScroll(scroll);
 }
 
 function appendChunk(messageId, text) {
@@ -675,11 +699,14 @@ function updateRibbonMinimizedSummary(state) {
  *  to catch a structural change like the first chunk flipping a placeholder
  *  card into a text card without forcing a rebuild on every appended token. */
 function messageSignature(m) {
+  const liveEvents = Array.isArray(m.liveChannelEvents) ? m.liveChannelEvents : [];
   return [
     m.id,
     m.role || "system",
     m.phase || "",
     (m.text || "").length,
+    liveEvents.length,
+    liveEvents.map((event) => String(event.kind || "") + ":" + liveEventPayloadText(event).length).join(","),
     m.pending ? (m.activity || "running") : "",
     m.error ? "e" : "",
     m.cancelled ? "c" : "",
@@ -746,9 +773,77 @@ function applyMessageArticle(article, m) {
   text.textContent = m.text || "";
   if (!m.pending || m.text || !m.activity) card.append(head, text);
   else card.append(head);
+  const liveEvents = renderLiveChannelEvents(m.liveChannelEvents);
+  if (liveEvents) card.append(liveEvents);
   if (m.runFailure) card.append(renderRunFailureCard(m.runFailure));
 
   article.replaceChildren(time, card);
+}
+
+function renderLiveChannelEvents(events) {
+  if (!Array.isArray(events) || events.length === 0) return null;
+  const list = document.createElement("div");
+  list.className = "live-channel-events";
+  for (const event of events.slice(-50)) list.append(renderLiveChannelEvent(event));
+  return list;
+}
+
+function renderLiveChannelEvent(event) {
+  const payload = event && event.payload && typeof event.payload === "object" ? event.payload : {};
+  const item = document.createElement("section");
+  item.className = "live-channel-event";
+  const status = typeof payload.status === "string" ? payload.status : liveChannelKindLabel(event && event.kind);
+  const title = document.createElement("div");
+  title.className = "live-channel-title";
+  const name = document.createElement("span");
+  name.textContent = liveChannelKindLabel(event && event.kind);
+  const meta = document.createElement("span");
+  meta.textContent = status || "update";
+  title.append(name, meta);
+  item.append(title);
+
+  const summary = typeof payload.summary === "string" ? payload.summary.trim() : "";
+  if (summary) {
+    const line = document.createElement("div");
+    line.className = "live-channel-summary";
+    line.textContent = summary;
+    item.append(line);
+  }
+
+  const outputText = liveEventPayloadText(event);
+  if (outputText) {
+    const output = document.createElement("pre");
+    output.className = "live-channel-output";
+    output.textContent = outputText;
+    item.append(output);
+  } else if (payload.outputFileReadStatus && payload.outputFileReadStatus !== "ok") {
+    const line = document.createElement("div");
+    line.className = "live-channel-summary muted";
+    line.textContent = "output file " + payload.outputFileReadStatus;
+    item.append(line);
+  }
+
+  if (payload.outputFileTruncated) {
+    const truncated = document.createElement("div");
+    truncated.className = "live-channel-summary muted";
+    truncated.textContent = "output truncated";
+    item.append(truncated);
+  }
+  return item;
+}
+
+function liveEventPayloadText(event) {
+  const payload = event && event.payload && typeof event.payload === "object" ? event.payload : {};
+  return typeof payload.outputFileText === "string" ? payload.outputFileText : "";
+}
+
+function liveChannelKindLabel(kind) {
+  if (kind === "task_notification") return "agent result";
+  if (kind === "task_started") return "agent started";
+  if (kind === "task_progress") return "agent progress";
+  if (kind === "task_summary") return "agent summary";
+  if (kind === "task_updated") return "agent update";
+  return "agent event";
 }
 
 function renderMessages() {

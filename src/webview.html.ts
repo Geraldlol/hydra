@@ -333,6 +333,48 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       font-family: var(--vscode-editor-font-family);
       font-size: var(--vscode-editor-font-size);
     }
+    .live-channel-events {
+      margin-top: 9px;
+      display: grid;
+      gap: 6px;
+    }
+    .live-channel-event {
+      border-left: 2px solid color-mix(in srgb, var(--claude) 70%, var(--border));
+      background: color-mix(in srgb, var(--panel) 64%, transparent);
+      border-radius: 4px;
+      padding: 6px 8px;
+      display: grid;
+      gap: 4px;
+    }
+    .live-channel-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: lowercase;
+    }
+    .live-channel-title span:first-child {
+      color: var(--vscode-charts-orange, var(--claude));
+      font-weight: 650;
+    }
+    .live-channel-summary {
+      color: var(--text);
+      overflow-wrap: anywhere;
+      line-height: 1.35;
+    }
+    .live-channel-summary.muted { color: var(--muted); }
+    .live-channel-output {
+      margin: 0;
+      max-height: 220px;
+      overflow: auto;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font-family: var(--vscode-editor-font-family);
+      font-size: calc(var(--vscode-editor-font-size) * 0.92);
+      line-height: 1.35;
+    }
     .run-failure {
       margin-top: 9px;
       padding-top: 8px;

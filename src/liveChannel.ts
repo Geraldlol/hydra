@@ -24,9 +24,10 @@ export interface LiveChannelWriterArgs {
   agent: AgentId;
   phase: Phase;
   outputMode: LiveChannelOutputMode;
+  onEvent?: (event: LiveChannelEvent) => void;
 }
 
-interface LiveChannelEvent {
+export interface LiveChannelEvent {
   version: 1;
   timestamp: string;
   requestId: string;
@@ -95,6 +96,11 @@ abstract class JsonlLiveChannelWriter implements LiveChannelWriter {
       kind,
       ...(payload === undefined ? {} : { payload: boundPayload(payload) }),
     };
+    try {
+      this.args.onEvent?.(record);
+    } catch {
+      // Live-channel observers are UI-only; they must not break file writes.
+    }
     this.pending = this.pending.then(() => this.write(record), () => this.write(record));
   }
 

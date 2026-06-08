@@ -28,12 +28,14 @@ describe("live channel writer", () => {
     const root = tempRoot();
     const taskOutputPath = path.join(root, "task-output.txt");
     fs.writeFileSync(taskOutputPath, "subagent result");
+    const observed: string[] = [];
     const writer = createLiveChannelWriter({
       workspaceRoot: root,
       requestId: "turn/1",
       agent: "claude",
       phase: "reactor",
       outputMode: "claudeStreamJson",
+      onEvent: (event) => observed.push(event.kind),
     });
     assert.ok(writer);
 
@@ -71,6 +73,7 @@ describe("live channel writer", () => {
     const records = readJsonl(filePath);
     assert.equal(records.length, 4);
     assert.deepEqual(records.map((r) => r.kind), ["text_delta", "task_notification", "tool_start", "done"]);
+    assert.deepEqual(observed, ["text_delta", "task_notification", "tool_start", "done"]);
     assert.equal((records[0]!.payload as Record<string, unknown>).text, "hello");
     assert.equal((records[1]!.payload as Record<string, unknown>).taskId, "task-1");
     assert.equal((records[1]!.payload as Record<string, unknown>).outputFile, taskOutputPath);

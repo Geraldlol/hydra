@@ -56,7 +56,7 @@ import {
 import { buildCommandCenterActions, type CommandCenterActionId, type CommandCenterWikiStatus } from "./commandCenter";
 import { shouldAutoSkipCloserOnAgreement } from "./closerSkip";
 import { createLiveTextExtractor } from "./liveText";
-import { createLiveChannelWriter, liveChannelPath } from "./liveChannel";
+import { createLiveChannelWriter, liveChannelPath, type LiveChannelEvent } from "./liveChannel";
 import {
   appendDecision,
   decisionHasNoUserBlockers,
@@ -271,6 +271,7 @@ interface UiMessage extends TranscriptMessage {
   pending?: boolean;
   activity?: string;
   runFailure?: RunFailureCard;
+  liveChannelEvents?: LiveChannelEvent[];
 }
 
 interface PromptContextSnapshot {
@@ -328,6 +329,10 @@ function promptTranscriptScope(phase: Phase): "discussion" | "build" | "review" 
 const TERMINAL_BRIDGE_NOT_READY =
   "Native terminal action unavailable: terminal bridge has not started. " +
   "Reopen the Hydra panel, or run \"Hydra: Use One-Shot Transport\" (Command Palette) to bypass the bridge.";
+
+function isClaudeTaskLiveEvent(event: LiveChannelEvent): boolean {
+  return event.agent === "claude" && typeof event.kind === "string" && event.kind.startsWith("task_");
+}
 
 type AgentStatusState = "idle" | "running" | "replied" | "error";
 interface AgentStatus {
@@ -3113,10 +3118,11 @@ export class HydraRoomPanel {
       traceKind?: "wikiWrapup";
       onChunk?: (chunk: string) => void;
       onReplaceText?: (text: string) => void;
+      onLiveChannelEvent?: (event: LiveChannelEvent) => void;
       recordFailureCard?: (result: RunResult) => void;
     } = {}
   ): Promise<RunResult> {
-    const { traceKind, onChunk, onReplaceText, recordFailureCard } = opts;
+    const { traceKind, onChunk, onReplaceText, onLiveChannelEvent, recordFailureCard } = opts;
     const spawn = prepared.spawn;
     const promptSha256 = sha256(prompt);
     await this.appendAgentCallTrace({
@@ -3151,6 +3157,7 @@ export class HydraRoomPanel {
           agent,
           phase,
           outputMode: prepared.outputMode,
+          onEvent: onLiveChannelEvent,
         })
       : undefined;
     const result = await runAgent(spawn, prompt, timeout, (chunk) => {
@@ -3680,6 +3687,7 @@ export class HydraRoomPanel {
             this.panel.webview.postMessage({ type: "replaceMessageText", messageId, text });
           }
         },
+        onLiveChannelEvent: (event) => this.appendMessageLiveChannelEvent(messageId, event),
         recordFailureCard: (normalized) => {
           this.recordRunFailureCard(messageId, {
             id: traceId,
@@ -4699,6 +4707,17 @@ export class HydraRoomPanel {
   private pushMessage(msg: UiMessage): void {
     this.messages.push(msg);
     this.messagesById.set(msg.id, msg);
+  }
+
+  private appendMessageLiveChannelEvent(messageId: string, event: LiveChannelEvent): void {
+    if (!isClaudeTaskLiveEvent(event)) return;
+    const message = this.messagesById.get(messageId);
+    if (!message) return;
+    const events = message.liveChannelEvents ?? [];
+    events.push(event);
+    // Keep the room state bounded even if a Claude run emits a long task loop.
+    message.liveChannelEvents = events.slice(-50);
+    this.panel.webview.postMessage({ type: "liveChannelEvent", messageId, event });
   }
 
   private openPendingMessage(role: AgentId, phase: Phase): string {

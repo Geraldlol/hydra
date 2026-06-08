@@ -208,7 +208,7 @@ describe("live streaming source contracts", () => {
     // must be fed from the same stdout chunks and flushed before the call
     // returns so readers never miss a trailing unterminated JSONL line.
     const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
-    assert.match(source, /import \{ createLiveChannelWriter, liveChannelPath \} from "\.\/liveChannel"/);
+    assert.match(source, /import \{ createLiveChannelWriter, liveChannelPath, type LiveChannelEvent \} from "\.\/liveChannel"/);
 
     const methodStart = source.indexOf("private async runOneShotPipeline(");
     const methodEnd = source.indexOf("private autoAdvanceExplainer(", methodStart);
@@ -217,13 +217,33 @@ describe("live streaming source contracts", () => {
     // Gated by Many Heads Mode so ordinary turns write no .hydra/live files.
     assert.match(method, /manyHeadsMode\(\)/);
     assert.match(method, /createLiveChannelWriter\(\{/);
+    assert.match(method, /onEvent: onLiveChannelEvent/);
     assert.match(method, /liveChannel\?\.push\(chunk\)/);
     assert.match(method, /await liveChannel\?\.flush\(\)/);
   });
 
+  test("room one-shot path forwards Claude task live-channel events to the parent message", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    assert.match(source, /function isClaudeTaskLiveEvent\(event: LiveChannelEvent\): boolean/);
+    assert.match(source, /event\.agent === "claude"[\s\S]*event\.kind\.startsWith\("task_"\)/);
+
+    const helperStart = source.indexOf("private appendMessageLiveChannelEvent(");
+    const helperEnd = source.indexOf("private openPendingMessage(", helperStart);
+    assert.ok(helperStart >= 0 && helperEnd > helperStart, "could not bound appendMessageLiveChannelEvent");
+    const helper = source.slice(helperStart, helperEnd);
+    assert.match(helper, /message\.liveChannelEvents = events\.slice\(-50\)/);
+    assert.match(helper, /this\.panel\.webview\.postMessage\(\{ type: "liveChannelEvent", messageId, event \}\)/);
+
+    const callStart = source.indexOf("return await this.runOneShotPipeline(agent, phase, prepared");
+    const callEnd = source.indexOf("recordFailureCard: (normalized)", callStart);
+    assert.ok(callStart >= 0 && callEnd > callStart, "could not bound room runOneShotPipeline call");
+    const call = source.slice(callStart, callEnd);
+    assert.match(call, /onLiveChannelEvent: \(event\) => this\.appendMessageLiveChannelEvent\(messageId, event\)/);
+  });
+
   test("parallel Codex prompts can point at Claude's live channel", () => {
     const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
-    assert.match(source, /import \{ createLiveChannelWriter, liveChannelPath \} from "\.\/liveChannel"/);
+    assert.match(source, /import \{ createLiveChannelWriter, liveChannelPath, type LiveChannelEvent \} from "\.\/liveChannel"/);
 
     const methodStart = source.indexOf("private async runParallelDiscussionTurn(");
     const methodEnd = source.indexOf("private async runBuildPhase", methodStart);

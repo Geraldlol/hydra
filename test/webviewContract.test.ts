@@ -267,6 +267,19 @@ describe("webview contract", () => {
     assert.match(surface, /if \(!msg \|\| typeof msg !== "object"\) return;/);
   });
 
+  test("renders Many Heads live-channel task events as nested message bubbles", () => {
+    assert.match(surface, /msg\.type === "liveChannelEvent"/);
+    assert.match(surface, /function appendLiveChannelEvent\(messageId, event\)/);
+    assert.match(surface, /message\.liveChannelEvents = events\.slice\(-50\)/);
+    assert.match(surface, /function renderLiveChannelEvents\(events\)/);
+    assert.match(surface, /function renderLiveChannelEvent\(event\)/);
+    assert.match(surface, /liveChannelKindLabel\(event && event\.kind\)/);
+    assert.match(surface, /payload\.outputFileTruncated/);
+    assert.match(html, /\.live-channel-events \{/);
+    assert.match(html, /\.live-channel-event \{/);
+    assert.match(html, /\.live-channel-output \{/);
+  });
+
   test("keeps Command Center disabled-state rendering and guards in place", () => {
     assert.match(html, /\.command-option\[aria-disabled="true"\]/);
     assert.match(surface, /const reason = enabled \? "" : disabledReason\(action\)/);
