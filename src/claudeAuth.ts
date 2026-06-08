@@ -98,8 +98,10 @@ export interface ClaudeAutomationGuardInput {
   mode: ClaudeAutomationGuardMode;
   /** Monthly Claude automation spend ceiling in USD. <= 0 disables the threshold. */
   capUsd: number;
-  /** Claude automation spend so far this month in USD. */
+  /** Recorded Claude automation spend so far this month in USD. */
   monthSpendUsd: number;
+  /** In-flight/projected Claude spend to include before dispatching another worker. */
+  pendingReservationUsd?: number;
   status: ClaudeAuthStatus;
   /** True when the call being evaluated is a Many Heads Mode fanout dispatch. */
   manyHeads: boolean;
@@ -121,7 +123,13 @@ function usd(n: number): string {
  * once monthly Claude spend reaches it.
  */
 export function evaluateClaudeAutomationGuard(input: ClaudeAutomationGuardInput): ClaudeAutomationGuardResult {
-  const { mode, capUsd, monthSpendUsd, status, manyHeads } = input;
+  const { mode, capUsd, status, manyHeads } = input;
+  const monthSpendUsd = Number.isFinite(input.monthSpendUsd) ? Math.max(0, input.monthSpendUsd) : 0;
+  const pendingReservationUsd =
+    typeof input.pendingReservationUsd === "number" && Number.isFinite(input.pendingReservationUsd)
+      ? Math.max(0, input.pendingReservationUsd)
+      : 0;
+  const projectedSpendUsd = monthSpendUsd + pendingReservationUsd;
 
   if (!status.isSubscription) {
     return {
@@ -136,19 +144,22 @@ export function evaluateClaudeAutomationGuard(input: ClaudeAutomationGuardInput)
     return { decision: "allow", reason: "Claude automation credit guard is off." };
   }
 
-  const over = capUsd > 0 && monthSpendUsd >= capUsd;
+  const over = capUsd > 0 && projectedSpendUsd >= capUsd;
+  const spendPhrase = pendingReservationUsd > 0
+    ? `${usd(monthSpendUsd)} recorded plus ${usd(pendingReservationUsd)} in-flight/projected`
+    : usd(monthSpendUsd);
   if (!over) {
     return {
       decision: "allow",
       reason:
         capUsd > 0
-          ? `Claude automation spend ${usd(monthSpendUsd)} is under the ${usd(capUsd)} monthly credit cap.`
+          ? `Claude automation spend ${spendPhrase} is under the ${usd(capUsd)} monthly credit cap.`
           : "No Claude automation credit cap is configured.",
     };
   }
 
   const plan = status.subscriptionType ? `${status.subscriptionType} subscription` : "subscription";
-  const overReason = `Claude is subscription-backed (${plan}); ${usd(monthSpendUsd)} of the ${usd(capUsd)} monthly Agent SDK credit estimate is used.`;
+  const overReason = `Claude is subscription-backed (${plan}); ${spendPhrase} reaches the ${usd(capUsd)} monthly Agent SDK credit estimate.`;
 
   if (mode === "blockClaudeAutomation") {
     return { decision: "block", reason: `${overReason} Blocking Claude automation until the cap resets or you switch to API-key auth.` };

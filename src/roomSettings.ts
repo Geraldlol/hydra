@@ -100,7 +100,7 @@ export function sessionCostCapUsd(): number {
   return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : 0;
 }
 
-// Why NOT scope:"application": these two only feed Hydra's own cost/decision
+// Why NOT scope:"application": these guard settings only feed Hydra's own cost/decision
 // logic - they inject into no spawn/exec/env/PATH/terminal/webhook/Telegram
 // path - so they follow the sessionCostCapUsd precedent as window/resource
 // scoped settings and stay out of TRUST_SCOPED_SETTINGS.
@@ -113,6 +113,12 @@ export function claudeAgentCreditCapUsd(): number {
   const raw = vscode.workspace.getConfiguration("hydraRoom").get<number>("claudeAgentCreditCapUsd", 200);
   // 0 disables the monthly threshold; negative/NaN falls back to the $200 default.
   return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? raw : 200;
+}
+
+export function claudeAgentEstimatedRunCostUsd(): number {
+  const raw = vscode.workspace.getConfiguration("hydraRoom").get<number>("claudeAgentEstimatedRunCostUsd", 1);
+  // 0 disables in-flight projection; negative/NaN falls back to the conservative $1 default.
+  return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? raw : 1;
 }
 
 export function autoAdvanceSendInstructionMaxConsecutive(): number {

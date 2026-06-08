@@ -170,6 +170,7 @@ import {
   autoSkipCloserOnAgreement,
   autoVerifyAfterBuild,
   claudeAgentCreditCapUsd,
+  claudeAgentEstimatedRunCostUsd,
   claudeAutomationCreditGuard,
   diagnosticRetentionDays,
   diffMaxLines,
@@ -506,7 +507,10 @@ export class HydraRoomPanel {
   // cached for the session (auth class rarely changes mid-session), and the
   // over-cap warning fires once so warn mode does not spam every Claude turn.
   private claudeAuthStatus: ClaudeAuthStatus | undefined;
-  private claudeAuthProbed = false;
+  private claudeAuthStatusPromise: Promise<ClaudeAuthStatus | undefined> | undefined;
+  // Pre-dispatch estimate for Claude calls currently in flight. This is not a
+  // billing ledger; usageRecords remain authoritative once each call completes.
+  private claudeCreditReservedUsd = 0;
   private claudeCreditWarned = false;
   private codexModelsUri!: vscode.Uri;
   private codexModelsSnapshot: CodexModelsSnapshot | undefined;
@@ -3448,12 +3452,14 @@ export class HydraRoomPanel {
     traceIdOverride?: string,
     manyHeadsDispatch = false
   ): Promise<{ text: string; result: RunResult }> {
+    let releaseClaudeCreditReservation: (() => void) | undefined;
     // Claude Agent SDK credit guard: evaluate BEFORE any spawn (timeout/pending
     // activity, consent, transport) so a `block` decision prevents
     // subscription-credit spend instead of only stopping auto-advance after the
     // spend already happened. Only Claude dispatch draws from that pool.
     if (agent === "claude") {
-      const guard = await this.evaluateClaudeCreditGuard(signal, manyHeadsDispatch);
+      const projectedDispatchUsd = claudeAgentEstimatedRunCostUsd();
+      const guard = await this.evaluateClaudeCreditGuard(signal, manyHeadsDispatch, projectedDispatchUsd);
       if (guard?.decision === "block") {
         const traceId = traceIdOverride ?? makeTraceId(agent, phase);
         await this.appendAgentCallTrace({
@@ -3475,6 +3481,7 @@ export class HydraRoomPanel {
         const finalized = this.messagesById.get(messageId);
         return { text: finalized?.text ?? "", result };
       }
+      releaseClaudeCreditReservation = this.reserveClaudeCreditEstimate(projectedDispatchUsd);
       if (guard?.decision === "warn" && !this.claudeCreditWarned) {
         this.claudeCreditWarned = true;
         await this.appendSystemMessage(`Hydra Claude automation credit warning: ${guard.reason}`);
@@ -3519,10 +3526,23 @@ export class HydraRoomPanel {
       });
       await this.finalizePendingMessage(messageId, result);
       stopActivity();
+      releaseClaudeCreditReservation?.();
+      releaseClaudeCreditReservation = undefined;
       const finalized = this.messagesById.get(messageId);
       return { text: finalized?.text ?? "", result };
     }
-    const consent = await this.ensureFullNativeConsent(agent, phase, spawn);
+    let consent: { allowed: boolean; message?: string };
+    try {
+      consent = await this.ensureFullNativeConsent(agent, phase, spawn);
+    } catch (err) {
+      // ensureFullNativeConsent awaits VS Code modal/state APIs that can reject;
+      // this await sits outside the final try/finally, so release the in-flight
+      // Claude credit reservation here or it stays elevated for the session.
+      stopActivity();
+      releaseClaudeCreditReservation?.();
+      releaseClaudeCreditReservation = undefined;
+      throw err;
+    }
     if (!consent.allowed) {
       const message = consent.message ?? `Hydra cancelled the ${agent} ${phase} call because full native authority was not confirmed.`;
       await this.appendAgentCallTrace({
@@ -3544,6 +3564,8 @@ export class HydraRoomPanel {
       };
       await this.finalizePendingMessage(messageId, result);
       stopActivity();
+      releaseClaudeCreditReservation?.();
+      releaseClaudeCreditReservation = undefined;
       const finalized = this.messagesById.get(messageId);
       return { text: finalized?.text ?? "", result };
     }
@@ -3554,6 +3576,7 @@ export class HydraRoomPanel {
       return { text: finalized?.text ?? "", result };
     } finally {
       stopActivity();
+      releaseClaudeCreditReservation?.();
     }
   }
 
@@ -4522,19 +4545,33 @@ export class HydraRoomPanel {
    * auth as unknown (non-subscription -> allow) rather than stranding the turn.
    */
   private async ensureClaudeAuthStatus(signal: AbortSignal): Promise<ClaudeAuthStatus | undefined> {
-    if (this.claudeAuthProbed) return this.claudeAuthStatus;
-    this.claudeAuthProbed = true;
-    try {
-      const spawn = await this.buildNativeCommandSpawn("claude", [...CLAUDE_AUTH_STATUS_PROBE_ARGS]);
-      const result = await runAgent(spawn, "", 30000, () => {}, signal);
-      // Some CLI builds print status to stdout, others to stderr; try both.
-      this.claudeAuthStatus = parseClaudeAuthStatus(result.stdout) ?? parseClaudeAuthStatus(result.stderr);
-    } catch {
-      // Probe failure (binary missing, --json unsupported, timeout, abort):
-      // leave auth class unknown so the credit guard fails open.
-      this.claudeAuthStatus = undefined;
-    }
-    return this.claudeAuthStatus;
+    if (this.claudeAuthStatusPromise) return this.claudeAuthStatusPromise;
+    this.claudeAuthStatusPromise = (async () => {
+      try {
+        const spawn = await this.buildNativeCommandSpawn("claude", [...CLAUDE_AUTH_STATUS_PROBE_ARGS]);
+        const result = await runAgent(spawn, "", 30000, () => {}, signal);
+        // Some CLI builds print status to stdout, others to stderr; try both.
+        this.claudeAuthStatus = parseClaudeAuthStatus(result.stdout) ?? parseClaudeAuthStatus(result.stderr);
+      } catch {
+        // Probe failure (binary missing, --json unsupported, timeout, abort):
+        // leave auth class unknown so the credit guard fails open.
+        this.claudeAuthStatus = undefined;
+      }
+      return this.claudeAuthStatus;
+    })();
+    return this.claudeAuthStatusPromise;
+  }
+
+  private reserveClaudeCreditEstimate(amountUsd: number): () => void {
+    const reserved = typeof amountUsd === "number" && Number.isFinite(amountUsd) ? Math.max(0, amountUsd) : 0;
+    if (reserved <= 0) return () => {};
+    this.claudeCreditReservedUsd += reserved;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.claudeCreditReservedUsd = Math.max(0, this.claudeCreditReservedUsd - reserved);
+    };
   }
 
   /**
@@ -4544,7 +4581,8 @@ export class HydraRoomPanel {
    */
   private async evaluateClaudeCreditGuard(
     signal: AbortSignal,
-    manyHeads = false
+    manyHeads = false,
+    projectedDispatchUsd = 0
   ): Promise<ClaudeAutomationGuardResult | undefined> {
     const mode = claudeAutomationCreditGuard();
     if (mode === "off") return undefined;
@@ -4554,6 +4592,7 @@ export class HydraRoomPanel {
       mode,
       capUsd: claudeAgentCreditCapUsd(),
       monthSpendUsd,
+      pendingReservationUsd: this.claudeCreditReservedUsd + Math.max(0, projectedDispatchUsd),
       status,
       manyHeads,
     });

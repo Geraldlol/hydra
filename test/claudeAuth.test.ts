@@ -192,6 +192,29 @@ describe("evaluateClaudeAutomationGuard", () => {
     assert.equal(atCap.decision, "warn");
   });
 
+  test("warn mode uses recorded plus in-flight projected spend", () => {
+    const under = evaluateClaudeAutomationGuard({
+      mode: "warn",
+      capUsd: 200,
+      monthSpendUsd: 198,
+      pendingReservationUsd: 1,
+      status: subscription,
+      manyHeads: true,
+    });
+    assert.equal(under.decision, "allow");
+
+    const projectedOver = evaluateClaudeAutomationGuard({
+      mode: "warn",
+      capUsd: 200,
+      monthSpendUsd: 198,
+      pendingReservationUsd: 2,
+      status: subscription,
+      manyHeads: true,
+    });
+    assert.equal(projectedOver.decision, "warn");
+    assert.match(projectedOver.reason, /recorded plus \$2\.00 in-flight\/projected/);
+  });
+
   test("blocks at exactly the cap, not only over it (inclusive >= boundary)", () => {
     const atCap = evaluateClaudeAutomationGuard({
       mode: "blockClaudeAutomation",
@@ -221,6 +244,18 @@ describe("evaluateClaudeAutomationGuard", () => {
       manyHeads: false,
     });
     assert.equal(normal.decision, "warn");
+  });
+
+  test("blockManyHeads blocks fanout when reservations project the turn to the cap", () => {
+    const fanout = evaluateClaudeAutomationGuard({
+      mode: "blockManyHeads",
+      capUsd: 200,
+      monthSpendUsd: 197,
+      pendingReservationUsd: 3,
+      status: subscription,
+      manyHeads: true,
+    });
+    assert.equal(fanout.decision, "block");
   });
 
   test("blockClaudeAutomation blocks every subscription turn over cap", () => {

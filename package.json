@@ -906,6 +906,12 @@
           "minimum": 0,
           "markdownDescription": "Monthly Claude automation spend ceiling in USD that `hydraRoom.claudeAutomationCreditGuard` checks against. Defaults to `200` (the Max 20x / eligible Enterprise Premium Agent SDK monthly credit). Set to `0` to disable the threshold. Spend is summed per UTC calendar month from Claude rows in `.hydra/usage.jsonl`; prefer native `total_cost_usd` when Claude stream-json is enabled."
         },
+        "hydraRoom.claudeAgentEstimatedRunCostUsd": {
+          "type": "number",
+          "default": 1,
+          "minimum": 0,
+          "markdownDescription": "Estimated USD reservation Hydra adds before dispatching each Claude automation call when evaluating `hydraRoom.claudeAutomationCreditGuard`. Defaults to `$1` so Many Heads Mode fanout cannot launch many workers against the same stale recorded spend. Set to `0` to disable in-flight projection. This only affects Hydra's own cost/decision logic and is not trust-scoped."
+        },
         "hydraRoom.handoffWebhookUrl": {
           "scope": "application",
           "type": "string",
