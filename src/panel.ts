@@ -56,7 +56,7 @@ import {
 import { buildCommandCenterActions, type CommandCenterActionId, type CommandCenterWikiStatus } from "./commandCenter";
 import { shouldAutoSkipCloserOnAgreement } from "./closerSkip";
 import { createLiveTextExtractor } from "./liveText";
-import { createLiveChannelWriter } from "./liveChannel";
+import { createLiveChannelWriter, liveChannelPath } from "./liveChannel";
 import {
   appendDecision,
   decisionHasNoUserBlockers,
@@ -2679,6 +2679,12 @@ export class HydraRoomPanel {
         }
       });
       const agents: AgentId[] = ["codex", "claude"];
+      const liveRequestIds = manyHeadsMode() && this.transportMode() === "oneShot"
+        ? {
+            codex: makeTraceId("codex", "parallel"),
+            claude: makeTraceId("claude", "parallel"),
+          } satisfies Record<AgentId, string>
+        : undefined;
       const calls: Promise<{ text: string; result: RunResult }>[] = [];
       for (const agent of agents) {
         const context = this.buildPromptContextSnapshotForCurrentTurn(
@@ -2688,18 +2694,21 @@ export class HydraRoomPanel {
           displayUserMessage,
           currentUserTimestamp
         );
+        const transcript = agent === "codex" && liveRequestIds
+          ? appendManyHeadsLiveChannelContext(context.text, this.workspaceRoot, liveRequestIds.claude)
+          : context.text;
         const envelope = await this.buildPromptEnvelope({
           agent,
           otherAgent: otherAgent(agent),
           phase: "parallel",
-          transcript: context.text,
+          transcript,
           currentUserMessage,
         });
         await this.persistPromptEnvelope(envelope);
         const messageId = this.openPendingMessage(agent, "parallel");
         this.pendingPromptTranscriptWindows.set(messageId, context.transcriptWindow);
         openedIds.push(messageId);
-        calls.push(this.callAgent(agent, "parallel", envelope.renderedPrompt, messageId, ctrl.signal));
+        calls.push(this.callAgent(agent, "parallel", envelope.renderedPrompt, messageId, ctrl.signal, false, liveRequestIds?.[agent]));
       }
       this.postState();
       // Once Promise.all is awaited, callAgent finalizes each bubble. Any
@@ -3409,7 +3418,8 @@ export class HydraRoomPanel {
     prompt: string,
     messageId: string,
     signal: AbortSignal,
-    forceTerminalBridge = false
+    forceTerminalBridge = false,
+    traceIdOverride?: string
   ): Promise<{ text: string; result: RunResult }> {
     // Claude Agent SDK credit guard: evaluate BEFORE any spawn (timeout/pending
     // activity, consent, transport) so a `block` decision prevents
@@ -3418,8 +3428,9 @@ export class HydraRoomPanel {
     if (agent === "claude") {
       const guard = await this.evaluateClaudeCreditGuard(signal);
       if (guard?.decision === "block") {
+        const traceId = traceIdOverride ?? makeTraceId(agent, phase);
         await this.appendAgentCallTrace({
-          id: makeTraceId(agent, phase),
+          id: traceId,
           event: "claudeCreditGuardBlocked",
           timestamp: new Date().toISOString(),
           agent,
@@ -3510,7 +3521,7 @@ export class HydraRoomPanel {
       return { text: finalized?.text ?? "", result };
     }
     try {
-      const result = await this.runAgentTransport(agent, phase, spawn, prompt, messageId, timeout, signal, forceTerminalBridge);
+      const result = await this.runAgentTransport(agent, phase, spawn, prompt, messageId, timeout, signal, forceTerminalBridge, traceIdOverride);
       await this.finalizePendingMessage(messageId, result);
       const finalized = this.messagesById.get(messageId);
       return { text: finalized?.text ?? "", result };
@@ -3568,9 +3579,10 @@ export class HydraRoomPanel {
     messageId: string,
     timeout: number,
     signal: AbortSignal,
-    forceTerminalBridge = false
+    forceTerminalBridge = false,
+    traceIdOverride?: string
   ): Promise<RunResult> {
-    const traceId = makeTraceId(agent, phase);
+    const traceId = traceIdOverride ?? makeTraceId(agent, phase);
     const startedAt = Date.now();
     const promptSha256 = sha256(prompt);
     try {
@@ -5500,6 +5512,18 @@ async function ensureJsonlFile(filePath: string): Promise<void> {
 
 function makeTraceId(agent: AgentId, phase: Phase): string {
   return `${Date.now()}-${crypto.randomBytes(3).toString("hex")}-${agent}-${phase}`;
+}
+
+function appendManyHeadsLiveChannelContext(transcript: string, workspaceRoot: string, claudeRequestId: string): string {
+  const claudeLivePath = liveChannelPath(workspaceRoot, claudeRequestId, "claude");
+  return [
+    transcript,
+    "",
+    "--- Many Heads live channel ---",
+    "Many Heads Mode is on. Claude's parallel structured stream is mirrored to this file while Claude runs:",
+    claudeLivePath,
+    "You may inspect or tail that file with your normal tools during this parallel turn. It may not exist yet when you start; retry briefly instead of treating that as a failure.",
+  ].join("\n");
 }
 
 function sha256(value: string): string {

@@ -1,5 +1,7 @@
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { parseClaudeEventLine } from "./claudeEvents";
 import { parseCodexEventLine, type AgentMessageItem } from "./codexEvents";
 import type { AgentId } from "./phases";
@@ -35,6 +37,7 @@ interface LiveChannelEvent {
 }
 
 const MAX_PARTIAL_LINE_CHARS = 1_000_000;
+const MAX_TASK_OUTPUT_FILE_BYTES = 64_000;
 const MAX_PAYLOAD_STRING_CHARS = 20_000;
 const TASK_SUBTYPES = new Set(["task_started", "task_updated", "task_progress", "task_summary", "task_notification"]);
 
@@ -50,10 +53,11 @@ export function createLiveChannelWriter(args: LiveChannelWriterArgs): LiveChanne
 abstract class JsonlLiveChannelWriter implements LiveChannelWriter {
   readonly filePath: string;
   private buffer = "";
+  private processing: Promise<void> = Promise.resolve();
   private pending: Promise<void> = Promise.resolve();
   private dirEnsured = false;
 
-  protected constructor(private readonly args: LiveChannelWriterArgs) {
+  protected constructor(protected readonly args: LiveChannelWriterArgs) {
     this.filePath = liveChannelPath(args.workspaceRoot, args.requestId, args.agent);
   }
 
@@ -69,14 +73,15 @@ abstract class JsonlLiveChannelWriter implements LiveChannelWriter {
       this.emit("stream_truncated", { droppedChars: MAX_PARTIAL_LINE_CHARS });
     }
     for (const line of lines) {
-      this.processLine(line);
+      this.enqueueLine(line);
     }
   }
 
   async flush(): Promise<void> {
     const trailing = this.buffer;
     this.buffer = "";
-    if (trailing.trim()) this.processLine(trailing);
+    if (trailing.trim()) this.enqueueLine(trailing);
+    await this.processing;
     await this.pending;
   }
 
@@ -93,7 +98,19 @@ abstract class JsonlLiveChannelWriter implements LiveChannelWriter {
     this.pending = this.pending.then(() => this.write(record), () => this.write(record));
   }
 
-  protected abstract processLine(line: string): void;
+  protected abstract processLine(line: string): void | Promise<void>;
+
+  private enqueueLine(line: string): void {
+    const run = async () => {
+      try {
+        await this.processLine(line);
+      } catch {
+        // Live channel parsing is best-effort. A malformed event or transient
+        // task-output read problem should drop only that event.
+      }
+    };
+    this.processing = this.processing.then(run, run);
+  }
 
   private async write(record: LiveChannelEvent): Promise<void> {
     try {
@@ -116,7 +133,7 @@ class ClaudeLiveChannelWriter extends JsonlLiveChannelWriter {
     super(args);
   }
 
-  protected processLine(line: string): void {
+  protected async processLine(line: string): Promise<void> {
     const event = parseClaudeEventLine(line);
     if (!event) return;
     if (event.type === "stream_event") {
@@ -132,7 +149,9 @@ class ClaudeLiveChannelWriter extends JsonlLiveChannelWriter {
     }
     if (event.type === "system") {
       const subtype = typeof event.subtype === "string" ? event.subtype : undefined;
-      if (subtype && TASK_SUBTYPES.has(subtype)) this.emit(subtype, taskPayload(event));
+      if (subtype && TASK_SUBTYPES.has(subtype)) {
+        this.emit(subtype, await taskPayload(event, this.args.workspaceRoot));
+      }
       return;
     }
     if (event.type === "assistant") {
@@ -189,15 +208,18 @@ class CodexLiveChannelWriter extends JsonlLiveChannelWriter {
   }
 }
 
-function taskPayload(record: Record<string, unknown>): Record<string, unknown> {
-  return {
+async function taskPayload(record: Record<string, unknown>, workspaceRoot: string): Promise<Record<string, unknown>> {
+  const outputFile = stringField(record, "output_file") ?? stringField(record, "outputFile") ?? stringField(record, "output-file");
+  const payload: Record<string, unknown> = {
     subtype: stringField(record, "subtype"),
     status: stringField(record, "status"),
     summary: stringField(record, "summary"),
     taskId: stringField(record, "task_id") ?? stringField(record, "taskId"),
     toolUseId: stringField(record, "tool_use_id") ?? stringField(record, "toolUseId"),
-    outputFile: stringField(record, "output_file") ?? stringField(record, "outputFile") ?? stringField(record, "output-file"),
+    outputFile,
   };
+  if (outputFile) Object.assign(payload, await readTaskOutputFile(outputFile, workspaceRoot));
+  return payload;
 }
 
 function assistantToolUses(message: Record<string, unknown> | undefined): Array<Record<string, string | undefined>> {
@@ -234,6 +256,87 @@ function stringField(record: Record<string, unknown>, key: string): string | und
 
 function numberField(record: Record<string, unknown>, key: string): number | undefined {
   return typeof record[key] === "number" && Number.isFinite(record[key]) ? record[key] as number : undefined;
+}
+
+async function readTaskOutputFile(filePath: string, workspaceRoot: string): Promise<Record<string, unknown>> {
+  const resolved = path.isAbsolute(filePath) ? path.resolve(filePath) : path.resolve(workspaceRoot, filePath);
+  // Fast lexical reject: keeps obviously out-of-bounds (and non-existent) paths
+  // returning blocked_path without a filesystem hit.
+  if (!isAllowedTaskOutputPath(resolved, workspaceRoot)) {
+    return { outputFileReadStatus: "blocked_path" };
+  }
+  let handle: fs.FileHandle | undefined;
+  try {
+    // Why: stat/open follow symlinks and Windows junctions, so a forged
+    // task_notification could place a link *inside* the workspace or temp dir
+    // that targets an out-of-bounds secret. Re-validate against the realpath'd
+    // target so the allowlist is enforced on the true on-disk file, not the
+    // link — closing the cross-agent exfiltration path the lexical check alone
+    // could not. realpath throws on a missing target, which becomes read_error.
+    const realTarget = await fs.realpath(resolved);
+    if (!(await isRealTaskOutputPathAllowed(realTarget, workspaceRoot))) {
+      return { outputFileReadStatus: "blocked_path" };
+    }
+    const stat = await fs.stat(realTarget);
+    if (!stat.isFile()) return { outputFileReadStatus: "not_file" };
+    handle = await fs.open(realTarget, "r");
+    const buffer = Buffer.alloc(MAX_TASK_OUTPUT_FILE_BYTES + 1);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    const sliceLen = Math.min(bytesRead, MAX_TASK_OUTPUT_FILE_BYTES);
+    // Why: decode whole UTF-8 code points only — a byte-boundary cut would emit
+    // a U+FFFD replacement char. StringDecoder drops a trailing partial sequence.
+    const decoded = new StringDecoder("utf8").write(buffer.subarray(0, sliceLen));
+    // Why: the emitted payload string is independently re-clamped to
+    // MAX_PAYLOAD_STRING_CHARS by boundPayload, so compute the truncation flag
+    // against what the reader actually receives — not the larger byte-read cap —
+    // or files in the (MAX_PAYLOAD_STRING_CHARS, MAX_TASK_OUTPUT_FILE_BYTES]
+    // window would be silently cut while the flag claimed completeness.
+    const text = decoded.slice(0, MAX_PAYLOAD_STRING_CHARS);
+    const truncated = decoded.length > text.length || stat.size > sliceLen;
+    return {
+      outputFileReadStatus: "ok",
+      outputFileText: text,
+      outputFileTruncated: truncated,
+    };
+  } catch {
+    return { outputFileReadStatus: "read_error" };
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+function isAllowedTaskOutputPath(candidate: string, workspaceRoot: string): boolean {
+  // Claude task output files are produced either in the workspace or in the OS
+  // temp dir. Refuse arbitrary absolute paths so a forged task notification
+  // cannot make Hydra mirror unrelated local files into .hydra/live.
+  return [workspaceRoot, os.tmpdir()].some((root) => isPathInside(candidate, path.resolve(root)));
+}
+
+async function isRealTaskOutputPathAllowed(realCandidate: string, workspaceRoot: string): Promise<boolean> {
+  // Compare the realpath'd target against realpath'd roots so a symlinked root
+  // (e.g. macOS /tmp -> /private/tmp) does not falsely block a legitimate file.
+  for (const root of [workspaceRoot, os.tmpdir()]) {
+    let realRoot: string;
+    try {
+      realRoot = await fs.realpath(root);
+    } catch {
+      realRoot = path.resolve(root);
+    }
+    if (isPathInside(realCandidate, realRoot)) return true;
+  }
+  return false;
+}
+
+function isPathInside(candidate: string, root: string): boolean {
+  const normalizedCandidate = normalizeForCompare(candidate);
+  const normalizedRoot = normalizeForCompare(root);
+  const relative = path.relative(normalizedRoot, normalizedCandidate);
+  return relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function normalizeForCompare(value: string): string {
+  const resolved = path.resolve(value);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
 function safePathSegment(value: string): string {

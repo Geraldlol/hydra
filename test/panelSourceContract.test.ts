@@ -208,7 +208,7 @@ describe("live streaming source contracts", () => {
     // must be fed from the same stdout chunks and flushed before the call
     // returns so readers never miss a trailing unterminated JSONL line.
     const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
-    assert.match(source, /import \{ createLiveChannelWriter \} from "\.\/liveChannel"/);
+    assert.match(source, /import \{ createLiveChannelWriter, liveChannelPath \} from "\.\/liveChannel"/);
 
     const methodStart = source.indexOf("private async runOneShotPipeline(");
     const methodEnd = source.indexOf("private autoAdvanceExplainer(", methodStart);
@@ -219,6 +219,29 @@ describe("live streaming source contracts", () => {
     assert.match(method, /createLiveChannelWriter\(\{/);
     assert.match(method, /liveChannel\?\.push\(chunk\)/);
     assert.match(method, /await liveChannel\?\.flush\(\)/);
+  });
+
+  test("parallel Codex prompts can point at Claude's live channel", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    assert.match(source, /import \{ createLiveChannelWriter, liveChannelPath \} from "\.\/liveChannel"/);
+
+    const methodStart = source.indexOf("private async runParallelDiscussionTurn(");
+    const methodEnd = source.indexOf("private async runBuildPhase", methodStart);
+    assert.ok(methodStart >= 0 && methodEnd > methodStart, "could not bound runParallelDiscussionTurn body");
+    const method = source.slice(methodStart, methodEnd);
+    assert.match(method, /const liveRequestIds = manyHeadsMode\(\) && this\.transportMode\(\) === "oneShot"/);
+    assert.match(method, /claude: makeTraceId\("claude", "parallel"\)/);
+    assert.match(method, /agent === "codex" && liveRequestIds/);
+    assert.match(method, /appendManyHeadsLiveChannelContext\(context\.text, this\.workspaceRoot, liveRequestIds\.claude\)/);
+    assert.match(method, /this\.callAgent\(agent, "parallel", envelope\.renderedPrompt, messageId, ctrl\.signal, false, liveRequestIds\?\.\[agent\]\)/);
+
+    const helperStart = source.indexOf("function appendManyHeadsLiveChannelContext(");
+    const helperEnd = source.indexOf("function sha256(", helperStart);
+    assert.ok(helperStart >= 0 && helperEnd > helperStart, "could not bound appendManyHeadsLiveChannelContext");
+    const helper = source.slice(helperStart, helperEnd);
+    assert.match(helper, /liveChannelPath\(workspaceRoot, claudeRequestId, "claude"\)/);
+    assert.match(helper, /Many Heads live channel/);
+    assert.match(helper, /tail that file/);
   });
 
   test("terminal bridge call site forwards live chunks for JSON modes and replaces with the normalized reply", () => {
