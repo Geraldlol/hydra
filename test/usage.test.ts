@@ -4,6 +4,7 @@ import {
   addRecordToSummary,
   boundUsageRecords,
   buildUsageRecord,
+  claudeAutomationSpendThisMonth,
   computeCostUsd,
   DEFAULT_MODEL_PRICES,
   DEFAULT_PRICES,
@@ -13,7 +14,24 @@ import {
   usageCutoffIso,
   usageFromClaudeSummary,
   usageFromCodexSummary,
+  type UsageRecord,
 } from "../src/usage";
+
+function usageRow(partial: Partial<UsageRecord> & { agent: UsageRecord["agent"]; timestamp: string; costUsd: number }): UsageRecord {
+  return {
+    sessionId: "s",
+    phase: "opener",
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreateTokens: 0,
+    reasoningTokens: 0,
+    totalTokens: 0,
+    costSource: "computed",
+    source: "unknown",
+    ...partial,
+  };
+}
 
 describe("parseCodexTextTokens", () => {
   test("parses the trailing tokens-used block Codex prints", () => {
@@ -276,6 +294,38 @@ describe("buildUsageRecord stores the model and prices accordingly", () => {
       assert.equal(r.costUsd, 5);
       assert.equal(r.costSource, "computed");
     }
+  });
+});
+
+describe("claudeAutomationSpendThisMonth", () => {
+  const now = new Date("2026-06-08T12:00:00.000Z");
+
+  test("sums only Claude cost within the current calendar month", () => {
+    const records = [
+      usageRow({ agent: "claude", timestamp: "2026-06-01T00:00:00.000Z", costUsd: 1.5 }),
+      usageRow({ agent: "claude", timestamp: "2026-06-08T11:00:00.000Z", costUsd: 2.25 }),
+      // Codex spend is a separate (OpenAI) pool — excluded.
+      usageRow({ agent: "codex", timestamp: "2026-06-02T00:00:00.000Z", costUsd: 99 }),
+      // Last month — excluded.
+      usageRow({ agent: "claude", timestamp: "2026-05-31T23:59:59.000Z", costUsd: 40 }),
+    ];
+    assert.equal(claudeAutomationSpendThisMonth(records, now), 3.75);
+  });
+
+  test("returns 0 when there is no Claude spend this month", () => {
+    const records = [
+      usageRow({ agent: "codex", timestamp: "2026-06-02T00:00:00.000Z", costUsd: 12 }),
+      usageRow({ agent: "claude", timestamp: "2026-04-10T00:00:00.000Z", costUsd: 80 }),
+    ];
+    assert.equal(claudeAutomationSpendThisMonth(records, now), 0);
+  });
+
+  test("ignores rows with an unparseable timestamp rather than throwing", () => {
+    const records = [
+      usageRow({ agent: "claude", timestamp: "not-a-date", costUsd: 5 }),
+      usageRow({ agent: "claude", timestamp: "2026-06-05T00:00:00.000Z", costUsd: 1 }),
+    ];
+    assert.equal(claudeAutomationSpendThisMonth(records, now), 1);
   });
 });
 

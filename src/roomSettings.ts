@@ -15,6 +15,7 @@ import * as vscode from "vscode";
 import type { Phase } from "./prompts";
 import type { DiscussionMode } from "./phases";
 import type { TelegramConfig } from "./telegram";
+import { CLAUDE_AUTOMATION_GUARD_MODES, type ClaudeAutomationGuardMode } from "./claudeAuth";
 
 export function agentTimeoutMs(phase?: Phase): number {
   if (phase === "opener" || phase === "reactor" || phase === "closer" || phase === "parallel") {
@@ -82,6 +83,21 @@ export function autoAdvanceActionableDefaults(): boolean {
 export function sessionCostCapUsd(): number {
   const raw = vscode.workspace.getConfiguration("hydraRoom").get<number>("sessionCostCapUsd", 0);
   return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : 0;
+}
+
+// Why NOT scope:"application": these two only feed Hydra's own cost/decision
+// logic — they inject into no spawn/exec/env/PATH/terminal/webhook/Telegram
+// path — so they follow the sessionCostCapUsd precedent as window/resource
+// scoped settings and stay out of TRUST_SCOPED_SETTINGS.
+export function claudeAutomationCreditGuard(): ClaudeAutomationGuardMode {
+  const raw = vscode.workspace.getConfiguration("hydraRoom").get<string>("claudeAutomationCreditGuard", "warn");
+  return (CLAUDE_AUTOMATION_GUARD_MODES as readonly string[]).includes(raw) ? (raw as ClaudeAutomationGuardMode) : "warn";
+}
+
+export function claudeAgentCreditCapUsd(): number {
+  const raw = vscode.workspace.getConfiguration("hydraRoom").get<number>("claudeAgentCreditCapUsd", 200);
+  // 0 disables the monthly threshold; negative/NaN falls back to the $200 default.
+  return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? raw : 200;
 }
 
 export function autoAdvanceSendInstructionMaxConsecutive(): number {

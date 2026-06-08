@@ -350,6 +350,26 @@ export function summarizeUsage(records: UsageRecord[], filterSessionId?: string,
   return summary;
 }
 
+/**
+ * Sum Claude automation cost (USD) recorded within the calendar month of `now`
+ * (UTC). This is the figure the Claude Agent SDK credit guard checks against its
+ * monthly cap: Codex spend is a separate (OpenAI) pool and is excluded, and the
+ * credit pool resets monthly so we bound to the current UTC calendar month.
+ * Rows with an unparseable timestamp are skipped rather than counted.
+ */
+export function claudeAutomationSpendThisMonth(records: UsageRecord[], now = new Date()): number {
+  const startMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1);
+  const nextMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1);
+  let total = 0;
+  for (const r of records) {
+    if (r.agent !== "claude") continue;
+    const ts = Date.parse(r.timestamp);
+    if (!Number.isFinite(ts) || ts < startMs || ts >= nextMs) continue;
+    total += r.costUsd || 0;
+  }
+  return Math.round(total * 10_000) / 10_000;
+}
+
 export function usageCutoffIso(days: number, now = new Date()): string {
   const cutoff = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
   return cutoff.toISOString();
