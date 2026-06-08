@@ -215,6 +215,67 @@ describe("buildUsageRecord stores the model and prices accordingly", () => {
     assert.equal(r.model, "claude-opus-4-8");
     // 1M Opus 4.8 input @ $5/M
     assert.equal(r.costUsd, 5);
+    assert.equal(r.costSource, "computed");
+  });
+
+  test("prefers native Claude cost when present", () => {
+    const r = buildUsageRecord({
+      sessionId: "s",
+      agent: "claude",
+      phase: "reactor",
+      source: "claudeStreamJson",
+      model: "claude-opus-4-8",
+      tokens: { inputTokens: 1_000_000, outputTokens: 1_000_000, cacheReadTokens: 0, cacheCreateTokens: 0, reasoningTokens: 0 },
+      nativeCostUsd: 0.12,
+    });
+    assert.equal(r.costUsd, 0.12);
+    assert.equal(r.costSource, "native");
+  });
+
+  test("accepts a native cost of exactly zero as authoritative", () => {
+    // A native total_cost_usd of 0 (e.g. a fully cache-served turn) is a real
+    // figure, not a missing one — believe it rather than fall back to estimate.
+    const r = buildUsageRecord({
+      sessionId: "s",
+      agent: "claude",
+      phase: "reactor",
+      source: "claudeStreamJson",
+      model: "claude-opus-4-8",
+      tokens: { inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheCreateTokens: 0, reasoningTokens: 0 },
+      nativeCostUsd: 0,
+    });
+    assert.equal(r.costUsd, 0);
+    assert.equal(r.costSource, "native");
+  });
+
+  test("falls back to computed cost when native cost is negative", () => {
+    const r = buildUsageRecord({
+      sessionId: "s",
+      agent: "claude",
+      phase: "reactor",
+      source: "claudeStreamJson",
+      model: "claude-opus-4-8",
+      tokens: { inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheCreateTokens: 0, reasoningTokens: 0 },
+      nativeCostUsd: -1,
+    });
+    assert.equal(r.costUsd, 5);
+    assert.equal(r.costSource, "computed");
+  });
+
+  test("falls back to computed cost when native cost is NaN or non-finite", () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      const r = buildUsageRecord({
+        sessionId: "s",
+        agent: "claude",
+        phase: "reactor",
+        source: "claudeStreamJson",
+        model: "claude-opus-4-8",
+        tokens: { inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheCreateTokens: 0, reasoningTokens: 0 },
+        nativeCostUsd: bad,
+      });
+      assert.equal(r.costUsd, 5);
+      assert.equal(r.costSource, "computed");
+    }
   });
 });
 

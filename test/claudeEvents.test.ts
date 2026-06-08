@@ -8,6 +8,7 @@ import {
   parseClaudeEventStream,
   summarizeClaudeEvents,
 } from "../src/claudeEvents";
+import { buildUsageRecord, usageFromClaudeSummary } from "../src/usage";
 
 describe("parseClaudeEventLine", () => {
   test("returns null for empty / whitespace lines", () => {
@@ -131,13 +132,14 @@ describe("summarizeClaudeEvents", () => {
 
   test("captures result subtype, stop_reason, usage, and final text", () => {
     const events = parseClaudeEventStream(
-      '{"type":"result","subtype":"success","stop_reason":"end_turn","is_error":false,"usage":{"input_tokens":100,"output_tokens":40,"cache_creation_input_tokens":5,"cache_read_input_tokens":10},"result":"final answer text","session_id":"s","uuid":"u"}'
+      '{"type":"result","subtype":"success","stop_reason":"end_turn","is_error":false,"total_cost_usd":0.12,"usage":{"input_tokens":100,"output_tokens":40,"cache_creation_input_tokens":5,"cache_read_input_tokens":10},"result":"final answer text","session_id":"s","uuid":"u"}'
     );
     const summary = summarizeClaudeEvents(events);
     assert.equal(summary.resultSubtype, "success");
     assert.equal(summary.stopReason, "end_turn");
     assert.equal(summary.usage?.input_tokens, 100);
     assert.equal(summary.usage?.cache_read_input_tokens, 10);
+    assert.equal(summary.totalCostUsd, 0.12);
     assert.equal(summary.lastAssistantText, "final answer text");
   });
 
@@ -314,10 +316,31 @@ describe("claudeEvents against real claude --print stream-json output", () => {
     assert.equal(summary.usage?.input_tokens, 6);
     assert.equal(summary.usage?.cache_creation_input_tokens, 19089);
     assert.equal(summary.usage?.cache_read_input_tokens, 20863);
+    assert.equal(summary.totalCostUsd, 0.12);
     // The result envelope's `result` text wins as the final assistant text.
     assert.equal(summary.lastAssistantText, "ready");
     // permission_denials was an empty array
     assert.equal(summary.permissionDenials, 0);
+  });
+
+  test("real fixture flows end-to-end into a native-costed usage record", () => {
+    // Mirrors the production claudeStreamJson path in panel.ts: parse the real
+    // stream, lift usage + native cost off the summary, and build the record.
+    // Guards the full chain so a regression in any link surfaces the 0.12 loss.
+    const summary = summarizeClaudeEvents(parseClaudeEventStream(stdout));
+    const tokens = usageFromClaudeSummary(summary.usage);
+    assert.ok(tokens, "fixture usage must map to canonical tokens");
+    const record = buildUsageRecord({
+      sessionId: "s",
+      agent: "claude",
+      phase: "reactor",
+      source: "claudeStreamJson",
+      model: "claude-opus-4-8",
+      tokens: tokens!,
+      nativeCostUsd: summary.totalCostUsd,
+    });
+    assert.equal(record.costUsd, 0.12);
+    assert.equal(record.costSource, "native");
   });
 
   test("captures all six SSE inner content_block_delta event types", () => {

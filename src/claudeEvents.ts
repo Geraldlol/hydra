@@ -194,6 +194,8 @@ export interface ClaudeStreamSummary {
   lastPermissionMode?: ClaudePermissionMode | string;
   // Aggregated usage from the terminal result.
   usage?: ClaudeUsageSummary;
+  // Authoritative cost from the terminal result, when Claude reports it.
+  totalCostUsd?: number;
   // Final assistant text (concatenated from result/result-message paths).
   lastAssistantText?: string;
 }
@@ -250,6 +252,9 @@ export function summarizeClaudeEvents(events: Array<ClaudeEvent | null>): Claude
       if (typeof event.subtype === "string") summary.resultSubtype = event.subtype;
       if (typeof event.stop_reason === "string") summary.stopReason = event.stop_reason;
       if (event.usage && typeof event.usage === "object") summary.usage = event.usage as ClaudeUsageSummary;
+      if (typeof event.total_cost_usd === "number" && Number.isFinite(event.total_cost_usd) && event.total_cost_usd >= 0) {
+        summary.totalCostUsd = event.total_cost_usd;
+      }
       if (typeof event.result === "string") summary.lastAssistantText = event.result;
     } else if (type === "system") {
       const subtype = typeof event.subtype === "string" ? event.subtype : "unknown";

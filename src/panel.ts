@@ -4025,6 +4025,7 @@ export class HydraRoomPanel {
     model?: string;
     source: UsageRecord["source"];
     tokens: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreateTokens: number; reasoningTokens: number };
+    nativeCostUsd?: number;
   }): Promise<void> {
     const { agentDefaults, modelOverrides } = this.modelPrices();
     const record = buildUsageRecord({
@@ -4035,6 +4036,7 @@ export class HydraRoomPanel {
       model: input.model,
       source: input.source,
       tokens: input.tokens,
+      nativeCostUsd: input.nativeCostUsd,
       prices: agentDefaults,
       modelPriceOverrides: modelOverrides,
     });
@@ -4073,7 +4075,7 @@ export class HydraRoomPanel {
       const summary = summarizeClaudeEvents(parseClaudeEventStream(result.stdout));
       const tokens = usageFromClaudeSummary(summary.usage);
       if (tokens) {
-        await this.recordUsage({ agent, phase, requestId, model, source: "claudeStreamJson", tokens });
+        await this.recordUsage({ agent, phase, requestId, model, source: "claudeStreamJson", tokens, nativeCostUsd: summary.totalCostUsd });
         return;
       }
     }

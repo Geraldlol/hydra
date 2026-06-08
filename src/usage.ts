@@ -23,6 +23,7 @@ export interface UsageRecord {
   reasoningTokens: number;
   totalTokens: number;
   costUsd: number;
+  costSource: "native" | "computed";
   source: "claudeStreamJson" | "codexJson" | "codexTextTokens" | "unknown";
 }
 
@@ -218,6 +219,7 @@ export function buildUsageRecord(input: {
   model?: string;
   source: UsageRecord["source"];
   tokens: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreateTokens: number; reasoningTokens: number };
+  nativeCostUsd?: number;
   prices?: Record<AgentId, ModelPrices>;
   modelPriceOverrides?: Record<string, Partial<ModelPrices>>;
 }): UsageRecord {
@@ -227,7 +229,12 @@ export function buildUsageRecord(input: {
     input.modelPriceOverrides ?? {},
     input.prices ?? DEFAULT_PRICES,
   );
-  const costUsd = computeCostUsd(input.agent, input.tokens, resolved);
+  const nativeCostUsd =
+    typeof input.nativeCostUsd === "number" && Number.isFinite(input.nativeCostUsd) && input.nativeCostUsd >= 0
+      ? input.nativeCostUsd
+      : undefined;
+  const costUsd = nativeCostUsd ?? computeCostUsd(input.agent, input.tokens, resolved);
+  const costSource = nativeCostUsd !== undefined ? "native" : "computed";
   const totalTokens =
     input.tokens.inputTokens +
     input.tokens.outputTokens +
@@ -247,6 +254,7 @@ export function buildUsageRecord(input: {
     reasoningTokens: input.tokens.reasoningTokens,
     totalTokens,
     costUsd,
+    costSource,
     source: input.source,
   };
 }
