@@ -514,6 +514,7 @@ export async function waitForReply(
   let streamed = "";
   const maxPollMs = Math.max(1, Math.floor(pollMs));
   let nextPollMs = Math.min(50, maxPollMs);
+  const hasTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0;
 
   // Race the polling delay against an abort signal so cancellation is
   // observed immediately rather than at most pollMs later.
@@ -534,7 +535,7 @@ export async function waitForReply(
     });
   };
 
-  while (Date.now() - start < timeoutMs) {
+  while (!hasTimeout || Date.now() - start < timeoutMs) {
     if (signal.aborted) {
       return { stdout: "", stderr: "", exitCode: null, timedOut: false, cancelled: true };
     }

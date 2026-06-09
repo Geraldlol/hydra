@@ -199,11 +199,14 @@ export async function runAgent(
       }, 2000);
     };
 
-    const timer = setTimeout(() => {
-      timedOut = true;
-      terminateProcessTree(child);
-      armBackstop();
-    }, timeoutMs);
+    const hasTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0;
+    const timer = hasTimeout
+      ? setTimeout(() => {
+          timedOut = true;
+          terminateProcessTree(child);
+          armBackstop();
+        }, timeoutMs)
+      : undefined;
 
     const abortHandler = () => {
       if (!settled) {
@@ -253,7 +256,7 @@ export async function runAgent(
     const finish = (exitCode: number | null) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       if (backstop) clearTimeout(backstop);
       signal.removeEventListener("abort", abortHandler);
       resolve({

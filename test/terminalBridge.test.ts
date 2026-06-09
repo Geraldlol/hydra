@@ -69,6 +69,21 @@ describe("waitForReply nonce reconciliation", () => {
     assert.equal(result.stdout, "hello world");
   });
 
+  test("zero timeout waits until reply or abort", async () => {
+    const dir = await tempDir();
+    const replyPath = path.join(dir, "reply.json");
+    const logPath = path.join(dir, "reply.log");
+    const timer = writeReplySoon(replyPath, { text: "uncapped", nonce: "n" }, 50);
+
+    const result = await waitForReply(replyPath, logPath, 0, new AbortController().signal, 5, undefined, "n");
+    clearTimeout(timer);
+
+    assert.equal(result.timedOut, false);
+    assert.equal(result.cancelled, false);
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.stdout, "uncapped");
+  });
+
   test("surfaces a reply error string with exit code 1", async () => {
     const dir = await tempDir();
     const replyPath = path.join(dir, "reply.json");

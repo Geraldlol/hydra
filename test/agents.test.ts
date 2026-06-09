@@ -93,6 +93,20 @@ describe("runAgent", () => {
     assert.equal(result.cancelled, false);
   });
 
+  test("zero timeout disables the wall-clock cap", async () => {
+    const result = await runAgent(
+      nodeSpawn(["--delay", "150", "--emit", "slow ok"]),
+      "",
+      0,
+      () => {},
+      new AbortController().signal
+    );
+    if (spawnBlockedBySandbox(result)) return;
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.timedOut, false);
+    assert.equal(result.stdout, "slow ok");
+  });
+
   test("missing native command returns a clear spawn failure", async () => {
     const result = await runAgent(
       { command: "hydra-definitely-missing-cli", args: [], cwd: process.cwd() },

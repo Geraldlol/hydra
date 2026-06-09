@@ -4581,7 +4581,7 @@ export class HydraRoomPanel {
     if (inspected?.workspaceFolderValue === 120000) updates.push([vscode.ConfigurationTarget.WorkspaceFolder, inspected.workspaceFolderValue]);
     for (const [target] of updates) {
       try {
-        await cfg.update("discussionTimeoutMs", 600000, target);
+        await cfg.update("discussionTimeoutMs", 0, target);
       } catch {
         // If VS Code refuses to write a scope, agentTimeoutMs still coerces the
         // old default at runtime so the room does not fall back to 2 minutes.

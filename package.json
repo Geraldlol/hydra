@@ -827,15 +827,15 @@
         },
         "hydraRoom.oneShotTimeoutMs": {
           "type": "number",
-          "default": 600000,
-          "minimum": 1000,
-          "markdownDescription": "Maximum runtime per Build or Review agent call in milliseconds."
+          "default": 0,
+          "minimum": 0,
+          "markdownDescription": "Maximum runtime per Build or Review agent call in milliseconds. Set to `0` to disable the wall-clock cap and rely on Stop Current Turn."
         },
         "hydraRoom.discussionTimeoutMs": {
           "type": "number",
-          "default": 600000,
-          "minimum": 1000,
-          "markdownDescription": "Maximum runtime per Discussion opener, reactor, or closer call in milliseconds. Defaults to 10 minutes so high-reasoning agent turns have room to finish; use Stop Current Turn to cancel earlier."
+          "default": 0,
+          "minimum": 0,
+          "markdownDescription": "Maximum runtime per Discussion opener, reactor, closer, or parallel call in milliseconds. Set to `0` to disable the wall-clock cap and rely on Stop Current Turn."
         },
         "hydraRoom.diffMaxLines": {
           "type": "number",

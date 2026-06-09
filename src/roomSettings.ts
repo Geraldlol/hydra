@@ -18,16 +18,22 @@ import type { TelegramConfig } from "./telegram";
 import { CLAUDE_AUTOMATION_GUARD_MODES, type ClaudeAutomationGuardMode } from "./claudeAuth";
 import { clampManyHeadsClaudeWorkerCount } from "./claudeWorkers";
 
+function normalizeAgentTimeoutMs(value: number | undefined, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  const timeout = Math.floor(value);
+  return timeout <= 0 ? 0 : Math.max(1000, timeout);
+}
+
 export function agentTimeoutMs(phase?: Phase): number {
   if (phase === "opener" || phase === "reactor" || phase === "closer" || phase === "parallel") {
-    const configured = vscode.workspace.getConfiguration("hydraRoom").get<number>("discussionTimeoutMs", 600000);
-    // Why: preserve the legacy 2-minute -> 10-minute coercion BEFORE clamping
+    const configured = vscode.workspace.getConfiguration("hydraRoom").get<number>("discussionTimeoutMs", 0);
+    // Why: preserve the legacy 2-minute -> uncapped coercion BEFORE clamping
     // so an explicitly-saved 120000 still upgrades to the new default.
-    const coerced = configured === 120000 ? 600000 : configured;
-    return Number.isFinite(coerced) ? Math.max(1000, Math.floor(coerced)) : 600000;
+    const coerced = configured === 120000 ? 0 : configured;
+    return normalizeAgentTimeoutMs(coerced, 0);
   }
-  const oneShot = vscode.workspace.getConfiguration("hydraRoom").get<number>("oneShotTimeoutMs", 600000);
-  return Number.isFinite(oneShot) ? Math.max(1000, Math.floor(oneShot)) : 600000;
+  const oneShot = vscode.workspace.getConfiguration("hydraRoom").get<number>("oneShotTimeoutMs", 0);
+  return normalizeAgentTimeoutMs(oneShot, 0);
 }
 
 export function terminalBridgeTimeoutMs(): number {
