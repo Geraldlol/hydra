@@ -137,18 +137,14 @@ Many Heads Mode must not dispatch a Claude head until the guard has evaluated:
 
 `evaluateClaudeAutomationGuard(...)` runs at the `callAgent`/worker-dispatch
 boundary, so a block decision prevents spend before the official Claude runtime
-starts. Before each allowed Claude dispatch, Hydra also adds
-`hydraRoom.claudeAgentEstimatedRunCostUsd` to an in-flight reservation counter
-and evaluates later sequential or cross-turn dispatches against recorded month
-spend plus those reservations. The reservation is released when the worker
-returns; recorded usage remains authoritative once the stream reports actual
-cost.
-
-Concurrent fanout still has a narrow overshoot window: workers launched under
-the same `Promise.all` can evaluate the guard before sibling reservations are
-installed. Closing that requires reserving before guard evaluation and releasing
-on block; until then, the reservation hardens sequential dispatches and probe
-concurrency, but not every same-turn fanout race.
+starts. Before each Claude dispatch, Hydra first adds
+`hydraRoom.claudeAgentEstimatedRunCostUsd` to an in-flight reservation counter,
+then evaluates the guard against recorded month spend plus all current
+reservations. That ordering matters for `Promise.all` fanout: each worker's
+reservation is visible to sibling guard checks before any shared auth-probe await
+can resume them. A block decision releases the reservation immediately; allowed
+workers release it when the runtime returns. Recorded usage remains authoritative
+once the stream reports actual cost.
 
 This is an estimate, not a hard billing boundary. A worker can still cost more
 than the configured estimate, so the guard should be treated as a launch-time

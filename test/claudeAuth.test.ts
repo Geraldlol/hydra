@@ -258,6 +258,29 @@ describe("evaluateClaudeAutomationGuard", () => {
     assert.equal(fanout.decision, "block");
   });
 
+  test("blockManyHeads sees cumulative reservations installed before a shared auth probe resumes", async () => {
+    let pendingReservationUsd = 0;
+    const sharedAuthProbe = Promise.resolve(subscription);
+
+    async function evaluateWorker() {
+      // Many Heads workers reserve synchronously before awaiting the shared
+      // auth probe; once the probe resolves, each guard sees the full fanout.
+      pendingReservationUsd += 1;
+      const status = await sharedAuthProbe;
+      return evaluateClaudeAutomationGuard({
+        mode: "blockManyHeads",
+        capUsd: 200,
+        monthSpendUsd: 197,
+        pendingReservationUsd,
+        status,
+        manyHeads: true,
+      });
+    }
+
+    const decisions = await Promise.all([evaluateWorker(), evaluateWorker(), evaluateWorker()]);
+    assert.deepEqual(decisions.map((decision) => decision.decision), ["block", "block", "block"]);
+  });
+
   test("blockClaudeAutomation blocks every subscription turn over cap", () => {
     const result = evaluateClaudeAutomationGuard({
       mode: "blockClaudeAutomation",

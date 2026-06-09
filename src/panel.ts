@@ -3459,8 +3459,18 @@ export class HydraRoomPanel {
     // spend already happened. Only Claude dispatch draws from that pool.
     if (agent === "claude") {
       const projectedDispatchUsd = claudeAgentEstimatedRunCostUsd();
-      const guard = await this.evaluateClaudeCreditGuard(signal, manyHeadsDispatch, projectedDispatchUsd);
+      releaseClaudeCreditReservation = this.reserveClaudeCreditEstimate(projectedDispatchUsd);
+      let guard: ClaudeAutomationGuardResult | undefined;
+      try {
+        guard = await this.evaluateClaudeCreditGuard(signal, manyHeadsDispatch);
+      } catch (err) {
+        releaseClaudeCreditReservation();
+        releaseClaudeCreditReservation = undefined;
+        throw err;
+      }
       if (guard?.decision === "block") {
+        releaseClaudeCreditReservation();
+        releaseClaudeCreditReservation = undefined;
         const traceId = traceIdOverride ?? makeTraceId(agent, phase);
         await this.appendAgentCallTrace({
           id: traceId,
@@ -3481,7 +3491,6 @@ export class HydraRoomPanel {
         const finalized = this.messagesById.get(messageId);
         return { text: finalized?.text ?? "", result };
       }
-      releaseClaudeCreditReservation = this.reserveClaudeCreditEstimate(projectedDispatchUsd);
       if (guard?.decision === "warn" && !this.claudeCreditWarned) {
         this.claudeCreditWarned = true;
         await this.appendSystemMessage(`Hydra Claude automation credit warning: ${guard.reason}`);
@@ -4581,8 +4590,7 @@ export class HydraRoomPanel {
    */
   private async evaluateClaudeCreditGuard(
     signal: AbortSignal,
-    manyHeads = false,
-    projectedDispatchUsd = 0
+    manyHeads = false
   ): Promise<ClaudeAutomationGuardResult | undefined> {
     const mode = claudeAutomationCreditGuard();
     if (mode === "off") return undefined;
@@ -4592,7 +4600,7 @@ export class HydraRoomPanel {
       mode,
       capUsd: claudeAgentCreditCapUsd(),
       monthSpendUsd,
-      pendingReservationUsd: this.claudeCreditReservedUsd + Math.max(0, projectedDispatchUsd),
+      pendingReservationUsd: this.claudeCreditReservedUsd,
       status,
       manyHeads,
     });

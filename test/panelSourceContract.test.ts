@@ -379,14 +379,15 @@ describe("claude automation credit guard source contract", () => {
     assert.match(method, /manyHeadsDispatch = false/);
     assert.match(method, /if \(agent === "claude"\)/);
     assert.match(method, /claudeAgentEstimatedRunCostUsd\(\)/);
-    assert.match(method, /await this\.evaluateClaudeCreditGuard\(signal, manyHeadsDispatch, projectedDispatchUsd\)/);
+    assert.match(method, /await this\.evaluateClaudeCreditGuard\(signal, manyHeadsDispatch\)/);
     assert.match(method, /this\.reserveClaudeCreditEstimate\(projectedDispatchUsd\)/);
-    const guardIdx = method.indexOf("await this.evaluateClaudeCreditGuard(signal, manyHeadsDispatch, projectedDispatchUsd)");
+    const guardIdx = method.indexOf("await this.evaluateClaudeCreditGuard(signal, manyHeadsDispatch)");
     const reserveIdx = method.indexOf("this.reserveClaudeCreditEstimate(projectedDispatchUsd)");
     const timeoutIdx = method.indexOf("agentTimeoutMs(phase)");
     const transportIdx = method.indexOf("this.runAgentTransport(");
     assert.ok(guardIdx >= 0, "callAgent must evaluate the Claude credit guard");
-    assert.ok(reserveIdx > guardIdx, "callAgent must reserve estimated Claude credit after an allowed guard decision");
+    assert.ok(reserveIdx >= 0, "callAgent must reserve estimated Claude credit");
+    assert.ok(reserveIdx < guardIdx, "callAgent must reserve estimated Claude credit before awaiting the guard");
     assert.ok(timeoutIdx > reserveIdx, "the estimated Claude credit reservation must happen before pending activity/spawn setup");
     assert.ok(timeoutIdx > guardIdx, "the credit guard must run before the spawn timeout/pending activity");
     assert.ok(transportIdx > guardIdx, "the credit guard must run before runAgentTransport");
@@ -399,6 +400,26 @@ describe("claude automation credit guard source contract", () => {
     assert.match(method, /await this\.finalizePendingMessage\(messageId, result\)/);
     assert.match(method, /guard\?\.decision === "warn"/);
     assert.match(method, /releaseClaudeCreditReservation\?\.\(\)/);
+    assert.doesNotMatch(method, /evaluateClaudeCreditGuard\(signal, manyHeadsDispatch, projectedDispatchUsd\)/);
+  });
+
+  test("concurrent Claude fanout installs reservations before awaiting the shared auth probe", () => {
+    // Why: Many Heads launches Claude workers under Promise.all. If each worker
+    // awaited the shared auth probe before reserving, all guard continuations
+    // could read the same stale reservation total and overshoot the cap.
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    const methodStart = source.indexOf("private async callAgent(");
+    const methodEnd = source.indexOf("private async ensureFullNativeConsent(", methodStart);
+    assert.ok(methodStart >= 0 && methodEnd > methodStart, "could not bound callAgent body");
+    const method = source.slice(methodStart, methodEnd);
+
+    const reserveIdx = method.indexOf("releaseClaudeCreditReservation = this.reserveClaudeCreditEstimate(projectedDispatchUsd)");
+    const guardIdx = method.indexOf("guard = await this.evaluateClaudeCreditGuard(signal, manyHeadsDispatch)");
+    const blockIdx = method.indexOf('if (guard?.decision === "block")');
+    assert.ok(reserveIdx >= 0, "callAgent must install the reservation before guard evaluation");
+    assert.ok(guardIdx > reserveIdx, "guard evaluation must happen after reservation installation");
+    assert.ok(blockIdx > guardIdx, "block decisions must be handled after guard evaluation");
+    assert.match(method, /if \(guard\?\.decision === "block"\) \{\s*releaseClaudeCreditReservation\(\);/s);
   });
 
   test("the credit guard composes monthly Claude spend with the pure decision and short-circuits when off", () => {
@@ -412,7 +433,8 @@ describe("claude automation credit guard source contract", () => {
     assert.match(method, /if \(mode === "off"\) return undefined/);
     assert.match(method, /claudeAutomationCreditGuard\(\)/);
     assert.match(method, /claudeAutomationSpendThisMonth\(this\.usageRecords\)/);
-    assert.match(method, /pendingReservationUsd: this\.claudeCreditReservedUsd \+ Math\.max\(0, projectedDispatchUsd\)/);
+    assert.match(method, /pendingReservationUsd: this\.claudeCreditReservedUsd/);
+    assert.doesNotMatch(method, /projectedDispatchUsd/);
     assert.match(method, /capUsd: claudeAgentCreditCapUsd\(\)/);
     assert.match(method, /evaluateClaudeAutomationGuard\(\{/);
   });
