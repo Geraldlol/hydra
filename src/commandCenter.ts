@@ -9,6 +9,8 @@ export type CommandCenterActionId =
   | "assignParallelBuilders"
   | "chooseModel"
   | "chooseEffort"
+  | "toggleManyHeadsMode"
+  | "configureManyHeadsWorkers"
   | "testTelegram"
   | "changeCapabilityProfile"
   | "requestReview"
@@ -88,6 +90,8 @@ export interface CommandCenterInput {
   transport: "oneShot" | "terminalBridge";
   workQueueCount: number;
   nativeActionsCount: number;
+  manyHeadsMode?: boolean;
+  manyHeadsClaudeWorkerCount?: number;
   wikiStatus?: CommandCenterWikiStatus;
 }
 
@@ -164,6 +168,18 @@ export function buildCommandCenterActions(input: CommandCenterInput): CommandCen
     action("openSupportBundle", "Open Support Bundle", "Diagnostics", "Refresh and open Doctor, authority, terminal, queue, and recent-action diagnostics."),
     action("chooseModel", "Choose Model", "Settings", "Pick Codex or Claude model overrides."),
     action("chooseEffort", "Choose Thinking Level", "Settings", "Pick Codex reasoning or Claude effort overrides."),
+    action(
+      "toggleManyHeadsMode",
+      input.manyHeadsMode ? "Turn Off Many Heads Mode" : "Turn On Many Heads Mode",
+      input.manyHeadsMode ? `Many Heads on (${input.manyHeadsClaudeWorkerCount ?? 3} Claude workers)` : "Many Heads off",
+      "Toggle experimental parallel discussion fanout through local subscription-backed Claude workers."
+    ),
+    action(
+      "configureManyHeadsWorkers",
+      "Set Many Heads Worker Count",
+      `${input.manyHeadsClaudeWorkerCount ?? 3} Claude workers`,
+      "Choose how many local subscription-backed Claude workers launch in Many Heads parallel discussion."
+    ),
     action("testTelegram", "Send Test Telegram", "Settings", "Send a Telegram test ping using the configured bot token and chat id."),
     action(
       "toggleAutoAdvanceActionableDefaults",

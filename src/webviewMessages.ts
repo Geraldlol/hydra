@@ -53,6 +53,8 @@ export type WebviewMessage =
   | { type: "chooseModelOrEffort" }
   | { type: "chooseModel" }
   | { type: "chooseEffort" }
+  | { type: "toggleManyHeadsMode" }
+  | { type: "configureManyHeadsWorkers" }
   | { type: "testTelegram" }
   | { type: "openNativeTerminals" }
   | {

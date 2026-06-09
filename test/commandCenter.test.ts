@@ -45,6 +45,8 @@ describe("command center", () => {
       transport: "oneShot",
       workQueueCount: 2,
       nativeActionsCount: 4,
+      manyHeadsMode: false,
+      manyHeadsClaudeWorkerCount: 3,
       wikiStatus: {
         contextChars: 1200,
         contextMaxChars: 8000,
@@ -85,6 +87,8 @@ describe("command center", () => {
     assert.ok(actions.some((action) => action.id === "runWikiWrapupNow"));
     assert.ok(actions.some((action) => action.id === "chooseModel"));
     assert.ok(actions.some((action) => action.id === "chooseEffort"));
+    assert.ok(actions.some((action) => action.id === "toggleManyHeadsMode"));
+    assert.ok(actions.some((action) => action.id === "configureManyHeadsWorkers"));
     assert.ok(actions.some((action) => action.id === "testTelegram"));
     assert.ok(actions.some((action) => action.id === "toggleAutoAdvanceActionableDefaults"));
     assert.ok(actions.some((action) => action.id === "runAutopilotStart"));
@@ -98,6 +102,39 @@ describe("command center", () => {
     assert.match(wiki.detail, /signal warming up 12\/20/);
     assert.match(wiki.detail, /citations 25% \(3\)/);
     assert.match(wiki.detail, /name\/path mentions 75% \(9\)/);
+    const manyHeads = actions.find((action) => action.id === "toggleManyHeadsMode");
+    assert.ok(manyHeads);
+    assert.equal(manyHeads.label, "Turn On Many Heads Mode");
+    assert.equal(manyHeads.description, "Many Heads off");
+  });
+
+  test("labels Many Heads settings with current mode and worker count", () => {
+    const actions = buildCommandCenterActions({
+      workspaceReady: true,
+      canStop: false,
+      canAcceptDefault: false,
+      autoAdvanceActionableDefaults: false,
+      canAssignBuilder: false,
+      canRequestReview: false,
+      canHandBack: false,
+      canRunVerification: false,
+      canPokeNativeTerminals: false,
+      needsCodexPath: false,
+      needsClaudePath: false,
+      transport: "oneShot",
+      workQueueCount: 0,
+      nativeActionsCount: 0,
+      manyHeadsMode: true,
+      manyHeadsClaudeWorkerCount: 5,
+    });
+
+    const toggle = actions.find((action) => action.id === "toggleManyHeadsMode");
+    const workers = actions.find((action) => action.id === "configureManyHeadsWorkers");
+    assert.ok(toggle);
+    assert.ok(workers);
+    assert.equal(toggle.label, "Turn Off Many Heads Mode");
+    assert.equal(toggle.description, "Many Heads on (5 Claude workers)");
+    assert.equal(workers.description, "5 Claude workers");
   });
 
   test("shows disabled wiki injection in Command Center status", () => {

@@ -220,6 +220,8 @@ const ACTIONS = [
   { id: "wiki-wrapup-now", group: "Files", name: "Run Wiki Wrapup Now", what: "Force a wiki wrapup from the latest completed room turn", run: () => vscode.postMessage({ type: "runWikiWrapupNow" }), enabled: () => !!lastState.canRunWikiWrapup },
   { id: "choose-model", group: "Settings", name: "Choose Model", what: "Pick Codex or Claude model overrides", run: () => vscode.postMessage({ type: "chooseModel" }), enabled: () => !lastState.canOpenFolder },
   { id: "choose-effort", group: "Settings", name: "Choose Thinking Level", what: "Pick Codex reasoning or Claude effort overrides", run: () => vscode.postMessage({ type: "chooseEffort" }), enabled: () => !lastState.canOpenFolder },
+  { id: "toggle-many-heads", group: "Settings", name: "Toggle Many Heads Mode", what: "Enable or disable local Claude worker fanout for parallel discussion", run: () => vscode.postMessage({ type: "toggleManyHeadsMode" }), enabled: () => !lastState.canOpenFolder },
+  { id: "many-heads-workers", group: "Settings", name: "Set Many Heads Worker Count", what: "Choose local subscription-backed Claude worker fanout", run: () => vscode.postMessage({ type: "configureManyHeadsWorkers" }), enabled: () => !lastState.canOpenFolder },
   { id: "test-telegram", group: "Settings", name: "Send Test Telegram", what: "Verify Telegram decision notifications", run: () => vscode.postMessage({ type: "testTelegram" }), enabled: () => !lastState.canOpenFolder },
   { id: "change-profile", group: "Settings", name: "Change Capability Profile", what: "Pick safe, native build, review, full-native, or custom CLI profiles", run: () => profileBtn.click(), enabled: () => !profileBtn.disabled },
   { id: "fix-codex", group: "Setup", name: "Fix Codex Path", what: "Update the configured Codex CLI command", run: () => fixCodexBtn.click(), enabled: () => !!lastState.needsCodexPath },
@@ -1703,7 +1705,7 @@ function disabledReason(action) {
   if (action.id === "open-folder") return "workspace is already open";
   if (action.id === "fix-codex") return "Codex path check is not failing";
   if (action.id === "fix-claude") return "Claude path check is not failing";
-  if (action.id === "choose-model" || action.id === "choose-effort" || action.id === "test-telegram" || action.id === "open-objective" || action.id === "open-agent-calls" || action.id === "clean-workspace-state") return "open a workspace folder first";
+  if (action.id === "choose-model" || action.id === "choose-effort" || action.id === "toggle-many-heads" || action.id === "many-heads-workers" || action.id === "test-telegram" || action.id === "open-objective" || action.id === "open-agent-calls" || action.id === "clean-workspace-state") return "open a workspace folder first";
   if (action.id.indexOf("assign-") === 0) return "builder assignment unavailable";
   if (action.id === "request-review") return "no build ready for review";
   if (action.id.indexOf("poke-") === 0 || action.id.indexOf("-command") > 0 || action.id.indexOf("-raw") > 0 || action.id === "native-action") return "native terminal actions unavailable";

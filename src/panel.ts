@@ -1406,6 +1406,47 @@ export class HydraRoomPanel {
     });
   }
 
+  async toggleManyHeadsMode(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    const next = !manyHeadsMode();
+    await vscode.workspace
+      .getConfiguration("hydraRoom")
+      .update("manyHeadsMode", next, vscode.ConfigurationTarget.Workspace);
+    await this.appendSystemMessage(
+      next
+        ? `Many Heads Mode enabled for this workspace. Parallel discussion will launch ${manyHeadsClaudeWorkerCount()} local Claude workers through the subscription-backed runtime.`
+        : "Many Heads Mode disabled for this workspace."
+    );
+    this.postState();
+  }
+
+  async configureManyHeadsWorkers(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    const current = manyHeadsClaudeWorkerCount();
+    const choices = Array.from({ length: 8 }, (_, index) => {
+      const value = index + 1;
+      return {
+        label: `${value}`,
+        description: value === current ? "current" : undefined,
+        detail: `${value} local subscription-backed Claude worker${value === 1 ? "" : "s"} in Many Heads parallel discussion`,
+        value,
+      };
+    });
+    const pick = await vscode.window.showQuickPick(choices, {
+      title: "Many Heads Claude Workers",
+      placeHolder: "Choose local Claude worker fanout (1-8)",
+      ignoreFocusOut: true,
+    });
+    if (!pick) return;
+    await vscode.workspace
+      .getConfiguration("hydraRoom")
+      .update("manyHeadsClaudeWorkerCount", pick.value, vscode.ConfigurationTarget.Global);
+    await this.appendSystemMessage(`Many Heads Claude worker count set to ${pick.value}.`);
+    this.postState();
+  }
+
   private modelChooserDeps(): ModelChooserDeps {
     return {
       workspaceRoot: this.workspaceRoot,
@@ -1521,6 +1562,8 @@ export class HydraRoomPanel {
       transport: this.transportMode(),
       workQueueCount: this.workspaceReady ? this.currentWorkQueue().length : 0,
       nativeActionsCount: this.nativeActions.length,
+      manyHeadsMode: manyHeadsMode(),
+      manyHeadsClaudeWorkerCount: manyHeadsClaudeWorkerCount(),
       wikiStatus,
     });
     const pick = await vscode.window.showQuickPick(
@@ -1569,6 +1612,12 @@ export class HydraRoomPanel {
         return;
       case "chooseEffort":
         await this.chooseEffort();
+        return;
+      case "toggleManyHeadsMode":
+        await this.toggleManyHeadsMode();
+        return;
+      case "configureManyHeadsWorkers":
+        await this.configureManyHeadsWorkers();
         return;
       case "testTelegram":
         await this.sendTestTelegramMessage();
@@ -5256,6 +5305,12 @@ export class HydraRoomPanel {
         case "chooseEffort":
           await this.chooseEffort();
           break;
+        case "toggleManyHeadsMode":
+          await this.toggleManyHeadsMode();
+          break;
+        case "configureManyHeadsWorkers":
+          await this.configureManyHeadsWorkers();
+          break;
         case "testTelegram":
           await this.sendTestTelegramMessage();
           break;
@@ -5437,6 +5492,10 @@ export class HydraRoomPanel {
         efforts: {
           claude: this.effortSummaryForRail("claude"),
           codex: this.effortSummaryForRail("codex"),
+        },
+        manyHeads: {
+          enabled: manyHeadsMode(),
+          claudeWorkerCount: manyHeadsClaudeWorkerCount(),
         },
         latestDecision,
         latestDecisionAccepted,
