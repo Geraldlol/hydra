@@ -21,16 +21,22 @@ import { clampManyHeadsClaudeWorkerCount } from "./claudeWorkers";
 function normalizeAgentTimeoutMs(value: number | undefined, fallback: number): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
   const timeout = Math.floor(value);
+  if (shouldClearLegacyAgentTimeout(timeout)) return 0;
   return timeout <= 0 ? 0 : Math.max(1000, timeout);
+}
+
+export function shouldClearLegacyAgentTimeout(value: number | undefined): boolean {
+  if (typeof value !== "number" || !Number.isFinite(value)) return false;
+  const timeout = Math.floor(value);
+  // Why: tiny positive values are failed attempts to mean "effectively
+  // uncapped" that instead brick every native call after the 1s clamp.
+  return timeout > 0 && timeout <= 1000;
 }
 
 export function agentTimeoutMs(phase?: Phase): number {
   if (phase === "opener" || phase === "reactor" || phase === "closer" || phase === "parallel") {
     const configured = vscode.workspace.getConfiguration("hydraRoom").get<number>("discussionTimeoutMs", 0);
-    // Why: preserve the legacy 2-minute -> uncapped coercion BEFORE clamping
-    // so an explicitly-saved 120000 still upgrades to the new default.
-    const coerced = configured === 120000 ? 0 : configured;
-    return normalizeAgentTimeoutMs(coerced, 0);
+    return normalizeAgentTimeoutMs(configured, 0);
   }
   const oneShot = vscode.workspace.getConfiguration("hydraRoom").get<number>("oneShotTimeoutMs", 0);
   return normalizeAgentTimeoutMs(oneShot, 0);

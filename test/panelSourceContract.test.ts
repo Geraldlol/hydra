@@ -465,6 +465,14 @@ describe("many heads smoke command source contract", () => {
     assert.match(extension, /await panel\.runManyHeadsSmokeTest\(\)/);
   });
 
+  test("auto accept setting supports folder-scoped command center toggles", () => {
+    const pkg = JSON.parse(fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8")) as {
+      contributes?: { configuration?: { properties?: Record<string, { scope?: string }> } };
+    };
+    const prop = pkg.contributes?.configuration?.properties?.["hydraRoom.autoAdvanceActionableDefaults"];
+    assert.equal(prop?.scope, "resource");
+  });
+
   test("panel smoke runner uses the real parallel turn path and durable report", () => {
     const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
     const methodStart = source.indexOf("async runManyHeadsSmokeTest(");

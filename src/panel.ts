@@ -182,6 +182,7 @@ import {
   manyHeadsMode,
   manyHeadsClaudeWorkerCount,
   sessionCostCapUsd,
+  shouldClearLegacyAgentTimeout,
   telegramConfig,
   terminalBridgeTimeoutMs,
   terminalBridgeWorkspaceInstructionsMaxChars,
@@ -4713,8 +4714,8 @@ export class HydraRoomPanel {
         await cfg.update(key, 0, target);
       } catch {
         // If VS Code refuses to write a scope, agentTimeoutMs still coerces
-        // known legacy defaults at runtime so the room does not fall back to a
-        // stale wall-clock cap.
+        // tiny brick values at runtime so the room does not fall back to a
+        // stale 1-second wall-clock cap.
       }
     }
   }

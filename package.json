@@ -871,6 +871,7 @@
           "markdownDescription": "Automatically run Hydra verification after a successful Build phase."
         },
         "hydraRoom.autoAdvanceActionableDefaults": {
+          "scope": "resource",
           "type": "boolean",
           "default": true,
           "markdownDescription": "Automatically execute actionable Decision Packet defaults when they have no blockers and require no user decision. For example, a discussion default that names a builder enters Build without requiring the user to click Accept Default."
