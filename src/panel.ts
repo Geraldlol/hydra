@@ -55,6 +55,7 @@ import {
 } from "./capabilityProfiles";
 import { buildCommandCenterActions, type CommandCenterActionId, type CommandCenterWikiStatus } from "./commandCenter";
 import { shouldAutoSkipCloserOnAgreement } from "./closerSkip";
+import { formatElapsed, formatPendingAgentActivity } from "./agentActivity";
 import { createLiveTextExtractor } from "./liveText";
 import { createLiveChannelWriter, liveChannelPath, type LiveChannelEvent } from "./liveChannel";
 import {
@@ -655,7 +656,7 @@ export class HydraRoomPanel {
 
     this.workspaceReady = true;
     this.workspaceRoot = workspaceRoot;
-    await this.migrateLegacyDiscussionTimeoutDefault();
+    await this.migrateLegacyAgentTimeoutDefaults();
     this.terminalBridge = this.createTerminalBridge();
     this.transcriptUri = this.resolveTranscriptUri();
     this.objectiveUri = vscode.Uri.file(path.join(this.workspaceRoot, ".hydra", "objective.md"));
@@ -3661,7 +3662,7 @@ export class HydraRoomPanel {
       }
     }
     const timeout = agentTimeoutMs(phase);
-    const stopActivity = this.startPendingActivity(messageId, agent, phase, timeout);
+    const activity = this.startPendingActivity(messageId, agent, phase, timeout);
     let spawn: AgentSpawn;
     try {
       spawn = this.buildSpawn(agent, phase);
@@ -3698,7 +3699,7 @@ export class HydraRoomPanel {
         promptSha256: sha256(prompt),
       });
       await this.finalizePendingMessage(messageId, result);
-      stopActivity();
+      activity.stop();
       releaseClaudeCreditReservation?.();
       releaseClaudeCreditReservation = undefined;
       const finalized = this.messagesById.get(messageId);
@@ -3711,7 +3712,7 @@ export class HydraRoomPanel {
       // ensureFullNativeConsent awaits VS Code modal/state APIs that can reject;
       // this await sits outside the final try/finally, so release the in-flight
       // Claude credit reservation here or it stays elevated for the session.
-      stopActivity();
+      activity.stop();
       releaseClaudeCreditReservation?.();
       releaseClaudeCreditReservation = undefined;
       throw err;
@@ -3736,19 +3737,19 @@ export class HydraRoomPanel {
         cancelled: true,
       };
       await this.finalizePendingMessage(messageId, result);
-      stopActivity();
+      activity.stop();
       releaseClaudeCreditReservation?.();
       releaseClaudeCreditReservation = undefined;
       const finalized = this.messagesById.get(messageId);
       return { text: finalized?.text ?? "", result };
     }
     try {
-      const result = await this.runAgentTransport(agent, phase, spawn, prompt, messageId, timeout, signal, forceTerminalBridge, traceIdOverride);
+      const result = await this.runAgentTransport(agent, phase, spawn, prompt, messageId, timeout, signal, forceTerminalBridge, traceIdOverride, activity.markOutput);
       await this.finalizePendingMessage(messageId, result);
       const finalized = this.messagesById.get(messageId);
       return { text: finalized?.text ?? "", result };
     } finally {
-      stopActivity();
+      activity.stop();
       releaseClaudeCreditReservation?.();
     }
   }
@@ -3803,7 +3804,8 @@ export class HydraRoomPanel {
     timeout: number,
     signal: AbortSignal,
     forceTerminalBridge = false,
-    traceIdOverride?: string
+    traceIdOverride?: string,
+    markOutput?: () => void
   ): Promise<RunResult> {
     const traceId = traceIdOverride ?? makeTraceId(agent, phase);
     const startedAt = Date.now();
@@ -3841,6 +3843,7 @@ export class HydraRoomPanel {
         const liveText = createLiveTextExtractor(terminalPrepared.outputMode);
         const onLiveChunk = liveText
           ? (chunk: string) => {
+              markOutput?.();
               const text = liveText.push(chunk);
               if (!text) return;
               const live = this.messagesById.get(messageId);
@@ -3892,6 +3895,7 @@ export class HydraRoomPanel {
       const prepared = await this.prepareOneShotRequestFiles(agent, phase, spawn, prompt);
       return await this.runOneShotPipeline(agent, phase, prepared, prompt, timeout, signal, traceId, startedAt, {
         onChunk: (chunk) => {
+          markOutput?.();
           const m = this.messagesById.get(messageId);
           if (m) m.text += chunk;
           this.panel.webview.postMessage({ type: "chunk", messageId, text: chunk });
@@ -4687,19 +4691,30 @@ export class HydraRoomPanel {
     return this.transport;
   }
 
-  private async migrateLegacyDiscussionTimeoutDefault(): Promise<void> {
+  private async migrateLegacyAgentTimeoutDefaults(): Promise<void> {
     const cfg = vscode.workspace.getConfiguration("hydraRoom");
-    const inspected = cfg.inspect<number>("discussionTimeoutMs");
-    const updates: Array<[vscode.ConfigurationTarget, number | undefined]> = [];
-    if (inspected?.globalValue === 120000) updates.push([vscode.ConfigurationTarget.Global, inspected.globalValue]);
-    if (inspected?.workspaceValue === 120000) updates.push([vscode.ConfigurationTarget.Workspace, inspected.workspaceValue]);
-    if (inspected?.workspaceFolderValue === 120000) updates.push([vscode.ConfigurationTarget.WorkspaceFolder, inspected.workspaceFolderValue]);
-    for (const [target] of updates) {
+    await this.clearLegacyAgentTimeoutSetting(cfg, "discussionTimeoutMs");
+    await this.clearLegacyAgentTimeoutSetting(cfg, "oneShotTimeoutMs");
+  }
+
+  private async clearLegacyAgentTimeoutSetting(
+    cfg: vscode.WorkspaceConfiguration,
+    key: "discussionTimeoutMs" | "oneShotTimeoutMs"
+  ): Promise<void> {
+    const inspected = cfg.inspect<number>(key);
+    const scopes: Array<[vscode.ConfigurationTarget, number | undefined]> = [
+      [vscode.ConfigurationTarget.Global, inspected?.globalValue],
+      [vscode.ConfigurationTarget.Workspace, inspected?.workspaceValue],
+      [vscode.ConfigurationTarget.WorkspaceFolder, inspected?.workspaceFolderValue],
+    ];
+    for (const [target, value] of scopes) {
+      if (!shouldClearLegacyAgentTimeout(value)) continue;
       try {
-        await cfg.update("discussionTimeoutMs", 0, target);
+        await cfg.update(key, 0, target);
       } catch {
-        // If VS Code refuses to write a scope, agentTimeoutMs still coerces the
-        // old default at runtime so the room does not fall back to 2 minutes.
+        // If VS Code refuses to write a scope, agentTimeoutMs still coerces
+        // known legacy defaults at runtime so the room does not fall back to a
+        // stale wall-clock cap.
       }
     }
   }
@@ -5007,22 +5022,31 @@ export class HydraRoomPanel {
     agent: AgentId,
     phase: Phase,
     timeoutMs: number
-  ): () => void {
+  ): { markOutput: () => void; stop: () => void } {
     const startedAt = Date.now();
+    let lastOutputAt = startedAt;
     const update = () => {
       const message = this.messagesById.get(messageId);
       if (!message?.pending) return;
       const elapsedMs = Date.now() - startedAt;
-      const elapsed = formatElapsed(elapsedMs);
-      const timeout = formatElapsed(timeoutMs);
-      const label = AGENT_NAMES[agent];
-      message.activity = `${label} is still running ${phase} (${elapsed}; timeout ${timeout}). Use Stop current turn if this is not useful.`;
-      this.setAgentStatus(agent, "running", `${phase} running ${elapsed}`);
+      message.activity = formatPendingAgentActivity({
+        agentLabel: AGENT_NAMES[agent],
+        phase,
+        elapsedMs,
+        timeoutMs,
+        outputIdleMs: Date.now() - lastOutputAt,
+      });
+      this.setAgentStatus(agent, "running", `${phase} running ${formatElapsed(elapsedMs)}`);
       this.postState();
     };
     const handle = setInterval(update, 5000);
     update();
-    return () => clearInterval(handle);
+    return {
+      markOutput: () => {
+        lastOutputAt = Date.now();
+      },
+      stop: () => clearInterval(handle),
+    };
   }
 
   private async finalizePendingMessage(messageId: string, result: RunResult): Promise<void> {
@@ -6096,14 +6120,6 @@ function unavailableAuthoritySummary(agent: AgentId): AgentAuthoritySummary {
       detail: `${AGENT_NAMES[agent]} CLI authority is unavailable until a workspace folder is open.`,
     },
   };
-}
-
-function formatElapsed(ms: number): string {
-  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  if (minutes === 0) return `${seconds}s`;
-  return `${minutes}m ${seconds.toString().padStart(2, "0")}s`;
 }
 
 function roomTextFromClaudeStreamJson(raw: string): string {
