@@ -455,6 +455,33 @@ describe("claude automation credit guard source contract", () => {
   });
 });
 
+describe("many heads smoke command source contract", () => {
+  test("command palette command routes to the panel smoke runner", () => {
+    const extension = fs.readFileSync(path.join(process.cwd(), "src", "extension.ts"), "utf8");
+    const pkg = fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8");
+
+    assert.match(pkg, /"command": "hydraRoom\.runManyHeadsSmokeTest"/);
+    assert.match(extension, /"hydraRoom\.runManyHeadsSmokeTest"/);
+    assert.match(extension, /await panel\.runManyHeadsSmokeTest\(\)/);
+  });
+
+  test("panel smoke runner uses the real parallel turn path and durable report", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    const methodStart = source.indexOf("async runManyHeadsSmokeTest(");
+    const methodEnd = source.indexOf("private modelChooserDeps(", methodStart);
+    assert.ok(methodStart >= 0 && methodEnd > methodStart, "could not bound runManyHeadsSmokeTest");
+    const method = source.slice(methodStart, methodEnd);
+
+    assert.match(method, /cfg\.update\("manyHeadsMode", true, vscode\.ConfigurationTarget\.Workspace\)/);
+    assert.match(method, /cfg\.update\("autoAdvanceActionableDefaults", false, vscode\.ConfigurationTarget\.Workspace\)/);
+    assert.match(method, /await this\.sendUserMessage\(prompt, "codex"\)/);
+    assert.match(method, /readJsonlGuarded\(\s*this\.agentCallsUri\.fsPath,\s*isManyHeadsSmokeAgentCall/s);
+    assert.match(method, /this\.readManyHeadsSmokeLiveFiles\(agentCalls\)/);
+    assert.match(method, /buildManyHeadsSmokeReport\(\{/);
+    assert.match(method, /appendManyHeadsSmokeReport\(this\.manyHeadsSmokeUri\.fsPath, report\)/);
+  });
+});
+
 describe("workspace edit viewer source contracts", () => {
   const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
 

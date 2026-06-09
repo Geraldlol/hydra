@@ -104,7 +104,7 @@ import {
 } from "./doctor";
 import { EditorContextAttachment, truncateEditorContext } from "./editorContext";
 import { appendHydraEvent, createHydraEvent, ensureHydraEventsFile, hydraEventsPath, readHydraEvents, type HydraEventKind } from "./events";
-import { ensureFile, serializePerFile } from "./fileQueue";
+import { ensureFile, readJsonlGuarded, serializePerFile } from "./fileQueue";
 import { detectNativeReplyLeak, formatNativeReplyLeakError } from "./nativeReplyGuard";
 import { ensureObjectiveFile, objectiveAsContext, readObjective, writeObjective } from "./objective";
 import { TerminalBridge } from "./terminalBridge";
@@ -206,6 +206,16 @@ import {
   buildParallelDiscussionWorkers,
   claudeWorkerTraceIds,
 } from "./claudeWorkers";
+import {
+  appendManyHeadsSmokeReport,
+  buildManyHeadsSmokeReport,
+  ensureManyHeadsSmokeFile,
+  formatManyHeadsSmokeReport,
+  isManyHeadsSmokeAgentCall,
+  manyHeadsSmokePath,
+  type ManyHeadsSmokeAgentCall,
+  type ManyHeadsSmokeLiveFile,
+} from "./manyHeadsSmoke";
 import type { WebviewMessage } from "./webviewMessages";
 import {
   attachmentDisplaySummary,
@@ -464,6 +474,7 @@ export class HydraRoomPanel {
   private nativeActionsUri!: vscode.Uri;
   private eventsUri!: vscode.Uri;
   private agentCallsUri!: vscode.Uri;
+  private manyHeadsSmokeUri!: vscode.Uri;
   private nativeCapabilitiesUri!: vscode.Uri;
   private nativeDataSnapshotUri!: vscode.Uri;
   private workQueueUri!: vscode.Uri;
@@ -653,6 +664,7 @@ export class HydraRoomPanel {
     this.nativeActionsUri = vscode.Uri.file(path.join(this.workspaceRoot, ".hydra", "native-actions.jsonl"));
     this.eventsUri = vscode.Uri.file(hydraEventsPath(this.workspaceRoot));
     this.agentCallsUri = vscode.Uri.file(path.join(this.workspaceRoot, ".hydra", "agent-calls.jsonl"));
+    this.manyHeadsSmokeUri = vscode.Uri.file(manyHeadsSmokePath(this.workspaceRoot));
     this.usageUri = vscode.Uri.file(path.join(this.workspaceRoot, ".hydra", "usage.jsonl"));
     this.codexModelsUri = vscode.Uri.file(path.join(this.workspaceRoot, ".hydra", "codex-models.json"));
     this.nativeCapabilitiesUri = vscode.Uri.file(nativeCapabilitiesPath(this.workspaceRoot));
@@ -670,6 +682,7 @@ export class HydraRoomPanel {
     await ensureNativeActionsFile(this.nativeActionsUri.fsPath);
     await ensureHydraEventsFile(this.eventsUri.fsPath);
     await ensureJsonlFile(this.agentCallsUri.fsPath);
+    await ensureManyHeadsSmokeFile(this.manyHeadsSmokeUri.fsPath);
     await ensureJsonlFile(this.usageUri.fsPath);
     await ensureFile(this.telegramInboundStateUri.fsPath, "{\"seenIds\":[]}\n");
     // Why: usage.jsonl keeps full durable history, but the in-memory replay is
@@ -1444,6 +1457,108 @@ export class HydraRoomPanel {
       .getConfiguration("hydraRoom")
       .update("manyHeadsClaudeWorkerCount", pick.value, vscode.ConfigurationTarget.Global);
     await this.appendSystemMessage(`Many Heads Claude worker count set to ${pick.value}.`);
+    this.postState();
+  }
+
+  async runManyHeadsSmokeTest(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    if (isInFlight(this.state) || this.terminalPokeInFlight || this.verificationRunning || this.autopilotRunning) {
+      await this.appendSystemMessage("Many Heads smoke test skipped because Hydra is already running work.");
+      this.postState();
+      return;
+    }
+    if (!isSendable(this.state)) {
+      await this.appendSystemMessage(`Many Heads smoke test skipped because the room is not in a sendable state: ${this.state.name}.`);
+      this.postState();
+      return;
+    }
+
+    const prompt = [
+      "Codex and Claude, run a Hydra Many Heads smoke test.",
+      "Do not edit files or run long commands.",
+      "Codex: inspect only the Many Heads live-channel pointers in your prompt and reply with SMOKE_CODEX_OK plus any live-channel evidence you can see.",
+      "Claude workers: each of you should use one Task/subagent call if available with the instruction `Return SMOKE_TASK_OK only.` Then reply with SMOKE_CLAUDE_OK.",
+      "Keep all replies under 8 lines and include no Decision Packet.",
+    ].join(" ");
+    const cfg = vscode.workspace.getConfiguration("hydraRoom");
+    const previousManyHeadsWorkspaceValue = cfg.inspect<boolean>("manyHeadsMode")?.workspaceValue;
+    const previousAutoAdvanceWorkspaceValue = cfg.inspect<boolean>("autoAdvanceActionableDefaults")?.workspaceValue;
+    const previousTransport = this.transportMode();
+    const expectedClaudeWorkers = manyHeadsClaudeWorkerCount();
+    const startedAt = new Date().toISOString();
+    const messageStartIndex = this.messages.length;
+    let turnError: string | undefined;
+
+    await this.appendSystemMessage(
+      `Hydra Many Heads smoke test started. Temporarily enabling Many Heads Mode with ${expectedClaudeWorkers} Claude worker(s); report will be written to \`.hydra/many-heads-smoke.jsonl\`.`
+    );
+    await this.recordEvent("commandInvoked", "Hydra Many Heads smoke test started.", {
+      expectedClaudeWorkers,
+      previousTransport,
+    });
+
+    try {
+      if (previousTransport !== "oneShot") {
+        this.transport = "oneShot";
+        this.terminalBridge?.dispose();
+        this.terminalBridge = undefined;
+        await this.appendSystemMessage("Many Heads smoke test switched this room to safe one-shot transport; Many Heads worker fanout does not run through terminal bridge.");
+      }
+      await cfg.update("manyHeadsMode", true, vscode.ConfigurationTarget.Workspace);
+      await cfg.update("autoAdvanceActionableDefaults", false, vscode.ConfigurationTarget.Workspace);
+      this.postState();
+      await this.sendUserMessage(prompt, "codex");
+    } catch (err) {
+      turnError = err instanceof Error ? err.message : String(err);
+      await this.appendSystemMessage(`Many Heads smoke test turn failed before report collection: ${turnError}`);
+    } finally {
+      await cfg.update("manyHeadsMode", previousManyHeadsWorkspaceValue, vscode.ConfigurationTarget.Workspace);
+      await cfg.update("autoAdvanceActionableDefaults", previousAutoAdvanceWorkspaceValue, vscode.ConfigurationTarget.Workspace);
+      this.postState();
+    }
+
+    const completedAt = new Date().toISOString();
+    const agentCalls = (await readJsonlGuarded(
+      this.agentCallsUri.fsPath,
+      isManyHeadsSmokeAgentCall,
+      { limit: 500 }
+    )).filter((call) => isSmokeWindowCall(call, startedAt));
+    const liveFiles = await this.readManyHeadsSmokeLiveFiles(agentCalls);
+    const forwardedTaskEvents = this.messages
+      .slice(messageStartIndex)
+      .reduce((sum, message) => sum + (message.liveChannelEvents?.length ?? 0), 0);
+    const report = buildManyHeadsSmokeReport({
+      startedAt,
+      completedAt,
+      prompt,
+      expectedClaudeWorkers,
+      agentCalls,
+      liveFiles,
+      forwardedTaskEvents,
+    });
+    await appendManyHeadsSmokeReport(this.manyHeadsSmokeUri.fsPath, report);
+    const formatted = formatManyHeadsSmokeReport(report);
+    await this.appendSystemMessage(
+      [
+        formatted,
+        `Report: \`.hydra/many-heads-smoke.jsonl\``,
+        turnError ? `Turn error: ${turnError}` : "",
+      ].filter(Boolean).join("\n")
+    );
+    await this.recordEvent(report.passed ? "commandInvoked" : "error", `Hydra Many Heads smoke test ${report.passed ? "passed" : "failed"}.`, {
+      expectedClaudeWorkers,
+      claudeStarts: report.observed.claudeStarts,
+      liveFiles: report.observed.liveFiles,
+      forwardedTaskEvents: report.observed.forwardedTaskEvents,
+      guardBlocks: report.observed.guardBlocks,
+      passed: report.passed,
+    });
+    if (report.passed) {
+      vscode.window.showInformationMessage("Hydra Many Heads smoke test passed.");
+    } else {
+      vscode.window.showWarningMessage("Hydra Many Heads smoke test failed. See .hydra/many-heads-smoke.jsonl.");
+    }
     this.postState();
   }
 
@@ -4825,6 +4940,42 @@ export class HydraRoomPanel {
     this.messagesById.set(msg.id, msg);
   }
 
+  private async readManyHeadsSmokeLiveFiles(agentCalls: readonly ManyHeadsSmokeAgentCall[]): Promise<ManyHeadsSmokeLiveFile[]> {
+    const started = agentCalls.filter((call) =>
+      call.event === "started" &&
+      call.phase === "parallel" &&
+      (call.agent === "codex" || call.agent === "claude")
+    );
+    const seen = new Set<string>();
+    const summaries: ManyHeadsSmokeLiveFile[] = [];
+    for (const call of started) {
+      const agent = call.agent as AgentId;
+      const key = `${call.id}\0${agent}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const filePath = liveChannelPath(this.workspaceRoot, call.id, agent);
+      const records = await readJsonlGuarded(filePath, isSmokeLiveChannelRecord);
+      let exists = records.length > 0;
+      if (!exists) {
+        try {
+          const stat = await fs.stat(filePath);
+          exists = stat.isFile();
+        } catch {
+          exists = false;
+        }
+      }
+      if (!exists) continue;
+      summaries.push({
+        requestId: call.id,
+        agent,
+        path: vscode.workspace.asRelativePath(filePath, false),
+        eventCount: records.length,
+        taskEventCount: records.filter((record) => record.agent === "claude" && record.kind.startsWith("task_")).length,
+      });
+    }
+    return summaries;
+  }
+
   private appendMessageLiveChannelEvent(messageId: string, event: LiveChannelEvent): void {
     if (!isClaudeTaskLiveEvent(event)) return;
     const message = this.messagesById.get(messageId);
@@ -5833,6 +5984,24 @@ function checkFailed(report: DoctorReport | undefined, id: string): boolean {
 // and run validateNativeArgs against it. Doctor consumes the rows and turns
 // any non-empty warning lists into a "Native CLI args" check. Cheap
 // (six config reads + six pure validations) and runs once per Doctor pass.
+function isSmokeWindowCall(call: ManyHeadsSmokeAgentCall, startedAt: string): boolean {
+  if (typeof call.timestamp !== "string") return false;
+  const callTime = Date.parse(call.timestamp);
+  const startTime = Date.parse(startedAt);
+  return Number.isFinite(callTime) && Number.isFinite(startTime) && callTime >= startTime;
+}
+
+function isSmokeLiveChannelRecord(value: unknown): value is LiveChannelEvent {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Partial<LiveChannelEvent>;
+  return record.version === 1 &&
+    typeof record.timestamp === "string" &&
+    typeof record.requestId === "string" &&
+    (record.agent === "codex" || record.agent === "claude") &&
+    typeof record.phase === "string" &&
+    typeof record.kind === "string";
+}
+
 function collectArgsValidation(cfg: vscode.WorkspaceConfiguration): DoctorArgsValidation[] {
   const profiles: Array<{ profile: string; key: (agent: AgentId) => string }> = [
     { profile: "discussion", key: (agent) => `${agent}ExecArgsDiscussion` },

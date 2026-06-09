@@ -501,6 +501,13 @@ export function activate(context: vscode.ExtensionContext): void {
       })
     ),
     vscode.commands.registerCommand(
+      "hydraRoom.runManyHeadsSmokeTest",
+      withErrorReporting(async () => {
+        const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
+        await panel.runManyHeadsSmokeTest();
+      })
+    ),
+    vscode.commands.registerCommand(
       "hydraRoom.showEffectiveAuthority",
       withErrorReporting(async () => {
         const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);

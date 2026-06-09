@@ -198,6 +198,10 @@
         "title": "Hydra: Advanced: Run Terminal Bridge Self-Test"
       },
       {
+        "command": "hydraRoom.runManyHeadsSmokeTest",
+        "title": "Hydra: Advanced: Run Many Heads Smoke Test"
+      },
+      {
         "command": "hydraRoom.showEffectiveAuthority",
         "title": "Hydra: Show Effective Native Authority"
       },
