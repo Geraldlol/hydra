@@ -199,10 +199,10 @@ export function detectRiskySignals(packet: DecisionPacket | undefined): RiskySig
   for (const { pattern, label } of RISKY_PATTERNS) {
     if (pattern.test(haystack)) reasons.add(label);
   }
-  // TODO(security): Callers that auto-advance phase (panel.maybeAutoAdvanceDecision)
-  // MUST gate on `risky === false`. A non-empty `reasons` list means the agent's
-  // default action contains a high-blast-radius verb; the user should be
-  // prompted, not auto-actioned.
+  // Auto-advance callers must gate on `risky === false`. A non-empty `reasons`
+  // list means the agent's default action contains a high-blast-radius verb; the
+  // user should be prompted, not auto-actioned. panel.ts and
+  // panelSourceContract.test.ts pin that invariant.
   return { risky: reasons.size > 0, reasons: [...reasons] };
 }
 
