@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.0
+
+Public beta release candidate.
+
+- Adds Marketplace metadata for the public Hydra listing under publisher `geraldlol`.
+- Marks the extension as Preview and keeps the visible product name as **Hydra**.
+- Adds pre-release VSIX packaging support via `pnpm run package:pre-release`.
+- Keeps the existing local-first security posture documented: Hydra can spawn Codex and Claude with workspace-write authority by default, and untrusted workspaces restrict sensitive spawn/configuration settings.
+
 ## 0.4.x
 
 Summary of the major themes shipped across the 0.4 line since 0.1.0 (see `git log` for per-commit detail):

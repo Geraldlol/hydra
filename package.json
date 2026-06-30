@@ -2,17 +2,45 @@
   "name": "vscode-hydra-room",
   "displayName": "Hydra",
   "description": "Three-way collaboration room for the user, Codex CLI, and Claude Code CLI inside VS Code.",
-  "version": "0.4.39",
+  "version": "0.5.0",
   "packageManager": "pnpm@11.1.3",
-  "publisher": "local-tools",
+  "publisher": "geraldlol",
   "license": "MIT",
   "private": false,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Geraldlol/hydra.git"
+  },
+  "homepage": "https://github.com/Geraldlol/hydra#readme",
+  "bugs": {
+    "url": "https://github.com/Geraldlol/hydra/issues"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "codex",
+    "claude",
+    "collaboration",
+    "automation",
+    "review",
+    "pair-programming",
+    "vscode"
+  ],
+  "galleryBanner": {
+    "color": "#0A0F14",
+    "theme": "dark"
+  },
+  "icon": "media/hydra-heads/guard.png",
+  "preview": true,
+  "pricing": "Free",
+  "qna": false,
   "engines": {
     "vscode": "^1.120.0",
     "node": ">=20 <21"
   },
   "categories": [
-    "Other"
+    "AI",
+    "Chat"
   ],
   "main": "./dist/src/extension.js",
   "contributes": {
@@ -1246,7 +1274,8 @@
     "test:fast": "tsc --incremental -p ./ && node --test --test-concurrency=4 dist/test/*.test.js",
     "verify:fast": "pnpm run test:fast",
     "prepackage": "pnpm run clean && pnpm run test",
-    "package": "pnpm exec vsce package --no-dependencies --allow-missing-repository",
+    "package": "pnpm exec vsce package --no-dependencies",
+    "package:pre-release": "pnpm exec vsce package --no-dependencies --pre-release",
     "install:local": "node scripts/install-local.js",
     "install:local:existing": "node scripts/install-local.js --skip-package"
   },

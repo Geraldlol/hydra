@@ -2,10 +2,7 @@ node_modules/**
 src/**
 test/**
 scripts/**
-docs/native-internals/**
-docs/native-cli-recon.md
-docs/native-data-recon.md
-docs/native-contract-probe.md
+docs/**
 dist/test/**
 .vscode/**
 .hydra/**
