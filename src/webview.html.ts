@@ -22,7 +22,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
-  // style-src remains 'unsafe-inline' because the webview ships a ~900-line
+  // style-src remains 'unsafe-inline' because the webview ships a large
   // inline CSS block; default-src 'none' + nonced script-src + the policies
   // below neutralize CSS-injection-to-XSS without the refactor cost.
   return `<!DOCTYPE html>
@@ -33,53 +33,160 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${heads.cspSource}; script-src 'nonce-${nonce}' ${heads.cspSource}; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none';">
   <title>Hydra Room</title>
   <style>
+    /* ============================================================
+       Hydra UI Kit — "Abyssal" identity. Ported from the Claude
+       Design system. The token block below is the single source of
+       truth; it mirrors foundations/abyssal.html one-for-one so the
+       kit and the live webview never drift. Many heads, one body:
+       agent color comes from the --head-1..8 ramp by index, never a
+       hardcoded per-model literal, so a new model just takes the
+       next hue. Fixed dark palette by design (marketing identity);
+       it deliberately overrides the VS Code theme.
+       ============================================================ */
     :root {
-      color-scheme: light dark;
-      --panel: var(--vscode-editor-background);
-      --panel-alt: var(--vscode-sideBar-background);
-      --text: var(--vscode-editor-foreground);
-      --muted: var(--vscode-descriptionForeground);
-      --border: var(--vscode-panel-border);
-      --button: var(--vscode-button-background);
-      --button-text: var(--vscode-button-foreground);
-      --button-hover: var(--vscode-button-hoverBackground);
-      --secondary-button: var(--vscode-button-secondaryBackground);
-      --secondary-text: var(--vscode-button-secondaryForeground);
-      --secondary-hover: var(--vscode-button-secondaryHoverBackground);
-      --input: var(--vscode-input-background);
-      --input-border: var(--vscode-input-border);
-      --focus: var(--vscode-focusBorder);
-      --codex: #4fb3ff;
-      --claude: #d19a66;
-      --user: #7bd88f;
-      --system: var(--muted);
-      --warn: var(--vscode-editorWarning-foreground);
-      --error: var(--vscode-errorForeground);
-      --ok: #7bd88f;
-      font-family: var(--vscode-font-family);
-      font-size: var(--vscode-font-size);
+      color-scheme: dark;
+
+      /* ---- Neutrals — deep water, cool teal undertone ---- */
+      --ink: #0A0F14;            /* app background, deepest */
+      --abyss: #10171E;          /* primary surface / panel */
+      --abyss-raised: #161F28;   /* cards, message bubbles */
+      --abyss-overlay: #1C2731;  /* modals, command center */
+      --border: #26323D;         /* hairline divider */
+      --border-strong: #3A4A57;  /* emphasized edge */
+      --text: #E6ECEF;           /* primary text, cool ivory */
+      --text-muted: #93A4AD;     /* secondary */
+      --text-faint: #5E6E78;     /* tertiary / disabled */
+
+      /* ---- Brand — bioluminescent hydra glow ---- */
+      --hydra: #74D0C9;
+      --hydra-deep: #3E948E;
+      --hydra-glow: rgba(116, 208, 201, 0.35);
+
+      /* ---- Semantic ---- */
+      --ok: #74C29A;
+      --warn: #D9B871;
+      --error: #E08B8B;
+      --info: #7FB4D6;
+
+      /* ---- Head ramp — categorical & scalable. Add a model -> next hue. ---- */
+      --head-1: #7FA8D9;  /* azure    — Codex   */
+      --head-2: #D6A77F;  /* amber    — Claude  */
+      --head-3: #7FC9A8;  /* emerald  */
+      --head-4: #B79BD6;  /* violet   */
+      --head-5: #D68FA8;  /* rose     */
+      --head-6: #D6C27F;  /* gold     */
+      --head-7: #8FCBC9;  /* aqua     */
+      --head-8: #A89BD6;  /* lavender */
+      --user: #A8D6C2;    /* the operator — soft mint, distinct from the heads */
+
+      /* ---- Compatibility aliases (kept so legacy selectors + the
+             webview contract's var(--focus) reference keep resolving) ---- */
+      --focus: var(--hydra);
+      --panel: var(--abyss);
+      --panel-alt: var(--abyss-raised);
+      --muted: var(--text-muted);
+      --codex: var(--head-1);
+      --claude: var(--head-2);
+      --button: var(--hydra);
+      --button-text: var(--ink);
+      --input: var(--ink);
+      --input-border: var(--border-strong);
+
+      /* ---- Type — serif display + mono instrument layer (no generic sans) ---- */
+      --font-display: "Hoefler Text", "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, "Times New Roman", serif;
+      --font-ui: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace;
+      --font-mono: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace;
+
+      /* ---- Radii — sharp, etched edges ---- */
+      --r-chip: 2px; --r-card: 2px; --r-panel: 3px; --r-pill: 2px;
+
+      font-family: var(--font-ui);
+      font-size: 13px;
     }
     * { box-sizing: border-box; min-width: 0; }
-    body { margin: 0; color: var(--text); background: var(--panel); overflow: hidden; }
-    button, textarea, select, input { font: inherit; }
-    button {
-      min-height: 28px; padding: 4px 10px; border: 1px solid transparent;
-      color: var(--button-text); background: var(--button); cursor: pointer;
+    body {
+      margin: 0; color: var(--text); overflow: hidden;
+      background:
+        radial-gradient(900px 380px at 82% -12%, rgba(116,208,201,.11), transparent 58%),
+        radial-gradient(760px 460px at 6% 2%, rgba(127,168,217,.05), transparent 52%),
+        radial-gradient(1000px 720px at 50% 118%, rgba(62,148,142,.08), transparent 62%),
+        radial-gradient(160% 130% at 50% -8%, #05090A 0%, var(--ink) 34%, #04080A 100%);
+      -webkit-font-smoothing: antialiased;
     }
-    button:hover:not(:disabled) { background: var(--button-hover); }
-    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    /* the presence — a heavy, slow-breathing vignette; something watching from the dark */
+    body::before {
+      content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+      background:
+        radial-gradient(135% 105% at 50% 4%, transparent 42%, rgba(0,0,0,.70) 100%),
+        radial-gradient(58% 44% at 50% 113%, rgba(62,148,142,.13), transparent 72%);
+      animation: breathe 12s ease-in-out infinite;
+    }
+    @keyframes breathe { 0%,100% { opacity: .84 } 50% { opacity: 1 } }
+    /* drifting deep-water caustics, slow and cold */
+    body::after {
+      content: ""; position: fixed; inset: -20%; pointer-events: none; z-index: 0; opacity: .42;
+      background:
+        radial-gradient(closest-side, rgba(116,208,201,.07), transparent) 12% 22%/360px 360px no-repeat,
+        radial-gradient(closest-side, rgba(127,168,217,.05), transparent) 88% 64%/420px 420px no-repeat;
+      animation: drift 34s ease-in-out infinite alternate;
+    }
+    @keyframes drift { from { transform: translate3d(-14px,-10px,0) scale(1) } to { transform: translate3d(20px,16px,0) scale(1.08) } }
+    /* eldritch tendrils — glowing limbs curling up from beneath the surface */
+    .abyss-tendrils {
+      position: fixed; inset: 0; width: 100%; height: 100%; z-index: 0; pointer-events: none;
+      opacity: .2; mix-blend-mode: screen; filter: drop-shadow(0 0 7px rgba(116,208,201,.4));
+      animation: sway 26s ease-in-out infinite alternate;
+    }
+    .abyss-tendrils path { fill: none; stroke: var(--hydra-deep); stroke-width: 1.5; stroke-linecap: round; }
+    .abyss-tendrils path.f { stroke: var(--head-1); opacity: .55; }
+    .abyss-tendrils path.s { stroke: var(--hydra); opacity: .7; stroke-width: 1.1; }
+    @keyframes sway { from { transform: translateY(0) rotate(-.7deg) scale(1.02) } to { transform: translateY(-16px) rotate(.7deg) scale(1.06) } }
+    @keyframes pulse { 0%,100% { opacity: 1; filter: brightness(1) } 50% { opacity: .62; filter: brightness(1.35) } }
+    @keyframes rot { to { transform: rotate(360deg) } }
+    @keyframes blink { 50% { opacity: 0; } }
+    @keyframes flicker {
+      0%,100% { opacity: 1; text-shadow: 0 0 18px var(--hydra-glow); }
+      40% { opacity: 1; } 41% { opacity: .45; text-shadow: none; }
+      42.5% { opacity: 1; text-shadow: 0 0 18px var(--hydra-glow); }
+      71% { opacity: 1; } 72% { opacity: .7; } 73% { opacity: 1; }
+      87% { opacity: 1; } 87.7% { opacity: .35; text-shadow: none; }
+      88.6% { opacity: 1; text-shadow: 0 0 18px var(--hydra-glow); }
+    }
+
+    button, textarea, select, input { font: inherit; }
+    /* base button == kit .btn (secondary-ish neutral); variant classes refine */
+    button {
+      display: inline-flex; align-items: center; gap: 7px; justify-content: center;
+      min-height: 28px; padding: 7px 12px; line-height: 1; font-weight: 600;
+      color: var(--text); background: var(--abyss-raised);
+      border: 1px solid var(--border-strong); border-radius: var(--r-chip);
+      cursor: pointer; white-space: nowrap;
+      transition: filter .12s ease, background .12s ease, box-shadow .12s ease, border-color .12s ease;
+    }
+    button:hover:not(:disabled) { border-color: var(--text-faint); background: var(--abyss-overlay); }
+    button:active:not(:disabled) { filter: brightness(.94); }
+    button:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--ink), 0 0 0 4px var(--hydra-glow); }
+    button:disabled { opacity: .5; cursor: not-allowed; }
     button.secondary,
     .rail-chip,
     .rail-link,
     .palette-meta {
-      color: var(--secondary-text);
-      background: var(--secondary-button);
-      border-color: var(--border);
+      color: var(--text-muted);
+      background: var(--abyss-raised);
+      border: 1px solid var(--border);
     }
     button.secondary:hover:not(:disabled),
-    .rail-link:hover { background: var(--secondary-hover); }
-    button.danger { background: var(--error); color: var(--vscode-button-foreground); }
-    button.suggested { outline: 2px solid var(--focus); outline-offset: 1px; }
+    .rail-link:hover { color: var(--text); background: var(--abyss-overlay); border-color: var(--border-strong); }
+    button.danger {
+      color: var(--error); background: rgba(224,139,139,.10);
+      border-color: rgba(224,139,139,.5);
+    }
+    button.danger:hover:not(:disabled) { background: rgba(224,139,139,.16); border-color: var(--error); }
+    button.suggested {
+      color: var(--hydra); background: rgba(116,208,201,.10);
+      border-color: rgba(116,208,201,.45);
+    }
+    button.suggested:hover:not(:disabled) { background: rgba(116,208,201,.16); border-color: var(--hydra); }
     .hidden { display: none !important; }
     .visually-hidden {
       position: absolute;
@@ -98,7 +205,9 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       height: 100vh;
       display: grid;
       grid-template-rows: auto 1fr auto;
-      background: var(--panel);
+      background: transparent;
+      position: relative;
+      z-index: 1;
     }
 
     #operationalRail {
@@ -107,27 +216,31 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       grid-template-columns: auto minmax(180px, 0.45fr) minmax(260px, 1fr);
       align-items: center;
       gap: 5px 12px;
-      padding: 7px 10px;
+      padding: 7px 12px;
       border-bottom: 1px solid var(--border);
-      background: color-mix(in srgb, var(--panel-alt) 82%, var(--panel));
+      background: linear-gradient(180deg, var(--abyss-raised), var(--abyss));
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.03);
       overflow: visible;
       font-size: 12px;
     }
     .brand {
       display: inline-flex;
       align-items: center;
-      gap: 8px;
-      font-weight: 700;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
+      gap: 9px;
       flex: none;
     }
+    .brand .wordmark {
+      font-family: var(--font-display);
+      font-size: 15px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
+    }
+    .brand .wm-accent { color: var(--hydra); animation: flicker 6.5s linear infinite; }
     .brand-mark {
-      width: 18px; height: 18px; border-radius: 50%;
-      border: 1px solid var(--focus);
+      width: 24px; height: 24px; border-radius: 50%;
       overflow: hidden;
       display: inline-flex; align-items: center; justify-content: center;
-      color: var(--focus); font-size: 11px; font-weight: 700;
+      color: var(--hydra); font-size: 11px; font-weight: 700;
+      flex: none;
+      box-shadow: 0 0 0 1px var(--border-strong), 0 0 10px -1px var(--hydra-glow);
     }
     .brand-mark img {
       width: 100%;
@@ -164,35 +277,37 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       align-items: center;
       gap: 6px;
       min-height: 22px;
-      max-width: 180px;
-      padding: 2px 7px;
+      max-width: 200px;
+      padding: 3px 9px;
       border: 1px solid var(--border);
-      border-radius: 4px;
+      border-radius: var(--r-pill);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      color: var(--muted);
+      color: var(--text-muted);
+      font-size: 11px;
     }
     .phase-chip {
       flex: none;
       max-width: 240px;
-      color: var(--text);
-      border-color: var(--focus);
-      font-weight: 650;
-      background: color-mix(in srgb, var(--focus) 9%, transparent);
+      color: var(--hydra);
+      border-color: rgba(116,208,201,.34);
+      font-weight: 700; letter-spacing: .04em;
+      background: rgba(116,208,201,.08);
+      box-shadow: 0 0 16px -7px var(--hydra-glow);
     }
-    .agent-status { max-width: 150px; }
-    .authority-badge { max-width: 138px; }
-    .rail-chip.optional { max-width: 145px; }
-    #usageRail { max-width: 310px; }
+    .agent-status { max-width: 168px; font-weight: 600; }
+    .authority-badge { max-width: 150px; font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; }
+    .rail-chip.optional { max-width: 165px; }
+    #usageRail { max-width: 340px; }
     .rail-primary #usageRail {
       flex: none;
       color: var(--text);
       border-color: var(--focus);
-      background: color-mix(in srgb, var(--focus) 10%, transparent);
+      background: color-mix(in srgb, var(--focus) 12%, transparent);
       font-weight: 650;
     }
-    .phase-chip.idle { color: var(--muted); border-color: var(--border); background: transparent; font-weight: 500; }
+    .phase-chip.idle { color: var(--text-muted); border-color: var(--border-strong); background: transparent; font-weight: 600; box-shadow: none; }
     .phase-chip.experimental { color: var(--warn); border-color: var(--warn); }
     .agent-status::before,
     .authority-badge::before,
@@ -201,109 +316,141 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       width: 7px;
       height: 7px;
       border-radius: 50%;
-      background: var(--muted);
+      background: var(--text-faint);
+      box-shadow: 0 0 6px currentColor;
       flex: none;
     }
-    .agent-status.running::before { background: var(--focus); animation: pulse 1.1s ease-in-out infinite; }
+    .agent-status.running::before { background: var(--hydra); animation: pulse 1.4s ease-in-out infinite; }
     .agent-status.replied::before,
     .authority-badge.readOnly::before,
     .rail-chip.ok::before { background: var(--ok); }
     .agent-status.error::before,
     .authority-badge.unknown::before,
     .rail-chip.error::before { background: var(--error); }
-    .agent-status.codex::before { background: var(--codex); }
-    .agent-status.claude::before { background: var(--claude); }
-    .authority-badge.workspaceWrite::before { background: var(--focus); }
+    .agent-status.codex::before { background: var(--head-1); }
+    .agent-status.claude::before { background: var(--head-2); }
+    .agent-status.running { color: var(--hydra); border-color: rgba(116,208,201,.4); background: rgba(116,208,201,.07); }
+    .agent-status.replied { color: var(--ok); border-color: rgba(116,194,154,.35); }
+    .agent-status.error { color: var(--error); border-color: rgba(224,139,139,.4); background: rgba(224,139,139,.06); }
+    .authority-badge.workspaceWrite { color: var(--info); border-color: rgba(127,180,214,.4); background: rgba(127,180,214,.08); }
+    .authority-badge.workspaceWrite::before { background: var(--info); }
+    .authority-badge.fullNative { color: var(--warn); border-color: rgba(217,184,113,.45); background: rgba(217,184,113,.08); }
     .authority-badge.fullNative::before,
     .rail-chip.warn::before { background: var(--warn); }
-    .rail-label { color: var(--muted); }
+    .authority-badge.unknown { border-style: dashed; }
+    .rail-chip.warn { color: var(--warn); border-color: rgba(217,184,113,.4); }
+    .rail-chip.ok { color: var(--ok); }
+    .rail-chip.error { color: var(--error); border-color: rgba(224,139,139,.4); }
+    .rail-label { color: var(--text-faint); }
     .rail-value { color: var(--text); overflow: hidden; text-overflow: ellipsis; }
+    .rail-value strong { color: inherit; font-weight: 700; }
     .rail-objective {
       display: inline-flex;
       align-items: center;
-      gap: 6px;
+      gap: 8px;
       min-width: 0;
       max-width: 100%;
-      color: var(--muted);
+      color: var(--text-muted);
       overflow: hidden;
     }
+    #objectiveLabel { font-size: 9px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--text-faint); flex: none; }
     #objectiveText {
       color: var(--text);
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    @keyframes pulse { 50% { opacity: 0.38; } }
 
     #messages {
       overflow: auto;
-      padding: 12px 14px 18px;
+      padding: 14px 16px 20px;
       scroll-behavior: auto;
       overflow-anchor: none;
+      background: transparent;
     }
     .empty {
       max-width: 760px;
-      color: var(--muted);
-      line-height: 1.5;
-      margin: 0;
+      color: var(--text-muted);
+      line-height: 1.55;
+      margin: 24px auto;
+      text-align: center;
+      font-family: var(--font-mono);
+      font-size: 12.5px;
     }
+    /* phase divider — etched line flanking an uppercase badge */
     .phase-mark {
-      display: grid;
-      grid-template-columns: 74px minmax(0, 1fr);
-      gap: 12px;
+      display: flex;
       align-items: center;
-      margin: 6px 0 10px;
-      color: var(--muted);
-      font-size: 11px;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
+      gap: 14px;
+      margin: 10px 0 12px;
     }
+    .phase-mark::before,
     .phase-mark::after {
       content: "";
-      display: block;
+      flex: 1;
       height: 1px;
-      background: var(--border);
+      background: linear-gradient(90deg, transparent, var(--border) 40%, var(--border));
+    }
+    .phase-mark::after { background: linear-gradient(270deg, transparent, var(--border) 40%, var(--border)); }
+    .phase-mark span {
+      flex: none;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--hydra);
+      padding: 4px 13px;
+      border-radius: var(--r-pill);
+      background: rgba(116,208,201,.07);
+      border: 1px solid rgba(116,208,201,.3);
+      box-shadow: 0 0 18px -8px var(--hydra-glow);
     }
     .message {
       display: grid;
       grid-template-columns: 74px minmax(0, 1fr);
       gap: 12px;
-      margin: 0 0 10px;
+      margin: 0 0 13px;
     }
     .message-time {
-      color: var(--muted);
+      color: var(--text-faint);
       text-align: right;
-      font-size: 11px;
+      font-size: 10px;
+      font-family: var(--font-mono);
       font-variant-numeric: tabular-nums;
-      padding-top: 7px;
+      padding-top: 8px;
     }
     .message-card {
-      border-left: 3px solid var(--system);
-      padding: 7px 10px 9px;
-      background: color-mix(in srgb, var(--panel-alt) 68%, transparent);
-      border-radius: 4px;
+      border: 1px solid var(--border);
+      border-left: 2px solid var(--border-strong);
+      padding: 9px 13px 11px;
+      background: var(--abyss-raised);
+      border-radius: var(--r-card);
     }
-    .message.user .message-card { border-left-color: var(--user); }
-    .message.codex .message-card { border-left-color: var(--codex); }
-    .message.claude .message-card { border-left-color: var(--claude); }
+    .message.user .message-card { border-left-color: var(--user); background: linear-gradient(180deg, color-mix(in srgb, var(--user) 5%, transparent), var(--abyss-raised)); }
+    .message.codex .message-card { border-left-color: var(--head-1); }
+    .message.claude .message-card { border-left-color: var(--head-2); }
     .message.error .message-card { border-left-color: var(--error); }
     .message.cancelled .message-card { border-left-color: var(--warn); opacity: 0.86; }
     .message-head {
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 9px;
       margin-bottom: 5px;
-      color: var(--muted);
+      color: var(--text-muted);
       font-size: 11px;
     }
+    /* head-art == the kit head orb, but keeping the existing avatar image
+       inside it; the orb supplies the per-head bioluminescent glow ring. */
     .head-art {
-      width: 22px; height: 22px;
+      position: relative;
+      width: 28px; height: 28px;
       border-radius: 50%;
       display: inline-flex; align-items: center; justify-content: center;
-      border: 1px solid currentColor;
       overflow: hidden;
-      background: color-mix(in srgb, var(--panel) 70%, transparent);
+      background: color-mix(in srgb, var(--hc, var(--text-faint)) 22%, var(--abyss-raised));
+      box-shadow: 0 0 0 1px rgba(0,0,0,.45), 0 0 0 1px rgba(255,255,255,.05) inset, 0 0 14px -3px var(--hc, var(--text-faint));
       font-size: 10px;
-      font-weight: 700;
+      font-weight: 800;
+      color: var(--ink);
       flex: none;
     }
     .head-art img {
@@ -312,26 +459,31 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       object-fit: cover;
       display: block;
     }
-    .head-art.codex { color: var(--codex); }
-    .head-art.claude { color: var(--claude); }
-    .head-art.user { color: var(--user); }
-    .head-art.system, .speaker.system { color: var(--muted); }
-    /* Why: speaker labels carry text, so they use theme-aware chart tokens that
-       keep contrast on light/high-contrast themes; the head-art glyph dots sit
-       on a known dark chip and keep the brand literals above. */
-    .speaker.codex { color: var(--vscode-charts-blue, var(--codex)); }
-    .speaker.claude { color: var(--vscode-charts-orange, var(--claude)); }
-    .speaker.user { color: var(--vscode-charts-green, var(--user)); }
-    .speaker { color: var(--text); font-weight: 650; text-transform: lowercase; }
-    .role-tag { color: var(--muted); font-family: var(--vscode-editor-font-family); }
-    .message-status { margin-left: auto; color: var(--muted); }
+    .head-art.codex { --hc: var(--head-1); }
+    .head-art.claude { --hc: var(--head-2); }
+    .head-art.user { --hc: var(--user); }
+    .head-art.system { --hc: var(--text-faint); }
+    /* the currently-streaming head pulses a ring of its own color */
+    .message.pending .head-art::after {
+      content: "";
+      position: absolute; inset: -3px; border-radius: 50%;
+      box-shadow: 0 0 0 1.5px var(--hc, var(--hydra)), 0 0 12px 1px var(--hc, var(--hydra));
+      animation: pulse 2s ease-in-out infinite;
+    }
+    .speaker.codex { color: var(--head-1); }
+    .speaker.claude { color: var(--head-2); }
+    .speaker.user { color: var(--user); }
+    .speaker.system { color: var(--text-muted); }
+    .speaker { color: var(--text); font-weight: 700; }
+    .role-tag { color: var(--text-faint); font-family: var(--font-mono); font-size: 10px; }
+    .message-status { margin-left: auto; color: var(--text-faint); font-family: var(--font-mono); font-size: 10px; }
     .text {
       margin: 0;
       white-space: pre-wrap;
       overflow-wrap: anywhere;
-      line-height: 1.45;
-      font-family: var(--vscode-editor-font-family);
-      font-size: var(--vscode-editor-font-size);
+      line-height: 1.55;
+      font-family: var(--font-mono);
+      font-size: 12.5px;
     }
     .live-channel-events {
       margin-top: 9px;
@@ -339,46 +491,49 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       gap: 6px;
     }
     .live-channel-event {
-      border-left: 2px solid color-mix(in srgb, var(--claude) 70%, var(--border));
-      background: color-mix(in srgb, var(--panel) 64%, transparent);
-      border-radius: 4px;
-      padding: 6px 8px;
+      border: 1px solid var(--border);
+      border-left: 2px solid color-mix(in srgb, var(--hydra) 70%, var(--border));
+      background: var(--ink);
+      border-radius: var(--r-card);
+      padding: 7px 10px;
       display: grid;
       gap: 4px;
+      font-family: var(--font-mono);
     }
     .live-channel-title {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 8px;
-      color: var(--muted);
+      color: var(--text-faint);
       font-size: 11px;
-      text-transform: lowercase;
     }
     .live-channel-title span:first-child {
-      color: var(--vscode-charts-orange, var(--claude));
+      color: var(--hydra);
       font-weight: 650;
     }
     .live-channel-summary {
       color: var(--text);
       overflow-wrap: anywhere;
-      line-height: 1.35;
+      line-height: 1.45;
+      font-size: 11.5px;
     }
-    .live-channel-summary.muted { color: var(--muted); }
+    .live-channel-summary.muted { color: var(--text-muted); }
     .live-channel-output {
       margin: 0;
       max-height: 220px;
       overflow: auto;
       white-space: pre-wrap;
       overflow-wrap: anywhere;
-      font-family: var(--vscode-editor-font-family);
-      font-size: calc(var(--vscode-editor-font-size) * 0.92);
-      line-height: 1.35;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      line-height: 1.45;
+      color: var(--text-muted);
     }
     .run-failure {
       margin-top: 9px;
-      padding-top: 8px;
-      border-top: 1px solid color-mix(in srgb, var(--error) 45%, var(--border));
+      padding-top: 9px;
+      border-top: 1px solid rgba(224,139,139,.4);
       display: grid;
       gap: 7px;
     }
@@ -388,11 +543,13 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       justify-content: space-between;
       gap: 10px;
       color: var(--error);
-      font-size: 12px;
+      font-size: 12.5px;
+      font-weight: 700;
     }
     .run-failure-head span {
-      color: var(--muted);
-      font-family: var(--vscode-editor-font-family);
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+      font-weight: 400;
       overflow-wrap: anywhere;
       text-align: right;
     }
@@ -400,8 +557,9 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       display: flex;
       flex-wrap: wrap;
       gap: 6px 12px;
-      color: var(--muted);
+      color: var(--text-muted);
       font-size: 11px;
+      font-family: var(--font-mono);
     }
     .run-failure-meta b { color: var(--text); font-weight: 650; }
     .run-failure-stderr {
@@ -410,14 +568,16 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       overflow: auto;
       white-space: pre-wrap;
       overflow-wrap: anywhere;
-      padding: 6px 7px;
+      padding: 7px 9px;
       border: 1px solid var(--border);
-      background: var(--input);
-      font-family: var(--vscode-editor-font-family);
+      background: var(--ink);
+      border-radius: var(--r-card);
+      font-family: var(--font-mono);
       font-size: 11px;
-      line-height: 1.35;
+      line-height: 1.45;
+      color: var(--text-muted);
     }
-    .run-failure-stderr.muted { color: var(--muted); font-style: italic; }
+    .run-failure-stderr.muted { color: var(--text-faint); font-style: italic; }
     .run-failure-actions {
       display: flex;
       flex-wrap: wrap;
@@ -425,22 +585,22 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     }
     .run-failure-actions button {
       min-height: 24px;
-      padding: 2px 8px;
+      padding: 4px 9px;
       font-size: 11px;
     }
     .pending .text::after {
-      content: "|";
+      content: "\\258B";
       display: inline-block;
-      margin-left: 2px;
+      margin-left: 1px;
+      color: var(--hydra);
+      text-shadow: 0 0 8px var(--hydra);
       animation: blink 1s steps(1) infinite;
-      opacity: 0.7;
     }
     .pending .text:empty::before {
       content: attr(data-placeholder);
-      color: var(--muted);
+      color: var(--text-faint);
       font-style: italic;
     }
-    @keyframes blink { 50% { opacity: 0; } }
     @media (max-width: 720px) {
       .message, .phase-mark { grid-template-columns: 54px minmax(0, 1fr); gap: 8px; }
       .message-time { font-size: 10px; }
@@ -452,7 +612,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
 
     #composer-region {
       border-top: 1px solid var(--border);
-      background: var(--panel-alt);
+      background: linear-gradient(180deg, var(--abyss), var(--abyss-raised));
     }
     .ribbon-stack {
       display: grid;
@@ -460,16 +620,18 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     }
     .ribbon-toggle {
       position: absolute;
-      top: 5px;
+      top: 6px;
       right: 12px;
       z-index: 2;
       min-height: 23px;
-      padding: 2px 8px;
+      padding: 3px 9px;
       font-size: 11px;
     }
     .ribbon-minimized-summary {
       display: none;
-      color: var(--muted);
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+      font-size: 11px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -482,7 +644,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       min-height: 31px;
       padding: 4px 12px;
       border-bottom: 1px solid var(--border);
-      background: color-mix(in srgb, var(--panel-alt) 78%, var(--panel));
+      background: rgba(0,0,0,.18);
     }
     .ribbon-stack.is-minimized > :not(.ribbon-toggle):not(.ribbon-minimized-summary) {
       display: none !important;
@@ -494,6 +656,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     .ribbon-stack.is-minimized .ribbon-minimized-summary {
       display: block;
     }
+    /* ribbon strips == kit .ribbon: semantic left edge + faint wash */
     .composer-ribbon,
     .objective,
     .setup-strip,
@@ -505,11 +668,14 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       align-items: center;
       justify-content: space-between;
       gap: 10px;
-      padding: 7px 12px;
+      padding: 10px 13px;
       border-bottom: 1px solid var(--border);
-      color: var(--muted);
+      border-left: 2px solid var(--border-strong);
+      color: var(--text-muted);
       font-size: 12px;
-      background: color-mix(in srgb, var(--panel-alt) 78%, var(--panel));
+      background:
+        linear-gradient(90deg, color-mix(in srgb, var(--border-strong) 18%, transparent), transparent 40%),
+        var(--abyss-raised);
     }
     .ribbon-stack:not(.is-minimized) .setup-strip,
     .ribbon-stack:not(.is-minimized) .verification-strip,
@@ -526,7 +692,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     .work-queue-strip strong,
     .decision-strip strong {
       color: var(--text);
-      font-weight: 650;
+      font-weight: 700;
     }
     .setup-actions,
     .ribbon-actions,
@@ -539,7 +705,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     }
     .ribbon-collapse-btn {
       min-height: 22px;
-      padding: 1px 7px;
+      padding: 2px 8px;
       font-size: 11px;
       flex: none;
     }
@@ -557,12 +723,18 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     .work-queue-strip.is-collapsed .ribbon-actions > :not(.ribbon-collapse-btn) {
       display: none !important;
     }
-    #setupStrip { background: color-mix(in srgb, var(--warn) 8%, var(--panel-alt)); }
-    #verificationStrip.failed { background: color-mix(in srgb, var(--error) 9%, var(--panel-alt)); }
+    #setupStrip { border-left-color: var(--text-faint); background: linear-gradient(90deg, color-mix(in srgb, var(--warn) 8%, transparent), transparent 40%), var(--abyss-raised); }
+    #verificationStrip { border-left-color: var(--info); background: linear-gradient(90deg, rgba(127,180,214,.08), transparent 40%), var(--abyss-raised); }
+    #verificationStrip.failed { border-left-color: var(--error); background: linear-gradient(90deg, rgba(224,139,139,.10), transparent 42%), var(--abyss-raised); }
+    #nativeActionStrip { border-left-color: var(--warn); background: linear-gradient(90deg, rgba(217,184,113,.09), transparent 40%), var(--abyss-raised); }
+    #workQueueStrip { border-left-color: var(--info); }
     #decisionStrip {
       display: grid;
       grid-template-columns: minmax(100px, 0.4fr) repeat(4, minmax(110px, 1fr));
       align-items: start;
+      border-left-color: var(--hydra);
+      background: linear-gradient(90deg, rgba(116,208,201,.08), transparent 42%), var(--abyss-raised);
+      box-shadow: 0 0 26px -14px var(--hydra-glow);
     }
     #decisionStrip.is-collapsed {
       grid-template-columns: minmax(0, 1fr);
@@ -579,14 +751,14 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       gap: 6px;
       flex-wrap: wrap;
       color: var(--text);
-      font-weight: 650;
+      font-weight: 700;
     }
-    .decision-count { margin-left: 4px; color: var(--muted); font-weight: 400; }
+    .decision-count { margin-left: 4px; color: var(--text-muted); font-weight: 400; font-family: var(--font-mono); }
     .risk-chip {
       display: inline-flex; align-items: center; gap: 4px;
-      margin-left: 8px; padding: 1px 8px; border-radius: 999px;
-      background: color-mix(in srgb, var(--warn) 22%, var(--panel));
-      color: var(--warn); border: 1px solid var(--warn);
+      margin-left: 8px; padding: 2px 8px; border-radius: var(--r-pill);
+      background: rgba(217,184,113,.16);
+      color: var(--warn); border: 1px solid rgba(217,184,113,.45);
       font-size: 11px; font-weight: 600;
     }
     .risk-chip::before { content: "!"; font-weight: 700; }
@@ -597,6 +769,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    .decision-field strong { font-size: 9px; letter-spacing: .1em; text-transform: uppercase; color: var(--text-faint); }
     @media (max-width: 880px) {
       #decisionStrip { grid-template-columns: 1fr; }
       .setup-strip,
@@ -610,33 +783,40 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
       gap: 10px;
-      padding: 10px 12px 12px;
+      padding: 12px 13px 13px;
     }
     #composerFrame {
       position: relative;
       min-width: 0;
+      background: var(--abyss-raised);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--r-panel);
+      box-shadow: 0 18px 44px rgba(0,0,0,.5);
     }
+    #composerFrame:focus-within { border-color: var(--hydra-deep); box-shadow: 0 0 0 3px var(--hydra-glow), 0 18px 44px rgba(0,0,0,.5); }
     #composer {
       display: block;
       width: 100%;
       min-height: 78px;
       max-height: 240px;
       resize: vertical;
-      padding: 8px 10px 32px;
-      border: 1px solid var(--input-border);
+      padding: 11px 13px 36px;
+      border: none;
       color: var(--text);
-      background: var(--input);
-      font-family: var(--vscode-editor-font-family);
-      font-size: var(--vscode-editor-font-size);
-      line-height: 1.4;
+      background: transparent;
+      border-radius: var(--r-panel);
+      font-family: var(--font-mono);
+      font-size: 12.5px;
+      line-height: 1.55;
     }
-    #composer:focus { border-color: var(--focus); outline: none; }
+    #composer::placeholder { color: var(--text-faint); }
+    #composer:focus { outline: none; }
     #composer:disabled { opacity: 0.5; cursor: not-allowed; }
     #composerToolbar {
       position: absolute;
-      left: 7px;
-      right: 7px;
-      bottom: 5px;
+      left: 9px;
+      right: 9px;
+      bottom: 7px;
       display: flex;
       align-items: center;
       gap: 8px;
@@ -646,21 +826,24 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     #attachmentTray {
       display: none;
       flex-wrap: wrap;
-      gap: 5px;
-      margin: 6px 0 0;
-      color: var(--muted);
+      gap: 6px;
+      margin: 0;
+      padding: 9px 11px 0;
+      color: var(--text-muted);
       font-size: 11px;
     }
     #attachmentTray.has-attachments { display: flex; }
     .attachment-chip {
       display: inline-flex;
       align-items: center;
-      gap: 5px;
+      gap: 6px;
       min-height: 24px;
       max-width: 260px;
-      padding: 2px 6px;
+      padding: 4px 5px 4px 8px;
       border: 1px solid var(--border);
-      background: color-mix(in srgb, var(--input) 80%, transparent);
+      border-radius: var(--r-chip);
+      background: var(--ink);
+      color: var(--text);
     }
     .attachment-chip span {
       overflow: hidden;
@@ -669,21 +852,27 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     }
     .attachment-chip button {
       min-height: 18px;
-      padding: 0 5px;
+      padding: 0 6px;
       line-height: 1;
+      background: transparent;
+      border-color: transparent;
+      color: var(--text-faint);
     }
+    .attachment-chip button:hover:not(:disabled) { background: var(--border); color: var(--text); }
     #openerBtn {
-      min-height: 22px;
-      padding: 1px 7px;
+      min-height: 24px;
+      padding: 4px 9px;
       font-size: 11px;
-      color: var(--muted);
-      background: color-mix(in srgb, var(--input) 80%, transparent);
-      border-color: var(--input-border);
+      color: var(--text);
+      background: var(--abyss-overlay);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--r-pill);
     }
     #composerHint {
       margin-left: auto;
-      color: var(--muted);
-      font-size: 11px;
+      color: var(--text-faint);
+      font-family: var(--font-mono);
+      font-size: 10.5px;
     }
     #composerActions {
       display: flex;
@@ -691,18 +880,27 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       gap: 6px;
       min-width: 126px;
     }
-    #sendBtn, #stopBtn {
+    #sendBtn {
       min-height: 38px;
       font-weight: 700;
       letter-spacing: 0.04em;
+      color: var(--ink);
+      background: linear-gradient(180deg, var(--hydra), var(--hydra-deep));
+      border-color: transparent;
+      box-shadow: 0 0 18px -5px var(--hydra-glow);
     }
+    #sendBtn:hover:not(:disabled) { filter: brightness(1.1); border-color: transparent; background: linear-gradient(180deg, var(--hydra), var(--hydra-deep)); }
+    #sendBtn:disabled { background: var(--abyss); color: var(--text-faint); box-shadow: none; border-color: var(--border); }
     #stopBtn {
       display: none;
-      background: var(--error);
-      color: var(--vscode-button-foreground);
-      border-color: var(--error);
+      min-height: 38px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      background: rgba(224,139,139,.1);
+      color: var(--error);
+      border-color: rgba(224,139,139,.5);
     }
-    .app.in-flight #stopBtn { display: block; }
+    .app.in-flight #stopBtn { display: inline-flex; }
     .workflow-actions {
       display: flex;
       flex-wrap: wrap;
@@ -710,6 +908,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       align-items: center;
       grid-column: 1 / -1;
     }
+    .workflow-actions button { font-size: 12px; }
     .action-bank { display: none; }
 
     .overlay {
@@ -720,7 +919,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       align-items: flex-start;
       justify-content: center;
       padding: 44px 16px 16px;
-      background: color-mix(in srgb, var(--panel) 62%, transparent);
+      background: radial-gradient(120% 100% at 50% 0%, rgba(116,208,201,.05), transparent 60%), rgba(4,8,10,.62);
     }
     .overlay[data-open="true"] { display: flex; }
     #commandCenter,
@@ -728,40 +927,43 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       width: min(920px, calc(100vw - 24px));
       max-height: calc(100vh - 72px);
       overflow: hidden;
-      border: 1px solid var(--border);
-      background: var(--panel);
-      box-shadow: 0 18px 50px color-mix(in srgb, #000 36%, transparent);
+      border: 1px solid var(--border-strong);
+      background: linear-gradient(180deg, var(--abyss-overlay), var(--abyss));
+      border-radius: var(--r-panel);
+      box-shadow: 0 40px 90px rgba(0,0,0,.7), 0 0 0 1px rgba(0,0,0,.5), 0 0 40px -16px var(--hydra-glow);
       display: grid;
       grid-template-rows: auto 1fr;
     }
     .palette-input {
       display: grid;
       grid-template-columns: auto minmax(0, 1fr) auto;
-      gap: 8px;
+      gap: 11px;
       align-items: center;
-      padding: 10px;
+      padding: 14px 16px;
       border-bottom: 1px solid var(--border);
-      background: var(--panel-alt);
     }
+    .palette-input .brand-mark { box-shadow: 0 0 0 1px var(--border-strong), 0 0 10px -1px var(--hydra-glow); }
     #paletteInput {
       min-height: 32px;
-      border: 1px solid var(--input-border);
-      background: var(--input);
+      border: none;
+      background: transparent;
       color: var(--text);
-      padding: 5px 8px;
+      padding: 2px 0;
+      font-size: 15px;
     }
-    #paletteInput:focus { border-color: var(--focus); outline: none; }
+    #paletteInput:focus { outline: none; }
+    #paletteInput::placeholder { color: var(--text-faint); }
     #commandList {
       overflow: auto;
-      padding: 8px;
+      padding: 7px;
     }
-    .command-group { margin-bottom: 10px; }
+    .command-group { margin-bottom: 8px; }
     .command-group h4 {
-      margin: 8px 6px 5px;
-      color: var(--muted);
-      font-size: 11px;
-      font-weight: 650;
-      letter-spacing: 0.08em;
+      margin: 9px 8px 5px;
+      color: var(--text-faint);
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.16em;
       text-transform: uppercase;
     }
     .command-option {
@@ -769,42 +971,46 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       grid-template-columns: minmax(0, 1fr) auto auto;
       gap: 10px;
       align-items: center;
-      padding: 7px 9px;
-      border-radius: 4px;
+      padding: 8px 10px;
+      border-radius: var(--r-chip);
       cursor: pointer;
     }
+    .command-option:hover { background: var(--abyss-raised); }
     .command-option[aria-selected="true"] {
-      outline: 1px solid var(--focus);
-      background: color-mix(in srgb, var(--focus) 12%, transparent);
+      background: rgba(116,208,201,.10);
+      box-shadow: inset 2px 0 0 var(--hydra);
     }
     .command-option[aria-disabled="true"] {
       cursor: not-allowed;
       opacity: 0.55;
     }
     .command-name { color: var(--text); font-weight: 600; }
-    .command-desc { color: var(--muted); margin-left: 6px; }
+    .command-desc { color: var(--text-faint); margin-left: 6px; font-family: var(--font-mono); font-size: 11px; }
     .command-why { color: var(--warn); font-size: 11px; margin-left: 6px; }
+    .palette-meta { font-size: 10px; color: var(--text-faint); font-family: var(--font-mono); padding: 2px 7px; }
     .kbd {
-      color: var(--muted);
-      border: 1px solid var(--border);
-      padding: 1px 5px;
-      border-radius: 3px;
-      font-size: 11px;
-      font-family: var(--vscode-editor-font-family);
+      color: var(--text-muted);
+      border: 1px solid var(--border-strong);
+      border-bottom-width: 2px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-family: var(--font-mono);
+      background: linear-gradient(180deg, var(--abyss-raised), var(--abyss));
     }
 
     .inspector { display: grid; }
     .insp-head {
       display: flex;
       align-items: center;
-      gap: 10px;
-      padding: 10px;
+      gap: 11px;
+      padding: 12px 13px;
       border-bottom: 1px solid var(--border);
-      background: var(--panel-alt);
     }
-    .insp-head h3 { margin: 0; font-size: 14px; }
-    .insp-head .count { color: var(--muted); }
-    .insp-body { overflow: auto; padding: 8px; }
+    .insp-head h3 { margin: 0; font-size: 13px; font-weight: 700; }
+    .insp-head .count { color: var(--text-faint); font-family: var(--font-mono); font-size: 11px; }
+    .insp-head .close { margin-left: auto; }
+    .insp-body { overflow: auto; padding: 12px 13px; }
     .panel-view { display: none; min-height: 0; overflow: hidden; }
     #panelOverlay[data-panel="actions"] .panel-view[data-view="actions"],
     #panelOverlay[data-panel="queue"] .panel-view[data-view="queue"],
@@ -824,7 +1030,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     .usage-board {
       display: grid;
       gap: 1px;
-      color: var(--muted);
+      color: var(--text-muted);
       font-size: 12px;
     }
     .native-action-row,
@@ -836,9 +1042,10 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       grid-template-columns: minmax(90px, 0.32fr) minmax(140px, 0.5fr) minmax(220px, 1fr) auto;
       gap: 10px;
       align-items: center;
-      padding: 7px 8px;
+      padding: 8px 9px;
       border-bottom: 1px solid var(--border);
-      background: color-mix(in srgb, var(--panel-alt) 50%, transparent);
+      background: var(--ink);
+      border-radius: var(--r-chip);
     }
     .native-action-row {
       grid-template-columns: 92px 82px minmax(140px, 0.55fr) minmax(220px, 1fr) auto;
@@ -856,39 +1063,47 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       grid-template-columns: 1fr;
       align-items: stretch;
     }
+    .session-line { display: flex; gap: 8px; font-size: 11.5px; font-family: var(--font-mono); }
+    .session-line strong { color: var(--text-faint); font-weight: 600; }
+    .session-line span { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .usage-summary {
       display: grid;
       grid-template-columns: repeat(4, minmax(110px, 1fr));
       gap: 8px;
-      padding: 8px;
-      border-bottom: 1px solid var(--border);
+      padding: 0 0 12px;
     }
     .usage-stat {
       display: grid;
       gap: 2px;
-      padding: 8px;
+      padding: 10px 12px;
       border: 1px solid var(--border);
-      background: color-mix(in srgb, var(--panel-alt) 50%, transparent);
+      border-radius: var(--r-card);
+      background: var(--ink);
     }
     .usage-stat strong {
       color: var(--text);
-      font-size: 15px;
-      font-weight: 650;
+      font-family: var(--font-display);
+      font-size: 20px;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
     }
-    .usage-stat span { color: var(--muted); }
+    .usage-stat span { color: var(--text-faint); font-size: 10px; letter-spacing: .04em; text-transform: uppercase; }
     .usage-row {
       display: grid;
       grid-template-columns: 76px 76px minmax(90px, 0.7fr) repeat(4, minmax(74px, 0.55fr)) 72px;
       gap: 8px;
       align-items: center;
-      padding: 7px 8px;
+      padding: 8px 9px;
       border-bottom: 1px solid var(--border);
-      background: color-mix(in srgb, var(--panel-alt) 50%, transparent);
+      background: var(--ink);
+      border-radius: var(--r-chip);
+      font-family: var(--font-mono);
+      font-size: 11px;
     }
     .usage-row.header {
       color: var(--text);
-      font-weight: 650;
-      background: color-mix(in srgb, var(--panel-alt) 76%, var(--panel));
+      font-weight: 700;
+      background: var(--abyss-raised);
     }
     .native-action-row span,
     .work-queue-row span,
@@ -908,8 +1123,11 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       justify-content: flex-end;
       flex-wrap: wrap;
     }
+    .native-action-controls button,
+    .edit-controls button,
+    .work-queue-controls button { min-height: 24px; padding: 3px 8px; font-size: 11px; }
     .status.completed,
-    .severity.info { color: var(--focus); }
+    .severity.info { color: var(--info); }
     .status.failed,
     .severity.error { color: var(--error); }
     .status.cancelled,
@@ -917,10 +1135,12 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     select {
       min-height: 28px;
       color: var(--text);
-      background: var(--input);
-      border: 1px solid var(--input-border);
+      background: var(--ink);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--r-chip);
       padding: 3px 8px;
     }
+    select:focus { outline: none; border-color: var(--hydra-deep); box-shadow: 0 0 0 3px var(--hydra-glow); }
     @media (max-width: 900px) {
       #operationalRail { grid-template-columns: auto minmax(150px, 1fr); }
       .rail-secondary { grid-column: 1 / -1; }
@@ -941,7 +1161,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
         grid-template-columns: minmax(0, 1fr);
         gap: 6px;
       }
-      .brand { display: none; }
+      .brand .wordmark { display: none; }
       .rail-primary,
       .rail-secondary {
         width: 100%;
@@ -955,7 +1175,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       .authority-badge,
       .rail-chip {
         flex: 0 0 auto;
-        max-width: 180px;
+        max-width: 200px;
       }
       #composer-region { gap: 6px; padding: 6px; }
       .ribbon-stack { max-height: 34vh; }
@@ -985,7 +1205,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
         text-align: left;
         padding-top: 0;
       }
-      .message-card { padding: 7px 8px; }
+      .message-card { padding: 7px 10px; }
       .rail-primary { flex-direction: column; align-items: stretch; overflow-x: visible; }
       .rail-secondary { max-height: 30px; }
       .phase-chip,
@@ -1021,9 +1241,17 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
   </style>
 </head>
 <body data-head-assets="${headAssetsAttr}">
+  <svg class="abyss-tendrils" viewBox="0 0 1440 900" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+    <path d="M-40 770 C 200 720 250 540 175 395 C 120 285 235 185 380 210"/>
+    <path d="M-60 840 C 250 815 340 615 305 450 C 286 330 385 255 540 300" class="f"/>
+    <path d="M120 920 C 150 760 60 660 130 520 C 185 408 110 320 170 215" class="s"/>
+    <path d="M1490 110 C 1240 175 1170 360 1255 525 C 1320 650 1215 750 1050 728"/>
+    <path d="M1500 50 C 1205 115 1110 305 1175 480 C 1230 620 1115 712 970 690" class="f"/>
+    <path d="M740 950 C 720 770 575 705 615 525 C 645 405 555 322 615 222" class="s"/>
+  </svg>
   <div class="app" id="app">
     <header id="operationalRail">
-      <div class="brand"><span class="brand-mark"><img src="${heads.brand}" alt=""></span><span>Hydra</span></div>
+      <div class="brand"><span class="brand-mark"><img src="${heads.brand}" alt=""></span><span class="wordmark">Hy<span class="wm-accent">dra</span></span></div>
       <div class="rail-primary">
         <span id="phaseChip" class="phase-chip idle">Idle</span>
         <span id="usageRail" class="rail-chip" role="button" tabindex="0" title="Open session token usage and estimated cost. Costs are estimates using hydraRoom.modelPrices (defaults: Claude Sonnet 4.6, Codex GPT-5 blend).">usage: 0 turns</span>

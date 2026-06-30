@@ -67,9 +67,13 @@ Every per-workspace artifact lives under `.hydra/` (gitignored). Key files inclu
 
 ### Webview
 
-The HTML template + CSS live in `src/webview.html.ts` (~1160 lines, mostly inline CSS). The webview script is **external**: `media/webview.js`, loaded via `webview.asWebviewUri(...)`. `HEAD_ASSETS` (the avatar URIs) is passed from host → webview via an HTML-escaped JSON `data-head-assets` attribute on `<body>`. The webview reads it defensively with try/catch.
+The HTML template + CSS live in `src/webview.html.ts` (~1450 lines, mostly inline CSS). The webview script is **external**: `media/webview.js`, loaded via `webview.asWebviewUri(...)`. `HEAD_ASSETS` (the avatar URIs) is passed from host → webview via an HTML-escaped JSON `data-head-assets` attribute on `<body>`. The webview reads it defensively with try/catch.
+
+The inline CSS implements the bespoke **"Abyssal"** visual identity — a fixed dark, deep-water palette that *deliberately overrides* the VS Code theme (a marketing-identity trade-off, not a bug to "fix"). Its canonical source is the Claude Design **"Hydra UI Kit"** project; keep the two in sync rather than letting the webview drift. Two load-bearing conventions: (1) agent color comes from a `--head-1..8` ramp **by index** ("many heads, one body") — `codex → --head-1`, `claude → --head-2`, `user → --user`; never hardcode a per-model color, so a new model just takes the next hue (the fully data-driven index assignment in `media/webview.js` is still a TODO — today it emits `codex`/`claude`/`user`/`system` role classes that CSS maps to ramp colors); (2) message avatars keep the `HEAD_ASSETS` `<img>` inside the `.head-art` orb and add a glow ring — don't swap them for letter glyphs.
 
 Editing the webview script: edit `media/webview.js` directly (it's plain JS with `// @ts-check` and runs as-is, no compile step). The file ships unmodified inside the `.vsix`.
+
+Webview *structure* is pinned by `test/webviewContract.test.ts` and `test/webviewCsp.test.ts` — restyle freely, but keep their hooks: every scripted element id, the CSP (`default-src 'none'`, nonced script-src, no `frame-ancestors`), the `data-head-assets` HTML-escaping, a single `.head-art {`/`.head-art img {` site, the `.rail-primary #usageRail` emphasis using `var(--focus)`, the `.live-channel-*` selectors, the 900/720/480 breakpoints, and `type=` on every `<button>`.
 
 ### panel.ts and its extracted modules
 
@@ -120,3 +124,4 @@ This repo was seeded from `C:\Users\geral\Spireslap\tools\vscode-hydra-room` and
 - **`code` CLI on Windows is `code.cmd`** — Node's CVE-2024-27980 mitigation refuses to spawn `.cmd` shims with `shell: false`. Always route through `spawnViaCmdShim` (don't reinvent the wrap, several modules already learned this the hard way).
 - **`vsce` ignores `.gitignore`** — `.vscodeignore` is what controls the `.vsix` contents. Workspace-local state directories (`.claude/`, `.npm-cache/`, etc.) must be in `.vscodeignore` even when they're already in `.gitignore`, or they ship to end users.
 - **Workspace path math** — `scripts/open-dev-host.js` opens the repo itself as the dev workspace because the extension IS the repo root now (legacy `<Spireslap>/tools/vscode-hydra-room` two-levels-up math was removed in commit `0fd61cd`). Override via `DEV_HOST_WORKSPACE` env var.
+- **Source edits don't reach a running installed extension** — editing `src/` or `media/` does nothing for the user's installed `.vsix` until you rebuild and reinstall: `pnpm run package` (bumps version, builds the `.vsix` at repo root) then `code --install-extension <file>.vsix --force`, then the user reloads the window. For live iteration use `pnpm run dev` (Extension Development Host), which loads source directly with no packaging step.
