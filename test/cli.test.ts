@@ -43,8 +43,8 @@ describe("Hydra CLI bridge", () => {
 
   test("expands workspace placeholders without interpreting native args", () => {
     assert.deepEqual(
-      expandWorkspaceArgs(["exec", "--cd", "${workspaceFolder}", "-c", "model=\"x\""], "C:\\Users\\geral\\Spireslap"),
-      ["exec", "--cd", "C:\\Users\\geral\\Spireslap", "-c", "model=\"x\""]
+      expandWorkspaceArgs(["exec", "--cd", "${workspaceFolder}", "-c", "model=\"x\""], "C:\\workspaces\\hydra"),
+      ["exec", "--cd", "C:\\workspaces\\hydra", "-c", "model=\"x\""]
     );
   });
 

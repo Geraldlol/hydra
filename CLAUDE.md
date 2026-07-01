@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`vscode-hydra-room` (display name "Hydra") is a VS Code extension that runs a 3-way collaboration room between the user, the OpenAI **Codex CLI**, and the Anthropic **Claude Code CLI**. Both agents are invoked as native CLI subprocesses; the extension is the orchestrator, transcript keeper, and decision-packet parser. README.md is the user-facing manual; this file is the architecture and conventions cheat sheet for editing the code.
+`vscode-hydra-room` (display name "Hydra Agents") is a VS Code extension that runs a 3-way collaboration room between the user, the OpenAI **Codex CLI**, and the Anthropic **Claude Code CLI**. Both agents are invoked as native CLI subprocesses; the extension is the orchestrator, transcript keeper, and decision-packet parser. README.md is the user-facing manual; this file is the architecture and conventions cheat sheet for editing the code.
 
-The package id is `local-tools.vscode-hydra-room`. It is not published to the Marketplace; install locally via `pnpm run package` + `code --install-extension *.vsix`.
+The Marketplace extension id is `geraldlol.vscode-hydra-room`. For local testing, install via `pnpm run package` + `code --install-extension *.vsix`.
 
 ## Commands
 
@@ -115,13 +115,9 @@ These were locked in by the security audit in commits `cc977f9`, `40cf52a`, `4f7
 - **No new `: any`** — `panel.ts:onWebviewMessage` was the last one and it's now typed via the `WebviewMessage` discriminated union in `src/webviewMessages.ts`. New webview message types go there first.
 - **`docs/native-internals/`** is the reverse-engineered spec for Codex and Claude CLI internals (wire protocols, system prompts, tool catalogs). The arg-validation logic in `src/authority.ts` cites these documents — keep the citations accurate when updating.
 
-## Spireslap origin
-
-This repo was seeded from `C:\Users\geral\Spireslap\tools\vscode-hydra-room` and is now the canonical working copy. The Spireslap copy is upstream-stale; do not assume it tracks this repo. There is no two-way sync.
-
 ## Common pitfalls
 
 - **`code` CLI on Windows is `code.cmd`** — Node's CVE-2024-27980 mitigation refuses to spawn `.cmd` shims with `shell: false`. Always route through `spawnViaCmdShim` (don't reinvent the wrap, several modules already learned this the hard way).
 - **`vsce` ignores `.gitignore`** — `.vscodeignore` is what controls the `.vsix` contents. Workspace-local state directories (`.claude/`, `.npm-cache/`, etc.) must be in `.vscodeignore` even when they're already in `.gitignore`, or they ship to end users.
-- **Workspace path math** — `scripts/open-dev-host.js` opens the repo itself as the dev workspace because the extension IS the repo root now (legacy `<Spireslap>/tools/vscode-hydra-room` two-levels-up math was removed in commit `0fd61cd`). Override via `DEV_HOST_WORKSPACE` env var.
+- **Workspace path math** — `scripts/open-dev-host.js` opens the repo itself as the dev workspace because the extension is the repo root. Override via `DEV_HOST_WORKSPACE` env var.
 - **Source edits don't reach a running installed extension** — editing `src/` or `media/` does nothing for the user's installed `.vsix` until you rebuild and reinstall: `pnpm run package` (bumps version, builds the `.vsix` at repo root) then `code --install-extension <file>.vsix --force`, then the user reloads the window. For live iteration use `pnpm run dev` (Extension Development Host), which loads source directly with no packaging step.

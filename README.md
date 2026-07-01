@@ -23,7 +23,7 @@ If VS Code cannot find a CLI, set `hydraRoom.codexCommand` or `hydraRoom.claudeC
 ## Local Development
 
 ```powershell
-cd C:\Users\geral\Hydra
+cd C:\path\to\hydra
 corepack enable
 pnpm install
 pnpm run compile
@@ -37,7 +37,7 @@ The repo pins pnpm via `packageManager`; Corepack resolves that exact version.
 If `pnpm run dev` cannot find your VS Code CLI, set `VSCODE_CLI` to the absolute path of `code.cmd` (Windows) or `code` (macOS/Linux), or fall back to the manual form:
 
 ```powershell
-code --extensionDevelopmentPath . ..\..
+code --extensionDevelopmentPath . .
 ```
 
 In the Extension Development Host, run `Hydra: Start`.
@@ -272,7 +272,7 @@ Use `Hydra: Show Effective Native Authority` and `Hydra: Preview Next Prompt` to
 ## Packaging
 
 ```powershell
-cd C:\Users\geral\Hydra
+cd C:\path\to\hydra
 corepack enable
 pnpm install
 pnpm run check
@@ -280,7 +280,7 @@ pnpm test
 pnpm run package
 ```
 
-The package command builds a local `.vsix`. A Marketplace release still needs a real publisher id, icon, and release notes.
+The package command builds a local `.vsix`. Marketplace release metadata lives in `package.json`; use `docs/release.md` for the release checklist.
 
 To install this working copy into VS Code from the repo root:
 

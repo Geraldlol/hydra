@@ -1,13 +1,18 @@
-﻿node_modules/
+node_modules/
 dist/
-*.tsbuildinfo
 out/
-.vscode-test/
-.vscode/
-*.vsix
-!/.hydra/
-/.hydra/*
-.npm-cache/
-.claude/
-debug.log
+*.tsbuildinfo
+
+# Workspace-local runtime and editor state.
 .hydra/
+.claude/
+.npm-cache/
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
+.vscode-test/
+
+# Local package/test artifacts.
+*.vsix
+*.log
+npm-debug.log
