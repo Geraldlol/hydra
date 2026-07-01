@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.1
+
+Marketplace publish follow-up.
+
+- Changes the Marketplace display name from **Hydra** to **Hydra Agents** because the bare **Hydra** display name is already taken.
+- Keeps the durable extension identity unchanged: publisher `geraldlol`, package name `vscode-hydra-room`, extension id `geraldlol.vscode-hydra-room`.
+
 ## 0.5.0
 
 Public beta release candidate.

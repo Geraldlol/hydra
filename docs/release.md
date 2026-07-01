@@ -6,9 +6,9 @@ This checklist is for the first public Marketplace beta of Hydra.
 
 - Publisher id: `geraldlol`
 - Extension id: `geraldlol.vscode-hydra-room`
-- Marketplace display name: `Hydra`
+- Marketplace display name: `Hydra Agents`
 - Package name: `vscode-hydra-room`
-- Release version: `0.5.0`
+- Release version: `0.5.1`
 
 The display name is reversible in a later release. The publisher id and package name are the durable extension identity.
 
