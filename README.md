@@ -1,12 +1,17 @@
 # Hydra
 
-Hydra is a VS Code room where you, Codex, and Claude work in one shared thread.
+Hydra puts Codex and Claude Code in one room inside VS Code and has them work the same task together while you stay in control. You send one message, the two agents discuss a plan, one of them builds, the other reviews the diff, and you approve the steps that matter. It drives the Codex and Claude Code CLIs you already have installed, using your existing logins, and writes the whole session (transcript, plan, and every decision) to a `.hydra/` folder in your workspace.
 
-The normal path is simple:
+<!-- Demo GIF: capture a discuss/build/review turn, save it as media/hydra-demo.gif, and uncomment the next line. vsce rewrites the relative path to the GitHub raw URL when publishing, so it renders on the Marketplace. -->
+<!-- ![Hydra runs a discuss, build, and review turn across Codex and Claude](media/hydra-demo.gif) -->
+
+**Auto mode.** Every agent turn ends with a short decision packet: what it did, what it recommends next, any blockers, and a safe default action. Hydra can take that default and move the loop forward on its own, from discussion to build to verify to review and back again, running your test or build command after each build. It stops and asks you the moment a step looks risky, such as a push, a delete, or a deploy. That way it handles the routine middle of a task and only interrupts you for the decisions that actually need a person.
+
+## Quick start
 
 1. Open the Command Palette.
 2. Run `Hydra: Start`.
-3. Hydra Autopilot checks the workspace, native CLIs, and terminal bridge.
+3. Hydra checks the workspace, the native CLIs, and the terminal bridge.
 4. Type in the room.
 
 Do not type `Hydra` into PowerShell. Hydra is a VS Code command, not a terminal command.

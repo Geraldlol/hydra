@@ -20,4 +20,5 @@ pnpm-workspace.yaml
 **/*.tsbuildinfo
 npm-debug.log
 debug.log
+media/hydra-demo.gif
 *.vsix
