@@ -454,3 +454,24 @@ describe("shouldRunParallelDiscussion()", () => {
     assert.equal(shouldRunParallelDiscussion("both of you review this", "parallelOnBoth"), true);
   });
 });
+
+import { pickReviewers, DEFAULT_ROSTER } from "../src/phases";
+
+describe("pickReviewers()", () => {
+  test("two-head roster returns the single non-builder as reviewer", () => {
+    assert.deepEqual(pickReviewers("codex", ["codex", "claude"]), ["claude"]);
+    assert.deepEqual(pickReviewers("claude", ["codex", "claude"]), ["codex"]);
+  });
+
+  test("gemini can be the builder in a codex+gemini roster", () => {
+    assert.deepEqual(pickReviewers("gemini", ["codex", "gemini"]), ["codex"]);
+  });
+
+  test("default roster is codex then claude", () => {
+    assert.deepEqual([...DEFAULT_ROSTER], ["codex", "claude"]);
+  });
+
+  test("serial policy never returns more than one reviewer (SP1)", () => {
+    assert.equal(pickReviewers("codex", ["codex", "claude", "gemini"], "serial").length, 1);
+  });
+});

@@ -1,4 +1,5 @@
-export type AgentId = "codex" | "claude";
+export type AgentId = string;
+export type ParticipationPolicy = "serial";
 export type DiscussionMode = "serial" | "parallelOnBoth" | "parallel";
 
 export type State =
@@ -34,7 +35,25 @@ export type Event =
   | { type: "requestReviewSkipped" }
   | { type: "stop" };
 
-const otherAgent = (a: AgentId): AgentId => (a === "codex" ? "claude" : "codex");
+export const DEFAULT_ROSTER: ReadonlyArray<AgentId> = ["codex", "claude"];
+
+/**
+ * Reviewers for a builder's diff, chosen from the rest of the roster.
+ * SP1 is serial-only: a two-head roster yields exactly one reviewer, so
+ * `transition()` behavior is unchanged. SP3 relaxes this to N reviewers.
+ */
+export function pickReviewers(
+  builder: AgentId,
+  roster: ReadonlyArray<AgentId>,
+  _policy: ParticipationPolicy = "serial",
+): AgentId[] {
+  return roster.filter((a) => a !== builder).slice(0, 1);
+}
+
+// Why: keep the internal binary flip used by transition() but route it through
+// pickReviewers over the default two-head roster, so the state machine stays
+// exactly as-is while the reviewer choice has a single generalized home.
+const otherAgent = (a: AgentId): AgentId => pickReviewers(a, DEFAULT_ROSTER)[0] ?? a;
 
 export function isInFlight(state: State): boolean {
   return (
