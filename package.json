@@ -1033,7 +1033,7 @@
               "description": "Per-phase models for Claude. Missing phases fall back to the CLI default."
             }
           ],
-          "markdownDescription": "Model passed to Claude Code CLI as `--model <id>` on every dispatch. Either a single string (applied to every phase) or an object with per-phase overrides like `{ \"discussion\": \"sonnet\", \"build\": \"opus\", \"review\": \"opus\" }`. Aliases (`sonnet`, `opus`, `haiku`) or full IDs (`claude-sonnet-4-6`, `claude-opus-4-8`, `claude-haiku-4-5-20251001`) both work. Use `Hydra: Choose Model` (Ctrl+Alt+M) to change live."
+          "markdownDescription": "Model passed to Claude Code CLI as `--model <id>` on every dispatch. Either a single string (applied to every phase) or an object with per-phase overrides like `{ \"discussion\": \"sonnet\", \"build\": \"opus\", \"review\": \"fable\" }`. Aliases (`fable`, `sonnet`, `opus`, `haiku`) always resolve to the current build of that family; or pin a full ID (`claude-fable-5`, `claude-sonnet-5`, `claude-opus-4-8`, `claude-haiku-4-5-20251001`). Use `Hydra: Choose Model` (Ctrl+Alt+M) to change live."
         },
         "hydraRoom.codexModel": {
           "scope": "application",
@@ -1060,7 +1060,7 @@
               "description": "Per-phase models for Codex. Missing phases fall back to the CLI default."
             }
           ],
-          "markdownDescription": "Model passed to Codex CLI as `--model <id>` on every `exec` dispatch. Either a single string (applied to every phase) or an object with per-phase overrides. Codex CLI 0.130.0 ships: `gpt-5.5` (default), `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark` (interactive only, no API), `gpt-5.2`. Run `codex debug models` to inspect what your install actually exposes. Use `Hydra: Choose Model` (Ctrl+Alt+M) to change live."
+          "markdownDescription": "Model passed to Codex CLI as `--model <id>` on every `exec` dispatch. Either a single string (applied to every phase) or an object with per-phase overrides. Recent Codex CLIs ship `gpt-5.6` (current flagship), `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark` (interactive only, no API), `gpt-5.2`. Run `codex debug models` (or `Hydra: Refresh Codex Models`) to inspect what your install actually exposes. Use `Hydra: Choose Model` (Ctrl+Alt+M) to change live."
         },
         "hydraRoom.claudeEffort": {
           "scope": "application",

@@ -53,13 +53,21 @@ export const DEFAULT_PRICES: Record<AgentId, ModelPrices> = {
  * split cache reads.
  */
 export const DEFAULT_MODEL_PRICES: Record<string, ModelPrices> = {
-  // Claude family
+  // Claude family. Aliases (fable/sonnet/opus/haiku) price at the current build
+  // of that family. Fable 5 / Mythos 5 are the Claude 5 flagship tier ($10/$50);
+  // Mythos 5 is the same model and pricing as Fable 5, for approved orgs. Cache
+  // rates follow Claude's ~0.1x-read / ~1.25x-write convention off input price.
+  fable: { inputPerMTok: 10, outputPerMTok: 50, cacheReadPerMTok: 1, cacheCreatePerMTok: 12.5 },
+  "claude-fable-5": { inputPerMTok: 10, outputPerMTok: 50, cacheReadPerMTok: 1, cacheCreatePerMTok: 12.5 },
+  "claude-mythos-5": { inputPerMTok: 10, outputPerMTok: 50, cacheReadPerMTok: 1, cacheCreatePerMTok: 12.5 },
   sonnet: { inputPerMTok: 3, outputPerMTok: 15, cacheReadPerMTok: 0.3, cacheCreatePerMTok: 3.75 },
+  "claude-sonnet-5": { inputPerMTok: 3, outputPerMTok: 15, cacheReadPerMTok: 0.3, cacheCreatePerMTok: 3.75 },
   "claude-sonnet-4-6": { inputPerMTok: 3, outputPerMTok: 15, cacheReadPerMTok: 0.3, cacheCreatePerMTok: 3.75 },
   "claude-sonnet-4-5": { inputPerMTok: 3, outputPerMTok: 15, cacheReadPerMTok: 0.3, cacheCreatePerMTok: 3.75 },
   opus: { inputPerMTok: 5, outputPerMTok: 25, cacheReadPerMTok: 0.5, cacheCreatePerMTok: 6.25 },
   "claude-opus-4-8": { inputPerMTok: 5, outputPerMTok: 25, cacheReadPerMTok: 0.5, cacheCreatePerMTok: 6.25 },
   "claude-opus-4-7": { inputPerMTok: 5, outputPerMTok: 25, cacheReadPerMTok: 0.5, cacheCreatePerMTok: 6.25 },
+  "claude-opus-4-6": { inputPerMTok: 5, outputPerMTok: 25, cacheReadPerMTok: 0.5, cacheCreatePerMTok: 6.25 },
   "claude-opus-4-5": { inputPerMTok: 5, outputPerMTok: 25, cacheReadPerMTok: 0.5, cacheCreatePerMTok: 6.25 },
   haiku: { inputPerMTok: 1, outputPerMTok: 5, cacheReadPerMTok: 0.1, cacheCreatePerMTok: 1.25 },
   "claude-haiku-4-5-20251001": { inputPerMTok: 1, outputPerMTok: 5, cacheReadPerMTok: 0.1, cacheCreatePerMTok: 1.25 },
@@ -68,6 +76,7 @@ export const DEFAULT_MODEL_PRICES: Record<string, ModelPrices> = {
   // since OpenAI has not published official pricing for every variant the
   // Codex CLI exposes. Set hydraRoom.modelPrices["gpt-5.5"] etc. to pin
   // exact rates. Run `codex debug models` to see what your install offers.
+  "gpt-5.6": { inputPerMTok: 1.25, outputPerMTok: 10, cacheReadPerMTok: 0.125, cacheCreatePerMTok: 1.25 },
   "gpt-5.5": { inputPerMTok: 1.25, outputPerMTok: 10, cacheReadPerMTok: 0.125, cacheCreatePerMTok: 1.25 },
   "gpt-5.4": { inputPerMTok: 1.25, outputPerMTok: 10, cacheReadPerMTok: 0.125, cacheCreatePerMTok: 1.25 },
   "gpt-5.4-mini": { inputPerMTok: 0.25, outputPerMTok: 2, cacheReadPerMTok: 0.025, cacheCreatePerMTok: 0.25 },

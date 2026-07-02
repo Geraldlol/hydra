@@ -165,14 +165,29 @@ export async function chooseModelInteractively(deps: ModelChooserDeps): Promise<
   deps.postState();
 }
 
+// Curated Claude model presets for the chooser. Unlike Codex (which has
+// `codex debug models`), the Claude Code CLI exposes no "list models" command,
+// so this list is maintained by hand — keep it current with the Claude model
+// catalog (the claude-api skill's models.md is the canonical source).
+// Why aliases first: `fable`/`sonnet`/`opus`/`haiku` NEVER go stale — each
+// always resolves to the current build of that family, so a user who picks an
+// alias keeps getting the latest model without this list ever being re-edited.
+// Full IDs follow for pinning a specific version. The chooser also offers a
+// free-text "Custom…" entry, so an ID missing here is never a dead end.
+// Drift guard: test/modelChooserSourceContract.test.ts pins the current flagships.
 const CLAUDE_MODEL_PRESETS: Array<{ label: string; description: string }> = [
+  { label: "fable", description: "Alias — current Fable (most capable)" },
   { label: "sonnet", description: "Alias — current Sonnet" },
   { label: "opus", description: "Alias — current Opus" },
   { label: "haiku", description: "Alias — current Haiku" },
-  { label: "claude-sonnet-4-6", description: "Sonnet 4.6" },
-  { label: "claude-sonnet-4-5", description: "Sonnet 4.5 (older)" },
+  { label: "claude-fable-5", description: "Fable 5 — most capable (Claude 5, Mythos-class tier above Opus)" },
+  { label: "claude-mythos-5", description: "Mythos 5 — same model as Fable 5 (approved Project Glasswing orgs only)" },
+  { label: "claude-sonnet-5", description: "Sonnet 5 — near-Opus quality at Sonnet cost" },
   { label: "claude-opus-4-8", description: "Opus 4.8" },
-  { label: "claude-opus-4-7", description: "Opus 4.7" },
+  { label: "claude-opus-4-7", description: "Opus 4.7 (older)" },
+  { label: "claude-opus-4-6", description: "Opus 4.6 (older)" },
+  { label: "claude-sonnet-4-6", description: "Sonnet 4.6 (older)" },
+  { label: "claude-sonnet-4-5", description: "Sonnet 4.5 (older)" },
   { label: "claude-opus-4-5", description: "Opus 4.5 (older)" },
   { label: "claude-haiku-4-5-20251001", description: "Haiku 4.5 dated build" },
   { label: "claude-haiku-4-5", description: "Haiku 4.5 alias" },
@@ -189,11 +204,14 @@ function codexPresetsForChooser(
       description: codexModelDescription(m),
     }));
   }
-  // Fallback when the catalog has never been fetched. Matches the Codex CLI
-  // 0.130.0 ship list — refresh to replace this with live data.
+  // Fallback when the catalog has never been fetched. `codex debug models` (the
+  // "$(refresh) Refresh Codex catalog…" chooser entry) is the real source of
+  // truth and replaces this list with live data; this only seeds the picker
+  // before the first refresh, so keep the current flagship at the top.
   return [
-    { label: "gpt-5.5", description: "GPT-5.5 — Codex CLI default" },
-    { label: "gpt-5.4", description: "GPT-5.4 — prior flagship" },
+    { label: "gpt-5.6", description: "GPT-5.6 — current Codex flagship" },
+    { label: "gpt-5.5", description: "GPT-5.5 — prior default" },
+    { label: "gpt-5.4", description: "GPT-5.4" },
     { label: "gpt-5.4-mini", description: "GPT-5.4-Mini — lighter / cheaper" },
     { label: "gpt-5.3-codex", description: "Code-tuned 5.3" },
     { label: "gpt-5.3-codex-spark", description: "High-reasoning code variant (interactive only — no API)" },
