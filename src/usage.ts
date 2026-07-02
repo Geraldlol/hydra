@@ -38,6 +38,15 @@ export interface ModelPrices {
   cacheCreatePerMTok: number;
 }
 
+/** Normalized per-call token counts shared across adapters. */
+export interface UsageTokens {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreateTokens: number;
+  reasoningTokens: number;
+}
+
 export const DEFAULT_PRICES: Record<AgentId, ModelPrices> = {
   // Per-agent fallback when no model is known. Sonnet 4.6 / GPT-5.
   claude: { inputPerMTok: 3, outputPerMTok: 15, cacheReadPerMTok: 0.3, cacheCreatePerMTok: 3.75 },
