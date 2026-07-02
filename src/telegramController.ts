@@ -32,11 +32,19 @@ import {
 const AGENT_NAMES: Record<AgentId, string> = { codex: "Codex", claude: "Claude" };
 
 // Telegram inbound payloads are attacker-controlled (anyone with the bot
-// token's chat id can post). Fence the body and label the block so the LLM
-// treats it as data; sanitize the sender name so it can't break out of the
-// header line into an instruction.
+// token's chat id can post). A sender's display name is theirs to set, so
+// strip newlines/backticks (so it can't break out of a header line into a
+// forged instruction) and cap its length. Every path that echoes `from` into
+// prompt or transcript context MUST route it through here — the fenced prompt
+// and the System-role log line used to sanitize independently and drifted.
+export function sanitizeSenderName(from: string | undefined): string {
+  return (from ?? "").replace(/[\r\n`]/g, " ").trim().slice(0, 80);
+}
+
+// Fence the body and label the block so the LLM treats it as data; sanitize the
+// sender name so it can't break out of the header line into an instruction.
 export function formatTelegramInboundPrompt(from: string | undefined, body: string): string {
-  const safeFrom = (from ?? "").replace(/[\r\n`]/g, " ").trim().slice(0, 80);
+  const safeFrom = sanitizeSenderName(from);
   const safeBody = body.replace(/```/g, "`​``");
   const senderTag = safeFrom ? `, sender claims to be: ${safeFrom}` : "";
   return [
@@ -194,7 +202,12 @@ export class TelegramController {
           this.deps.postState();
           continue;
         }
-        const source = record.message.from ? ` from ${record.message.from}` : "";
+        // Why: sanitize the untrusted sender name here too — this line is stored
+        // as a System-role message and fed to the agents (buildPromptContext),
+        // so an unsanitized name is a prompt-injection vector, same as the fenced
+        // prompt path below. Route both through sanitizeSenderName so they match.
+        const safeFrom = sanitizeSenderName(record.message.from);
+        const source = safeFrom ? ` from ${safeFrom}` : "";
         await this.deps.appendSystemMessage(`Telegram inbound${source}: ${truncateForLog(record.command, 160)}`);
         const telegramPrompt = formatTelegramInboundPrompt(record.message.from, record.command);
         const outcome = await this.deps.sendInboundUserMessage(telegramPrompt, this.deps.getFirstSpeaker(), {

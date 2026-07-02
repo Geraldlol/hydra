@@ -961,7 +961,7 @@
           "scope": "application",
           "type": "string",
           "default": "",
-          "markdownDescription": "Telegram chat id Hydra sends notifications to. Your personal chat with the bot, a group, or a channel. Find it by messaging your bot and visiting `https://api.telegram.org/bot<token>/getUpdates`. Required for Telegram notifications to fire."
+          "markdownDescription": "Telegram chat id Hydra sends notifications to. Your personal chat with the bot, a group, or a channel. Find it by messaging your bot and visiting `https://api.telegram.org/bot<token>/getUpdates`. Required for Telegram notifications to fire. **Security:** when inbound polling is on, authorization is chat-level — pointing this at a **group** lets *every member of that group* (and anyone who obtains its invite link) drive agent turns in your workspace. Prefer your private 1:1 chat with the bot unless every group member is trusted."
         },
         "hydraRoom.telegramNotifyOnDecisionNeeded": {
           "scope": "application",
@@ -973,7 +973,7 @@
           "scope": "application",
           "type": "boolean",
           "default": false,
-          "markdownDescription": "Poll Telegram Bot API updates and inject accepted messages into the Hydra room as user input. Requires `hydraRoom.telegramBotToken`, `hydraRoom.telegramChatId`, and the `hydraRoom.telegramInboundCommandPrefix` prefix. Disabled by default because inbound Telegram messages are remote untrusted input."
+          "markdownDescription": "Poll Telegram Bot API updates and inject accepted messages into the Hydra room as user input. Requires `hydraRoom.telegramBotToken`, `hydraRoom.telegramChatId`, and the `hydraRoom.telegramInboundCommandPrefix` prefix. Disabled by default because inbound Telegram messages are remote untrusted input. **Authorization is chat-level, not per-sender:** anyone who can post to the configured `hydraRoom.telegramChatId` can drive agent turns under the configured execution permissions — keep that chat private (a 1:1 with the bot, or a group of fully-trusted members)."
         },
         "hydraRoom.telegramInboundCommandPrefix": {
           "scope": "application",
