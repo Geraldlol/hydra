@@ -2,8 +2,14 @@
 
 Hydra puts Codex and Claude Code in one room inside VS Code and has them work the same task together while you stay in control. You send one message, the two agents discuss a plan, one of them builds, the other reviews the diff, and you approve the steps that matter. It drives the Codex and Claude Code CLIs you already have installed, using your existing logins, and writes the whole session (transcript, plan, and every decision) to a `.hydra/` folder in your workspace.
 
-<!-- Demo GIF: capture a discuss/build/review turn, save it as media/hydra-demo.gif, and uncomment the next line. vsce rewrites the relative path to the GitHub raw URL when publishing, so it renders on the Marketplace. -->
-<!-- ![Hydra runs a discuss, build, and review turn across Codex and Claude](media/hydra-demo.gif) -->
+<!-- Screenshots or a demo GIF go here. Capture the shots below, save them under media/screenshots/ as PNG or JPG (the Marketplace does not render SVG), then remove the comment markers around this block to publish. Small PNGs are bundled in the extension, so they show on the in-editor extension page as well as the web listing. A demo GIF can join or replace these later, saved as media/hydra-demo.gif (already kept out of the .vsix download).
+
+![A room turn: Codex and Claude discussing the plan](media/screenshots/room-discussion.png)
+
+![Review pass: one agent flags an issue in the other agent's diff](media/screenshots/review.png)
+
+![Per phase model picker and the live session cost meter](media/screenshots/model-and-cost.png)
+-->
 
 **Auto mode.** Every agent turn ends with a short decision packet: what it did, what it recommends next, any blockers, and a safe default action. Hydra can take that default and move the loop forward on its own, from discussion to build to verify to review and back again, running your test or build command after each build. It stops and asks you the moment a step looks risky, such as a push, a delete, or a deploy. That way it handles the routine middle of a task and only interrupts you for the decisions that actually need a person.
 
