@@ -14,7 +14,7 @@ function parseTelegramUpdate(value: unknown): TelegramUpdate | undefined {
       text?: unknown;
       caption?: unknown;
       chat?: { id?: unknown };
-      from?: { first_name?: unknown; username?: unknown; is_bot?: unknown };
+      from?: { id?: unknown; first_name?: unknown; username?: unknown; is_bot?: unknown };
       reply_to_message?: { message_id?: unknown };
     };
   };
@@ -37,6 +37,13 @@ function parseTelegramUpdate(value: unknown): TelegramUpdate | undefined {
         ? update.message.reply_to_message.message_id
         : undefined,
       from: [firstName, username].filter(Boolean).join(" ").trim() || undefined,
+      // Telegram user ids are numbers; store as a string so it compares cleanly
+      // against the string allowlist and survives JSON round-trips in the inbox.
+      fromId: typeof update.message?.from?.id === "number"
+        ? String(update.message.from.id)
+        : typeof update.message?.from?.id === "string"
+          ? update.message.from.id
+          : undefined,
       fromIsBot: update.message?.from?.is_bot === true,
     };
   }
@@ -63,6 +70,8 @@ export interface TelegramUpdateMessage {
   chatId: string;
   text: string;
   from?: string;
+  /** Telegram numeric user id, as a string. Undefined when the update omits `from`. */
+  fromId?: string;
   fromIsBot?: boolean;
 }
 

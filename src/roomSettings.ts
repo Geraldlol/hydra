@@ -223,3 +223,17 @@ export function telegramInboundPollIntervalMs(): number {
 export function telegramInboundPrefix(): string {
   return vscode.workspace.getConfiguration("hydraRoom").get<string>("telegramInboundCommandPrefix", "/hydra").trim();
 }
+
+// Optional per-sender allowlist for inbound Telegram. Empty (default) means
+// every sender in the configured chat is allowed — for a group chatId that is
+// every member. A non-empty list gates inbound commands to those Telegram user
+// ids only. Coerce entries to trimmed strings (a hand-edited settings.json may
+// enter numeric ids unquoted) and drop blanks.
+export function telegramInboundAllowedSenderIds(): string[] {
+  const raw = vscode.workspace.getConfiguration("hydraRoom").get<unknown>("telegramInboundAllowedSenderIds", []);
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((v): v is string | number => typeof v === "string" || typeof v === "number")
+    .map((v) => String(v).trim())
+    .filter((v) => v.length > 0);
+}

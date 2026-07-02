@@ -1,6 +1,7 @@
 import { describe, test } from "node:test";
 import { strict as assert } from "node:assert";
 import { formatTelegramInboundPrompt } from "../src/panel";
+import { isTelegramSenderAllowed } from "../src/telegramController";
 
 describe("formatTelegramInboundPrompt", () => {
   test("sanitizes newlines in sender name so header stays single-line", () => {
@@ -41,5 +42,23 @@ describe("formatTelegramInboundPrompt", () => {
     const out = formatTelegramInboundPrompt(undefined, "hi");
     const header = out.split("\n")[0];
     assert.equal(header, "[Telegram inbound — UNTRUSTED REMOTE INPUT]");
+  });
+});
+
+describe("isTelegramSenderAllowed", () => {
+  test("empty allowlist authorizes every sender (backcompat)", () => {
+    assert.equal(isTelegramSenderAllowed("123", []), true);
+    assert.equal(isTelegramSenderAllowed(undefined, []), true);
+  });
+
+  test("non-empty allowlist authorizes only listed sender ids", () => {
+    assert.equal(isTelegramSenderAllowed("123", ["123", "456"]), true);
+    assert.equal(isTelegramSenderAllowed("999", ["123", "456"]), false);
+  });
+
+  test("non-empty allowlist fails closed on a missing or blank sender id", () => {
+    // A group message with no from.id must not slip through an active allowlist.
+    assert.equal(isTelegramSenderAllowed(undefined, ["123"]), false);
+    assert.equal(isTelegramSenderAllowed("", ["123"]), false);
   });
 });

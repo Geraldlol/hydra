@@ -102,6 +102,7 @@ export const TRUST_SCOPED_SETTINGS = [
   "telegramInboundPollingEnabled",
   "telegramInboundCommandPrefix",
   "telegramInboundPollIntervalSeconds",
+  "telegramInboundAllowedSenderIds",
 ] as const;
 
 export async function runHydraDoctor(input: DoctorInput): Promise<DoctorReport> {

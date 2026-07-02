@@ -961,7 +961,7 @@
           "scope": "application",
           "type": "string",
           "default": "",
-          "markdownDescription": "Telegram chat id Hydra sends notifications to. Your personal chat with the bot, a group, or a channel. Find it by messaging your bot and visiting `https://api.telegram.org/bot<token>/getUpdates`. Required for Telegram notifications to fire. **Security:** when inbound polling is on, authorization is chat-level — pointing this at a **group** lets *every member of that group* (and anyone who obtains its invite link) drive agent turns in your workspace. Prefer your private 1:1 chat with the bot unless every group member is trusted."
+          "markdownDescription": "Telegram chat id Hydra sends notifications to. Your personal chat with the bot, a group, or a channel. Find it by messaging your bot and visiting `https://api.telegram.org/bot<token>/getUpdates`. Required for Telegram notifications to fire. **Security:** when inbound polling is on, authorization is chat-level — pointing this at a **group** lets *every member of that group* (and anyone who obtains its invite link) drive agent turns in your workspace. Prefer your private 1:1 chat with the bot, or set `hydraRoom.telegramInboundAllowedSenderIds` to gate individual senders."
         },
         "hydraRoom.telegramNotifyOnDecisionNeeded": {
           "scope": "application",
@@ -980,6 +980,15 @@
           "type": "string",
           "default": "/hydra",
           "markdownDescription": "Required prefix for Telegram inbound polling. Messages from the configured chat must start with this prefix (for example `/hydra continue with the default`) before Hydra treats them as room input. Set to an empty string only for a private bot chat you fully trust."
+        },
+        "hydraRoom.telegramInboundAllowedSenderIds": {
+          "scope": "application",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "markdownDescription": "Optional per-sender allowlist for Telegram inbound polling. Empty (the default) means every sender in the configured `hydraRoom.telegramChatId` may drive agent turns — for a group chat, that is every member. Set it to a list of Telegram numeric user ids (as strings, e.g. `[\"123456789\"]`) to accept inbound commands ONLY from those senders; every other sender in the chat is silently ignored. Find an id by messaging `@userinfobot`, or by reading `from.id` from `https://api.telegram.org/bot<token>/getUpdates`. Requires `hydraRoom.telegramInboundPollingEnabled`."
         },
         "hydraRoom.telegramInboundPollIntervalSeconds": {
           "scope": "application",
@@ -1256,7 +1265,8 @@
         "hydraRoom.telegramNotifyOnDecisionNeeded",
         "hydraRoom.telegramInboundPollingEnabled",
         "hydraRoom.telegramInboundCommandPrefix",
-        "hydraRoom.telegramInboundPollIntervalSeconds"
+        "hydraRoom.telegramInboundPollIntervalSeconds",
+        "hydraRoom.telegramInboundAllowedSenderIds"
       ]
     }
   },

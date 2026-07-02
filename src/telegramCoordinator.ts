@@ -234,5 +234,6 @@ function isTelegramUpdateMessage(value: unknown): value is TelegramUpdateMessage
     typeof message.chatId === "string" &&
     typeof message.text === "string" &&
     (typeof message.from === "string" || message.from === undefined) &&
+    (typeof message.fromId === "string" || message.fromId === undefined) &&
     (typeof message.fromIsBot === "boolean" || message.fromIsBot === undefined);
 }
