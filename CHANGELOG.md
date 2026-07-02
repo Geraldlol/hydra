@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.0
+
+Current-model refresh and Telegram inbound hardening.
+
+- **Model chooser refresh** — `Hydra: Choose Model` now lists the current models: Claude **Fable 5** (`claude-fable-5`), **Mythos 5** (`claude-mythos-5`, approved Project Glasswing orgs only), **Sonnet 5** (`claude-sonnet-5`), **Opus 4.6**, and a `fable` family alias; **GPT-5.6** leads the Codex fallback list. Family aliases (`fable`/`sonnet`/`opus`/`haiku`) are listed first because they always resolve to the current build. The cost meter (`hydraRoom.modelPrices` defaults) prices the new models, and a source-contract test now fails CI if the current flagships drop out of the chooser.
+- **Telegram sender-name sanitization** — the untrusted Telegram sender display name is now run through a shared `sanitizeSenderName()` on both the fenced-prompt path and the System-role transcript line, closing a prompt-injection vector where a sender's profile name could reach the agent prompt under Hydra's trusted voice.
+- **Per-sender Telegram allowlist** — new `hydraRoom.telegramInboundAllowedSenderIds` (application-scoped, trust-restricted) gates inbound commands to specific Telegram user ids. Empty (default) preserves existing behavior; a non-empty list fails closed on a missing sender id. Setting descriptions now warn that a group `telegramChatId` authorizes every member.
+
 ## 0.5.1
 
 Marketplace publish follow-up.
