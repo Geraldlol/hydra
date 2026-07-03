@@ -29,4 +29,11 @@ describe("model chooser source contract", () => {
     const source = modelChooser();
     assert.match(source, /label:\s*"gpt-5\.6"/, "gpt-5.6 missing from Codex fallback presets");
   });
+
+  test("Gemini appears in the model chooser with a preset flagship", () => {
+    const source = modelChooser();
+    assert.match(source, /value:\s*"gemini"/, "Gemini missing from the agent picker");
+    assert.match(source, /GEMINI_MODEL_PRESETS/, "Gemini presets missing");
+    assert.match(source, /label:\s*"gemini-2\.5-pro"/, "current Gemini flagship missing"); // VERIFY id
+  });
 });

@@ -87,6 +87,7 @@ export async function chooseModelInteractively(deps: ModelChooserDeps): Promise<
     [
       { label: "Claude", description: describePhasedSettingCurrent(readModelSetting("claude")), value: "claude" as AgentId },
       { label: "Codex", description: describePhasedSettingCurrent(readModelSetting("codex")), value: "codex" as AgentId },
+      { label: "Gemini", description: describePhasedSettingCurrent(readModelSetting("gemini")), value: "gemini" as AgentId },
     ],
     { placeHolder: "Which agent's model do you want to change?" },
   );
@@ -104,8 +105,8 @@ export async function chooseModelInteractively(deps: ModelChooserDeps): Promise<
   if (!scopePick) return;
   const scope = scopePick.value as PhaseScope;
 
-  const presets = agent === "claude"
-    ? CLAUDE_MODEL_PRESETS
+  const presets = agent === "claude" ? CLAUDE_MODEL_PRESETS
+    : agent === "gemini" ? GEMINI_MODEL_PRESETS
     : codexPresetsForChooser(deps.getCodexModelsSnapshot());
 
   const current = readModelSetting(agent);
@@ -191,6 +192,16 @@ const CLAUDE_MODEL_PRESETS: Array<{ label: string; description: string }> = [
   { label: "claude-opus-4-5", description: "Opus 4.5 (older)" },
   { label: "claude-haiku-4-5-20251001", description: "Haiku 4.5 dated build" },
   { label: "claude-haiku-4-5", description: "Haiku 4.5 alias" },
+];
+
+// Curated Gemini model presets for the chooser. Like Claude, the Gemini CLI
+// exposes no "list models" command, so this list is hand-maintained — models
+// confirmed against the real CLI in Task 5 Step 0. The chooser also offers a
+// free-text "Custom…" entry, so an ID missing here is never a dead end.
+// Drift guard: test/modelChooserSourceContract.test.ts pins the current flagship.
+const GEMINI_MODEL_PRESETS: Array<{ label: string; description: string }> = [
+  { label: "gemini-2.5-pro", description: "Gemini 2.5 Pro — most capable" },
+  { label: "gemini-2.5-flash", description: "Gemini 2.5 Flash — faster / cheaper" },
 ];
 
 function codexPresetsForChooser(
