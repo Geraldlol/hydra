@@ -367,7 +367,18 @@
               "headers": { "type": "object", "additionalProperties": { "type": "string" }, "markdownDescription": "Extra HTTP headers. Reference secrets as `${env:NAME}`." },
               "command": { "type": "string" },
               "argsTemplate": { "type": "array", "items": { "type": "string" }, "markdownDescription": "cli-template argv. Placeholders: `${prompt}`, `${model}`, `${workspaceFolder}`, `${hydraPromptFile}`, `${hydraReplyFile}`, `${hydraLogFile}`." },
-              "defaultAuthority": { "type": "string", "enum": ["read-only", "workspace-write", "full-native"] }
+              "defaultAuthority": { "type": "string", "enum": ["read-only", "workspace-write", "full-native"] },
+              "pricing": {
+                "type": "object",
+                "properties": {
+                  "inputPerMTok": { "type": "number", "description": "USD per million input tokens." },
+                  "outputPerMTok": { "type": "number", "description": "USD per million output tokens." },
+                  "cacheReadPerMTok": { "type": "number", "description": "USD per million cache-read tokens." },
+                  "cacheCreatePerMTok": { "type": "number", "description": "USD per million cache-write tokens." }
+                },
+                "additionalProperties": false,
+                "markdownDescription": "Override per-model USD pricing (per million tokens) used for usage-rail cost estimates."
+              }
             },
             "additionalProperties": false
           },

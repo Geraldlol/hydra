@@ -56,6 +56,43 @@ describe("native data snapshot", () => {
     });
   });
 
+  test("redacts inline header-credential shapes on a hydraRoom.agents-style headers map", () => {
+    // Why: a custom `hydraRoom.agents` head can carry inline `headers`
+    // credentials if a user bypasses validation via user-settings; if that
+    // definition is ever serialized into a generated snapshot/support
+    // bundle, these header names must not leak the credential value.
+    const out = redactedJson({
+      headers: {
+        Authorization: "Bearer sk-secret",
+        "X-Api-Key": "sk-secret",
+        "X-Auth-Key": "sk-secret",
+        Authentication: "sk-secret",
+        "WWW-Authenticate": "sk-secret",
+        Auth: "sk-secret",
+      },
+      apiKeyEnv: "OPENAI_API_KEY",
+    }) as { headers: Record<string, string>; apiKeyEnv: string };
+    assert.deepEqual(out.headers, {
+      Authorization: "[REDACTED]",
+      "X-Api-Key": "[REDACTED]",
+      "X-Auth-Key": "[REDACTED]",
+      Authentication: "[REDACTED]",
+      "WWW-Authenticate": "[REDACTED]",
+      Auth: "[REDACTED]",
+    });
+    // apiKeyEnv is an env-var NAME, not a secret, but is redacted defensively too.
+    assert.equal(out.apiKeyEnv, "[REDACTED]");
+  });
+
+  test("does not over-redact benign auth-adjacent fields", () => {
+    // Guards the new bare-"auth" coverage against catching unrelated fields
+    // like a git commit author.
+    assert.deepEqual(redactedJson({ author: "Jane Doe", authorId: "123" }), {
+      author: "Jane Doe",
+      authorId: "123",
+    });
+  });
+
   test("renders redacted native data summaries", () => {
     const markdown = renderNativeDataSnapshot({
       generatedAt: "2026-05-10T12:00:00.000Z",
