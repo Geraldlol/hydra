@@ -56,6 +56,10 @@ export interface AgentSpawn {
   args: string[];
   cwd: string;
   env?: Record<string, string | undefined>;
+  // Why: when set, runAgent writes THIS to the child's stdin instead of the
+  // prompt argument. cli-template heads bake ${prompt} into argv and pass ""
+  // here so the prompt is not ALSO piped; vendor heads pass the prompt itself.
+  stdin?: string;
 }
 
 // Strip ANSI escape sequences. Covers:
@@ -291,7 +295,7 @@ export async function runAgent(
       // surfaced via stderr / exitCode through the existing finish path.
       child.stdin.on("error", () => {});
       try {
-        child.stdin.write(prompt);
+        child.stdin.write(spawn.stdin ?? prompt);
         child.stdin.end();
       } catch {
         // Synchronous write to a half-closed pipe; same EPIPE class. Stderr
