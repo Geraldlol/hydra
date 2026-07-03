@@ -7,7 +7,7 @@ import { runAgent, AgentSpawn, RunResult } from "./agents";
 import { parseGitStatusEntries, type WorkspaceChange } from "./gitStatus";
 import { State, Event, AgentId, transition, isInFlight, shouldRunParallelDiscussion } from "./phases";
 import { Phase, buildPrompt, APPROVED_SENTINEL_RE, SOFT_APPROVAL_RE } from "./prompts";
-import { displayNameFor } from "./agentRegistry";
+import { displayNameFor, listAgentDefinitions } from "./agentRegistry";
 import {
   appendMessage,
   archiveAndResetTranscript,
@@ -5661,6 +5661,7 @@ export class HydraRoomPanel {
         firstSpeaker: this.getFirstSpeaker(),
         transport: this.transportMode(),
         objective: this.objective,
+        roster: listAgentDefinitions().map(({ id, displayName, colorIndex }) => ({ id, displayName, colorIndex })),
         agentStatuses: this.agentStatuses,
         authoritySummaries,
         terminalSessions: this.terminalBridge?.getSessions() ?? [],

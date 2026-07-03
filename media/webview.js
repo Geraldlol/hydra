@@ -160,6 +160,10 @@ let hasOpenerOverride = false;
 let transport = "oneShot";
 let lastNativeActions = [];
 let lastState = {};
+/** Roster metadata ({id, displayName, colorIndex}) keyed by agent id, sent by
+ *  the host in state.roster (see listAgentDefinitions in src/agentRegistry.ts).
+ *  Empty until the first "state" message arrives. */
+let rosterById = {};
 let ribbonsMinimized = !!webviewState.ribbonsMinimized;
 let collapsedRibbons = new Set(Array.isArray(webviewState.collapsedRibbons) ? webviewState.collapsedRibbons : []);
 /** Cheap signature of the rendered message list. renderMessages() bails early
@@ -478,8 +482,17 @@ function replaceMessageText(messageId, text) {
   restoreMessageScroll(scroll);
 }
 
+function buildRosterById(roster) {
+  const map = {};
+  for (const def of Array.isArray(roster) ? roster : []) {
+    if (def && typeof def.id === "string") map[def.id] = def;
+  }
+  return map;
+}
+
 function renderState(state) {
   lastState = state;
+  rosterById = buildRosterById(state.roster);
   const hostMessages = state.messages || [];
   pendingLocalUserMessages = pendingLocalUserMessages.filter((pending) => !hostMessages.some((m) => sameUserMessage(m, pending)));
   lastMessages = hostMessages.concat(pendingLocalUserMessages);
@@ -748,7 +761,7 @@ function applyMessageArticle(article, m) {
   const head = document.createElement("div");
   head.className = "message-head";
   const art = document.createElement("span");
-  art.className = "head-art " + (m.role || "system");
+  art.className = "head-art " + headColorClass(m.role);
   const headSrc = headAsset(m.role);
   if (headSrc) {
     const img = document.createElement("img");
@@ -1746,6 +1759,16 @@ function activateSelection() {
 }
 function headAsset(role) {
   return HEAD_ASSETS[role] || HEAD_ASSETS.system || "";
+}
+/** Many heads, one body: color comes from the roster's colorIndex (assigned
+ *  by src/agentRegistry.ts:assignColorIndexes), never a hardcoded per-model
+ *  literal. Falls back to the legacy codex/claude/user/system role classes
+ *  when the role isn't in the roster (user/system) or before the first
+ *  "state" message populates rosterById, so the CSS ramp still resolves. */
+function headColorClass(role) {
+  const def = rosterById[role];
+  if (def && def.colorIndex) return "head-" + def.colorIndex;
+  return role || "system";
 }
 function headGlyph(role) {
   if (role === "codex") return "C";

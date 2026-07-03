@@ -463,6 +463,17 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     .head-art.claude { --hc: var(--head-2); }
     .head-art.user { --hc: var(--user); }
     .head-art.system { --hc: var(--text-faint); }
+    /* Roster-driven heads: media/webview.js:headColorClass emits "head-<N>"
+       from the agent's colorIndex once state.roster arrives, so any new head
+       (not just codex/claude) resolves to the ramp by index. */
+    .head-art.head-1 { --hc: var(--head-1); }
+    .head-art.head-2 { --hc: var(--head-2); }
+    .head-art.head-3 { --hc: var(--head-3); }
+    .head-art.head-4 { --hc: var(--head-4); }
+    .head-art.head-5 { --hc: var(--head-5); }
+    .head-art.head-6 { --hc: var(--head-6); }
+    .head-art.head-7 { --hc: var(--head-7); }
+    .head-art.head-8 { --hc: var(--head-8); }
     /* the currently-streaming head pulses a ring of its own color */
     .message.pending .head-art::after {
       content: "";

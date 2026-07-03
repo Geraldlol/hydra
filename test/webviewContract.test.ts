@@ -369,6 +369,12 @@ describe("webview contract", () => {
     assert.equal((scriptBody.match(/className = "head-art "/g) ?? []).length, 1, "missing or duplicated head-art DOM creation");
   });
 
+  test("head color class derives from roster colorIndex metadata", () => {
+    assert.match(scriptBody, /function headColorClass\(/, "webview must map role -> head-<index> class");
+    // The single head-art DOM site is preserved (also pinned elsewhere in this file).
+    assert.equal((scriptBody.match(/className = "head-art "/g) ?? []).length, 1);
+  });
+
   test("keeps transcript scroll anchored unless the reader is already near the bottom", () => {
     assert.match(surface, /MESSAGE_BOTTOM_STICKY_PX = 32/);
     assert.match(surface, /let messageAutoStick = true/);
