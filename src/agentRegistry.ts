@@ -2,6 +2,7 @@ import type { AgentDefinition, AgentAdapter, AgentKind } from "./agentAdapter";
 import { codexAdapter } from "./codexAdapter";
 import { claudeAdapter } from "./claudeAdapter";
 import { geminiAdapter } from "./geminiAdapter";
+import { mergeAgentDefinitions } from "./agentValidation";
 
 export const BUILTIN_AGENT_DEFINITIONS: AgentDefinition[] = [
   { id: "codex", displayName: "Codex", kind: "codex" },
@@ -14,15 +15,42 @@ export function assignColorIndexes(defs: AgentDefinition[]): AgentDefinition[] {
   return defs.map((def, i) => ({ ...def, colorIndex: def.colorIndex ?? i + 1 }));
 }
 
-// SP1: built-ins only. SP2 merges validated hydraRoom.agents entries here.
-function loadDefinitions(): AgentDefinition[] {
-  return assignColorIndexes(BUILTIN_AGENT_DEFINITIONS.map((d) => ({ ...d })));
+function readUserAgents(): unknown {
+  try {
+    // Lazy require: registry is imported by pure unit tests that have no
+    // vscode config; fall back to no user agents there.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const vscode = require("vscode") as typeof import("vscode");
+    return vscode.workspace.getConfiguration("hydraRoom").get<unknown>("agents", []);
+  } catch {
+    return [];
+  }
 }
 
 let cached: AgentDefinition[] | undefined;
+let cachedWarnings: string[] = [];
+
+function loadDefinitions(): AgentDefinition[] {
+  const merged = mergeAgentDefinitions(BUILTIN_AGENT_DEFINITIONS.map((d) => ({ ...d })), readUserAgents());
+  cachedWarnings = merged.warnings;
+  return merged.defs;
+}
+
 function definitions(): AgentDefinition[] {
   if (!cached) cached = loadDefinitions();
   return cached;
+}
+
+/** Drop the memoized roster so a settings change re-merges hydraRoom.agents. */
+export function reloadAgentDefinitions(): void {
+  cached = undefined;
+  cachedWarnings = [];
+}
+
+/** Validation warnings from the last load (invalid user defs that were dropped). */
+export function agentDefinitionWarnings(): string[] {
+  definitions(); // ensure a load has happened
+  return [...cachedWarnings];
 }
 
 export function listAgentDefinitions(): AgentDefinition[] {
