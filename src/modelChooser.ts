@@ -195,9 +195,11 @@ const CLAUDE_MODEL_PRESETS: Array<{ label: string; description: string }> = [
 ];
 
 // Curated Gemini model presets for the chooser. Like Claude, the Gemini CLI
-// exposes no "list models" command, so this list is hand-maintained — models
-// confirmed against the real CLI in Task 5 Step 0. The chooser also offers a
-// free-text "Custom…" entry, so an ID missing here is never a dead end.
+// exposes no "list models" command, so this list is hand-maintained — these
+// IDs are NOT yet confirmed against a live Gemini CLI (no gemini binary was
+// available, so the Task 5 Step 0 verification step was skipped) and should
+// be updated once verified. The chooser also offers a free-text "Custom…"
+// entry, so an ID missing here is never a dead end.
 // Drift guard: test/modelChooserSourceContract.test.ts pins the current flagship.
 const GEMINI_MODEL_PRESETS: Array<{ label: string; description: string }> = [
   { label: "gemini-2.5-pro", description: "Gemini 2.5 Pro — most capable" },
