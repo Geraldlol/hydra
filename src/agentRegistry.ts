@@ -1,6 +1,7 @@
 import type { AgentDefinition, AgentAdapter, AgentKind } from "./agentAdapter";
 import { codexAdapter } from "./codexAdapter";
 import { claudeAdapter } from "./claudeAdapter";
+import { geminiAdapter } from "./geminiAdapter";
 
 export const BUILTIN_AGENT_DEFINITIONS: AgentDefinition[] = [
   { id: "codex", displayName: "Codex", kind: "codex" },
@@ -46,6 +47,7 @@ export function registerAdapter(adapter: AgentAdapter): void {
 // any earlier in module-evaluation order would hit the `const adapters` TDZ.
 registerAdapter(codexAdapter);
 registerAdapter(claudeAdapter);
+registerAdapter(geminiAdapter);
 
 export function adapterForKind(kind: AgentKind): AgentAdapter {
   const adapter = adapters.get(kind);
