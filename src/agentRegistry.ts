@@ -3,6 +3,7 @@ import { codexAdapter } from "./codexAdapter";
 import { claudeAdapter } from "./claudeAdapter";
 import { geminiAdapter } from "./geminiAdapter";
 import { openaiCompatibleAdapter } from "./openaiCompatibleAdapter";
+import { cliTemplateAdapter } from "./cliTemplateAdapter";
 import { mergeAgentDefinitions } from "./agentValidation";
 
 export const BUILTIN_AGENT_DEFINITIONS: AgentDefinition[] = [
@@ -78,6 +79,7 @@ registerAdapter(codexAdapter);
 registerAdapter(claudeAdapter);
 registerAdapter(geminiAdapter);
 registerAdapter(openaiCompatibleAdapter);
+registerAdapter(cliTemplateAdapter);
 
 export function adapterForKind(kind: AgentKind): AgentAdapter {
   const adapter = adapters.get(kind);
