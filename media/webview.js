@@ -483,7 +483,9 @@ function replaceMessageText(messageId, text) {
 }
 
 function buildRosterById(roster) {
-  const map = {};
+  // Why: Object.create(null) has no prototype, so a future roster id of
+  // "__proto__" can't be used to pollute Object.prototype via map[def.id] = def.
+  const map = Object.create(null);
   for (const def of Array.isArray(roster) ? roster : []) {
     if (def && typeof def.id === "string") map[def.id] = def;
   }

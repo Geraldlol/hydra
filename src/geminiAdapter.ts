@@ -1,20 +1,21 @@
 import type { AgentAdapter, AgentDefinition, InvocationContext, Invocation, AdapterRawOutput } from "./agentAdapter";
 import type { UsageTokens, ModelPrices } from "./usage";
 import { buildAgentSpawn } from "./cli";
-import { insertBeforeStdinDash } from "./agentArgs";
+import { insertBeforeStdinDash, withModelArgs } from "./agentArgs";
 import { classifyAgentAuthority } from "./authority";
-import { resolveModelPrices } from "./usage";
+import { resolveModelPrices, DEFAULT_PRICES_BY_KIND } from "./usage";
 
 export const geminiAdapter: AgentAdapter = {
   kind: "gemini",
   buildInvocation(def: AgentDefinition, ctx: InvocationContext): Invocation {
     const spawn = buildAgentSpawn(def.id, ctx.phase, ctx.command, ctx.rawArgs, ctx.workspaceRoot);
-    let args = spawn.args;
-    // Why: unlike codex/claude (whose per-phase model comes from the existing
-    // `hydraRoom.{codex,claude}Model` settings via withModelArgs), there is no
-    // `hydraRoom.geminiModel` setting yet (that lands in a later task), so the model
-    // is read straight off the AgentDefinition instead. Respects an explicit
-    // --model/-m the caller already put in rawArgs.
+    // Why: same per-phase model resolution as codex/claude — withModelArgs
+    // reads `hydraRoom.geminiModel` (string or per-phase object) and respects
+    // an explicit --model/-m already present in rawArgs. def.model is only a
+    // fallback for when neither the setting nor rawArgs supplied one, so the
+    // model chooser's selection actually takes effect and we never emit two
+    // --model flags.
+    let args = withModelArgs(spawn, def.id, ctx.phase).args;
     if (def.model && !args.includes("--model") && !args.includes("-m")) {
       args = insertBeforeStdinDash(args, ["--model", def.model]);
     }
@@ -39,7 +40,11 @@ export const geminiAdapter: AgentAdapter = {
     return undefined;
   },
   pricing(def: AgentDefinition): ModelPrices {
-    return def.pricing ?? resolveModelPrices(def.id, def.model, {});
+    // Why: unlike codex/claude (whose AgentId key matches a DEFAULT_PRICES
+    // entry directly), "gemini" has no DEFAULT_PRICES key, so resolveModelPrices'
+    // default agentDefaults param would silently floor to the codex row. Pass
+    // the gemini row from DEFAULT_PRICES_BY_KIND explicitly as the fallback.
+    return def.pricing ?? resolveModelPrices(def.id, def.model, {}, { gemini: DEFAULT_PRICES_BY_KIND.gemini });
   },
   authority(def: AgentDefinition, ctx: InvocationContext) {
     return classifyAgentAuthority(def.id, ctx.phase, ctx.rawArgs);

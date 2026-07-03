@@ -235,14 +235,18 @@ export async function knownAgentExecutableCandidates(
 // Why: CAPABILITIES is keyed by the now-widened AgentId; an id outside the
 // built-in codex/claude table (gemini, custom heads) has no vendor-specific
 // capability list, so it falls back to this generic line instead of an
-// empty (or crashing) summary.
-const GENERIC_CAPABILITIES = [
-  "Native CLI via hydraRoom.{id}ExecArgs* for this phase; Hydra passes raw native args through.",
-  "Use whatever repo/shell/model/tool capabilities the configured native CLI invocation exposes.",
-];
+// empty (or crashing) summary. A function (not a static array) so the real
+// agent id is interpolated into the ExecArgs setting name instead of a
+// literal "{id}" placeholder leaking into the prompt.
+function genericCapabilities(agent: string): string[] {
+  return [
+    `Native CLI via hydraRoom.${agent}ExecArgs* for this phase; Hydra passes raw native args through.`,
+    "Use whatever repo/shell/model/tool capabilities the configured native CLI invocation exposes.",
+  ];
+}
 
 export function nativeCapabilitySummary(agent: AgentId): string {
-  return (CAPABILITIES[agent] ?? GENERIC_CAPABILITIES).map((capability) => `- ${capability}`).join("\n");
+  return (CAPABILITIES[agent] ?? genericCapabilities(agent)).map((capability) => `- ${capability}`).join("\n");
 }
 
 // Phase authority gate. The design rule is native CLI parity:

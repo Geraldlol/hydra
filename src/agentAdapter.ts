@@ -58,6 +58,18 @@ export interface AdapterRawOutput {
 
 export type AuthorityClass = AuthorityClassification;
 
+/**
+ * Why: in SP1, `parseReply`/`parseUsage` are NOT yet wired into panel's
+ * dispatch — panel.ts calls only `buildInvocation` (and `pricing`/`authority`
+ * separately); the reply/usage normalization panel actually uses still lives
+ * in panel.ts's own code paths (e.g. `roomTextFromClaudeStreamJson`), not
+ * here. Concretely, `claudeAdapter.parseReply` returns raw stdout while
+ * `claudeAdapter.parseUsage` parses the stream-json event stream — two
+ * different shapes for the same call, which is only harmless because nothing
+ * reads them yet. SP2 must wire `parseReply`/`parseUsage` into panel's actual
+ * dispatch path and reconcile them with panel's real normalization before
+ * relying on either method's output.
+ */
 export interface AgentAdapter {
   readonly kind: AgentKind;
   buildInvocation(def: AgentDefinition, ctx: InvocationContext): Invocation;

@@ -1,9 +1,16 @@
 import { describe, test } from "node:test";
 import { strict as assert } from "node:assert";
+import * as vscode from "vscode";
 import { geminiAdapter } from "../src/geminiAdapter";
 import { adapterForKind } from "../src/agentRegistry";
-import { UNKNOWN_AGENT_PRICES } from "../src/usage";
+import { DEFAULT_PRICES_BY_KIND } from "../src/usage";
 import type { AgentDefinition, InvocationContext } from "../src/agentAdapter";
+
+// agentArgs.ts's withModelArgs (which geminiAdapter.buildInvocation now calls)
+// reads vscode.workspace.getConfiguration("hydraRoom").get(...) at runtime;
+// node:test substitutes a stub (scripts/setup-vscode-stub.js) exposing
+// `currentConfig` so tests can simulate hydraRoom.geminiModel being set.
+const currentConfig = (vscode as unknown as { currentConfig: Record<string, unknown> }).currentConfig;
 
 const geminiDef: AgentDefinition = { id: "gemini", displayName: "Gemini", kind: "gemini" };
 const ctx = (over: Partial<InvocationContext> = {}): InvocationContext => ({
@@ -34,6 +41,7 @@ describe("gemini adapter", () => {
   });
 
   test("model from the definition is injected as --model before the trailing stdin dash", () => {
+    delete currentConfig.geminiModel; // guard against a leaked hydraRoom.geminiModel from another test
     const inv = geminiAdapter.buildInvocation({ ...geminiDef, model: "gemini-2.5-pro" }, ctx());
     assert.equal(inv.transport, "spawn");
     if (inv.transport !== "spawn") return;
@@ -43,6 +51,7 @@ describe("gemini adapter", () => {
   });
 
   test("does not double-inject --model when rawArgs already declares one", () => {
+    delete currentConfig.geminiModel;
     const inv = geminiAdapter.buildInvocation(
       { ...geminiDef, model: "gemini-2.5-pro" },
       ctx({ rawArgs: ["-p", "--model", "gemini-2.5-flash", "-"] }),
@@ -54,10 +63,53 @@ describe("gemini adapter", () => {
   });
 
   test("no model configured -> args pass through unchanged", () => {
+    delete currentConfig.geminiModel;
     const inv = geminiAdapter.buildInvocation(geminiDef, ctx());
     assert.equal(inv.transport, "spawn");
     if (inv.transport !== "spawn") return;
     assert.ok(!inv.args.includes("--model"));
+  });
+
+  test("hydraRoom.geminiModel setting is injected as --model when configured", () => {
+    currentConfig.geminiModel = "gemini-2.5-pro";
+    try {
+      const inv = geminiAdapter.buildInvocation(geminiDef, ctx());
+      assert.equal(inv.transport, "spawn");
+      if (inv.transport !== "spawn") return;
+      assert.equal(inv.args.filter((a) => a === "--model").length, 1);
+      assert.equal(inv.args[inv.args.indexOf("--model") + 1], "gemini-2.5-pro");
+    } finally {
+      delete currentConfig.geminiModel;
+    }
+  });
+
+  test("hydraRoom.geminiModel setting wins over def.model, without a duplicate --model", () => {
+    currentConfig.geminiModel = "gemini-2.5-pro";
+    try {
+      const inv = geminiAdapter.buildInvocation({ ...geminiDef, model: "gemini-2.5-flash" }, ctx());
+      assert.equal(inv.transport, "spawn");
+      if (inv.transport !== "spawn") return;
+      assert.equal(inv.args.filter((a) => a === "--model").length, 1);
+      assert.equal(inv.args[inv.args.indexOf("--model") + 1], "gemini-2.5-pro");
+    } finally {
+      delete currentConfig.geminiModel;
+    }
+  });
+
+  test("an explicit --model already in rawArgs still wins over hydraRoom.geminiModel", () => {
+    currentConfig.geminiModel = "gemini-2.5-pro";
+    try {
+      const inv = geminiAdapter.buildInvocation(
+        geminiDef,
+        ctx({ rawArgs: ["-p", "--model", "gemini-2.5-flash", "-"] }),
+      );
+      assert.equal(inv.transport, "spawn");
+      if (inv.transport !== "spawn") return;
+      assert.equal(inv.args.filter((a) => a === "--model").length, 1);
+      assert.equal(inv.args[inv.args.indexOf("--model") + 1], "gemini-2.5-flash");
+    } finally {
+      delete currentConfig.geminiModel;
+    }
   });
 
   // parseReply/parseUsage: Gemini's real JSON output shape is UNVERIFIED (no `gemini`
@@ -82,8 +134,8 @@ describe("gemini adapter", () => {
     assert.equal(geminiAdapter.parseUsage({ stdout: raw, stderr: "", exitCode: 0, outputMode: "geminiJson" }), undefined);
   });
 
-  test("pricing falls back to the unknown-agent floor when no model/pricing is set", () => {
-    assert.deepEqual(geminiAdapter.pricing(geminiDef), UNKNOWN_AGENT_PRICES);
+  test("pricing falls back to the gemini price row (not the codex floor) when no model/pricing is set", () => {
+    assert.deepEqual(geminiAdapter.pricing(geminiDef), DEFAULT_PRICES_BY_KIND.gemini);
   });
 
   test("pricing respects an explicit def.pricing override", () => {

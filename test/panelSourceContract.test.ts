@@ -601,6 +601,7 @@ describe("multi-head wiring source contract", () => {
     const src = source();
     const start = src.indexOf("private buildSpawn(");
     const end = src.indexOf("private async buildNativeCommandSpawn(", start);
+    assert.ok(start >= 0 && end > start, "buildSpawn body not delimited");
     const body = src.slice(start, end);
     assert.match(body, /adapterForKind\(def\.kind\)\.buildInvocation\(/);
     assert.doesNotMatch(body, /withCodexSkipGitRepoCheckArgs\(spawn\)/);

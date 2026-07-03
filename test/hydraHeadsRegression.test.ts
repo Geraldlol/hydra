@@ -4,7 +4,7 @@ import { transition, pickReviewers, DEFAULT_ROSTER } from "../src/phases";
 import { getAgentDefinition, adapterForKind } from "../src/agentRegistry";
 import type { AgentDefinition, InvocationContext } from "../src/agentAdapter";
 import type { Phase } from "../src/prompts";
-import "../src/geminiAdapter"; // ensure registration side-effect
+import "../src/geminiAdapter"; // gemini registers via agentRegistry.ts's module body, not here
 
 const ALL_PHASES: Phase[] = ["opener", "reactor", "closer", "parallel", "build", "review"];
 
