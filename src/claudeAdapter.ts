@@ -10,7 +10,7 @@ export const claudeAdapter: AgentAdapter = {
   kind: "claude",
   buildInvocation(def: AgentDefinition, ctx: InvocationContext): Invocation {
     // Why: no withCodexSkipGitRepoCheckArgs step here -- that guard is
-    // codex-only (panel.ts:buildSpawn only applies it `if (agent === "codex")`).
+    // codex-only (it lives in codexAdapter.buildInvocation).
     let spawn = buildAgentSpawn(def.id, ctx.phase, ctx.command, ctx.rawArgs, ctx.workspaceRoot);
     spawn = withModelArgs(spawn, def.id, ctx.phase);
     spawn = withEffortArgs(spawn, def.id, ctx.phase);

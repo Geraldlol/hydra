@@ -5,9 +5,9 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import { runAgent, AgentSpawn, RunResult } from "./agents";
 import { parseGitStatusEntries, type WorkspaceChange } from "./gitStatus";
-import { State, Event, AgentId, transition, isInFlight, shouldRunParallelDiscussion } from "./phases";
+import { State, Event, AgentId, transition, isInFlight, shouldRunParallelDiscussion, pickReviewers, DEFAULT_ROSTER } from "./phases";
 import { Phase, buildPrompt, APPROVED_SENTINEL_RE, SOFT_APPROVAL_RE } from "./prompts";
-import { displayNameFor, listAgentDefinitions } from "./agentRegistry";
+import { adapterForKind, displayNameFor, getAgentDefinition, listAgentDefinitions } from "./agentRegistry";
 import {
   appendMessage,
   archiveAndResetTranscript,
@@ -197,7 +197,7 @@ import {
   wikiWrapupMaxSourceChars,
   wikiWrapupTimeoutMs,
 } from "./roomSettings";
-import { modelForPhase, withEffortArgs, withModelArgs } from "./agentArgs";
+import { modelForPhase } from "./agentArgs";
 import {
   CLAUDE_AUTH_STATUS_PROBE_ARGS,
   evaluateClaudeAutomationGuard,
@@ -233,7 +233,6 @@ import {
   shouldUseCodexJson,
   withCodexJsonArgs,
   withCodexLastMessageArgs,
-  withCodexSkipGitRepoCheckArgs,
 } from "./codexTransport";
 import {
   shouldCreateClaudeRequestFiles,
@@ -879,7 +878,7 @@ export class HydraRoomPanel {
     if (this.state.name === "ParallelBuildDone") {
       parallelAgents = [...this.state.agents];
     } else {
-      reviewer = otherAgent(this.state.builder);
+      reviewer = pickReviewers(this.state.builder, this.roster())[0] ?? this.state.builder;
     }
     this.applyEvent({ type: "requestReview" });
     if (parallelAgents) {
@@ -2694,7 +2693,7 @@ export class HydraRoomPanel {
       // Track pending message ids opened in this method so a synchronous throw
       // mid-await (template render, ENOSPC on persist, etc.) can finalize each
       // bubble's spinner. The happy-path branches NULL these as they're consumed.
-      const reactor = otherAgent(opener);
+      const reactor = pickReviewers(opener, this.roster())[0] ?? opener;
       let openerId: string | undefined;
       let reactorId: string | undefined;
       let closerId: string | undefined;
@@ -2885,7 +2884,7 @@ export class HydraRoomPanel {
         const transcript = appendClaudeWorkerAssignment(transcriptWithLiveChannels, worker);
         const envelope = await this.buildPromptEnvelope({
           agent,
-          otherAgent: otherAgent(agent),
+          otherAgent: pickReviewers(agent, this.roster())[0] ?? agent,
           phase: "parallel",
           transcript,
           currentUserMessage,
@@ -2987,7 +2986,7 @@ export class HydraRoomPanel {
         const buildContext = this.buildPromptContextSnapshot("build", undefined, agent);
         const buildEnvelope = await this.buildPromptEnvelope({
           agent,
-          otherAgent: otherAgent(agent),
+          otherAgent: pickReviewers(agent, this.roster())[0] ?? agent,
           phase: "build",
           transcript: buildContext.text,
         });
@@ -3582,7 +3581,7 @@ export class HydraRoomPanel {
         const reviewContext = this.buildPromptContextSnapshot("review", undefined, reviewer);
         const reviewEnvelope = await this.buildPromptEnvelope({
           agent: reviewer,
-          otherAgent: otherAgent(reviewer),
+          otherAgent: pickReviewers(reviewer, this.roster())[0] ?? reviewer,
           phase: "review",
           transcript: reviewContext.text,
           diff,
@@ -4062,6 +4061,11 @@ export class HydraRoomPanel {
     }
   }
 
+  // SP3 reads this from configuration; SP1 pins the built-in two-head roster.
+  private roster(): AgentId[] {
+    return [...DEFAULT_ROSTER];
+  }
+
   private buildSpawn(agent: AgentId, phase: Phase): AgentSpawn {
     const cfg = vscode.workspace.getConfiguration("hydraRoom");
     const command = cfg.get<string>(`${agent}Command`, agent);
@@ -4072,10 +4076,21 @@ export class HydraRoomPanel {
       ? argsForCapabilityProfile(agent, configuredProfile)
       : undefined;
     const rawArgs = presetArgs ?? cfg.get<string[]>(argsKey, []);
-    let spawn = buildAgentSpawn(agent, phase, command, rawArgs, this.workspaceRoot);
-    if (agent === "codex") spawn = withCodexSkipGitRepoCheckArgs(spawn);
-    spawn = withModelArgs(spawn, agent, phase);
-    spawn = withEffortArgs(spawn, agent, phase);
+    // The vendor argv chain (buildAgentSpawn → skip-git-repo-check → model →
+    // effort) lives inside each kind's adapter now, so a new head dispatches
+    // through the exact same path as codex/claude.
+    const def = getAgentDefinition(agent) ?? { id: agent, displayName: agent, kind: "codex" as const };
+    const inv = adapterForKind(def.kind).buildInvocation(def, {
+      phase,
+      workspaceRoot: this.workspaceRoot,
+      prompt: "", // buildSpawn only forms argv; runAgent writes the prompt to stdin.
+      command,
+      rawArgs,
+    });
+    if (inv.transport !== "spawn") {
+      throw new Error(`HTTP transport for kind "${def.kind}" is not supported until Sub-project 2`);
+    }
+    const spawn: AgentSpawn = { command: inv.command, args: inv.args, cwd: this.workspaceRoot };
     return applySpawnEnvironment(
       spawn,
       this.workspaceRoot,
@@ -4223,7 +4238,7 @@ export class HydraRoomPanel {
     workspaceDiff?: string
   ): Promise<PromptEnvelope> {
     const phase: Phase = "opener";
-    const other = otherAgent(agent);
+    const other = pickReviewers(agent, this.roster())[0] ?? agent;
     const renderedPrompt = buildDirectTerminalPokePrompt({
       agent,
       otherAgent: other,
@@ -4469,7 +4484,7 @@ export class HydraRoomPanel {
     }
 
     const selectedOpener = normalizeAgentId(opener, this.getFirstSpeaker());
-    const reactor = otherAgent(selectedOpener);
+    const reactor = pickReviewers(selectedOpener, this.roster())[0] ?? selectedOpener;
     const trimmed = draftWithAttachments.promptText.trim();
     const previewMessages = trimmed
       ? [
@@ -4560,7 +4575,7 @@ export class HydraRoomPanel {
       case "ParallelBuild":
         return "build";
       case "BuildDone":
-        return otherAgent(this.state.builder) === agent ? "review" : "build";
+        return (pickReviewers(this.state.builder, this.roster())[0] ?? this.state.builder) === agent ? "review" : "build";
       case "ParallelBuildDone":
         return "review";
       case "Review":
@@ -5828,10 +5843,6 @@ function configurationTargetLabel(target: vscode.ConfigurationTarget): string {
   if (target === vscode.ConfigurationTarget.WorkspaceFolder) return "workspace-folder";
   if (target === vscode.ConfigurationTarget.Workspace) return "workspace";
   return "user";
-}
-
-function otherAgent(agent: AgentId): AgentId {
-  return agent === "codex" ? "claude" : "codex";
 }
 
 function normalizeAgentId(value: unknown, fallback: AgentId): AgentId {

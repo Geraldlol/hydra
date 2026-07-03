@@ -588,6 +588,25 @@ describe("workspace edit viewer source contracts", () => {
   });
 });
 
+describe("multi-head wiring source contract", () => {
+  const source = () => fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+
+  test("review handoff uses pickReviewers, not the removed binary otherAgent", () => {
+    const src = source();
+    assert.match(src, /pickReviewers\(this\.state\.builder, this\.roster\(\)\)/);
+    assert.doesNotMatch(src, /otherAgent\(/);
+  });
+
+  test("buildSpawn delegates argv construction to the registry adapter", () => {
+    const src = source();
+    const start = src.indexOf("private buildSpawn(");
+    const end = src.indexOf("private async buildNativeCommandSpawn(", start);
+    const body = src.slice(start, end);
+    assert.match(body, /adapterForKind\(def\.kind\)\.buildInvocation\(/);
+    assert.doesNotMatch(body, /withCodexSkipGitRepoCheckArgs\(spawn\)/);
+  });
+});
+
 describe("wiki wrapup source contracts", () => {
   test("wiki wrapups emit start and no-change diagnostics", () => {
     const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
