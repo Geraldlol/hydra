@@ -121,4 +121,11 @@ describe("trust scope contract", () => {
       );
     }
   });
+
+  test("hydraRoom.agents is trust-scoped (spawn command + network endpoint)", () => {
+    assert.ok(
+      (TRUST_SCOPED_SETTINGS as readonly string[]).includes("agents"),
+      "agents must be trust-scoped — it defines a spawn command and an HTTP endpoint",
+    );
+  });
 });

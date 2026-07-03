@@ -95,6 +95,7 @@ export const TRUST_SCOPED_SETTINGS = [
   "geminiModel",
   "geminiNativeEnv",
   "geminiNativePathPrepend",
+  "agents",
   "codexTerminalCommand",
   "claudeTerminalCommand",
   "verifyCommand",
