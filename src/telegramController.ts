@@ -1,5 +1,6 @@
 import { AgentId } from "./phases";
 import type { HydraEventKind } from "./events";
+import { displayNameFor } from "./agentRegistry";
 import {
   telegramConfig,
   telegramInboundAllowedSenderIds,
@@ -29,8 +30,6 @@ import {
   writeTelegramOffset,
   type TelegramCoordinatorPaths,
 } from "./telegramCoordinator";
-
-const AGENT_NAMES: Record<AgentId, string> = { codex: "Codex", claude: "Claude" };
 
 // Telegram inbound payloads are attacker-controlled (anyone with the bot
 // token's chat id can post). A sender's display name is theirs to set, so
@@ -458,9 +457,7 @@ export class TelegramController {
       .filter((message): message is TelegramReplyMessage & { role: AgentId } => (message.role === "codex" || message.role === "claude") && !message.pending);
     const latest = agentMessages[agentMessages.length - 1];
     if (!latest) return undefined;
-    // Why: AGENT_NAMES is keyed by the now-widened AgentId; fall back to the
-    // raw role for an agent outside the built-in codex/claude table.
-    const label = AGENT_NAMES[latest.role] ?? latest.role;
+    const label = displayNameFor(latest.role);
     const phase = latest.phase ? ` (${latest.phase})` : "";
     return `<b>${escapeTelegramHtml(label)}${escapeTelegramHtml(phase)}</b>\n\n${escapeTelegramHtml(truncateForTelegram(latest.text))}`;
   }

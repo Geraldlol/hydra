@@ -276,6 +276,31 @@ describe("decision packets", () => {
     assert.equal(action.builder, "claude");
   });
 
+  test("labels a gemini builder as Gemini, not Claude", () => {
+    // Before this task, the label/detail ternary only recognized "codex" and
+    // mislabeled every other agent id (including gemini) as "Claude".
+    const packet = parseDecisionPacket(
+      [
+        "Recommendation: Let Gemini keep the work it picked up.",
+        "Default next action: I've got this; let me continue.",
+        "Decision needed from user: none",
+        "Blockers: none",
+      ].join("\n"),
+      {
+        agent: "gemini",
+        phase: "opener",
+        sourceMessageTimestamp: "2026-05-16T17:38:16.826Z",
+      }
+    );
+
+    const action = resolveDecisionAction(packet, "AwaitingUser");
+    assert.equal(action.kind, "assignBuilder");
+    assert.equal(action.builder, "gemini");
+    assert.match(action.label, /Gemini/);
+    assert.doesNotMatch(action.label, /Claude/);
+    assert.match(action.detail, /Gemini/);
+  });
+
   test("detects auto-advanceable decisions with no user blockers", () => {
     const packet = parseDecisionPacket(
       [

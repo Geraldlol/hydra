@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as crypto from "node:crypto";
 import * as path from "node:path";
 import { atomicWriteFile, ensureFile, serializePerFile } from "./fileQueue";
+import { displayNameFor } from "./agentRegistry";
 
 export const HYDRA_WIKI_DIR = path.join(".hydra", "wiki");
 
@@ -537,7 +538,7 @@ function findLastIndex<T>(items: T[], predicate: (item: T) => boolean): number {
 
 function formatWrapupMessage(message: HydraWikiWrapupMessage): string {
   const phase = message.phase ? ` (${message.phase})` : "";
-  const role = message.role === "user" ? "You" : message.role === "system" ? "System" : message.role === "codex" ? "Codex" : "Claude";
+  const role = message.role === "user" ? "You" : message.role === "system" ? "System" : displayNameFor(message.role);
   return `## ${message.timestamp} ${role}${phase}\n\n${message.text.trim()}`;
 }
 

@@ -2,6 +2,7 @@ import * as path from "node:path";
 import type { AgentSpawn } from "./agents";
 import type { AgentId } from "./phases";
 import type { Phase } from "./prompts";
+import { displayNameFor } from "./agentRegistry";
 
 export interface TerminalProtocolPaths {
   promptPath: string;
@@ -51,7 +52,7 @@ export function buildTerminalPromptFile(agent: AgentId, phase: Phase, prompt: st
 }
 
 export function buildTerminalReadyCommand(agent: AgentId, workspaceRoot: string): string {
-  const label = agent === "codex" ? "Codex" : "Claude";
+  const label = displayNameFor(agent);
   return [
     `Write-Host ${quotePowerShell(`[Hydra] ${label} terminal ready.`)} -ForegroundColor Cyan`,
     `Write-Host ${quotePowerShell("[Hydra] Dispatch mode: leave this shell open; Hydra will paste short request launchers here.")}`,

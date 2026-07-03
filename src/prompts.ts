@@ -1,4 +1,5 @@
 import { AgentId } from "./phases";
+import { displayNameFor } from "./agentRegistry";
 
 export type Phase = "opener" | "reactor" | "closer" | "parallel" | "build" | "review";
 
@@ -11,8 +12,6 @@ export interface PromptInput {
   verification?: string;
   nativeCapabilities?: string;
 }
-
-const AGENT_NAMES: Record<AgentId, string> = { codex: "Codex", claude: "Claude" };
 
 const DECISION_PACKET =
   "End with a Decision Packet using these exact headings:\n" +
@@ -94,8 +93,8 @@ const PHASE_RULES: Record<Phase, string> = {
 };
 
 export function buildPrompt(input: PromptInput): string {
-  const me = AGENT_NAMES[input.agent];
-  const them = AGENT_NAMES[input.otherAgent];
+  const me = displayNameFor(input.agent);
+  const them = displayNameFor(input.otherAgent);
   const wikiContext = wikiContextBlock(input.transcript);
   const hasWikiContext = wikiContext !== undefined;
   const hasWikiSourceCitations = wikiContext ? /\[src:[a-f0-9]{12}\]/i.test(wikiContext) : false;

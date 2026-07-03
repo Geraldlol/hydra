@@ -1,6 +1,7 @@
 import type { DecisionAction } from "./decisions";
 import type { NativeActionReceipt } from "./nativeActions";
 import { verificationPassed, verificationSummary, type VerificationResult } from "./verification";
+import { displayNameFor } from "./agentRegistry";
 
 export type WorkQueueItemKind = "decision" | "verification" | "nativeAction";
 export type WorkQueueSeverity = "info" | "warning" | "error";
@@ -79,7 +80,7 @@ export function buildWorkQueue(input: BuildWorkQueueInput): WorkQueueItem[] {
 }
 
 function nativeActionDetail(action: NativeActionReceipt): string {
-  const agents = action.agents.map((agent) => agent === "codex" ? "Codex" : "Claude").join(" + ");
+  const agents = action.agents.map((agent) => displayNameFor(agent)).join(" + ");
   const instruction = action.instruction.trim().replace(/\s+/g, " ");
   const shortInstruction = instruction.length > 120 ? `${instruction.slice(0, 117)}...` : instruction;
   return `${agents}: ${shortInstruction || "[no instruction]"}`;

@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentId } from "./phases";
+import { displayNameFor } from "./agentRegistry";
 
 export interface NativeCapabilityProbe {
   agent: AgentId;
@@ -180,7 +181,7 @@ function renderProbe(probe: NativeCapabilityProbe): string[] {
 }
 
 function labelAgent(agent: AgentId): string {
-  return agent === "codex" ? "Codex" : "Claude";
+  return displayNameFor(agent);
 }
 
 function singleLine(value: string): string {

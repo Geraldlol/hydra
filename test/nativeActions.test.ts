@@ -13,6 +13,7 @@ import {
   writeNativeActions,
   type NativeActionReceipt,
 } from "../src/nativeActions";
+import { displayNameFor } from "../src/agentRegistry";
 
 describe("native action receipts", () => {
   test("resolves the workspace-native action log path", () => {
@@ -81,6 +82,21 @@ describe("native action receipts", () => {
       }),
       "failed: Codex (editor)"
     );
+    // Before this task, nativeActionSummary's agent-name ternary mislabeled
+    // any non-codex agent (including gemini) as "Claude".
+    assert.equal(
+      nativeActionSummary({
+        id: "action-2",
+        timestamp: "2026-05-09T20:00:00.000Z",
+        agents: ["gemini"],
+        instruction: "Inspect this file.",
+        includeEditorContext: false,
+        includeWorkspaceDiff: false,
+        promptEnvelopeIds: ["env-2"],
+        status: "completed",
+      }),
+      "completed: Gemini"
+    );
   });
 
   test("rewrites native action receipts after clearing rows", async () => {
@@ -146,5 +162,14 @@ describe("native action receipts", () => {
       ["claude", "claude-live-session", "claude-match"],
     ]);
     assert.equal(hints.find((hint) => hint.agent === "claude")?.pathLabel, "111.json");
+  });
+});
+
+describe("multi-head display labels", () => {
+  test("a gemini head is labeled Gemini, not Claude", () => {
+    // Before this task, agent === "codex" ? "Codex" : "Claude" mislabeled gemini.
+    assert.equal(displayNameFor("gemini"), "Gemini");
+    assert.equal(displayNameFor("codex"), "Codex");
+    assert.equal(displayNameFor("claude"), "Claude");
   });
 });

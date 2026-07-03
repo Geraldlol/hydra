@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { ensureFile, readJsonlGuarded, serializePerFile } from "./fileQueue";
 import type { AgentId } from "./phases";
+import { displayNameFor } from "./agentRegistry";
 
 export type NativeActionStatus = "completed" | "cancelled" | "failed";
 
@@ -86,7 +87,7 @@ export async function readNativeActions(filePath: string): Promise<NativeActionR
 
 export function nativeActionSummary(receipt: NativeActionReceipt | undefined): string {
   if (!receipt) return "No native actions yet";
-  const agents = receipt.agents.map((agent) => agent === "codex" ? "Codex" : "Claude").join(" + ");
+  const agents = receipt.agents.map((agent) => displayNameFor(agent)).join(" + ");
   const attachments = [
     receipt.includeEditorContext ? "editor" : "",
     receipt.includeWorkspaceDiff ? "diff" : "",

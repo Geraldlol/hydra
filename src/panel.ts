@@ -7,6 +7,7 @@ import { runAgent, AgentSpawn, RunResult } from "./agents";
 import { parseGitStatusEntries, type WorkspaceChange } from "./gitStatus";
 import { State, Event, AgentId, transition, isInFlight, shouldRunParallelDiscussion } from "./phases";
 import { Phase, buildPrompt, APPROVED_SENTINEL_RE, SOFT_APPROVAL_RE } from "./prompts";
+import { displayNameFor } from "./agentRegistry";
 import {
   appendMessage,
   archiveAndResetTranscript,
@@ -308,7 +309,6 @@ interface PromptTranscriptWindowStats {
   truncated: boolean;
 }
 
-const AGENT_NAMES: Record<AgentId, string> = { codex: "Codex", claude: "Claude" };
 // Why: skip the per-append mkdir(recursive) syscall on the agent-call trace
 // once its parent .hydra/ dir is known to exist. First write still creates it.
 const ensuredAgentCallDirs = new Set<string>();
@@ -843,7 +843,7 @@ export class HydraRoomPanel {
     if (!this.workspaceReady) return;
     if (this.state.name !== "AwaitingUser") return;
     await this.appendSystemMessage(
-      `${AGENT_NAMES[builder]} assigned as builder. This is explicit user build authority; previous survey or planning defaults no longer block implementation.`
+      `${displayNameFor(builder)} assigned as builder. This is explicit user build authority; previous survey or planning defaults no longer block implementation.`
     );
     this.applyEvent({ type: "assignBuilder", builder });
     await this.runBuildPhase(builder);
@@ -2023,7 +2023,7 @@ export class HydraRoomPanel {
     this.terminalPokeInFlight = true;
     const commandLine = `${agent} ${rawArgs.join(" ")}`;
     try {
-      await this.appendUserMessage(`[Native ${AGENT_NAMES[agent]} command]\n\n${commandLine}`);
+      await this.appendUserMessage(`[Native ${displayNameFor(agent)} command]\n\n${commandLine}`);
       const messageId = this.openPendingMessage(agent, "opener");
       const spawn = await this.buildNativeCommandSpawn(agent, rawArgs);
       const result = await this.runAgentTransport(
@@ -2071,9 +2071,9 @@ export class HydraRoomPanel {
     let status: NativeActionStatus = "failed";
     this.terminalPokeInFlight = true;
     try {
-      await this.appendUserMessage(`[Raw ${AGENT_NAMES[agent]} terminal line]\n\n${trimmed}`);
+      await this.appendUserMessage(`[Raw ${displayNameFor(agent)} terminal line]\n\n${trimmed}`);
       await this.terminalBridge.sendRawLine(agent, trimmed);
-      await this.appendSystemMessage(`Sent raw line to ${AGENT_NAMES[agent]} terminal. Continue interaction in the visible terminal if the CLI is interactive.`);
+      await this.appendSystemMessage(`Sent raw line to ${displayNameFor(agent)} terminal. Continue interaction in the visible terminal if the CLI is interactive.`);
       status = "completed";
     } finally {
       await this.recordNativeAction({
@@ -2143,7 +2143,7 @@ export class HydraRoomPanel {
       const firstAgent = targetAgents[0]!;
       const targetLabel = targetAgents.length === 2
         ? "Codex and Claude terminals"
-        : `${AGENT_NAMES[firstAgent]} terminal`;
+        : `${displayNameFor(firstAgent)} terminal`;
       const attachmentSummary = [
         editorContext
           ? `Attached editor context: ${editorContext.label} (${editorContext.selected ? "selection" : "active file"}, ${editorContext.text.length} chars${editorContext.truncated ? " truncated" : ""})`
@@ -2162,7 +2162,7 @@ export class HydraRoomPanel {
         await this.persistPromptEnvelope(envelope);
         const messageId = this.openPendingMessage(agent, "opener");
         const pending = this.messagesById.get(messageId);
-        if (pending) pending.activity = `${AGENT_NAMES[agent]} native terminal poke running...`;
+        if (pending) pending.activity = `${displayNameFor(agent)} native terminal poke running...`;
         calls.push(this.callAgent(agent, "opener", envelope.renderedPrompt, messageId, ctrl.signal, true));
       }
       this.postState();
@@ -2214,9 +2214,9 @@ export class HydraRoomPanel {
       const input = await vscode.window.showInputBox({
         title: `Hydra: ${pick.plainLabel}`,
         prompt: pick.actionKind === "command"
-          ? `Native args/subcommand to run after ${AGENT_NAMES[firstAgent]}'s configured executable. Example: doctor or mcp list.`
+          ? `Native args/subcommand to run after ${displayNameFor(firstAgent)}'s configured executable. Example: doctor or mcp list.`
           : pick.actionKind === "rawLine"
-          ? `Raw PowerShell line to send to the visible ${AGENT_NAMES[firstAgent]} terminal. Use this for interactive native CLI flows.`
+          ? `Raw PowerShell line to send to the visible ${displayNameFor(firstAgent)} terminal. Use this for interactive native CLI flows.`
           : pick.options.includeEditorContext || pick.options.includeWorkspaceDiff
           ? "Optional instruction. Leave blank to use only the attached context."
           : "Instruction to send to the selected native terminal endpoint.",
@@ -2585,8 +2585,8 @@ export class HydraRoomPanel {
       canSelectFiles: true,
       canSelectFolders: false,
       canSelectMany: false,
-      openLabel: `Use as ${AGENT_NAMES[agent]} CLI`,
-      title: `Select ${AGENT_NAMES[agent]} CLI executable or wrapper`,
+      openLabel: `Use as ${displayNameFor(agent)} CLI`,
+      title: `Select ${displayNameFor(agent)} CLI executable or wrapper`,
     });
     const file = picked?.[0]?.fsPath;
     if (!file) return;
@@ -2594,7 +2594,7 @@ export class HydraRoomPanel {
       .getConfiguration("hydraRoom")
       .update(`${agent}Command`, file, vscode.ConfigurationTarget.Global);
     await this.appendSystemMessage(
-      `${AGENT_NAMES[agent]} CLI path saved to User settings: ${file}\nHydra Autopilot is rechecking the room.`
+      `${displayNameFor(agent)} CLI path saved to User settings: ${file}\nHydra Autopilot is rechecking the room.`
     );
     await this.runAutopilotStart();
   }
@@ -3113,7 +3113,7 @@ export class HydraRoomPanel {
         sourceTruncated: wrapupSource.truncated,
       });
       if (manual) {
-        await this.appendSystemMessage(`Hydra wiki wrapup started with ${AGENT_NAMES[agent]}.`);
+        await this.appendSystemMessage(`Hydra wiki wrapup started with ${displayNameFor(agent)}.`);
         this.postState();
       }
       const files = await readHydraWikiFiles(this.workspaceRoot);
@@ -5041,9 +5041,7 @@ export class HydraRoomPanel {
       if (!message?.pending) return;
       const elapsedMs = Date.now() - startedAt;
       message.activity = formatPendingAgentActivity({
-        // Why: AGENT_NAMES is keyed by the now-widened AgentId; fall back to the
-        // raw id for an agent outside the built-in codex/claude table.
-        agentLabel: AGENT_NAMES[agent] ?? agent,
+        agentLabel: displayNameFor(agent),
         phase,
         elapsedMs,
         timeoutMs,
@@ -5129,7 +5127,7 @@ export class HydraRoomPanel {
     const telemetry = summarizeHydraWikiUsage(message.text);
     await this.recordEvent(
       "diagnostic",
-      `Hydra wiki usage telemetry: ${AGENT_NAMES[message.role]} ${message.phase ?? "turn"} reply ${telemetry.hasCitationSignal ? "cited wiki sources" : telemetry.hasMentionSignal ? "mentioned wiki memory" : "had no wiki usage signal"}.`,
+      `Hydra wiki usage telemetry: ${displayNameFor(message.role)} ${message.phase ?? "turn"} reply ${telemetry.hasCitationSignal ? "cited wiki sources" : telemetry.hasMentionSignal ? "mentioned wiki memory" : "had no wiki usage signal"}.`,
       {
         agent: message.role,
         phase: message.phase ?? null,
@@ -5803,16 +5801,16 @@ function isSendable(state: State): boolean {
 function phaseLabel(state: State): string {
   switch (state.name) {
     case "Idle": return "Idle";
-    case "Opener": return `Discussion - ${AGENT_NAMES[state.opener]} opening`;
-    case "Reactor": return `Discussion - ${AGENT_NAMES[state.reactor]} reacting`;
-    case "Closer": return `Discussion - ${AGENT_NAMES[state.opener]} closing`;
+    case "Opener": return `Discussion - ${displayNameFor(state.opener)} opening`;
+    case "Reactor": return `Discussion - ${displayNameFor(state.reactor)} reacting`;
+    case "Closer": return `Discussion - ${displayNameFor(state.opener)} closing`;
     case "ParallelDiscussion": return "Discussion - Codex and Claude running in parallel";
     case "AwaitingUser": return "Awaiting your reply";
-    case "Build": return `Build — ${AGENT_NAMES[state.builder]} is editing`;
+    case "Build": return `Build — ${displayNameFor(state.builder)} is editing`;
     case "ParallelBuild": return "Build — Codex and Claude editing in parallel";
     case "BuildDone": return `Build done — request review`;
     case "ParallelBuildDone": return "Parallel build done — request review";
-    case "Review": return `Review — ${AGENT_NAMES[state.reviewer]} is reading the diff`;
+    case "Review": return `Review — ${displayNameFor(state.reviewer)} is reading the diff`;
     case "ParallelReview": return "Review — Codex and Claude reading the diff";
     case "ParallelReviewDone":
       return state.approved
@@ -5959,7 +5957,7 @@ function nativeActionPick(
     options,
     actionKind,
     presetLine,
-    description: description ?? (agents.length === 2 ? "Codex + Claude" : agents[0] ? AGENT_NAMES[agents[0]] : ""),
+    description: description ?? (agents.length === 2 ? "Codex + Claude" : agents[0] ? displayNameFor(agents[0]) : ""),
     detail,
   };
 }
@@ -6070,7 +6068,7 @@ function formatTerminalBridgeHealth(sessions: TerminalSession[]): string {
   for (const session of sessions) {
     lines.push(
       "",
-      `${AGENT_NAMES[session.agent]}: ${session.state}`,
+      `${displayNameFor(session.agent)}: ${session.state}`,
       `Detail: ${session.detail}`,
       `Command: ${session.currentCommand ?? "none"}`,
       `Phase: ${session.currentPhase ?? "none"}`,
@@ -6093,7 +6091,7 @@ function formatEffectiveAuthority(summaries: Record<AgentId, AgentAuthoritySumma
     if (!summary) continue;
     lines.push(
       "",
-      `${AGENT_NAMES[agent]}: ${summary.authority.label}`,
+      `${displayNameFor(agent)}: ${summary.authority.label}`,
       `Profile: ${summary.profile.label}`,
       `Detail: ${summary.authority.detail}`,
       `Profile detail: ${summary.profile.detail}`
@@ -6133,7 +6131,7 @@ function unavailableAuthoritySummary(agent: AgentId): AgentAuthoritySummary {
     profile: {
       id: "custom",
       label: "Unavailable",
-      detail: `${AGENT_NAMES[agent]} CLI authority is unavailable until a workspace folder is open.`,
+      detail: `${displayNameFor(agent)} CLI authority is unavailable until a workspace folder is open.`,
     },
   };
 }

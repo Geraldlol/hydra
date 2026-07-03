@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { ensureFile, readJsonlGuarded, serializePerFile } from "./fileQueue";
 import type { AgentId } from "./phases";
 import type { Phase } from "./prompts";
+import { displayNameFor } from "./agentRegistry";
 
 export interface DecisionPacket {
   timestamp: string;
@@ -147,8 +148,8 @@ export function resolveDecisionAction(
     return {
       kind: "assignBuilder",
       builder,
-      label: `Accept Default: Build with ${builder === "codex" ? "Codex" : "Claude"}`,
-      detail: `The default action names ${builder === "codex" ? "Codex" : "Claude"} as the implementation owner.`,
+      label: `Accept Default: Build with ${displayNameFor(builder)}`,
+      detail: `The default action names ${displayNameFor(builder)} as the implementation owner.`,
       sourceTimestamp,
     };
   }
