@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { serializePerFile } from "./fileQueue";
 import type { AgentId } from "./phases";
 import type { Phase } from "./prompts";
+import type { AgentKind } from "./agentAdapter";
 
 // Why: skip the per-append mkdir(recursive) syscall once a usage file's parent
 // directory is known to exist. First write still creates it; the durable
@@ -60,6 +61,20 @@ export const DEFAULT_PRICES: Record<AgentId, ModelPrices> = {
 // other DEFAULT_PRICES-lookup sites (e.g. panel.ts) can reuse the same floor
 // instead of inventing their own.
 export const UNKNOWN_AGENT_PRICES: ModelPrices = { inputPerMTok: 1.25, outputPerMTok: 10, cacheReadPerMTok: 0.125, cacheCreatePerMTok: 1.25 };
+
+// Why: DEFAULT_PRICES.codex/.claude type as possibly-undefined under
+// noUncheckedIndexedAccess (AgentId is a plain `string`), even though both
+// keys are always present above -- fall back to UNKNOWN_AGENT_PRICES (same
+// values as DEFAULT_PRICES.codex) rather than a second hardcoded literal, so
+// there's one canonical "unknown codex-shaped" price, not two that could drift.
+/** Per-kind fallback prices when a head has no explicit pricing and no known model. */
+export const DEFAULT_PRICES_BY_KIND: Record<AgentKind, ModelPrices> = {
+  codex: DEFAULT_PRICES.codex ?? UNKNOWN_AGENT_PRICES,
+  claude: DEFAULT_PRICES.claude ?? UNKNOWN_AGENT_PRICES,
+  gemini: { inputPerMTok: 1.25, outputPerMTok: 5, cacheReadPerMTok: 0.3125, cacheCreatePerMTok: 1.25 }, // VERIFY vs Gemini public pricing
+  "openai-compatible": DEFAULT_PRICES.codex ?? UNKNOWN_AGENT_PRICES, // SP2 refines
+  "cli-template": DEFAULT_PRICES.codex ?? UNKNOWN_AGENT_PRICES,
+};
 
 /**
  * Per-model prices for the cost meter. Aliases (sonnet/opus/haiku) resolve
@@ -119,7 +134,7 @@ export function resolveModelPrices(
   agentDefaults: Record<AgentId, ModelPrices> = DEFAULT_PRICES,
 ): ModelPrices {
   const key = (model ?? "").trim().toLowerCase();
-  const agentBase = agentDefaults[agent] ?? DEFAULT_PRICES[agent] ?? UNKNOWN_AGENT_PRICES;
+  const agentBase = agentDefaults[agent] ?? DEFAULT_PRICES[agent] ?? DEFAULT_PRICES_BY_KIND.codex;
   if (key && modelOverrides[key]) {
     // Why: merge the partial override over the most specific known base — the
     // built-in per-model rate if we have one, else the per-agent default — so
@@ -325,7 +340,7 @@ export interface UsageSummary {
   reasoningTokens: number;
   totalTokens: number;
   costUsd: number;
-  byAgent: Record<AgentId, { turns: number; totalTokens: number; costUsd: number }>;
+  byAgent: Record<string, { turns: number; totalTokens: number; costUsd: number }>;
 }
 
 export function summarizeUsage(records: UsageRecord[], filterSessionId?: string, sinceIso?: string): UsageSummary {
@@ -347,10 +362,7 @@ export function summarizeUsage(records: UsageRecord[], filterSessionId?: string,
     reasoningTokens: 0,
     totalTokens: 0,
     costUsd: 0,
-    byAgent: {
-      codex: { turns: 0, totalTokens: 0, costUsd: 0 },
-      claude: { turns: 0, totalTokens: 0, costUsd: 0 },
-    },
+    byAgent: {},
   };
   // Why: historical .hydra/usage.jsonl records pre-date the reasoningTokens field; coerce every numeric field so an undefined doesn't poison the aggregate with NaN.
   for (const r of filtered) {
@@ -362,6 +374,10 @@ export function summarizeUsage(records: UsageRecord[], filterSessionId?: string,
     summary.reasoningTokens += r.reasoningTokens || 0;
     summary.totalTokens += r.totalTokens || 0;
     summary.costUsd += r.costUsd || 0;
+    // Why: seat a fresh { turns, totalTokens, costUsd } entry the first time an
+    // agent id is seen, rather than a hardcoded codex/claude literal, so any
+    // registered head (e.g. gemini) aggregates without special-casing.
+    if (!summary.byAgent[r.agent]) summary.byAgent[r.agent] = { turns: 0, totalTokens: 0, costUsd: 0 };
     const a = summary.byAgent[r.agent];
     if (a) {
       a.turns += 1;
@@ -416,6 +432,7 @@ export function addRecordToSummary(summary: UsageSummary, record: UsageRecord): 
   summary.reasoningTokens += record.reasoningTokens || 0;
   summary.totalTokens += record.totalTokens || 0;
   summary.costUsd = Math.round((summary.costUsd + (record.costUsd || 0)) * 10_000) / 10_000;
+  if (!summary.byAgent[record.agent]) summary.byAgent[record.agent] = { turns: 0, totalTokens: 0, costUsd: 0 };
   const a = summary.byAgent[record.agent];
   if (a) {
     a.turns += 1;

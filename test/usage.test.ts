@@ -8,6 +8,7 @@ import {
   computeCostUsd,
   DEFAULT_MODEL_PRICES,
   DEFAULT_PRICES,
+  DEFAULT_PRICES_BY_KIND,
   parseCodexTextTokens,
   resolveModelPrices,
   summarizeUsage,
@@ -403,9 +404,11 @@ describe("summarizeUsage", () => {
     assert.equal(summary.turns, 1);
     assert.equal(summary.totalTokens, 150);
     assert.ok(summary.byAgent.codex);
-    assert.ok(summary.byAgent.claude);
     assert.equal(summary.byAgent.codex.turns, 1);
-    assert.equal(summary.byAgent.claude.turns, 0);
+    // Why: byAgent seats lazily now, so the stale claude record (excluded by
+    // the cutoff filter before the fold loop even runs) never seats a claude
+    // entry at all -- it's absent, not present-with-zero.
+    assert.equal(summary.byAgent.claude, undefined);
   });
 });
 
@@ -481,5 +484,23 @@ describe("boundUsageRecords", () => {
     // The broken row appears before the cutoff scan finds it, so it anchors the
     // window start and everything from there on is kept.
     assert.deepEqual(bounded, [broken, stale]);
+  });
+});
+
+describe("registry-driven pricing", () => {
+  test("per-kind defaults exist for codex, claude, gemini", () => {
+    assert.ok(DEFAULT_PRICES_BY_KIND.codex.inputPerMTok > 0);
+    assert.ok(DEFAULT_PRICES_BY_KIND.claude.inputPerMTok > 0);
+    assert.ok(DEFAULT_PRICES_BY_KIND.gemini.inputPerMTok > 0);
+  });
+
+  test("summarizeUsage aggregates an arbitrary agent id without a hardcoded seat", () => {
+    const rec = buildUsageRecord({
+      sessionId: "s", agent: "gemini", phase: "build", source: "unknown",
+      tokens: { inputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheCreateTokens: 0, reasoningTokens: 0 },
+    });
+    const summary = summarizeUsage([rec]);
+    assert.equal(summary.byAgent.gemini?.turns, 1);
+    assert.equal(summary.byAgent.gemini?.totalTokens, 150);
   });
 });
