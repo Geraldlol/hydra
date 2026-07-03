@@ -45,6 +45,38 @@ describe("agent definition validation", () => {
     assert.equal(baseUrlAllowed("ftp://localhost/v1").ok, false);
   });
 
+  test("isLoopbackOrPrivateHost rejects DNS names that merely start with a private-looking prefix", () => {
+    assert.equal(isLoopbackOrPrivateHost("192.168.evil.test"), false);
+    assert.equal(isLoopbackOrPrivateHost("10.attacker.example"), false);
+    assert.equal(isLoopbackOrPrivateHost("127.0.0.1.evil.test"), false);
+    assert.equal(isLoopbackOrPrivateHost("169.254.169.254.evil.test"), false);
+  });
+
+  test("isLoopbackOrPrivateHost tolerates a single trailing dot", () => {
+    assert.equal(isLoopbackOrPrivateHost("localhost."), true);
+  });
+
+  test("baseUrlAllowed rejects spoofed private-looking public hosts over http", () => {
+    assert.equal(baseUrlAllowed("http://192.168.evil.test/v1").ok, false);
+    assert.equal(baseUrlAllowed("http://10.attacker.example/v1").ok, false);
+    assert.equal(baseUrlAllowed("http://127.0.0.1.evil.test/v1").ok, false);
+    assert.equal(baseUrlAllowed("http://169.254.169.254.evil.test/v1").ok, false);
+  });
+
+  test("baseUrlAllowed still allows genuine local/private hosts over http", () => {
+    assert.equal(baseUrlAllowed("http://192.168.1.5/v1").ok, true);
+    assert.equal(baseUrlAllowed("http://10.0.0.1/v1").ok, true);
+    assert.equal(baseUrlAllowed("http://172.16.0.1/v1").ok, true);
+    assert.equal(baseUrlAllowed("http://127.0.0.1:11434/v1").ok, true);
+    assert.equal(baseUrlAllowed("http://localhost:1234/v1").ok, true);
+    assert.equal(baseUrlAllowed("http://[::1]:1234/v1").ok, true);
+    assert.equal(baseUrlAllowed("http://localhost./v1").ok, true);
+  });
+
+  test("baseUrlAllowed still allows https for public hosts", () => {
+    assert.equal(baseUrlAllowed("https://api.openai.com/v1").ok, true);
+  });
+
   test("validateAgentDefinition accepts a well-formed openai-compatible head", () => {
     const { def, error } = validateAgentDefinition(
       { id: "ollama-qwen", displayName: "Qwen (local)", kind: "openai-compatible", baseUrl: "http://localhost:11434/v1", model: "qwen2.5-coder" },
@@ -69,6 +101,15 @@ describe("agent definition validation", () => {
       new Set(),
     );
     assert.match(error ?? "", /secret|inline|Authorization/i);
+  });
+
+  test("rejects an agent id that is itself secret-shaped", () => {
+    const { def, error } = validateAgentDefinition(
+      { id: "AKIAIOSFODNN7EXAMPLE", kind: "openai-compatible", baseUrl: "https://x/v1" },
+      new Set(),
+    );
+    assert.equal(def, undefined);
+    assert.match(error ?? "", /secret/i);
   });
 
   test("rejects duplicate id, missing baseUrl, missing command/argsTemplate, bad kind", () => {

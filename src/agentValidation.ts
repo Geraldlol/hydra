@@ -24,16 +24,33 @@ export function isSecretShaped(value: string): boolean {
   return false;
 }
 
+// Strictly parses a dotted-quad IPv4 address; returns the 4 octets, or
+// undefined if `host` isn't a fully-numeric IPv4 address. This is deliberately
+// NOT a prefix/regex match against the raw string: a DNS name like
+// "127.0.0.1.evil.test" or "192.168.evil.test" must never classify as private.
+function parseIpv4(host: string): [number, number, number, number] | undefined {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (!m) return undefined;
+  const octets: [number, number, number, number] = [Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4])];
+  return octets.every((n) => n >= 0 && n <= 255) ? octets : undefined;
+}
+
 export function isLoopbackOrPrivateHost(host: string): boolean {
-  const h = host.replace(/^\[|\]$/g, "").toLowerCase(); // strip IPv6 brackets
-  if (h === "localhost" || h === "::1" || h === "0.0.0.0") return true;
+  // Strip IPv6 brackets and a single trailing dot (e.g. "localhost.").
+  const h = host.replace(/^\[|\]$/g, "").toLowerCase().replace(/\.$/, "");
+  if (h === "localhost" || h === "::1") return true;
   if (h.endsWith(".local") || h.endsWith(".localhost")) return true;
-  if (/^127\./.test(h)) return true;
-  if (/^10\./.test(h)) return true;
-  if (/^192\.168\./.test(h)) return true;
-  if (/^172\.(1[6-9]|2\d|3[01])\./.test(h)) return true;
-  if (/^169\.254\./.test(h)) return true; // link-local
-  if (/^f[cd][0-9a-f]{2}:/.test(h)) return true; // IPv6 ULA
+  const octets = parseIpv4(h);
+  if (!octets) return false;
+  const [a, b] = octets;
+  if (a === 127) return true; // loopback
+  if (a === 10) return true; // RFC1918
+  if (a === 192 && b === 168) return true; // RFC1918
+  if (a === 172 && b >= 16 && b <= 31) return true; // RFC1918
+  // Why: 169.254.0.0/16 is link-local and includes the cloud-metadata
+  // endpoint 169.254.169.254; acceptable only because baseUrl is a
+  // trust-scoped, application-scoped user setting (not workspace-injectable).
+  if (a === 169 && b === 254) return true;
   return false;
 }
 
@@ -58,7 +75,7 @@ const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 // separately (it legitimately contains a host). apiKeyEnv is a NAME.
 function scanForInlineSecret(def: Record<string, unknown>): string | undefined {
   const strings: string[] = [];
-  for (const key of ["model", "command", "displayName"]) {
+  for (const key of ["id", "model", "command", "displayName"]) {
     const v = def[key];
     if (typeof v === "string") strings.push(v);
   }
@@ -76,6 +93,15 @@ export function validateAgentDefinition(
   if (!raw || typeof raw !== "object") return { error: "agent definition must be an object" };
   const d = raw as Record<string, unknown>;
   const id = typeof d.id === "string" ? d.id.trim() : "";
+  // Scan (incl. id itself) for inlined secrets before the format check, so a
+  // secret-shaped id is caught by the secrets rule rather than slipping
+  // through ID_RE (many key/token shapes are valid ID_RE strings) and later
+  // landing in displayName. Truncate the label - `id` may itself be the secret.
+  const secret = scanForInlineSecret(d);
+  if (secret) {
+    const label = (id || "definition").slice(0, 12);
+    return { error: `agent "${label}" appears to inline a secret ("${secret.slice(0, 12)}…"); reference it via apiKeyEnv / \${env:NAME} instead` };
+  }
   if (!ID_RE.test(id)) return { error: `agent id "${String(d.id)}" must match ${ID_RE} (letters, digits, -, _)` };
   if (takenIds.has(id)) return { error: `duplicate agent id "${id}"` };
   const kind = typeof d.kind === "string" ? d.kind : "";
@@ -85,9 +111,6 @@ export function validateAgentDefinition(
   if (d.apiKeyEnv !== undefined && (typeof d.apiKeyEnv !== "string" || !isEnvVarName(d.apiKeyEnv))) {
     return { error: `agent "${id}" apiKeyEnv must be an environment-variable NAME (e.g. OPENAI_API_KEY), not a key value` };
   }
-  const secret = scanForInlineSecret(d);
-  if (secret) return { error: `agent "${id}" appears to inline a secret ("${secret.slice(0, 12)}…"); reference it via apiKeyEnv / \${env:NAME} instead` };
-
   if (kind === "openai-compatible") {
     if (typeof d.baseUrl !== "string" || !d.baseUrl.trim()) return { error: `openai-compatible agent "${id}" requires a baseUrl` };
     const allowed = baseUrlAllowed(d.baseUrl.trim());
