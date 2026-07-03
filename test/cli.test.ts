@@ -225,3 +225,21 @@ describe("Hydra CLI bridge", () => {
     assert.match(nativeCapabilitySummary("claude"), /claudeExecArgs/);
   });
 });
+
+describe("capabilities for arbitrary heads", () => {
+  test("an unknown/gemini head gets a generic capability line, not a crash", () => {
+    const summary = nativeCapabilitySummary("gemini");
+    assert.ok(summary.length > 0);
+    assert.doesNotThrow(() => nativeCapabilitySummary("ollama-qwen"));
+  });
+
+  test("known executable candidates for a gemini/unknown head is empty (falls through to PATH)", async () => {
+    // No bespoke install locations are known for gemini/custom heads yet;
+    // resolveAgentCommand should fall through to a plain PATH lookup instead
+    // of guessing at codex-shaped install paths.
+    assert.deepEqual(
+      await knownAgentExecutableCandidates("gemini", { USERPROFILE: "C:\\Users\\x" }, "win32"),
+      []
+    );
+  });
+});

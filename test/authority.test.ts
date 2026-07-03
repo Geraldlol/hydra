@@ -286,3 +286,23 @@ describe("validateNativeArgs", () => {
     assert.ok(result.warnings.some((w) => /interactive root command/.test(w)));
   });
 });
+
+describe("authority for non codex/claude heads", () => {
+  test("a gemini/unknown head does not get mislabeled as Claude", () => {
+    // Before this task, the codex/claude ternary sent every non-codex agent
+    // (including gemini) through classifyClaudeAuthority, so an unrecognized
+    // gemini call reported detail text saying "Claude ... do not declare a
+    // recognized permission mode" -- wrong vendor entirely.
+    const result = classifyAgentAuthority("gemini", "build", ["-p", "-"]);
+    assert.doesNotMatch(result.detail, /Claude/);
+    assert.doesNotMatch(result.label, /Claude/);
+    assert.equal(result.level, "unknown");
+  });
+
+  test("a gemini/unknown head still gets fullNative for a dangerous flag", () => {
+    // The dangerousFlag gate in classifyAgentAuthority runs before the
+    // per-vendor dispatch, so it must still catch generic heads.
+    const result = classifyAgentAuthority("gemini", "build", ["--dangerously-skip-permissions"]);
+    assert.equal(result.level, "fullNative");
+  });
+});

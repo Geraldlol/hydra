@@ -61,7 +61,8 @@ export function withModelArgs(spawn: AgentSpawn, agent: AgentId, phase: Phase): 
  * `claudeEffort` and `codexReasoning` share the same string-or-object shape.
  */
 export function effortForPhase(agent: AgentId, phase: Phase): string {
-  const key = agent === "claude" ? "claudeEffort" : "codexReasoning";
+  const key = agent === "claude" ? "claudeEffort" : agent === "codex" ? "codexReasoning" : undefined;
+  if (!key) return ""; // heads without an effort/reasoning knob (e.g. gemini) inject no flag
   return effectivePhasedSetting(
     vscode.workspace.getConfiguration("hydraRoom").get<unknown>(key),
     profileForPhase(phase),

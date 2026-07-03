@@ -208,6 +208,13 @@ export async function knownAgentExecutableCandidates(
     return unique(candidates);
   }
 
+  if (agent !== "codex") {
+    // Why: no bespoke install locations are known yet for gemini/custom
+    // heads; return [] so resolveAgentCommand falls through to a plain
+    // PATH lookup instead of guessing at codex-shaped install paths.
+    return [];
+  }
+
   if (appData) candidates.push(path.join(appData, "npm", "codex.cmd"));
   if (home) {
     candidates.push(path.join(home, ".local", "bin", "codex.exe"));
@@ -225,10 +232,17 @@ export async function knownAgentExecutableCandidates(
   return unique(candidates);
 }
 
+// Why: CAPABILITIES is keyed by the now-widened AgentId; an id outside the
+// built-in codex/claude table (gemini, custom heads) has no vendor-specific
+// capability list, so it falls back to this generic line instead of an
+// empty (or crashing) summary.
+const GENERIC_CAPABILITIES = [
+  "Native CLI via hydraRoom.{id}ExecArgs* for this phase; Hydra passes raw native args through.",
+  "Use whatever repo/shell/model/tool capabilities the configured native CLI invocation exposes.",
+];
+
 export function nativeCapabilitySummary(agent: AgentId): string {
-  // Why: CAPABILITIES is keyed by the now-widened AgentId; an id outside the
-  // built-in codex/claude table has no known capabilities to list.
-  return (CAPABILITIES[agent] ?? []).map((capability) => `- ${capability}`).join("\n");
+  return (CAPABILITIES[agent] ?? GENERIC_CAPABILITIES).map((capability) => `- ${capability}`).join("\n");
 }
 
 // Phase authority gate. The design rule is native CLI parity:

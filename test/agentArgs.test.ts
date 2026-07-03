@@ -1,7 +1,7 @@
 import { describe, test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as vscode from "vscode";
-import { insertBeforeStdinDash, withModelArgs, withEffortArgs } from "../src/agentArgs";
+import { insertBeforeStdinDash, withModelArgs, withEffortArgs, effortForPhase } from "../src/agentArgs";
 
 // agentArgs.ts does `import * as vscode from "vscode"` at module top-level;
 // at runtime VS Code provides that module. For node:test runs we substitute
@@ -189,4 +189,10 @@ describe("withEffortArgs", () => {
   // Positive splice cases (claude --effort injection, codex -c model_reasoning_effort
   // injection) intentionally skipped — they exercise config-driven behavior
   // that belongs in an integration test with a real-shaped vscode config.
+});
+
+describe("effort for non codex/claude heads", () => {
+  test("gemini has no effort/reasoning setting -> empty string", () => {
+    assert.equal(effortForPhase("gemini", "build"), "");
+  });
 });

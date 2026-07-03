@@ -30,7 +30,10 @@ export function classifyAgentAuthority(
     );
   }
 
-  const base = agent === "codex" ? classifyCodexAuthority(phase, args) : classifyClaudeAuthority(phase, args);
+  const base =
+    agent === "codex" ? classifyCodexAuthority(phase, args)
+    : agent === "claude" ? classifyClaudeAuthority(phase, args)
+    : classifyGenericAuthority(phase, args); // gemini + custom heads: no vendor-specific sandbox flags known
   if (validation.length === 0) return base;
   return { ...base, warnings: [...base.warnings, ...validation] };
 }
@@ -301,6 +304,20 @@ function classifyClaudeAuthority(phase: Phase, args: string[]): AuthorityClassif
     "Unknown/custom",
     `Claude ${phase} args do not declare a recognized permission mode.`,
     ["Hydra cannot prove this Claude call is read-only or workspace-write from args alone."]
+  );
+}
+
+// Generic path for agents with no vendor-specific sandbox/permission flags
+// (gemini, custom heads). Hydra has no schema to read authority off of raw
+// args for these, so it honestly reports "unknown" rather than guessing --
+// the dangerousFlag gate above already caught the one signal that applies
+// to every vendor (--dangerously-*).
+function classifyGenericAuthority(phase: Phase, args: string[]): AuthorityClassification {
+  return classification(
+    "unknown",
+    "Unknown/custom",
+    `${phase} args do not declare a recognized authority for this agent; Hydra has no vendor-specific rules for it.`,
+    ["Hydra cannot prove this call is read-only or workspace-write from args alone."]
   );
 }
 
