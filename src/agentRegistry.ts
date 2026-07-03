@@ -1,4 +1,6 @@
 import type { AgentDefinition, AgentAdapter, AgentKind } from "./agentAdapter";
+import { codexAdapter } from "./codexAdapter";
+import { claudeAdapter } from "./claudeAdapter";
 
 export const BUILTIN_AGENT_DEFINITIONS: AgentDefinition[] = [
   { id: "codex", displayName: "Codex", kind: "codex" },
@@ -39,6 +41,11 @@ const adapters = new Map<AgentKind, AgentAdapter>();
 export function registerAdapter(adapter: AgentAdapter): void {
   adapters.set(adapter.kind, adapter);
 }
+
+// Why: run after `adapters` is initialized above -- calling registerAdapter
+// any earlier in module-evaluation order would hit the `const adapters` TDZ.
+registerAdapter(codexAdapter);
+registerAdapter(claudeAdapter);
 
 export function adapterForKind(kind: AgentKind): AgentAdapter {
   const adapter = adapters.get(kind);
