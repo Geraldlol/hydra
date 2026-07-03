@@ -186,9 +186,11 @@ describe("resolveModelPrices", () => {
 
   test("a partial override for an unknown model fills omitted fields from the per-agent default", () => {
     const merged = resolveModelPrices("codex", "totally-new-codex", { "totally-new-codex": { inputPerMTok: 7 } });
+    const codexDefault = DEFAULT_PRICES.codex;
+    assert.ok(codexDefault);
     assert.equal(merged.inputPerMTok, 7);
-    assert.equal(merged.outputPerMTok, DEFAULT_PRICES.codex.outputPerMTok);
-    assert.equal(merged.cacheReadPerMTok, DEFAULT_PRICES.codex.cacheReadPerMTok);
+    assert.equal(merged.outputPerMTok, codexDefault.outputPerMTok);
+    assert.equal(merged.cacheReadPerMTok, codexDefault.cacheReadPerMTok);
   });
 
   test("rejects malformed override fields (NaN / negative) and keeps the base", () => {
@@ -360,6 +362,8 @@ describe("summarizeUsage", () => {
     const summary = summarizeUsage(records, "s1");
     assert.equal(summary.turns, 2);
     assert.equal(summary.totalTokens, 10_000 + 500_000 + 100_000);
+    assert.ok(summary.byAgent.codex);
+    assert.ok(summary.byAgent.claude);
     assert.equal(summary.byAgent.codex.turns, 1);
     assert.equal(summary.byAgent.claude.turns, 1);
     // 10k Codex output @ $10/M = $0.10; 500k Claude input @ $3/M + 100k output @ $15/M = $1.5 + $1.5 = $3.00
@@ -398,6 +402,8 @@ describe("summarizeUsage", () => {
 
     assert.equal(summary.turns, 1);
     assert.equal(summary.totalTokens, 150);
+    assert.ok(summary.byAgent.codex);
+    assert.ok(summary.byAgent.claude);
     assert.equal(summary.byAgent.codex.turns, 1);
     assert.equal(summary.byAgent.claude.turns, 0);
   });

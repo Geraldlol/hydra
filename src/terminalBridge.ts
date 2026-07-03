@@ -136,7 +136,10 @@ export class TerminalBridge {
   }
 
   getSessions(): TerminalSession[] {
-    return [this.sessions.codex, this.sessions.claude];
+    // Why: sessions is keyed by the now-widened AgentId, so a literal .codex/.claude
+    // access is typed as possibly-undefined even though both are always populated
+    // by the field initializer; the fallback is unreachable in practice.
+    return [this.sessions.codex ?? createTerminalSession("codex"), this.sessions.claude ?? createTerminalSession("claude")];
   }
 
   async callAgent(
@@ -218,7 +221,10 @@ export class TerminalBridge {
     // otherwise interleave PowerShell dispatch blocks and corrupt reply
     // routing. Each agent has its own chain; both can run in parallel
     // across agents (Promise.all on different agents still races).
-    const previous = this.dispatchChains[agent];
+    // Why: dispatchChains is keyed by the now-widened AgentId; fall back to an
+    // already-resolved chain start for an id not yet seeded, matching the
+    // field initializer's Promise.resolve() default.
+    const previous = this.dispatchChains[agent] ?? Promise.resolve();
     let release!: () => void;
     const next = new Promise<void>((resolve) => { release = resolve; });
     this.dispatchChains[agent] = previous.then(() => next).catch(() => undefined);
@@ -422,8 +428,11 @@ export class TerminalBridge {
   }
 
   private async setSession(agent: AgentId, patch: TerminalSessionPatch): Promise<void> {
-    const previous = this.sessions[agent];
-    const next = updateTerminalSession(this.sessions[agent], patch);
+    // Why: sessions is keyed by the now-widened AgentId; fall back to a fresh
+    // session for an id not yet seeded (never happens for codex/claude, which
+    // the constructor always populates).
+    const previous = this.sessions[agent] ?? createTerminalSession(agent);
+    const next = updateTerminalSession(previous, patch);
     this.sessions[agent] = next;
     try {
       await writeTerminalSession(this.workspaceRoot, next);

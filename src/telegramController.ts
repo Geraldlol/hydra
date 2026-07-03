@@ -458,7 +458,9 @@ export class TelegramController {
       .filter((message): message is TelegramReplyMessage & { role: AgentId } => (message.role === "codex" || message.role === "claude") && !message.pending);
     const latest = agentMessages[agentMessages.length - 1];
     if (!latest) return undefined;
-    const label = AGENT_NAMES[latest.role];
+    // Why: AGENT_NAMES is keyed by the now-widened AgentId; fall back to the
+    // raw role for an agent outside the built-in codex/claude table.
+    const label = AGENT_NAMES[latest.role] ?? latest.role;
     const phase = latest.phase ? ` (${latest.phase})` : "";
     return `<b>${escapeTelegramHtml(label)}${escapeTelegramHtml(phase)}</b>\n\n${escapeTelegramHtml(truncateForTelegram(latest.text))}`;
   }

@@ -45,7 +45,9 @@ export function createTerminalSession(agent: AgentId, now: Date = new Date()): T
   const timestamp = now.toISOString();
   return {
     agent,
-    terminalName: TERMINAL_NAMES[agent],
+    // Why: TERMINAL_NAMES is keyed by the now-widened AgentId; fall back to the
+    // raw id for an agent outside the built-in codex/claude table.
+    terminalName: TERMINAL_NAMES[agent] ?? agent,
     state: "idle",
     detail: "Terminal has not been opened yet.",
     updatedAt: timestamp,

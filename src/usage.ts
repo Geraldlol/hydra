@@ -53,6 +53,14 @@ export const DEFAULT_PRICES: Record<AgentId, ModelPrices> = {
   codex: { inputPerMTok: 1.25, outputPerMTok: 10, cacheReadPerMTok: 0.125, cacheCreatePerMTok: 1.25 },
 };
 
+// Why: DEFAULT_PRICES is keyed by the now-widened AgentId, so a lookup for an
+// id outside the built-in codex/claude table types as possibly-undefined.
+// This is the last-resort floor for that case (mirrors DEFAULT_PRICES.codex);
+// unreachable for codex/claude, which are always present above. Exported so
+// other DEFAULT_PRICES-lookup sites (e.g. panel.ts) can reuse the same floor
+// instead of inventing their own.
+export const UNKNOWN_AGENT_PRICES: ModelPrices = { inputPerMTok: 1.25, outputPerMTok: 10, cacheReadPerMTok: 0.125, cacheCreatePerMTok: 1.25 };
+
 /**
  * Per-model prices for the cost meter. Aliases (sonnet/opus/haiku) resolve
  * to the current default version of that family. Override any of these via
@@ -111,7 +119,7 @@ export function resolveModelPrices(
   agentDefaults: Record<AgentId, ModelPrices> = DEFAULT_PRICES,
 ): ModelPrices {
   const key = (model ?? "").trim().toLowerCase();
-  const agentBase = agentDefaults[agent] ?? DEFAULT_PRICES[agent];
+  const agentBase = agentDefaults[agent] ?? DEFAULT_PRICES[agent] ?? UNKNOWN_AGENT_PRICES;
   if (key && modelOverrides[key]) {
     // Why: merge the partial override over the most specific known base — the
     // built-in per-model rate if we have one, else the per-agent default — so
@@ -144,7 +152,7 @@ export function computeCostUsd(
   tokens: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreateTokens: number },
   prices: Record<AgentId, ModelPrices> | ModelPrices = DEFAULT_PRICES,
 ): number {
-  const p: ModelPrices = "inputPerMTok" in prices ? (prices as ModelPrices) : ((prices as Record<AgentId, ModelPrices>)[agent] ?? DEFAULT_PRICES[agent]);
+  const p: ModelPrices = "inputPerMTok" in prices ? (prices as ModelPrices) : ((prices as Record<AgentId, ModelPrices>)[agent] ?? DEFAULT_PRICES[agent] ?? UNKNOWN_AGENT_PRICES);
   const cost =
     (tokens.inputTokens * p.inputPerMTok +
       tokens.outputTokens * p.outputPerMTok +

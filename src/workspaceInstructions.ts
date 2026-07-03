@@ -60,10 +60,13 @@ export interface WorkspaceInstructionsContextOptions {
 }
 
 export function workspaceInstructionsAsContext(
-  instructions: string,
+  // Why: callers keyed by the now-widened AgentId (e.g. panel.ts's
+  // workspaceInstructionsByAgent[agent]) may type this as possibly-undefined;
+  // treat a missing value the same as an empty instructions file.
+  instructions: string | undefined,
   options: WorkspaceInstructionsContextOptions = {}
 ): string {
-  const trimmed = truncateInstructionContext(instructions.trim(), options.maxChars);
+  const trimmed = truncateInstructionContext((instructions ?? "").trim(), options.maxChars);
   if (!trimmed) return "--- Workspace instructions ---\nNone found.";
   return [
     "--- Workspace instructions ---",

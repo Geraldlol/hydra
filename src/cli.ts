@@ -226,7 +226,9 @@ export async function knownAgentExecutableCandidates(
 }
 
 export function nativeCapabilitySummary(agent: AgentId): string {
-  return CAPABILITIES[agent].map((capability) => `- ${capability}`).join("\n");
+  // Why: CAPABILITIES is keyed by the now-widened AgentId; an id outside the
+  // built-in codex/claude table has no known capabilities to list.
+  return (CAPABILITIES[agent] ?? []).map((capability) => `- ${capability}`).join("\n");
 }
 
 // Phase authority gate. The design rule is native CLI parity:

@@ -145,6 +145,7 @@ import {
   parseCodexTextTokens,
   resolveModelPrices,
   summarizeUsage,
+  UNKNOWN_AGENT_PRICES,
   usageCutoffIso,
   usageFromClaudeSummary,
   usageFromCodexSummary,
@@ -1332,7 +1333,9 @@ export class HydraRoomPanel {
     try {
       await this.appendSystemMessage("Capturing native Codex and Claude capability snapshot...");
       for (const agent of ["codex", "claude"] as AgentId[]) {
-        for (const probe of probeArgs[agent]) {
+        // Why: probeArgs is keyed by the now-widened AgentId; the loop above only
+        // ever iterates the two built-in ids, so this fallback is unreachable.
+        for (const probe of probeArgs[agent] ?? []) {
           const started = Date.now();
           const spawn = await this.buildNativeCommandSpawn(agent, probe.args);
           const result = await runAgent(spawn, "", 30000, () => {}, ctrl.signal);
@@ -4296,9 +4299,13 @@ export class HydraRoomPanel {
 
   private modelPrices(): { agentDefaults: Record<AgentId, ModelPrices>; modelOverrides: Record<string, Partial<ModelPrices>> } {
     const raw = vscode.workspace.getConfiguration("hydraRoom").get<Record<string, unknown>>("modelPrices");
+    // Why: DEFAULT_PRICES is keyed by the now-widened AgentId, so a literal
+    // .claude/.codex access types as possibly-undefined; UNKNOWN_AGENT_PRICES
+    // is the same floor resolveModelPrices falls back to, unreachable here
+    // since both built-in entries are always present.
     const agentDefaults: Record<AgentId, ModelPrices> = {
-      claude: { ...DEFAULT_PRICES.claude },
-      codex: { ...DEFAULT_PRICES.codex },
+      claude: { ...(DEFAULT_PRICES.claude ?? UNKNOWN_AGENT_PRICES) },
+      codex: { ...(DEFAULT_PRICES.codex ?? UNKNOWN_AGENT_PRICES) },
     };
     const modelOverrides: Record<string, Partial<ModelPrices>> = {};
     if (raw && typeof raw === "object") {
@@ -4309,7 +4316,7 @@ export class HydraRoomPanel {
           // Why: coerce each field through the model-base rather than spreading
           // raw user input, so a NaN/negative agent override can't poison the
           // cost meter base it's merged into.
-          agentDefaults[key] = coerceModelPrices(v, DEFAULT_PRICES[key]);
+          agentDefaults[key] = coerceModelPrices(v, DEFAULT_PRICES[key] ?? UNKNOWN_AGENT_PRICES);
         } else {
           // Why: keep the override PARTIAL — resolveModelPrices merges it over
           // the matching per-model/per-agent base at billing time, so an
@@ -5007,7 +5014,10 @@ export class HydraRoomPanel {
     const id = `m-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
     const msg: UiMessage = {
       id,
-      role,
+      // Why: MessageRole is a closed union unrelated to the now-widened AgentId;
+      // codex/claude (the only ids in use today) narrow through unchanged, and
+      // any future custom agent id displays as a system message.
+      role: role === "codex" || role === "claude" ? role : "system",
       text: "",
       timestamp: new Date().toISOString(),
       phase,
@@ -5031,7 +5041,9 @@ export class HydraRoomPanel {
       if (!message?.pending) return;
       const elapsedMs = Date.now() - startedAt;
       message.activity = formatPendingAgentActivity({
-        agentLabel: AGENT_NAMES[agent],
+        // Why: AGENT_NAMES is keyed by the now-widened AgentId; fall back to the
+        // raw id for an agent outside the built-in codex/claude table.
+        agentLabel: AGENT_NAMES[agent] ?? agent,
         phase,
         elapsedMs,
         timeoutMs,
@@ -6076,6 +6088,9 @@ function formatEffectiveAuthority(summaries: Record<AgentId, AgentAuthoritySumma
   const lines = ["Effective Native CLI Authority"];
   for (const agent of ["codex", "claude"] as AgentId[]) {
     const summary = summaries[agent];
+    // Why: summaries is keyed by the now-widened AgentId; the loop above only
+    // ever iterates the two built-in ids, so this is unreachable today.
+    if (!summary) continue;
     lines.push(
       "",
       `${AGENT_NAMES[agent]}: ${summary.authority.label}`,
