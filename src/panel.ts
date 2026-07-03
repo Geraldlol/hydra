@@ -145,6 +145,7 @@ import {
   loadUsageRecords,
   parseCodexTextTokens,
   resolveModelPrices,
+  seatDefinitionPrices,
   summarizeUsage,
   UNKNOWN_AGENT_PRICES,
   usageCutoffIso,
@@ -4340,7 +4341,7 @@ export class HydraRoomPanel {
         }
       }
     }
-    return { agentDefaults, modelOverrides };
+    return { agentDefaults: seatDefinitionPrices(agentDefaults, listAgentDefinitions()), modelOverrides };
   }
 
   private async recordUsage(input: {

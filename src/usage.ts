@@ -76,6 +76,21 @@ export const DEFAULT_PRICES_BY_KIND: Record<AgentKind, ModelPrices> = {
   "cli-template": DEFAULT_PRICES.codex ?? UNKNOWN_AGENT_PRICES,
 };
 
+/** Seat a per-head price base for every registered definition. Existing seats
+ *  (codex/claude from settings) are left as-is; custom heads take def.pricing
+ *  or their per-kind default. */
+export function seatDefinitionPrices(
+  base: Record<AgentId, ModelPrices>,
+  defs: Array<{ id: string; kind: AgentKind; pricing?: ModelPrices }>,
+): Record<string, ModelPrices> {
+  const out: Record<string, ModelPrices> = { ...base };
+  for (const def of defs) {
+    if (out[def.id]) continue;
+    out[def.id] = def.pricing ?? DEFAULT_PRICES_BY_KIND[def.kind];
+  }
+  return out;
+}
+
 /**
  * Per-model prices for the cost meter. Aliases (sonnet/opus/haiku) resolve
  * to the current default version of that family. Override any of these via

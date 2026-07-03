@@ -11,7 +11,9 @@ import {
   DEFAULT_PRICES_BY_KIND,
   parseCodexTextTokens,
   resolveModelPrices,
+  seatDefinitionPrices,
   summarizeUsage,
+  UNKNOWN_AGENT_PRICES,
   usageCutoffIso,
   usageFromClaudeSummary,
   usageFromCodexSummary,
@@ -502,5 +504,23 @@ describe("registry-driven pricing", () => {
     const summary = summarizeUsage([rec]);
     assert.equal(summary.byAgent.gemini?.turns, 1);
     assert.equal(summary.byAgent.gemini?.totalTokens, 150);
+  });
+});
+
+describe("per-head pricing", () => {
+  test("seatDefinitionPrices keeps existing seats and adds custom heads from def.pricing or per-kind default", () => {
+    // Why: DEFAULT_PRICES is keyed by the widened AgentId, so a literal
+    // .codex/.claude access types as possibly-undefined under
+    // noUncheckedIndexedAccess; both are always present in practice.
+    const base = { codex: DEFAULT_PRICES.codex ?? UNKNOWN_AGENT_PRICES, claude: DEFAULT_PRICES.claude ?? UNKNOWN_AGENT_PRICES };
+    const custom = { inputPerMTok: 0.2, outputPerMTok: 0.4, cacheReadPerMTok: 0, cacheCreatePerMTok: 0 };
+    const seated = seatDefinitionPrices(base, [
+      { id: "codex", kind: "codex" },
+      { id: "ollama-qwen", kind: "openai-compatible", pricing: custom },
+      { id: "my-tool", kind: "cli-template" },
+    ]);
+    assert.equal(seated.codex, DEFAULT_PRICES.codex); // untouched
+    assert.deepEqual(seated["ollama-qwen"], custom); // explicit per-head pricing
+    assert.deepEqual(seated["my-tool"], DEFAULT_PRICES_BY_KIND["cli-template"]); // per-kind fallback
   });
 });
