@@ -46,7 +46,7 @@ export interface InvocationContext {
   requestFiles?: RequestFilePlaceholders;
 }
 
-export type AdapterOutputMode = "plain" | "codexJson" | "claudeStreamJson" | "geminiJson";
+export type AdapterOutputMode = "plain" | "codexJson" | "claudeStreamJson" | "geminiJson" | "openaiJson";
 
 export interface AdapterRawOutput {
   stdout: string;
