@@ -564,6 +564,48 @@
           "default": true,
           "markdownDescription": "When `hydraRoom.claudeStreamJson` is enabled, pass Claude `--debug-file ${hydraLogFile}` so raw native debug output is captured in the per-request Hydra log artifact."
         },
+        "hydraRoom.geminiCommand": {
+          "scope": "application",
+          "type": "string",
+          "default": "gemini",
+          "markdownDescription": "Executable name or wrapper script for the Google Gemini CLI."
+        },
+        "hydraRoom.geminiExecArgsDiscussion": {
+          "scope": "application",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "-p",
+            "-"
+          ],
+          "markdownDescription": "Raw Gemini CLI args for serialized discussion turns. `${workspaceFolder}` is expanded; the trailing `-` reads the Hydra prompt from stdin. Hydra also expands `${hydraPromptFile}`, `${hydraReplyFile}`, and `${hydraLogFile}` per request so native file/output flags can target Hydra artifacts. Placeholder pending a verified real Gemini CLI install (tracked follow-up)."
+        },
+        "hydraRoom.geminiExecArgsBuild": {
+          "scope": "application",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "-p",
+            "-"
+          ],
+          "markdownDescription": "Raw Gemini CLI args for Build. Add native flags such as model, sandbox/approval mode, or Hydra request-file placeholders here. Placeholder pending a verified real Gemini CLI install (tracked follow-up)."
+        },
+        "hydraRoom.geminiExecArgsReview": {
+          "scope": "application",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "-p",
+            "-"
+          ],
+          "markdownDescription": "Raw Gemini CLI args for Review. Hydra does not downgrade these args by phase and expands Hydra request-file placeholders. Placeholder pending a verified real Gemini CLI install (tracked follow-up)."
+        },
         "hydraRoom.manyHeadsMode": {
           "type": "boolean",
           "default": false,
@@ -630,6 +672,24 @@
             "type": "string"
           },
           "markdownDescription": "Claude-only environment variables layered over `hydraRoom.nativeEnv` for native Claude dispatches. Values support `${workspaceFolder}` and `${env:NAME}` placeholders."
+        },
+        "hydraRoom.geminiNativePathPrepend": {
+          "scope": "application",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Gemini-only directories appended after `hydraRoom.nativePathPrepend` when constructing PATH/Path for native Gemini dispatches. Supports `${workspaceFolder}` and `${env:NAME}` placeholders."
+        },
+        "hydraRoom.geminiNativeEnv": {
+          "scope": "application",
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "string"
+          },
+          "markdownDescription": "Gemini-only environment variables layered over `hydraRoom.nativeEnv` for native Gemini dispatches. Values support `${workspaceFolder}` and `${env:NAME}` placeholders."
         },
         "hydraRoom.transport": {
           "type": "string",
@@ -1071,6 +1131,33 @@
           ],
           "markdownDescription": "Model passed to Codex CLI as `--model <id>` on every `exec` dispatch. Either a single string (applied to every phase) or an object with per-phase overrides. Recent Codex CLIs ship `gpt-5.6` (current flagship), `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark` (interactive only, no API), `gpt-5.2`. Run `codex debug models` (or `Hydra: Refresh Codex Models`) to inspect what your install actually exposes. Use `Hydra: Choose Model` (Ctrl+Alt+M) to change live."
         },
+        "hydraRoom.geminiModel": {
+          "scope": "application",
+          "default": "",
+          "anyOf": [
+            {
+              "type": "string",
+              "description": "Model applied to every Gemini phase. Empty = CLI default."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "discussion": {
+                  "type": "string"
+                },
+                "build": {
+                  "type": "string"
+                },
+                "review": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false,
+              "description": "Per-phase models for Gemini. Missing phases fall back to the CLI default."
+            }
+          ],
+          "markdownDescription": "Model passed to the Gemini CLI as `--model <id>`. Either a single string (applied to every phase) or an object with per-phase overrides like `{ \"discussion\": \"gemini-2.5-flash\", \"build\": \"gemini-2.5-pro\", \"review\": \"gemini-2.5-pro\" }`."
+        },
         "hydraRoom.claudeEffort": {
           "scope": "application",
           "default": "",
@@ -1252,6 +1339,13 @@
         "hydraRoom.codexNativeEnv",
         "hydraRoom.claudeNativePathPrepend",
         "hydraRoom.claudeNativeEnv",
+        "hydraRoom.geminiCommand",
+        "hydraRoom.geminiExecArgsDiscussion",
+        "hydraRoom.geminiExecArgsBuild",
+        "hydraRoom.geminiExecArgsReview",
+        "hydraRoom.geminiModel",
+        "hydraRoom.geminiNativeEnv",
+        "hydraRoom.geminiNativePathPrepend",
         "hydraRoom.codexTerminalCommand",
         "hydraRoom.claudeTerminalCommand",
         "hydraRoom.verifyCommand",

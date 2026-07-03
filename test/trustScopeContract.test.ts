@@ -108,4 +108,17 @@ describe("trust scope contract", () => {
       );
     }
   });
+
+  test("gemini spawn settings are trust-scoped", () => {
+    const geminiKeys = [
+      "geminiCommand", "geminiExecArgsDiscussion", "geminiExecArgsBuild",
+      "geminiExecArgsReview", "geminiModel", "geminiNativeEnv", "geminiNativePathPrepend",
+    ];
+    for (const key of geminiKeys) {
+      assert.ok(
+        (TRUST_SCOPED_SETTINGS as readonly string[]).includes(key),
+        `${key} must be trust-scoped — it flows into a native spawn`,
+      );
+    }
+  });
 });
