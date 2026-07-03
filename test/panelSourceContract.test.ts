@@ -598,13 +598,75 @@ describe("multi-head wiring source contract", () => {
   });
 
   test("buildSpawn delegates argv construction to the registry adapter", () => {
+    // Repointed for SP2 Task 8: the adapter call moved from buildSpawn into
+    // buildInvocationFor (which dispatch calls with the REAL prompt);
+    // buildSpawn now delegates to it with an empty prompt and stays the
+    // display/diagnostic argv source only.
     const src = source();
-    const start = src.indexOf("private buildSpawn(");
+    const start = src.indexOf("private buildInvocationFor(");
     const end = src.indexOf("private async buildNativeCommandSpawn(", start);
-    assert.ok(start >= 0 && end > start, "buildSpawn body not delimited");
+    assert.ok(start >= 0 && end > start, "buildInvocationFor/buildSpawn bodies not delimited");
     const body = src.slice(start, end);
     assert.match(body, /adapterForKind\(def\.kind\)\.buildInvocation\(/);
     assert.doesNotMatch(body, /withCodexSkipGitRepoCheckArgs\(spawn\)/);
+    assert.match(body, /this\.buildInvocationFor\(agent, phase, ""\)/);
+  });
+});
+
+describe("generic-adapter dispatch source contract", () => {
+  const source = () => fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+
+  test("dispatch builds an Invocation with the real prompt and branches on the http transport", () => {
+    const src = source();
+    assert.match(src, /this\.buildInvocationFor\(agent, phase, prompt\)/);
+    assert.match(src, /inv\.transport === "http"/);
+    assert.match(src, /runHttpPipeline\(/);
+    assert.match(src, /runHttpAgent\(/);
+  });
+
+  test("full-native consent derives authority from the registry adapter", () => {
+    const src = source();
+    const start = src.indexOf("private async ensureFullNativeConsent(");
+    assert.ok(start >= 0, "ensureFullNativeConsent not found");
+    const body = src.slice(start, start + 1200);
+    assert.match(body, /adapterForKind\(def\.kind\)\.authority\(/);
+  });
+
+  test("http pipeline forwards the caller's abort signal and timeout and never touches headers", () => {
+    const src = source();
+    const start = src.indexOf("private async runHttpPipeline(");
+    const end = src.indexOf("private autoAdvanceExplainer(", start);
+    assert.ok(start >= 0 && end > start, "runHttpPipeline body not delimited");
+    const body = src.slice(start, end);
+    assert.match(body, /runHttpAgent\(invocation, \{\s*timeoutMs: timeout,\s*signal,/);
+    // Why: invocation.headers may carry Authorization — the trace records the
+    // endpoint URL only, so the header map must never be read in this method.
+    assert.doesNotMatch(body, /invocation\.headers/);
+    assert.match(body, /transport: "http"/);
+    assert.match(body, /this\.recordRunFailureCard\(/);
+    assert.match(body, /completedAgentCallTrace\(traceId, agent, phase, "http", startedAt/);
+    assert.match(body, /await this\.recordUsage\(/);
+  });
+
+  test("spawn dispatch threads the invocation stdin so argv-baked prompts are not double-piped", () => {
+    const src = source();
+    assert.match(src, /stdin: inv\.stdin \?\? ""/);
+    const agents = fs.readFileSync(path.join(process.cwd(), "src", "agents.ts"), "utf8");
+    assert.match(agents, /spawn\.stdin \?\? prompt/);
+  });
+
+  test("custom head ids never read interpolated per-agent setting keys", () => {
+    // Why: `${id}Command`/`${id}ExecArgs`/`${id}NativeEnv`/`${id}NativePathPrepend`
+    // are declared, trust-scoped settings only for built-in heads. For a custom
+    // head id those keys are UNDECLARED — settable from an untrusted workspace's
+    // settings.json — so custom heads must source command/args from the
+    // trust-scoped hydraRoom.agents definition (SP1 final-review carry-in).
+    const src = source();
+    const start = src.indexOf("private buildInvocationFor(");
+    const end = src.indexOf("private async buildNativeCommandSpawn(", start);
+    assert.ok(start >= 0 && end > start);
+    const body = src.slice(start, end);
+    assert.match(body, /isBuiltinAgentId\(agent\)/);
   });
 });
 

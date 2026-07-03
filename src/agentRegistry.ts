@@ -63,6 +63,15 @@ export function getAgentDefinition(id: string): AgentDefinition | undefined {
   return definitions().find((d) => d.id === id);
 }
 
+// Why: `${id}Command`/`${id}ExecArgs`/`${id}NativeEnv`/`${id}NativePathPrepend`
+// are declared, trust-scoped settings only for these built-in ids. For any
+// other id those keys would be UNDECLARED — settable from an untrusted
+// workspace's settings.json — so callers must not read interpolated per-agent
+// keys unless this returns true (SP1 final-review carry-in constraint).
+export function isBuiltinAgentId(id: string): boolean {
+  return BUILTIN_AGENT_DEFINITIONS.some((d) => d.id === id);
+}
+
 export function displayNameFor(id: string): string {
   return getAgentDefinition(id)?.displayName ?? id;
 }

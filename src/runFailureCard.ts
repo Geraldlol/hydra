@@ -15,7 +15,7 @@ export interface RunFailureCard {
   id: string;
   agent: AgentId;
   phase: Phase;
-  transport: "oneShot" | "terminalBridge";
+  transport: "oneShot" | "terminalBridge" | "http";
   status: string;
   durationMs: number;
   exitCode: number | null;
@@ -31,7 +31,7 @@ export function createRunFailureCard(input: {
   id: string;
   agent: AgentId;
   phase: Phase;
-  transport: "oneShot" | "terminalBridge";
+  transport: "oneShot" | "terminalBridge" | "http";
   startedAt: number;
   result: RunResult;
   promptSha256: string;
