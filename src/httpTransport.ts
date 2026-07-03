@@ -42,6 +42,35 @@ function cancelledResult(): HttpAgentResult {
   return { stdout: "", stderr: "", exitCode: null, timedOut: false, cancelled: true, rawBody: "" };
 }
 
+/** Read a response body through `cap` so a huge non-streaming or error body
+ *  can't buffer unbounded memory before we get a chance to slice/parse it.
+ *  Falls back to `res.text()` when the runtime's fetch doesn't expose a body
+ *  reader (rare) — guarded by `content-length` so a body that's declared
+ *  huge upfront is refused instead of buffered in one shot. */
+async function readBoundedText(res: Response, cap: number, marker: string): Promise<string> {
+  if (!res.body) {
+    const declaredLength = Number(res.headers.get("content-length") ?? "");
+    if (Number.isFinite(declaredLength) && declaredLength > cap) return `\n${marker}\n`;
+    return res.text().catch(() => "");
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  const state: BoundedStreamState = { text: "", truncated: false };
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    appendBoundedStream(state, decoder.decode(value, { stream: true }), cap, marker);
+    if (state.truncated) {
+      void reader.cancel().catch(() => {
+        // Reader already closed/errored on our own early-stop — nothing to clean up.
+      });
+      break;
+    }
+  }
+  if (!state.truncated) state.text += decoder.decode();
+  return state.text;
+}
+
 /** Pull `choices[0].message.content` out of a non-streaming chat-completion
  *  JSON body; falls back to the raw text for endpoints that reply in plain
  *  text instead of the OpenAI JSON envelope. */
@@ -90,7 +119,7 @@ export async function runHttpAgent(
     });
 
     if (!res.ok) {
-      const errText = (await res.text().catch(() => "")).slice(0, 4000);
+      const errText = (await readBoundedText(res, MAX_AGENT_STDOUT_BYTES, marker).catch(() => "")).slice(0, 4000);
       return { stdout: "", stderr: `HTTP ${res.status}: ${errText || res.statusText}`, exitCode: res.status, timedOut, cancelled: false, rawBody: errText };
     }
 
@@ -100,6 +129,13 @@ export async function runHttpAgent(
       const decoder = new TextDecoder();
       let sseBuf = "";
       let usageJson: string | undefined;
+      let stopped = false;
+      const stopReading = () => {
+        stopped = true;
+        void reader.cancel().catch(() => {
+          // Reader already closed/errored on our own early-stop — nothing to clean up.
+        });
+      };
       for (;;) {
         const { value, done } = await reader.read();
         if (done) break;
@@ -115,6 +151,35 @@ export async function runHttpAgent(
             appendBoundedStream(state, text, MAX_AGENT_STDOUT_BYTES, marker);
             opts.onChunk?.(text);
           }
+          if (state.truncated) {
+            // Already at the output cap — stop pulling more network data
+            // we'd only have to discard.
+            stopReading();
+            break;
+          }
+        }
+        if (stopped) break;
+        // Why: bound the RAW buffer independent of delimiter position. A
+        // server that sends one arbitrarily large `data:` line — or never
+        // emits a blank-line delimiter at all — would otherwise grow
+        // `sseBuf` without bound while we wait for a "\n\n" that may never
+        // arrive. `appendBoundedStream` only caps the *extracted* text, so
+        // this raw-length check is the independent cap for the pre-delimiter
+        // buffer itself.
+        if (sseBuf.length > MAX_AGENT_STDOUT_BYTES) {
+          const { text, usageJson: eventUsage } = assembleSseText(sseBuf);
+          if (eventUsage) usageJson = eventUsage;
+          if (text) {
+            appendBoundedStream(state, text, MAX_AGENT_STDOUT_BYTES, marker);
+            opts.onChunk?.(text);
+          }
+          if (!state.truncated) {
+            state.truncated = true;
+            state.text += `\n${marker}\n`;
+          }
+          sseBuf = "";
+          stopReading();
+          break;
         }
       }
       // Why: flush any bytes TextDecoder buffered internally in case the
@@ -137,7 +202,7 @@ export async function runHttpAgent(
     }
 
     // Non-streaming: single JSON object (or plain text).
-    const rawBody = await res.text();
+    const rawBody = await readBoundedText(res, MAX_AGENT_STDOUT_BYTES, marker);
     const content = extractNonStreamingContent(rawBody);
     if (content) opts.onChunk?.(content);
     return { stdout: content, stderr: "", exitCode: 0, timedOut, cancelled: false, rawBody };

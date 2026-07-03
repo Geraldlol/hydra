@@ -1,6 +1,7 @@
 import { describe, test } from "node:test";
 import { strict as assert } from "node:assert";
 import { runHttpAgent, assembleSseText } from "../src/httpTransport";
+import { MAX_AGENT_STDOUT_BYTES } from "../src/agents";
 import type { Invocation } from "../src/agentAdapter";
 
 const inv: Extract<Invocation, { transport: "http" }> = {
@@ -21,6 +22,31 @@ function sseResponse(chunks: string[]): Response {
     },
   });
   return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+}
+
+// Builds a Response whose body streams `totalChars` filler bytes (no
+// "data:" prefix and no "\n\n" delimiter anywhere) in `chunkSize`-sized
+// pieces, and exposes how many characters the source actually produced
+// before the stream stopped being pulled — lets a test prove `runHttpAgent`
+// stopped reading early instead of draining (or hanging on) the full body.
+function fillerStream(totalChars: number, chunkSize: number, contentType: string) {
+  const encoder = new TextEncoder();
+  const chunkText = "x".repeat(chunkSize);
+  let produced = 0;
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (produced >= totalChars) {
+        controller.close();
+        return;
+      }
+      const remaining = totalChars - produced;
+      const piece = remaining >= chunkSize ? chunkText : chunkText.slice(0, remaining);
+      controller.enqueue(encoder.encode(piece));
+      produced += piece.length;
+    },
+  });
+  const response = new Response(stream, { status: 200, headers: { "content-type": contentType } });
+  return { response, producedSoFar: () => produced };
 }
 
 // Mimics real `fetch`: never settles on its own, only rejects once the
@@ -106,6 +132,34 @@ describe("http transport", () => {
     const parsed = JSON.parse(res.rawBody) as { choices: Array<{ message: { content: string } }>; usage: { prompt_tokens: number } };
     assert.equal(parsed.choices[0]?.message.content, "Hello");
     assert.equal(parsed.usage.prompt_tokens, 5);
+  });
+
+  test("an oversized, undelimited SSE stream is bounded and stops reading early (no hang)", async () => {
+    const totalChars = MAX_AGENT_STDOUT_BYTES + 8 * 1024 * 1024; // ~24MB, well past the cap
+    const chunkSize = 1024 * 1024; // 1MB per read, no "data:" prefix and no "\n\n" ever
+    const { response, producedSoFar } = fillerStream(totalChars, chunkSize, "text/event-stream");
+    const fetchImpl = (async () => response) as unknown as typeof fetch;
+    const res = await runHttpAgent(inv, { timeoutMs: 5000, signal: new AbortController().signal, fetchImpl });
+    assert.equal(res.exitCode, 0);
+    assert.ok(res.stdout.length <= MAX_AGENT_STDOUT_BYTES + 200, `stdout should be bounded, was ${res.stdout.length}`);
+    assert.match(res.stdout, /truncated/);
+    // The source was never asked to produce the full oversized body — proves
+    // runHttpAgent stopped reading once the raw buffer crossed the cap
+    // instead of draining (or hanging on) the rest of the stream.
+    assert.ok(producedSoFar() < totalChars, `expected an early stop, but all ${totalChars} chars were produced`);
+  });
+
+  test("an oversized non-streaming response body is bounded, not fully buffered", async () => {
+    const totalChars = MAX_AGENT_STDOUT_BYTES + 8 * 1024 * 1024; // ~24MB, well past the cap
+    const chunkSize = 1024 * 1024;
+    const { response, producedSoFar } = fillerStream(totalChars, chunkSize, "application/json");
+    const fetchImpl = (async () => response) as unknown as typeof fetch;
+    const res = await runHttpAgent(inv, { timeoutMs: 5000, signal: new AbortController().signal, fetchImpl });
+    assert.equal(res.exitCode, 0);
+    assert.ok(res.rawBody.length <= MAX_AGENT_STDOUT_BYTES + 200, `rawBody should be bounded, was ${res.rawBody.length}`);
+    assert.ok(res.stdout.length <= MAX_AGENT_STDOUT_BYTES + 200, `stdout should be bounded, was ${res.stdout.length}`);
+    assert.match(res.stdout, /truncated/);
+    assert.ok(producedSoFar() < totalChars, `expected an early stop, but all ${totalChars} chars were produced`);
   });
 
   test("reassembles an SSE delta split across two stream reads", async () => {
