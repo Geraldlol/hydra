@@ -1,0 +1,95 @@
+import { describe, test } from "node:test";
+import { strict as assert } from "node:assert";
+import {
+  isEnvVarName,
+  isSecretShaped,
+  isLoopbackOrPrivateHost,
+  baseUrlAllowed,
+  validateAgentDefinition,
+  mergeAgentDefinitions,
+} from "../src/agentValidation";
+import { BUILTIN_AGENT_DEFINITIONS } from "../src/agentRegistry";
+
+describe("agent definition validation", () => {
+  test("isEnvVarName accepts POSIX identifiers, rejects key-shaped values", () => {
+    assert.equal(isEnvVarName("OPENAI_API_KEY"), true);
+    assert.equal(isEnvVarName("OLLAMA_KEY_1"), true);
+    assert.equal(isEnvVarName("sk-abc123"), false);
+    assert.equal(isEnvVarName("has space"), false);
+    assert.equal(isEnvVarName(""), false);
+  });
+
+  test("isSecretShaped flags common inlined credential shapes", () => {
+    assert.equal(isSecretShaped("sk-proj-0123456789abcdef0123"), true);
+    assert.equal(isSecretShaped("Bearer eyJhbGciOi.aaaa.bbbb"), true);
+    assert.equal(isSecretShaped("ghp_0123456789abcdefABCDEF0123456789abcd"), true);
+    assert.equal(isSecretShaped("qwen2.5-coder"), false);
+    assert.equal(isSecretShaped("${env:OPENAI_API_KEY}"), false);
+  });
+
+  test("isLoopbackOrPrivateHost recognizes local model servers", () => {
+    assert.equal(isLoopbackOrPrivateHost("localhost"), true);
+    assert.equal(isLoopbackOrPrivateHost("127.0.0.1"), true);
+    assert.equal(isLoopbackOrPrivateHost("::1"), true);
+    assert.equal(isLoopbackOrPrivateHost("192.168.1.50"), true);
+    assert.equal(isLoopbackOrPrivateHost("10.0.0.4"), true);
+    assert.equal(isLoopbackOrPrivateHost("workstation.local"), true);
+    assert.equal(isLoopbackOrPrivateHost("api.openrouter.ai"), false);
+  });
+
+  test("baseUrlAllowed: https anywhere, http only for local", () => {
+    assert.equal(baseUrlAllowed("https://api.openrouter.ai/v1").ok, true);
+    assert.equal(baseUrlAllowed("http://localhost:11434/v1").ok, true);
+    assert.equal(baseUrlAllowed("http://192.168.1.9:1234/v1").ok, true);
+    assert.equal(baseUrlAllowed("http://api.openrouter.ai/v1").ok, false);
+    assert.equal(baseUrlAllowed("ftp://localhost/v1").ok, false);
+  });
+
+  test("validateAgentDefinition accepts a well-formed openai-compatible head", () => {
+    const { def, error } = validateAgentDefinition(
+      { id: "ollama-qwen", displayName: "Qwen (local)", kind: "openai-compatible", baseUrl: "http://localhost:11434/v1", model: "qwen2.5-coder" },
+      new Set(),
+    );
+    assert.equal(error, undefined);
+    assert.equal(def?.id, "ollama-qwen");
+  });
+
+  test("rejects an inlined api key in apiKeyEnv", () => {
+    const { def, error } = validateAgentDefinition(
+      { id: "bad", displayName: "Bad", kind: "openai-compatible", baseUrl: "https://x/v1", apiKeyEnv: "sk-proj-0123456789abcdef" },
+      new Set(),
+    );
+    assert.equal(def, undefined);
+    assert.match(error ?? "", /apiKeyEnv/);
+  });
+
+  test("rejects an inlined secret in a header value", () => {
+    const { error } = validateAgentDefinition(
+      { id: "bad2", displayName: "Bad2", kind: "openai-compatible", baseUrl: "https://x/v1", headers: { Authorization: "Bearer sk-proj-0123456789abcdef" } },
+      new Set(),
+    );
+    assert.match(error ?? "", /secret|inline|Authorization/i);
+  });
+
+  test("rejects duplicate id, missing baseUrl, missing command/argsTemplate, bad kind", () => {
+    assert.match(validateAgentDefinition({ id: "codex", displayName: "X", kind: "openai-compatible", baseUrl: "https://x/v1" }, new Set(["codex"])).error ?? "", /id/);
+    assert.match(validateAgentDefinition({ id: "a", displayName: "A", kind: "openai-compatible" }, new Set()).error ?? "", /baseUrl/);
+    assert.match(validateAgentDefinition({ id: "b", displayName: "B", kind: "cli-template", command: "tool" }, new Set()).error ?? "", /argsTemplate/);
+    assert.match(validateAgentDefinition({ id: "c", displayName: "C", kind: "totally-fake" }, new Set()).error ?? "", /kind/);
+  });
+
+  test("mergeAgentDefinitions overrides a built-in by id and appends new heads", () => {
+    const raw = [
+      { id: "codex", displayName: "Codex (custom cmd)", kind: "codex", command: "codex-wrapper" },
+      { id: "ollama-qwen", displayName: "Qwen", kind: "openai-compatible", baseUrl: "http://localhost:11434/v1" },
+      { id: "bogus", displayName: "Bogus", kind: "openai-compatible" }, // dropped: no baseUrl
+    ];
+    const { defs, warnings } = mergeAgentDefinitions([...BUILTIN_AGENT_DEFINITIONS], raw);
+    const ids = defs.map((d) => d.id);
+    assert.deepEqual(ids, ["codex", "claude", "gemini", "ollama-qwen"]);
+    assert.equal(defs.find((d) => d.id === "codex")?.command, "codex-wrapper");
+    assert.equal(defs.find((d) => d.id === "codex")?.colorIndex, 1); // registry order preserved
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0] ?? "", /bogus/);
+  });
+});
