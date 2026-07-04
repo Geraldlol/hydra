@@ -6,6 +6,26 @@ import type { Phase } from "./prompts";
 import { effectivePhasedSetting } from "./phasedSetting";
 
 /**
+ * Proxy for agentRegistry's `isBuiltinAgentId`, via a lazy `require` rather
+ * than a top-level import.
+ *
+ * Why: agentRegistry.ts imports every vendor adapter (which import this
+ * module) and calls `registerAdapter()` for each, synchronously, at its own
+ * module top level -- before it finishes defining `isBuiltinAgentId`. A
+ * top-level `import { isBuiltinAgentId } from "./agentRegistry"` here would
+ * complete that cycle mid-load: agentRegistry.ts would get back its own
+ * still-loading (adapter-less) exports and crash on
+ * `registerAdapter(undefined)`. Deferring the require to call time -- well
+ * after every module has finished loading -- sidesteps that. Exported so the
+ * vendor adapters (codexAdapter.ts, claudeAdapter.ts) share this one
+ * workaround instead of each re-deriving it.
+ */
+export function isBuiltinAgentId(id: AgentId): boolean {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  return (require("./agentRegistry") as typeof import("./agentRegistry")).isBuiltinAgentId(id);
+}
+
+/**
  * Splice extra args in just before the trailing "-" stdin sentinel.
  *
  * Codex's `codex exec` reads the prompt from stdin when its final
@@ -33,8 +53,16 @@ export function insertBeforeStdinDash(args: string[], insertion: string[]): stri
  * `hydraRoom.claudeModel` and `hydraRoom.codexModel` accept either a single
  * string (applies to every phase) or an object keyed by profile (discussion
  * / build / review). Empty string means "let the CLI pick its default."
+ *
+ * Why: `hydraRoom.${agent}Model` is a declared, trust-scoped setting only for
+ * built-in head ids (codex/claude/gemini). For a custom head id that key is
+ * UNDECLARED -- settable from an untrusted workspace's settings.json -- so a
+ * non-builtin id must never read it (mirrors the ${id}NativeEnv/${id}Command
+ * fence in agentRegistry.ts/panel.ts). Callers fall back to the trust-scoped
+ * `def.model` for a non-builtin id instead (see codexAdapter/claudeAdapter).
  */
 export function modelForPhase(agent: AgentId, phase: Phase): string {
+  if (!isBuiltinAgentId(agent)) return "";
   return effectivePhasedSetting(
     vscode.workspace.getConfiguration("hydraRoom").get<unknown>(`${agent}Model`),
     profileForPhase(phase),
