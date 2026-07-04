@@ -6,6 +6,8 @@ import {
   getAgentDefinition,
   displayNameFor,
   assignColorIndexes,
+  reloadAgentDefinitions,
+  agentDefinitionWarnings,
 } from "../src/agentRegistry";
 
 describe("agent registry", () => {
@@ -35,5 +37,14 @@ describe("agent registry", () => {
 
   test("listAgentDefinitions returns built-ins when no user agents configured", () => {
     assert.deepEqual(listAgentDefinitions().map((d) => d.id), ["codex", "claude", "gemini"]);
+  });
+});
+
+describe("registry user-agent merge", () => {
+  test("reloadAgentDefinitions + agentDefinitionWarnings exist and default clean", () => {
+    reloadAgentDefinitions();
+    // With no hydraRoom.agents configured (test stub), built-ins only and no warnings.
+    assert.deepEqual(listAgentDefinitions().map((d) => d.id), ["codex", "claude", "gemini"]);
+    assert.deepEqual(agentDefinitionWarnings(), []);
   });
 });

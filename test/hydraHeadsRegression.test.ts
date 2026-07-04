@@ -2,7 +2,7 @@ import { describe, test } from "node:test";
 import { strict as assert } from "node:assert";
 import { transition, pickReviewers, DEFAULT_ROSTER } from "../src/phases";
 import { getAgentDefinition, adapterForKind } from "../src/agentRegistry";
-import type { AgentDefinition, InvocationContext } from "../src/agentAdapter";
+import type { AgentDefinition, Invocation, InvocationContext } from "../src/agentAdapter";
 import type { Phase } from "../src/prompts";
 import "../src/geminiAdapter"; // gemini registers via agentRegistry.ts's module body, not here
 
@@ -29,6 +29,32 @@ describe("hydra heads SP1 regression", () => {
     assert.equal(review.name, "Review");
     assert.equal((review as any).reviewer, "claude");
     assert.deepEqual(pickReviewers("codex", [...DEFAULT_ROSTER]), ["claude"]);
+  });
+
+  test("codex and claude spawn argv is prompt-independent (dispatch argv == preview argv, prompt via stdin)", () => {
+    // Why: SP2 Task 8 switched turn dispatch from the empty-prompt buildSpawn
+    // to buildInvocationFor(REAL prompt). For the default codex+claude roster
+    // that must be a no-op: vendor adapters carry the prompt on stdin, never
+    // in argv, so dispatch argv stays byte-identical to the preview argv.
+    for (const agent of ["codex", "claude"] as const) {
+      const def = getAgentDefinition(agent);
+      assert.ok(def, `${agent} must be a registered head`);
+      const rawArgs = agent === "codex" ? ["exec", "-"] : ["-p"];
+      for (const phase of ALL_PHASES) {
+        // Why: the explicit return type breaks the inference circularity TS7022
+        // creates when a closure captures an assertion-narrowed binding (def).
+        const build = (prompt: string): Invocation =>
+          adapterForKind(def!.kind).buildInvocation(def!, { phase, workspaceRoot: "C:/repo", prompt, command: agent, rawArgs });
+        const real = build("real dispatch prompt");
+        const preview = build("");
+        assert.equal(real.transport, "spawn", `${agent} ${phase} must spawn`);
+        assert.equal(preview.transport, "spawn", `${agent} ${phase} preview must spawn`);
+        if (real.transport !== "spawn" || preview.transport !== "spawn") continue;
+        assert.equal(real.command, preview.command, `${agent} ${phase} command must not depend on the prompt`);
+        assert.deepEqual(real.args, preview.args, `${agent} ${phase} argv must not depend on the prompt`);
+        assert.equal(real.stdin, "real dispatch prompt", `${agent} ${phase} must carry the prompt on stdin`);
+      }
+    }
   });
 
   test("gemini is selectable and yields a correctly-wired spawn invocation for every phase", () => {

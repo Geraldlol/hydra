@@ -16,7 +16,10 @@ const PACKAGE_JSON_PATH = path.resolve(__dirname, "..", "..", "package.json");
 interface PackageJsonShape {
   contributes?: {
     configuration?: {
-      properties?: Record<string, { scope?: string }>;
+      properties?: Record<string, {
+        scope?: string;
+        items?: { properties?: Record<string, { properties?: Record<string, unknown> }> };
+      }>;
     };
   };
   capabilities?: {
@@ -120,5 +123,24 @@ describe("trust scope contract", () => {
         `${key} must be trust-scoped — it flows into a native spawn`,
       );
     }
+  });
+
+  test("hydraRoom.agents is trust-scoped (spawn command + network endpoint)", () => {
+    assert.ok(
+      (TRUST_SCOPED_SETTINGS as readonly string[]).includes("agents"),
+      "agents must be trust-scoped — it defines a spawn command and an HTTP endpoint",
+    );
+  });
+
+  test("hydraRoom.agents item schema declares pricing so a valid AgentDefinition doesn't squiggle", () => {
+    const pkg = loadPackageJson();
+    const agentsProp = pkg.contributes?.configuration?.properties?.["hydraRoom.agents"];
+    const pricing = agentsProp?.items?.properties?.pricing;
+    assert.ok(pricing, "hydraRoom.agents items.properties.pricing is missing");
+    assert.deepEqual(
+      Object.keys(pricing?.properties ?? {}).sort(),
+      ["cacheCreatePerMTok", "cacheReadPerMTok", "inputPerMTok", "outputPerMTok"],
+      "pricing schema should mirror the ModelPrices fields"
+    );
   });
 });

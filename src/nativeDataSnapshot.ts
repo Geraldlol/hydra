@@ -288,7 +288,11 @@ function list(values: string[]): string {
 }
 
 function isSensitiveKey(key: string): boolean {
-  return /(access|refresh|api[_-]?key|apikey|token|secret|password|passphrase|credential|authorization|bearer|private[_-]?key|ssh[_-]?key|signature|cookie)/i.test(key);
+  // Why: covers header-credential shapes a hydraRoom.agents `headers` map can
+  // carry (e.g. "X-Auth-Key", "Authentication", "WWW-Authenticate", bare
+  // "Auth") beyond the "authorization"/"bearer" literals already matched.
+  // `\bauth\b` is boundary-guarded so it doesn't also catch "author"/"authorId".
+  return /(access|refresh|api[_-]?key|apikey|token|secret|password|passphrase|credential|authorization|authenticat|\bauth\b|bearer|private[_-]?key|ssh[_-]?key|signature|cookie)/i.test(key);
 }
 
 async function readText(filePath: string): Promise<string> {

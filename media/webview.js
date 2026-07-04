@@ -1001,7 +1001,7 @@ function renderRunFailureCard(card) {
   meta.className = "run-failure-meta";
   meta.append(
     runFailureMeta("Duration", formatDuration(card.durationMs)),
-    runFailureMeta("Transport", card.transport === "terminalBridge" ? "Terminal bridge" : "One-shot"),
+    runFailureMeta("Transport", card.transport === "terminalBridge" ? "Terminal bridge" : card.transport === "http" ? "HTTP" : "One-shot"),
     runFailureMeta("Prompt", shortSha(card.promptSha256))
   );
 

@@ -7,7 +7,9 @@ import { runAgent, AgentSpawn, RunResult } from "./agents";
 import { parseGitStatusEntries, type WorkspaceChange } from "./gitStatus";
 import { State, Event, AgentId, transition, isInFlight, shouldRunParallelDiscussion, pickReviewers, DEFAULT_ROSTER } from "./phases";
 import { Phase, buildPrompt, APPROVED_SENTINEL_RE, SOFT_APPROVAL_RE } from "./prompts";
-import { adapterForKind, displayNameFor, getAgentDefinition, listAgentDefinitions } from "./agentRegistry";
+import { adapterForKind, displayNameFor, getAgentDefinition, isBuiltinAgentId, listAgentDefinitions } from "./agentRegistry";
+import type { AdapterRawOutput, Invocation } from "./agentAdapter";
+import { runHttpAgent } from "./httpTransport";
 import {
   appendMessage,
   archiveAndResetTranscript,
@@ -145,6 +147,7 @@ import {
   loadUsageRecords,
   parseCodexTextTokens,
   resolveModelPrices,
+  seatDefinitionPrices,
   summarizeUsage,
   UNKNOWN_AGENT_PRICES,
   usageCutoffIso,
@@ -390,6 +393,15 @@ interface PreparedOneShotSpawn {
   logPath?: string;
   outputMode: "plain" | "claudeStreamJson" | "codexJson";
 }
+
+type HttpInvocation = Extract<Invocation, { transport: "http" }>;
+
+// One turn leg's dispatch plan: either a fully-prepared native spawn (the
+// existing one-shot/terminal-bridge path) or an http invocation destined for
+// runHttpPipeline. Built in callAgent from buildInvocationFor's Invocation.
+type AgentDispatchPlan =
+  | { transport: "spawn"; spawn: AgentSpawn }
+  | { transport: "http"; invocation: HttpInvocation };
 
 interface QueuedUserMessage {
   displayText: string;
@@ -3249,7 +3261,7 @@ export class HydraRoomPanel {
     const promptSha256 = sha256(prompt);
     let spawn = this.buildSpawn(agent, phase);
     spawn = { ...spawn, command: await resolveAgentCommand(agent, spawn.command) };
-    const consent = await this.ensureFullNativeConsent(agent, phase, spawn);
+    const consent = await this.ensureFullNativeConsent(agent, phase, spawn.args);
     if (!consent.allowed) {
       await this.appendAgentCallTrace({
         id: traceId,
@@ -3395,6 +3407,84 @@ export class HydraRoomPanel {
     // trailing "tokens used" footer and silently disabled Codex usage rows.
     await this.extractAndRecordUsage({ agent, phase, requestId: traceId, result, outputMode: prepared.outputMode });
     return normalized;
+  }
+
+  // Sibling of runOneShotPipeline for http-transport heads (openai-compatible):
+  // same trace / live-chunk / failure-card / usage plumbing, but the reply
+  // comes from runHttpAgent instead of a spawned CLI, and reply/usage parsing
+  // routes through the head's registry adapter.
+  private async runHttpPipeline(
+    agent: AgentId,
+    phase: Phase,
+    invocation: HttpInvocation,
+    prompt: string,
+    messageId: string,
+    timeout: number,
+    signal: AbortSignal,
+    traceIdOverride?: string,
+    markOutput?: () => void
+  ): Promise<RunResult> {
+    const traceId = traceIdOverride ?? makeTraceId(agent, phase);
+    const startedAt = Date.now();
+    const promptSha256 = sha256(prompt);
+    await this.appendAgentCallTrace({
+      id: traceId,
+      event: "started",
+      timestamp: new Date(startedAt).toISOString(),
+      agent,
+      phase,
+      transport: "http",
+      // Why: record the endpoint URL only — the invocation's header map can
+      // carry an Authorization credential and must never reach the trace.
+      command: invocation.url,
+      args: [],
+      envKeys: [],
+      timeoutMs: timeout,
+      promptChars: prompt.length,
+      promptSha256,
+      outputMode: "openaiJson",
+    });
+    try {
+      const result = await runHttpAgent(invocation, {
+        timeoutMs: timeout,
+        signal,
+        onChunk: (chunk) => {
+          markOutput?.();
+          const m = this.messagesById.get(messageId);
+          if (m) m.text += chunk;
+          this.panel.webview.postMessage({ type: "chunk", messageId, text: chunk });
+        },
+      });
+      const def = getAgentDefinition(agent);
+      const adapter = def ? adapterForKind(def.kind) : undefined;
+      const raw: AdapterRawOutput = { stdout: result.rawBody, stderr: result.stderr, exitCode: result.exitCode, outputMode: "openaiJson" };
+      // Why: parse the reply only on success — on an HTTP error rawBody holds
+      // the error body, and on abort/timeout the streamed partial text in
+      // result.stdout is already the best reply we have.
+      const replyText = adapter && result.exitCode === 0 ? adapter.parseReply(raw) : result.stdout;
+      const normalized: RunResult = { ...result, stdout: replyText };
+      const m = this.messagesById.get(messageId);
+      if (m && replyText && replyText !== m.text) {
+        m.text = replyText;
+        this.panel.webview.postMessage({ type: "replaceMessageText", messageId, text: replyText });
+      }
+      this.recordRunFailureCard(messageId, { id: traceId, agent, phase, transport: "http", startedAt, result: normalized, promptSha256 });
+      await this.appendAgentCallTrace(completedAgentCallTrace(traceId, agent, phase, "http", startedAt, normalized));
+      if (!result.cancelled && !result.timedOut) {
+        const tokens = adapter?.parseUsage(raw);
+        if (tokens) {
+          await this.recordUsage({ agent, phase, requestId: traceId, model: def?.model, source: "unknown", tokens });
+        }
+      }
+      return normalized;
+    } catch (err) {
+      // runHttpAgent resolves failures as results; this mirrors
+      // runAgentTransport's belt-and-suspenders catch for anything it throws.
+      const result = agentCallFailureResult(err instanceof Error ? err.message : String(err));
+      this.recordRunFailureCard(messageId, { id: traceId, agent, phase, transport: "http", startedAt, result, promptSha256 });
+      await this.appendAgentCallTrace(completedAgentCallTrace(traceId, agent, phase, "http", startedAt, result));
+      return result;
+    }
   }
 
   private autoAdvanceExplainer(): string {
@@ -3666,10 +3756,26 @@ export class HydraRoomPanel {
     }
     const timeout = agentTimeoutMs(phase);
     const activity = this.startPendingActivity(messageId, agent, phase, timeout);
-    let spawn: AgentSpawn;
+    let dispatch: AgentDispatchPlan;
     try {
-      spawn = this.buildSpawn(agent, phase);
-      spawn = { ...spawn, command: await resolveAgentCommand(agent, spawn.command) };
+      // Why: dispatch argv must come from the REAL prompt so a cli-template
+      // head's ${prompt} placeholder expands; the empty-prompt buildSpawn is
+      // for previews/diagnostics only. For codex/claude the argv is
+      // prompt-independent (prompt rides stdin), so this is byte-identical to
+      // the old buildSpawn path — pinned by test/hydraHeadsRegression.test.ts.
+      const inv = this.buildInvocationFor(agent, phase, prompt);
+      if (inv.transport === "http") {
+        dispatch = { transport: "http", invocation: inv };
+      } else {
+        let spawn = this.applyConfiguredSpawnEnvironment(agent, {
+          command: inv.command,
+          args: inv.args,
+          cwd: this.workspaceRoot,
+          stdin: inv.stdin ?? "",
+        });
+        spawn = { ...spawn, command: await resolveAgentCommand(agent, spawn.command) };
+        dispatch = { transport: "spawn", spawn };
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const traceId = makeTraceId(agent, phase);
@@ -3710,7 +3816,7 @@ export class HydraRoomPanel {
     }
     let consent: { allowed: boolean; message?: string };
     try {
-      consent = await this.ensureFullNativeConsent(agent, phase, spawn);
+      consent = await this.ensureFullNativeConsent(agent, phase, dispatch.transport === "spawn" ? dispatch.spawn.args : []);
     } catch (err) {
       // ensureFullNativeConsent awaits VS Code modal/state APIs that can reject;
       // this await sits outside the final try/finally, so release the in-flight
@@ -3747,7 +3853,10 @@ export class HydraRoomPanel {
       return { text: finalized?.text ?? "", result };
     }
     try {
-      const result = await this.runAgentTransport(agent, phase, spawn, prompt, messageId, timeout, signal, forceTerminalBridge, traceIdOverride, activity.markOutput);
+      const result =
+        dispatch.transport === "http"
+          ? await this.runHttpPipeline(agent, phase, dispatch.invocation, prompt, messageId, timeout, signal, traceIdOverride, activity.markOutput)
+          : await this.runAgentTransport(agent, phase, dispatch.spawn, prompt, messageId, timeout, signal, forceTerminalBridge, traceIdOverride, activity.markOutput);
       await this.finalizePendingMessage(messageId, result);
       const finalized = this.messagesById.get(messageId);
       return { text: finalized?.text ?? "", result };
@@ -3760,9 +3869,16 @@ export class HydraRoomPanel {
   private async ensureFullNativeConsent(
     agent: AgentId,
     phase: Phase,
-    spawn: AgentSpawn
+    args: string[]
   ): Promise<{ allowed: boolean; message?: string }> {
-    const authority = classifyAgentAuthority(agent, phase, spawn.args);
+    // Why: authority comes from the head's registry adapter — codex/claude
+    // delegate to classifyAgentAuthority (identical result to before), while
+    // cli-template returns its definition's authority (fullNative by default),
+    // which is what routes custom CLI heads through this consent modal.
+    const def = getAgentDefinition(agent);
+    const authority = def
+      ? adapterForKind(def.kind).authority(def, { phase, workspaceRoot: this.workspaceRoot, prompt: "", command: "", rawArgs: args })
+      : classifyAgentAuthority(agent, phase, args);
     const stateKey = fullNativeConsentKey(agent);
     const alreadyConsented = this.context.workspaceState.get<boolean>(stateKey, false);
     const decision = evaluateFullNativeConsent({
@@ -4066,8 +4182,26 @@ export class HydraRoomPanel {
     return [...DEFAULT_ROSTER];
   }
 
-  private buildSpawn(agent: AgentId, phase: Phase): AgentSpawn {
+  private buildInvocationFor(agent: AgentId, phase: Phase, prompt: string): Invocation {
+    // The vendor argv chain (buildAgentSpawn → skip-git-repo-check → model →
+    // effort) lives inside each kind's adapter now, so a new head dispatches
+    // through the exact same path as codex/claude.
+    const def = getAgentDefinition(agent) ?? { id: agent, displayName: agent, kind: "codex" as const };
     const cfg = vscode.workspace.getConfiguration("hydraRoom");
+    // Why: `${agent}Command`/exec-args/profile keys are declared, trust-scoped
+    // settings only for built-in head ids. For a custom head id those keys are
+    // UNDECLARED — settable from an untrusted workspace's settings.json — so a
+    // custom head's command/args come solely from the trust-scoped
+    // hydraRoom.agents definition (SP1 final-review carry-in constraint).
+    if (!isBuiltinAgentId(agent)) {
+      return adapterForKind(def.kind).buildInvocation(def, {
+        phase,
+        workspaceRoot: this.workspaceRoot,
+        prompt,
+        command: def.command ?? agent,
+        rawArgs: [],
+      });
+    }
     const command = cfg.get<string>(`${agent}Command`, agent);
     const argsKey = argsSettingKey(agent, phase);
     const cliProfile = profileForPhase(phase);
@@ -4076,31 +4210,44 @@ export class HydraRoomPanel {
       ? argsForCapabilityProfile(agent, configuredProfile)
       : undefined;
     const rawArgs = presetArgs ?? cfg.get<string[]>(argsKey, []);
-    // The vendor argv chain (buildAgentSpawn → skip-git-repo-check → model →
-    // effort) lives inside each kind's adapter now, so a new head dispatches
-    // through the exact same path as codex/claude.
-    const def = getAgentDefinition(agent) ?? { id: agent, displayName: agent, kind: "codex" as const };
-    const inv = adapterForKind(def.kind).buildInvocation(def, {
+    return adapterForKind(def.kind).buildInvocation(def, {
       phase,
       workspaceRoot: this.workspaceRoot,
-      prompt: "", // buildSpawn only forms argv; runAgent writes the prompt to stdin.
+      prompt,
       command,
       rawArgs,
     });
+  }
+
+  private buildSpawn(agent: AgentId, phase: Phase): AgentSpawn {
+    // Why: prompt is deliberately empty — buildSpawn argv is the display /
+    // diagnostic surface (previews, doctor, envelopes, wiki wrapup). Turn
+    // dispatch calls buildInvocationFor with the REAL prompt instead, so a
+    // cli-template head's ${prompt} placeholder expands there and never here.
+    const inv = this.buildInvocationFor(agent, phase, "");
     if (inv.transport !== "spawn") {
-      throw new Error(`HTTP transport for kind "${def.kind}" is not supported until Sub-project 2`);
+      throw new Error(`Agent "${agent}" uses the HTTP transport and has no spawn argv`);
     }
-    const spawn: AgentSpawn = { command: inv.command, args: inv.args, cwd: this.workspaceRoot };
+    // No stdin here: buildSpawn consumers (wiki wrapup, probes) rely on
+    // runAgent's prompt-argument fallback.
+    return this.applyConfiguredSpawnEnvironment(agent, { command: inv.command, args: inv.args, cwd: this.workspaceRoot });
+  }
+
+  private applyConfiguredSpawnEnvironment(agent: AgentId, spawn: AgentSpawn): AgentSpawn {
+    const cfg = vscode.workspace.getConfiguration("hydraRoom");
+    // Why: same undeclared-key fence as buildInvocationFor — per-agent env /
+    // PATH keys are only declared (and trust-scoped) for built-in head ids.
+    const perAgent = isBuiltinAgentId(agent);
     return applySpawnEnvironment(
       spawn,
       this.workspaceRoot,
       mergeNativeEnv(
         cfg.get<Record<string, string>>("nativeEnv", {}),
-        cfg.get<Record<string, string>>(`${agent}NativeEnv`, {})
+        perAgent ? cfg.get<Record<string, string>>(`${agent}NativeEnv`, {}) : {}
       ),
       mergeNativePathPrepend(
         cfg.get<string[]>("nativePathPrepend", []),
-        cfg.get<string[]>(`${agent}NativePathPrepend`, [])
+        perAgent ? cfg.get<string[]>(`${agent}NativePathPrepend`, []) : []
       )
     );
   }
@@ -4340,7 +4487,7 @@ export class HydraRoomPanel {
         }
       }
     }
-    return { agentDefaults, modelOverrides };
+    return { agentDefaults: seatDefinitionPrices(agentDefaults, listAgentDefinitions()), modelOverrides };
   }
 
   private async recordUsage(input: {
@@ -5889,7 +6036,7 @@ function completedAgentCallTrace(
   id: string,
   agent: AgentId,
   phase: Phase,
-  transport: "oneShot" | "terminalBridge",
+  transport: "oneShot" | "terminalBridge" | "http",
   startedAt: number,
   result: RunResult
 ): Record<string, unknown> {

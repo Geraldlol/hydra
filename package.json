@@ -349,6 +349,41 @@
           "default": "codex",
           "markdownDescription": "Executable name or wrapper script for the OpenAI Codex CLI."
         },
+        "hydraRoom.agents": {
+          "scope": "application",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "object",
+            "required": ["id", "displayName", "kind"],
+            "properties": {
+              "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$" },
+              "displayName": { "type": "string" },
+              "kind": { "type": "string", "enum": ["codex", "claude", "gemini", "openai-compatible", "cli-template"] },
+              "model": { "type": "string" },
+              "colorIndex": { "type": "number" },
+              "baseUrl": { "type": "string", "markdownDescription": "openai-compatible: `https://` required unless the host is loopback or a private/`.local` address (local model servers)." },
+              "apiKeyEnv": { "type": "string", "markdownDescription": "NAME of the environment variable holding the API key. Never inline the key itself." },
+              "headers": { "type": "object", "additionalProperties": { "type": "string" }, "markdownDescription": "Extra HTTP headers. Reference secrets as `${env:NAME}`." },
+              "command": { "type": "string" },
+              "argsTemplate": { "type": "array", "items": { "type": "string" }, "markdownDescription": "cli-template argv. Placeholders: `${prompt}`, `${model}`, `${workspaceFolder}`, `${hydraPromptFile}`, `${hydraReplyFile}`, `${hydraLogFile}`." },
+              "defaultAuthority": { "type": "string", "enum": ["read-only", "workspace-write", "full-native"] },
+              "pricing": {
+                "type": "object",
+                "properties": {
+                  "inputPerMTok": { "type": "number", "description": "USD per million input tokens." },
+                  "outputPerMTok": { "type": "number", "description": "USD per million output tokens." },
+                  "cacheReadPerMTok": { "type": "number", "description": "USD per million cache-read tokens." },
+                  "cacheCreatePerMTok": { "type": "number", "description": "USD per million cache-write tokens." }
+                },
+                "additionalProperties": false,
+                "markdownDescription": "Override per-model USD pricing (per million tokens) used for usage-rail cost estimates."
+              }
+            },
+            "additionalProperties": false
+          },
+          "markdownDescription": "Custom Hydra heads (open/local models). Each entry is an agent definition; user entries override built-ins by `id`. **Security:** trust-scoped — ignored in untrusted workspaces. API keys must be referenced by env-var name (`apiKeyEnv`), never inlined; definitions containing key-shaped values are rejected."
+        },
         "hydraRoom.codexExecArgsDiscussion": {
           "scope": "application",
           "type": "array",
@@ -1315,6 +1350,7 @@
         "hydraRoom.transcriptPath",
         "hydraRoom.workspaceRoot",
         "hydraRoom.codexCommand",
+        "hydraRoom.agents",
         "hydraRoom.codexExecArgsDiscussion",
         "hydraRoom.codexExecArgsBuild",
         "hydraRoom.codexExecArgsReview",

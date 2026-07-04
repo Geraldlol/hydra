@@ -45,6 +45,37 @@ describe("runAgent", () => {
     assert.equal(result.exitCode, 0);
   });
 
+  test("spawn.stdin overrides the prompt argument when set", async () => {
+    // Why: cli-template heads can bake ${prompt} into argv; the adapter then
+    // sets Invocation.stdin=undefined and dispatch passes spawn.stdin="" so
+    // the prompt is not ALSO piped. spawn.stdin, when present, must win.
+    const echo = { command: process.execPath, args: ["-e", "process.stdin.pipe(process.stdout)"], cwd: process.cwd() };
+    const result = await runAgent(
+      { ...echo, stdin: "from-spawn-stdin" },
+      "prompt-arg-must-not-be-piped",
+      5000,
+      () => {},
+      new AbortController().signal
+    );
+    if (spawnBlockedBySandbox(result)) return;
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.stdout, "from-spawn-stdin");
+  });
+
+  test("empty spawn.stdin suppresses the prompt argument entirely", async () => {
+    const echo = { command: process.execPath, args: ["-e", "process.stdin.pipe(process.stdout)"], cwd: process.cwd() };
+    const result = await runAgent(
+      { ...echo, stdin: "" },
+      "prompt-arg-must-not-be-piped",
+      5000,
+      () => {},
+      new AbortController().signal
+    );
+    if (spawnBlockedBySandbox(result)) return;
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.stdout, "");
+  });
+
   test("non-zero exit reflected in exitCode", async () => {
     const result = await runAgent(
       nodeSpawn(["--emit", "boom", "--fail"]),

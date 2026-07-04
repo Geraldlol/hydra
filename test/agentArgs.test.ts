@@ -1,7 +1,7 @@
 import { describe, test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as vscode from "vscode";
-import { insertBeforeStdinDash, withModelArgs, withEffortArgs, effortForPhase } from "../src/agentArgs";
+import { insertBeforeStdinDash, withModelArgs, withEffortArgs, effortForPhase, modelForPhase } from "../src/agentArgs";
 
 // agentArgs.ts does `import * as vscode from "vscode"` at module top-level;
 // at runtime VS Code provides that module. For node:test runs we substitute
@@ -194,5 +194,54 @@ describe("withEffortArgs", () => {
 describe("effort for non codex/claude heads", () => {
   test("gemini has no effort/reasoning setting -> empty string", () => {
     assert.equal(effortForPhase("gemini", "build"), "");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// modelForPhase / withModelArgs fence for non-builtin (custom) head ids
+// ---------------------------------------------------------------------------
+// `hydraRoom.${id}Model` is only a declared, trust-scoped setting for
+// built-in ids (codex/claude/gemini). For a custom head id declared via the
+// trust-scoped hydraRoom.agents array, that interpolated key is UNDECLARED --
+// settable from an untrusted workspace's settings.json -- so it must never be
+// read for a non-builtin id.
+
+describe("modelForPhase / withModelArgs fence for non-builtin ids", () => {
+  test("modelForPhase ignores hydraRoom.<id>Model for a non-builtin id, even when set", () => {
+    currentConfig.myclaudeModel = "should-be-ignored";
+    try {
+      assert.equal(modelForPhase("myclaude", "build"), "");
+    } finally {
+      delete currentConfig.myclaudeModel;
+    }
+  });
+
+  test("withModelArgs leaves argv unchanged for a non-builtin id even when hydraRoom.<id>Model is set", () => {
+    currentConfig.myclaudeModel = "should-be-ignored";
+    try {
+      const s = { command: "claude", args: ["-p", "-"], cwd: "C:\\repo" };
+      const out = withModelArgs(s, "myclaude", "build");
+      assert.strictEqual(out, s, "no setting-derived model for a non-builtin id -> identical reference returned");
+    } finally {
+      delete currentConfig.myclaudeModel;
+    }
+  });
+
+  test("modelForPhase still reads hydraRoom.claudeModel for the builtin claude id (byte-identical)", () => {
+    currentConfig.claudeModel = "opus";
+    try {
+      assert.equal(modelForPhase("claude", "build"), "opus");
+    } finally {
+      delete currentConfig.claudeModel;
+    }
+  });
+
+  test("modelForPhase still reads hydraRoom.codexModel for the builtin codex id (byte-identical)", () => {
+    currentConfig.codexModel = "gpt-5.4";
+    try {
+      assert.equal(modelForPhase("codex", "build"), "gpt-5.4");
+    } finally {
+      delete currentConfig.codexModel;
+    }
   });
 });

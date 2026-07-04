@@ -76,6 +76,27 @@ export const DEFAULT_PRICES_BY_KIND: Record<AgentKind, ModelPrices> = {
   "cli-template": DEFAULT_PRICES.codex ?? UNKNOWN_AGENT_PRICES,
 };
 
+/** Seat a per-head price base for every registered definition. Existing seats
+ *  (codex/claude from settings) are left as-is; custom heads take def.pricing
+ *  or their per-kind default. */
+export function seatDefinitionPrices(
+  base: Record<AgentId, ModelPrices>,
+  defs: Array<{ id: string; kind: AgentKind; pricing?: ModelPrices }>,
+): Record<string, ModelPrices> {
+  const out: Record<string, ModelPrices> = { ...base };
+  for (const def of defs) {
+    if (out[def.id]) continue;
+    const kindDefault = DEFAULT_PRICES_BY_KIND[def.kind];
+    // Why: def.pricing comes from a user-editable hydraRoom.agents setting and
+    // is only object-shape-checked at validation time — coerce every field so
+    // a non-numeric/NaN/negative value falls back per-field instead of
+    // poisoning usage.jsonl (NaN serializes to null, which can fail record
+    // type-guards on reload).
+    out[def.id] = def.pricing ? coerceModelPrices(def.pricing, kindDefault) : kindDefault;
+  }
+  return out;
+}
+
 /**
  * Per-model prices for the cost meter. Aliases (sonnet/opus/haiku) resolve
  * to the current default version of that family. Override any of these via

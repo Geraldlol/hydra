@@ -1,7 +1,7 @@
 import type { AgentAdapter, AgentDefinition, InvocationContext, Invocation, AdapterRawOutput } from "./agentAdapter";
 import type { UsageTokens, ModelPrices } from "./usage";
 import { buildAgentSpawn } from "./cli";
-import { withModelArgs, withEffortArgs } from "./agentArgs";
+import { insertBeforeStdinDash, withModelArgs, withEffortArgs, isBuiltinAgentId } from "./agentArgs";
 import { withCodexSkipGitRepoCheckArgs } from "./codexTransport";
 import { classifyAgentAuthority } from "./authority";
 import { usageFromCodexSummary, resolveModelPrices, parseCodexTextTokens } from "./usage";
@@ -12,6 +12,22 @@ export const codexAdapter: AgentAdapter = {
     let spawn = buildAgentSpawn(def.id, ctx.phase, ctx.command, ctx.rawArgs, ctx.workspaceRoot);
     spawn = withCodexSkipGitRepoCheckArgs(spawn);
     spawn = withModelArgs(spawn, def.id, ctx.phase);
+    // Why: withModelArgs refuses to read the undeclared hydraRoom.${id}Model
+    // setting for a non-builtin id (agentArgs.ts) -- that key would otherwise
+    // be settable from an untrusted workspace's settings.json. A custom
+    // codex-kind head's model must come from its trust-scoped
+    // hydraRoom.agents def.model instead. Builtin "codex" is unaffected: it
+    // still resolves its model purely via hydraRoom.codexModel, exactly as
+    // before. --model is only valid on `codex exec`, matching withModelArgs.
+    if (
+      !isBuiltinAgentId(def.id) &&
+      def.model &&
+      spawn.args[0] === "exec" &&
+      !spawn.args.includes("--model") &&
+      !spawn.args.includes("-m")
+    ) {
+      spawn = { ...spawn, args: insertBeforeStdinDash(spawn.args, ["--model", def.model]) };
+    }
     spawn = withEffortArgs(spawn, def.id, ctx.phase);
     return { transport: "spawn", command: spawn.command, args: spawn.args, stdin: ctx.prompt };
   },

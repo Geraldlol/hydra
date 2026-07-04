@@ -1,7 +1,7 @@
 import type { AgentAdapter, AgentDefinition, InvocationContext, Invocation, AdapterRawOutput } from "./agentAdapter";
 import type { UsageTokens, ModelPrices } from "./usage";
 import { buildAgentSpawn } from "./cli";
-import { withModelArgs, withEffortArgs } from "./agentArgs";
+import { insertBeforeStdinDash, withModelArgs, withEffortArgs, isBuiltinAgentId } from "./agentArgs";
 import { classifyAgentAuthority } from "./authority";
 import { usageFromClaudeSummary, resolveModelPrices } from "./usage";
 import { parseClaudeEventStream, summarizeClaudeEvents } from "./claudeEvents";
@@ -13,6 +13,16 @@ export const claudeAdapter: AgentAdapter = {
     // codex-only (it lives in codexAdapter.buildInvocation).
     let spawn = buildAgentSpawn(def.id, ctx.phase, ctx.command, ctx.rawArgs, ctx.workspaceRoot);
     spawn = withModelArgs(spawn, def.id, ctx.phase);
+    // Why: withModelArgs refuses to read the undeclared hydraRoom.${id}Model
+    // setting for a non-builtin id (agentArgs.ts) -- that key would otherwise
+    // be settable from an untrusted workspace's settings.json. A custom
+    // claude-kind head's model must come from its trust-scoped
+    // hydraRoom.agents def.model instead. Builtin "claude" is unaffected: it
+    // still resolves its model purely via hydraRoom.claudeModel, exactly as
+    // before.
+    if (!isBuiltinAgentId(def.id) && def.model && !spawn.args.includes("--model") && !spawn.args.includes("-m")) {
+      spawn = { ...spawn, args: insertBeforeStdinDash(spawn.args, ["--model", def.model]) };
+    }
     spawn = withEffortArgs(spawn, def.id, ctx.phase);
     return { transport: "spawn", command: spawn.command, args: spawn.args, stdin: ctx.prompt };
   },
