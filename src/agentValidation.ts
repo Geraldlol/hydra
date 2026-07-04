@@ -9,18 +9,25 @@ export function isEnvVarName(value: string): boolean {
 
 // A `${env:NAME}` placeholder is explicitly NOT a secret (it's a reference).
 const ENV_PLACEHOLDER = /^\$\{env:[^}]+\}$/;
+const ENV_PLACEHOLDER_GLOBAL = /\$\{env:[^}]+\}/g;
 
 /** Heuristic: does this literal look like an inlined credential? Conservative —
  *  only flags shapes that are clearly keys/tokens, never ordinary model ids. */
 export function isSecretShaped(value: string): boolean {
   const v = value.trim();
   if (!v || ENV_PLACEHOLDER.test(v)) return false;
-  if (/\bBearer\s+\S+/i.test(v)) return true;
-  if (/\b(sk|rk|pk)-[A-Za-z0-9_-]{12,}/.test(v)) return true; // OpenAI-style
-  if (/\b(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/.test(v)) return true; // GitHub
-  if (/\bxox[baprs]-[A-Za-z0-9-]{10,}/.test(v)) return true; // Slack
-  if (/\bAKIA[0-9A-Z]{16}\b/.test(v)) return true; // AWS access key id
-  if (/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\./.test(v)) return true; // JWT
+  // Why: a documented pattern like `"Bearer ${env:MY_TOKEN}"` embeds a
+  // legitimate env-var reference alongside a non-secret prefix. Strip
+  // `${env:NAME}` occurrences before shape-checking so only a REAL inlined
+  // secret in the remainder gets flagged.
+  const stripped = v.replace(ENV_PLACEHOLDER_GLOBAL, "").trim();
+  if (!stripped) return false;
+  if (/\bBearer\s+\S+/i.test(stripped)) return true;
+  if (/\b(sk|rk|pk)-[A-Za-z0-9_-]{12,}/.test(stripped)) return true; // OpenAI-style
+  if (/\b(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/.test(stripped)) return true; // GitHub
+  if (/\bxox[baprs]-[A-Za-z0-9-]{10,}/.test(stripped)) return true; // Slack
+  if (/\bAKIA[0-9A-Z]{16}\b/.test(stripped)) return true; // AWS access key id
+  if (/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\./.test(stripped)) return true; // JWT
   return false;
 }
 
@@ -40,9 +47,16 @@ export function isLoopbackOrPrivateHost(host: string): boolean {
   const h = host.replace(/^\[|\]$/g, "").toLowerCase().replace(/\.$/, "");
   if (h === "localhost" || h === "::1") return true;
   if (h.endsWith(".local") || h.endsWith(".localhost")) return true;
+  // IPv6 Unique Local Address block fc00::/7 (fc00:: - fdff::). A colon can
+  // never appear in a DNS hostname, so this can't be spoofed by a domain
+  // like "fd00.evil.test" the way a bare numeric prefix match could be.
+  if (/^f[cd][0-9a-f]{2}:/i.test(h)) return true;
   const octets = parseIpv4(h);
   if (!octets) return false;
-  const [a, b] = octets;
+  const [a, b, c, d] = octets;
+  // Why: 0.0.0.0 is a common Ollama/vLLM bind-all address; treat it as local
+  // like the other reserved ranges below.
+  if (a === 0 && b === 0 && c === 0 && d === 0) return true;
   if (a === 127) return true; // loopback
   if (a === 10) return true; // RFC1918
   if (a === 192 && b === 168) return true; // RFC1918
@@ -60,6 +74,21 @@ export function baseUrlAllowed(baseUrl: string): { ok: true } | { ok: false; mes
     url = new URL(baseUrl);
   } catch {
     return { ok: false, message: `baseUrl "${baseUrl}" is not a valid URL` };
+  }
+  // Why: a userinfo-bearing baseUrl (https://user:sk-live-x@host/v1) would
+  // durably persist the credential into .hydra/agent-calls.jsonl, which logs
+  // the invocation URL for every HTTP-transport call.
+  if (url.username || url.password) {
+    return { ok: false, message: `baseUrl must not contain inline credentials (user:pass@host); use apiKeyEnv instead` };
+  }
+  let pathAndQuery = `${url.pathname}${url.search}`;
+  try {
+    pathAndQuery = decodeURIComponent(pathAndQuery);
+  } catch {
+    // Malformed percent-encoding — fall back to scanning the raw (still-encoded) string.
+  }
+  if (isSecretShaped(pathAndQuery)) {
+    return { ok: false, message: `baseUrl "${baseUrl}" appears to inline a secret in its path/query; use apiKeyEnv instead` };
   }
   if (url.protocol === "https:") return { ok: true };
   if (url.protocol === "http:") {

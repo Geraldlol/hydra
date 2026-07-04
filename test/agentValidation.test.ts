@@ -77,6 +77,44 @@ describe("agent definition validation", () => {
     assert.equal(baseUrlAllowed("https://api.openai.com/v1").ok, true);
   });
 
+  test("isLoopbackOrPrivateHost treats 0.0.0.0 and IPv6 ULA addresses as local", () => {
+    assert.equal(isLoopbackOrPrivateHost("0.0.0.0"), true);
+    assert.equal(isLoopbackOrPrivateHost("fd12:3456::1"), true);
+    assert.equal(isLoopbackOrPrivateHost("fc00::1"), true);
+  });
+
+  test("isLoopbackOrPrivateHost still rejects spoofed DNS names after the local-host fix", () => {
+    assert.equal(isLoopbackOrPrivateHost("192.168.evil.test"), false);
+    assert.equal(isLoopbackOrPrivateHost("10.attacker.example"), false);
+  });
+
+  test("baseUrlAllowed allows 0.0.0.0 and IPv6 ULA bind addresses over http", () => {
+    assert.equal(baseUrlAllowed("http://0.0.0.0:11434/v1").ok, true);
+    assert.equal(baseUrlAllowed("http://[fd12:3456::1]:1234/v1").ok, true);
+  });
+
+  test("baseUrlAllowed rejects a baseUrl carrying inline userinfo credentials", () => {
+    const result = baseUrlAllowed("https://user:sk-live-x@host/v1");
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.match(result.message, /credential/i);
+  });
+
+  test("baseUrlAllowed rejects a baseUrl carrying a secret-shaped query parameter", () => {
+    const result = baseUrlAllowed("https://host/v1?api_key=sk-proj-abc123def456");
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.match(result.message, /secret/i);
+  });
+
+  test("baseUrlAllowed still allows clean baseUrls with no credentials or secret-shaped query", () => {
+    assert.equal(baseUrlAllowed("https://host/v1").ok, true);
+    assert.equal(baseUrlAllowed("http://localhost:11434/v1").ok, true);
+  });
+
+  test("isSecretShaped treats a `${env:NAME}` placeholder embedded in a larger value as non-secret", () => {
+    assert.equal(isSecretShaped("Bearer ${env:MY_TOKEN}"), false);
+    assert.equal(isSecretShaped("Bearer sk-live-realkey00000"), true);
+  });
+
   test("validateAgentDefinition accepts a well-formed openai-compatible head", () => {
     const { def, error } = validateAgentDefinition(
       { id: "ollama-qwen", displayName: "Qwen (local)", kind: "openai-compatible", baseUrl: "http://localhost:11434/v1", model: "qwen2.5-coder" },
@@ -101,6 +139,26 @@ describe("agent definition validation", () => {
       new Set(),
     );
     assert.match(error ?? "", /secret|inline|Authorization/i);
+  });
+
+  test("accepts a header value that references an env var via ${env:NAME}, even with a Bearer prefix", () => {
+    const { def, error } = validateAgentDefinition(
+      { id: "ok-header", displayName: "OK", kind: "openai-compatible", baseUrl: "https://x/v1", headers: { Authorization: "Bearer ${env:MY_TOKEN}" } },
+      new Set(),
+    );
+    assert.equal(error, undefined);
+    assert.equal(def?.headers?.Authorization, "Bearer ${env:MY_TOKEN}");
+  });
+
+  test("still rejects a baseUrl carrying inline credentials or a secret-shaped query on validateAgentDefinition", () => {
+    assert.match(
+      validateAgentDefinition({ id: "cred", displayName: "Cred", kind: "openai-compatible", baseUrl: "https://user:sk-live-x@host/v1" }, new Set()).error ?? "",
+      /credential/i,
+    );
+    assert.match(
+      validateAgentDefinition({ id: "q", displayName: "Q", kind: "openai-compatible", baseUrl: "https://host/v1?api_key=sk-proj-abc123def456" }, new Set()).error ?? "",
+      /secret/i,
+    );
   });
 
   test("rejects an agent id that is itself secret-shaped", () => {

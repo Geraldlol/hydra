@@ -86,7 +86,13 @@ export function seatDefinitionPrices(
   const out: Record<string, ModelPrices> = { ...base };
   for (const def of defs) {
     if (out[def.id]) continue;
-    out[def.id] = def.pricing ?? DEFAULT_PRICES_BY_KIND[def.kind];
+    const kindDefault = DEFAULT_PRICES_BY_KIND[def.kind];
+    // Why: def.pricing comes from a user-editable hydraRoom.agents setting and
+    // is only object-shape-checked at validation time — coerce every field so
+    // a non-numeric/NaN/negative value falls back per-field instead of
+    // poisoning usage.jsonl (NaN serializes to null, which can fail record
+    // type-guards on reload).
+    out[def.id] = def.pricing ? coerceModelPrices(def.pricing, kindDefault) : kindDefault;
   }
   return out;
 }
