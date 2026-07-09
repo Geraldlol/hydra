@@ -80,6 +80,12 @@ describe("capability profiles", () => {
     assert.ok(claudeReview);
     assert.equal(classifyAgentAuthority("claude", "review", claudeReview).level, "readOnly");
 
+    const claudeFullNative = argsForCapabilityProfile("claude", "fullNative");
+    assert.ok(claudeFullNative);
+    assert.equal(classifyAgentAuthority("claude", "build", claudeFullNative).level, "fullNative");
+    assert.ok(claudeFullNative.includes("--dangerously-skip-permissions"));
+    assert.equal(claudeFullNative.includes("--permission-mode"), false);
+
     assert.equal(argsForCapabilityProfile("codex", "custom"), undefined);
   });
 

@@ -115,9 +115,11 @@ depends entirely on the user's allow-rules. `dontAsk` is also the default
 `permissionMode` for Claude's own cron jobs (`scheduled_tasks.json`,
 bundle around line 333759) — unattended runs are deny-by-default.
 
-Hydra currently passes `acceptEdits` and `bypassPermissions`. `dontAsk` and
-`auto` are valid options it could expose for stricter / classifier-based
-profiles.
+Hydra currently passes `acceptEdits` for workspace-write profiles. The Full
+Native Claude preset uses the explicit top-level
+`--dangerously-skip-permissions` flag; raw/custom args that use
+`bypassPermissions` are still classified as full native. `dontAsk` and `auto`
+are valid options Hydra could expose for stricter / classifier-based profiles.
 
 ## Common parser pitfalls
 

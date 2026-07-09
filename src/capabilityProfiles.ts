@@ -280,7 +280,7 @@ function claudeArgsForProfile(profile: ConfigurableCapabilityProfileId): string[
     case "nativeBuild":
       return [...claudePrintArgs(), "--permission-mode", "acceptEdits", "--add-dir", "${workspaceFolder}"];
     case "fullNative":
-      return [...claudePrintArgs(), "--permission-mode", "bypassPermissions", "--add-dir", "${workspaceFolder}"];
+      return [...claudePrintArgs(), "--dangerously-skip-permissions", "--add-dir", "${workspaceFolder}"];
     case "custom":
       return undefined;
   }

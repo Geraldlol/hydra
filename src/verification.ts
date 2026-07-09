@@ -29,6 +29,12 @@ export interface VerificationRunOptions {
   signal?: AbortSignal;
 }
 
+interface VerificationProcess {
+  command: string;
+  args: string[];
+  shell: boolean;
+}
+
 export async function ensureVerificationFile(filePath: string): Promise<void> {
   await ensureFile(filePath);
 }
@@ -93,9 +99,10 @@ export interface VerificationResultWithCancel extends VerificationResult {
 export async function runVerificationCommand(options: VerificationRunOptions): Promise<VerificationResultWithCancel> {
   const started = Date.now();
   return new Promise<VerificationResultWithCancel>((resolve) => {
-    const child = cp.spawn(options.command, {
+    const processSpec = verificationProcessForCommand(options.command);
+    const child = cp.spawn(processSpec.command, processSpec.args, {
       cwd: options.cwd,
-      shell: true,
+      shell: processSpec.shell,
       windowsHide: true,
       env: process.env,
     });
@@ -154,6 +161,30 @@ export async function runVerificationCommand(options: VerificationRunOptions): P
     });
     child.on("close", (exitCode) => finish(exitCode));
   });
+}
+
+export function verificationProcessForCommand(
+  command: string,
+  platform: NodeJS.Platform = process.platform
+): VerificationProcess {
+  // Windows `shell: true` goes through cmd.exe; PowerShell interpolation must
+  // run under PowerShell or `$()` / `$env:NAME` are treated as plain cmd text.
+  if (platform === "win32" && isPowerShellInterpolatedCommand(command)) {
+    return {
+      command: "powershell.exe",
+      args: ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+      shell: false,
+    };
+  }
+  return { command, args: [], shell: true };
+}
+
+function isPowerShellInterpolatedCommand(command: string): boolean {
+  return (
+    /(^|[^`])\$\(/.test(command) ||
+    /(^|[^`])\$env:[A-Za-z_][A-Za-z0-9_]*/i.test(command) ||
+    /(^|[^`])\$\{env:[^}]+\}/i.test(command)
+  );
 }
 
 export async function captureGitHead(cwd: string): Promise<string | undefined> {

@@ -9,6 +9,7 @@ import {
   inferVerificationCommand,
   readVerifications,
   resolveVerificationCommand,
+  verificationProcessForCommand,
   verificationAsReviewContext,
   verificationPassed,
   verificationSummary,
@@ -173,5 +174,60 @@ describe("resolveVerificationCommand", () => {
       workspaceRoot: "/nonexistent/path/that/does/not/exist",
     });
     assert.deepEqual(result, { kind: "refusedUntrustedInference" });
+  });
+});
+
+describe("verification shell selection", () => {
+  test("uses PowerShell on Windows for subexpression interpolation", () => {
+    const processSpec = verificationProcessForCommand('Write-Output "Hydra $($env:USERNAME)"', "win32");
+
+    assert.equal(processSpec.command, "powershell.exe");
+    assert.equal(processSpec.shell, false);
+    assert.deepEqual(processSpec.args.slice(0, 4), ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass"]);
+    assert.equal(processSpec.args.at(-1), 'Write-Output "Hydra $($env:USERNAME)"');
+  });
+
+  test("uses PowerShell on Windows for braced environment interpolation", () => {
+    const processSpec = verificationProcessForCommand('Write-Output "Hydra ${env:USERNAME}"', "win32");
+
+    assert.equal(processSpec.command, "powershell.exe");
+    assert.equal(processSpec.shell, false);
+  });
+
+  test("uses PowerShell on Windows for env-drive interpolation", () => {
+    const processSpec = verificationProcessForCommand('Write-Output "Hydra $env:USERNAME"', "win32");
+
+    assert.equal(processSpec.command, "powershell.exe");
+    assert.equal(processSpec.shell, false);
+  });
+
+  test("keeps ordinary npm verification commands on the default shell", () => {
+    const processSpec = verificationProcessForCommand("npm run check && npm test", "win32");
+
+    assert.deepEqual(processSpec, {
+      command: "npm run check && npm test",
+      args: [],
+      shell: true,
+    });
+  });
+
+  test("keeps escaped PowerShell interpolation literals on the default shell", () => {
+    const processSpec = verificationProcessForCommand('echo "`$(literal)"', "win32");
+
+    assert.deepEqual(processSpec, {
+      command: 'echo "`$(literal)"',
+      args: [],
+      shell: true,
+    });
+  });
+
+  test("does not force PowerShell on non-Windows platforms", () => {
+    const processSpec = verificationProcessForCommand('echo "$(date)"', "linux");
+
+    assert.deepEqual(processSpec, {
+      command: 'echo "$(date)"',
+      args: [],
+      shell: true,
+    });
   });
 });
