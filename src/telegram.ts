@@ -1,3 +1,5 @@
+import * as https from "node:https";
+
 export interface TelegramConfig {
   /** Bot token from BotFather, e.g. "123456789:ABCDEF...". */
   botToken: string;
@@ -87,6 +89,80 @@ export interface TelegramUpdatesResult {
   status?: number;
 }
 
+interface TelegramRequestOptions {
+  method: "GET" | "POST";
+  headers?: Record<string, string>;
+  body?: string;
+  signal?: AbortSignal;
+}
+
+interface TelegramHttpResponse {
+  ok: boolean;
+  status: number;
+  text(): Promise<string>;
+  json(): Promise<unknown>;
+}
+
+async function telegramRequest(url: string, options: TelegramRequestOptions): Promise<TelegramHttpResponse> {
+  try {
+    return await fetch(url, {
+      method: options.method,
+      headers: options.headers,
+      body: options.body,
+      signal: options.signal,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") throw err;
+    // Node's undici fetch can fail Telegram's dual-stack hostname path on some
+    // Windows networks while node:https succeeds when pinned to IPv4.
+    return await telegramHttpsRequest(url, options);
+  }
+}
+
+function telegramHttpsRequest(url: string, options: TelegramRequestOptions): Promise<TelegramHttpResponse> {
+  return new Promise((resolve, reject) => {
+    if (options.signal?.aborted) {
+      reject(new DOMException("This operation was aborted", "AbortError"));
+      return;
+    }
+
+    const req = https.request(
+      new URL(url),
+      {
+        method: options.method,
+        headers: options.headers,
+        family: 4,
+        timeout: 60_000,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer | string) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+        res.on("end", () => {
+          const body = Buffer.concat(chunks).toString("utf8");
+          const status = res.statusCode ?? 0;
+          resolve({
+            ok: status >= 200 && status < 300,
+            status,
+            text: async () => body,
+            json: async () => JSON.parse(body),
+          });
+        });
+        res.on("error", reject);
+      }
+    );
+
+    const abort = (): void => {
+      req.destroy(new DOMException("This operation was aborted", "AbortError"));
+    };
+    options.signal?.addEventListener("abort", abort, { once: true });
+    req.on("error", reject);
+    req.on("timeout", () => req.destroy(new Error("Telegram HTTPS request timed out")));
+    req.on("close", () => options.signal?.removeEventListener("abort", abort));
+    if (options.body) req.write(options.body);
+    req.end();
+  });
+}
+
 /**
  * Send a Markdown-formatted message via the Telegram Bot API. Uses the
  * MarkdownV2-safe subset by default (HTML mode actually — simpler escaping)
@@ -114,7 +190,7 @@ export async function sendTelegramMessage(
     disable_web_page_preview: true,
   };
   try {
-    const res = await fetch(url, {
+    const res = await telegramRequest(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -148,7 +224,7 @@ export async function getTelegramUpdates(
   params.set("allowed_updates", JSON.stringify(["message"]));
   const url = `https://api.telegram.org/bot${encodeURIComponent(token)}/getUpdates?${params.toString()}`;
   try {
-    const res = await fetch(url, { method: "GET", signal: options.signal });
+    const res = await telegramRequest(url, { method: "GET", signal: options.signal });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       return { ok: false, updates: [], status: res.status, error: text.slice(0, 500) || `HTTP ${res.status}` };

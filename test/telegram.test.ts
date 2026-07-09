@@ -1,6 +1,50 @@
 import { describe, test } from "node:test";
+import type { TestContext } from "node:test";
 import * as assert from "node:assert/strict";
-import { buildDecisionNotificationHtml, escapeTelegramHtml, extractTelegramInboundCommand } from "../src/telegram";
+import { EventEmitter } from "node:events";
+import type { ClientRequest, IncomingMessage } from "node:http";
+import https = require("node:https");
+import { PassThrough } from "node:stream";
+import {
+  buildDecisionNotificationHtml,
+  escapeTelegramHtml,
+  extractTelegramInboundCommand,
+  getTelegramUpdates,
+  sendTelegramMessage,
+} from "../src/telegram";
+
+function installTelegramHttpsMock(t: TestContext, responseBody: string, statusCode = 200): { bodies: string[] } {
+  const bodies: string[] = [];
+  t.mock.method(https, "request", ((url: string | URL, options: https.RequestOptions, callback?: (res: IncomingMessage) => void) => {
+    assert.match(String(url), /^https:\/\/api\.telegram\.org\//);
+    assert.equal(options.family, 4);
+    const req = new EventEmitter() as ClientRequest;
+    let body = "";
+    req.write = ((chunk: string | Buffer) => {
+      body += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : chunk;
+      return true;
+    }) as ClientRequest["write"];
+    req.end = ((callbackArg?: () => void) => {
+      queueMicrotask(() => {
+        bodies.push(body);
+        const stream = new PassThrough();
+        const res = stream as unknown as IncomingMessage;
+        res.statusCode = statusCode;
+        callback?.(res);
+        stream.end(responseBody);
+        callbackArg?.();
+      });
+      return req;
+    }) as ClientRequest["end"];
+    req.setTimeout = (() => req) as ClientRequest["setTimeout"];
+    req.destroy = ((error?: Error) => {
+      if (error) queueMicrotask(() => req.emit("error", error));
+      return req;
+    }) as ClientRequest["destroy"];
+    return req;
+  }) as typeof https.request);
+  return { bodies };
+}
 
 describe("escapeTelegramHtml", () => {
   test("escapes the three Telegram-significant characters and nothing else", () => {
@@ -54,6 +98,51 @@ describe("buildDecisionNotificationHtml", () => {
     });
     assert.ok(html.length < 1200, `expected truncation but got ${html.length} chars`);
     assert.match(html, /…/);
+  });
+});
+
+describe("Telegram API transport", () => {
+  test("falls back to IPv4 node:https when fetch cannot send a Telegram message", async (t) => {
+    t.mock.method(globalThis, "fetch", (async () => {
+      throw new TypeError("fetch failed");
+    }) as typeof fetch);
+    const httpsMock = installTelegramHttpsMock(t, JSON.stringify({ ok: true, result: { message_id: 123 } }));
+
+    const result = await sendTelegramMessage({ botToken: "123:test-token", chatId: "456" }, "Hydra ping");
+
+    assert.deepEqual(result, { ok: true, status: 200, messageId: 123 });
+    assert.equal(httpsMock.bodies.length, 1);
+    assert.match(httpsMock.bodies[0] ?? "", /"chat_id":"456"/);
+    assert.match(httpsMock.bodies[0] ?? "", /"text":"Hydra ping"/);
+  });
+
+  test("falls back to IPv4 node:https when fetch cannot poll Telegram updates", async (t) => {
+    t.mock.method(globalThis, "fetch", (async () => {
+      throw new TypeError("fetch failed");
+    }) as typeof fetch);
+    installTelegramHttpsMock(t, JSON.stringify({
+      ok: true,
+      result: [
+        {
+          update_id: 77,
+          message: {
+            message_id: 9,
+            text: "/hydra continue",
+            chat: { id: 456 },
+            from: { id: 123, first_name: "Alice" },
+          },
+        },
+      ],
+    }));
+
+    const result = await getTelegramUpdates({ botToken: "123:test-token" }, { offset: 76, limit: 1, timeoutSeconds: 0 });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.status, 200);
+    assert.equal(result.updates[0]?.updateId, 77);
+    assert.equal(result.updates[0]?.message?.chatId, "456");
+    assert.equal(result.updates[0]?.message?.text, "/hydra continue");
+    assert.equal(result.updates[0]?.message?.fromId, "123");
   });
 });
 
