@@ -1164,7 +1164,7 @@
               "description": "Per-phase models for Codex. Missing phases fall back to the CLI default."
             }
           ],
-          "markdownDescription": "Model passed to Codex CLI as `--model <id>` on every `exec` dispatch. Either a single string (applied to every phase) or an object with per-phase overrides. Recent Codex CLIs ship `gpt-5.6` (current flagship), `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark` (interactive only, no API), `gpt-5.2`. Run `codex debug models` (or `Hydra: Refresh Codex Models`) to inspect what your install actually exposes. Use `Hydra: Choose Model` (Ctrl+Alt+M) to change live."
+          "markdownDescription": "Model passed to Codex CLI as `--model <id>` on every `exec` dispatch. Either a single string (applied to every phase) or an object with per-phase overrides. Current Codex CLI catalog entries include `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark` (interactive only, no API), and `gpt-5.2`. Run `codex debug models` (or `Hydra: Refresh Codex Models`) to inspect what your install actually exposes. Use `Hydra: Choose Model` (Ctrl+Alt+M) to change live."
         },
         "hydraRoom.geminiModel": {
           "scope": "application",

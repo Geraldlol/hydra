@@ -222,8 +222,7 @@ function codexPresetsForChooser(
   // truth and replaces this list with live data; this only seeds the picker
   // before the first refresh, so keep the current flagship at the top.
   return [
-    { label: "gpt-5.6", description: "GPT-5.6 — current Codex flagship" },
-    { label: "gpt-5.5", description: "GPT-5.5 — prior default" },
+    { label: "gpt-5.5", description: "GPT-5.5 - current Codex flagship" },
     { label: "gpt-5.4", description: "GPT-5.4" },
     { label: "gpt-5.4-mini", description: "GPT-5.4-Mini — lighter / cheaper" },
     { label: "gpt-5.3-codex", description: "Code-tuned 5.3" },

@@ -129,7 +129,6 @@ export const DEFAULT_MODEL_PRICES: Record<string, ModelPrices> = {
   // since OpenAI has not published official pricing for every variant the
   // Codex CLI exposes. Set hydraRoom.modelPrices["gpt-5.5"] etc. to pin
   // exact rates. Run `codex debug models` to see what your install offers.
-  "gpt-5.6": { inputPerMTok: 1.25, outputPerMTok: 10, cacheReadPerMTok: 0.125, cacheCreatePerMTok: 1.25 },
   "gpt-5.5": { inputPerMTok: 1.25, outputPerMTok: 10, cacheReadPerMTok: 0.125, cacheCreatePerMTok: 1.25 },
   "gpt-5.4": { inputPerMTok: 1.25, outputPerMTok: 10, cacheReadPerMTok: 0.125, cacheCreatePerMTok: 1.25 },
   "gpt-5.4-mini": { inputPerMTok: 0.25, outputPerMTok: 2, cacheReadPerMTok: 0.025, cacheCreatePerMTok: 0.25 },
