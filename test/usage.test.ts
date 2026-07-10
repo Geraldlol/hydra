@@ -223,6 +223,20 @@ describe("resolveModelPrices", () => {
     assert.ok(sonnet);
     assert.equal(lower.inputPerMTok, sonnet.inputPerMTok);
   });
+
+  test("prices the documented GPT-5.6 Codex family", () => {
+    const sol = resolveModelPrices("codex", "gpt-5.6-sol");
+    const alias = resolveModelPrices("codex", "gpt-5.6");
+    const terra = resolveModelPrices("codex", "gpt-5.6-terra");
+    const luna = resolveModelPrices("codex", "gpt-5.6-luna");
+    assert.equal(sol.inputPerMTok, 5);
+    assert.equal(sol.outputPerMTok, 30);
+    assert.deepEqual(alias, sol);
+    assert.equal(terra.inputPerMTok, 2.5);
+    assert.equal(terra.outputPerMTok, 15);
+    assert.equal(luna.inputPerMTok, 1);
+    assert.equal(luna.outputPerMTok, 6);
+  });
 });
 
 describe("buildUsageRecord stores the model and prices accordingly", () => {

@@ -15,8 +15,9 @@ export interface EffortChooserDeps {
 /**
  * Interactive Hydra: Choose Thinking Level flow. Same agent/scope/value
  * walk as the model chooser, but writes to hydraRoom.claudeEffort or
- * hydraRoom.codexReasoning depending on the agent. Claude supports an
- * extra `max` level above `xhigh`; Codex caps at `xhigh`.
+ * hydraRoom.codexReasoning depending on the agent. Newer Codex models can
+ * expose higher/lower effort names, so keep the chooser permissive enough to
+ * match the native CLI instead of freezing an older four-level set.
  */
 export async function chooseEffortInteractively(deps: EffortChooserDeps): Promise<void> {
   const agentPick = await vscode.window.showQuickPick(
@@ -40,7 +41,7 @@ export async function chooseEffortInteractively(deps: EffortChooserDeps): Promis
   if (!scopePick) return;
   const scope = scopePick.value as PhaseScope;
 
-  const presets = agent === "claude" ? [...BASE_LEVELS, CLAUDE_MAX] : BASE_LEVELS;
+  const presets = agent === "claude" ? CLAUDE_LEVELS : CODEX_LEVELS;
   const currentRaw = readEffortSetting(agent);
   const currentForScope = phasedSettingForScope(currentRaw, scope);
   const items: Array<{ label: string; description?: string; value: string }> = [
@@ -72,10 +73,17 @@ const BASE_LEVELS = [
   { label: "low", description: "Fast, less deliberation" },
   { label: "medium", description: "Balanced (CLI default for most models)" },
   { label: "high", description: "Greater reasoning depth" },
-  { label: "xhigh", description: "Extra-high — slower, more thorough" },
+  { label: "xhigh", description: "Extra-high - slower, more thorough" },
 ];
 
-const CLAUDE_MAX = { label: "max", description: "Claude-only — maximum effort" };
+const CLAUDE_LEVELS = [...BASE_LEVELS, { label: "max", description: "Maximum effort" }];
+const CODEX_LEVELS = [
+  { label: "none", description: "No reasoning when the selected model supports it" },
+  { label: "minimal", description: "Minimal reasoning" },
+  ...BASE_LEVELS,
+  { label: "max", description: "Maximum reasoning when the selected model supports it" },
+  { label: "ultra", description: "Ultra mode when the selected Codex runtime supports it" },
+];
 
 function readEffortSetting(agent: AgentId): unknown {
   const key = agent === "claude" ? "claudeEffort" : "codexReasoning";

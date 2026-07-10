@@ -125,10 +125,12 @@ export const DEFAULT_MODEL_PRICES: Record<string, ModelPrices> = {
   haiku: { inputPerMTok: 1, outputPerMTok: 5, cacheReadPerMTok: 0.1, cacheCreatePerMTok: 1.25 },
   "claude-haiku-4-5-20251001": { inputPerMTok: 1, outputPerMTok: 5, cacheReadPerMTok: 0.1, cacheCreatePerMTok: 1.25 },
   "claude-haiku-4-5": { inputPerMTok: 1, outputPerMTok: 5, cacheReadPerMTok: 0.1, cacheCreatePerMTok: 1.25 },
-  // Codex / OpenAI family. The 5.x rates here are best-effort estimates
-  // since OpenAI has not published official pricing for every variant the
-  // Codex CLI exposes. Set hydraRoom.modelPrices["gpt-5.5"] etc. to pin
-  // exact rates. Run `codex debug models` to see what your install offers.
+  // Codex / OpenAI family. Set hydraRoom.modelPrices["gpt-5.6-sol"] etc. to
+  // pin custom rates. Run `codex debug models` to see what your install offers.
+  "gpt-5.6": { inputPerMTok: 5, outputPerMTok: 30, cacheReadPerMTok: 0.5, cacheCreatePerMTok: 6.25 },
+  "gpt-5.6-sol": { inputPerMTok: 5, outputPerMTok: 30, cacheReadPerMTok: 0.5, cacheCreatePerMTok: 6.25 },
+  "gpt-5.6-terra": { inputPerMTok: 2.5, outputPerMTok: 15, cacheReadPerMTok: 0.25, cacheCreatePerMTok: 3.125 },
+  "gpt-5.6-luna": { inputPerMTok: 1, outputPerMTok: 6, cacheReadPerMTok: 0.1, cacheCreatePerMTok: 1.25 },
   "gpt-5.5": { inputPerMTok: 1.25, outputPerMTok: 10, cacheReadPerMTok: 0.125, cacheCreatePerMTok: 1.25 },
   "gpt-5.4": { inputPerMTok: 1.25, outputPerMTok: 10, cacheReadPerMTok: 0.125, cacheCreatePerMTok: 1.25 },
   "gpt-5.4-mini": { inputPerMTok: 0.25, outputPerMTok: 2, cacheReadPerMTok: 0.025, cacheCreatePerMTok: 0.25 },

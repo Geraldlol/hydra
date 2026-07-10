@@ -1164,7 +1164,7 @@
               "description": "Per-phase models for Codex. Missing phases fall back to the CLI default."
             }
           ],
-          "markdownDescription": "Model passed to Codex CLI as `--model <id>` on every `exec` dispatch. Either a single string (applied to every phase) or an object with per-phase overrides. Current Codex CLI catalog entries include `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark` (interactive only, no API), and `gpt-5.2`. Run `codex debug models` (or `Hydra: Refresh Codex Models`) to inspect what your install actually exposes. Use `Hydra: Choose Model` (Ctrl+Alt+M) to change live."
+          "markdownDescription": "Model passed to Codex CLI as `--model <id>` on every `exec` dispatch. Either a single string (applied to every phase) or an object with per-phase overrides. Current Codex model IDs include `gpt-5.6-sol` (`gpt-5.6` alias), `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark` (interactive only, no API), and `gpt-5.2`. Run `codex debug models` (or `Hydra: Refresh Codex Models`) to inspect what your install actually exposes. Use `Hydra: Choose Model` (Ctrl+Alt+M) to change live."
         },
         "hydraRoom.geminiModel": {
           "scope": "application",
@@ -1258,10 +1258,14 @@
               "type": "string",
               "enum": [
                 "",
+                "none",
+                "minimal",
                 "low",
                 "medium",
                 "high",
-                "xhigh"
+                "xhigh",
+                "max",
+                "ultra"
               ]
             },
             {
@@ -1271,37 +1275,49 @@
                   "type": "string",
                   "enum": [
                     "",
+                    "none",
+                    "minimal",
                     "low",
                     "medium",
                     "high",
-                    "xhigh"
+                    "xhigh",
+                    "max",
+                    "ultra"
                   ]
                 },
                 "build": {
                   "type": "string",
                   "enum": [
                     "",
+                    "none",
+                    "minimal",
                     "low",
                     "medium",
                     "high",
-                    "xhigh"
+                    "xhigh",
+                    "max",
+                    "ultra"
                   ]
                 },
                 "review": {
                   "type": "string",
                   "enum": [
                     "",
+                    "none",
+                    "minimal",
                     "low",
                     "medium",
                     "high",
-                    "xhigh"
+                    "xhigh",
+                    "max",
+                    "ultra"
                   ]
                 }
               },
               "additionalProperties": false
             }
           ],
-          "markdownDescription": "Reasoning effort passed to Codex as `-c model_reasoning_effort=<level>` on every `exec` dispatch. Either a single string or per-phase object. Levels: `low`, `medium`, `high`, `xhigh`. Codex's supported levels can vary by model — run `Hydra: Refresh Codex Models` then check the chooser description for the model's `default_reasoning_level`. Leave blank to use the CLI's default. If `-c model_reasoning_effort=` is already in `hydraRoom.codexExecArgs*`, the explicit arg wins. Use `Hydra: Choose Thinking Level` (Ctrl+Alt+E)."
+          "markdownDescription": "Reasoning effort passed to Codex as `-c model_reasoning_effort=<level>` on every `exec` dispatch. Either a single string or per-phase object. Levels can vary by model/runtime; common values include `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and `ultra`. Run `Hydra: Refresh Codex Models` then check the chooser description for the model's `default_reasoning_level`. Leave blank to use the CLI's default. If `-c model_reasoning_effort=` is already in `hydraRoom.codexExecArgs*`, the explicit arg wins. Use `Hydra: Choose Thinking Level` (Ctrl+Alt+E)."
         },
         "hydraRoom.modelPrices": {
           "type": "object",

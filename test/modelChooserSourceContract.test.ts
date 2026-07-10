@@ -25,10 +25,12 @@ describe("model chooser source contract", () => {
     }
   });
 
-  test("Codex fallback presets seed the current local catalog flagship", () => {
+  test("Codex fallback presets seed the current documented 5.6 family", () => {
     const source = modelChooser();
+    assert.match(source, /label:\s*"gpt-5\.6-sol"/, "gpt-5.6-sol missing from Codex fallback presets");
+    assert.match(source, /label:\s*"gpt-5\.6-terra"/, "gpt-5.6-terra missing from Codex fallback presets");
+    assert.match(source, /label:\s*"gpt-5\.6-luna"/, "gpt-5.6-luna missing from Codex fallback presets");
     assert.match(source, /label:\s*"gpt-5\.5"/, "gpt-5.5 missing from Codex fallback presets");
-    assert.doesNotMatch(source, /label:\s*"gpt-5\.6/, "unsupported gpt-5.6 presets must not be seeded");
   });
 
   test("Gemini appears in the model chooser with a preset flagship", () => {
