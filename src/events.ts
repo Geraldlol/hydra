@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { ensureFile, readJsonlGuarded, serializePerFile } from "./fileQueue";
+import { appendFileSafely, ensureFile, readJsonlGuarded, serializePerFile } from "./fileQueue";
 import type { AgentId } from "./phases";
 import type { Phase } from "./prompts";
 
@@ -53,7 +53,7 @@ export async function appendHydraEvent(filePathOrWorkspaceRoot: string, event: H
     : hydraEventsPath(filePathOrWorkspaceRoot);
   await serializePerFile(filePath, async () => {
     await ensureDirOnce(path.dirname(filePath));
-    await fs.appendFile(filePath, `${JSON.stringify(event)}\n`, "utf8");
+    await appendFileSafely(filePath, `${JSON.stringify(event)}\n`);
   });
 }
 

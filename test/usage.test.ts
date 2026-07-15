@@ -1,5 +1,8 @@
 import { describe, test } from "node:test";
 import * as assert from "node:assert/strict";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import {
   addRecordToSummary,
   boundUsageRecords,
@@ -9,6 +12,8 @@ import {
   DEFAULT_MODEL_PRICES,
   DEFAULT_PRICES,
   DEFAULT_PRICES_BY_KIND,
+  loadClaudeAutomationSpendThisMonth,
+  loadUsageRecords,
   parseCodexTextTokens,
   resolveModelPrices,
   seatDefinitionPrices,
@@ -35,6 +40,78 @@ function usageRow(partial: Partial<UsageRecord> & { agent: UsageRecord["agent"];
     ...partial,
   };
 }
+
+describe("loadUsageRecords", () => {
+  test("loads only complete records from a bounded newest tail", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-usage-tail-"));
+    const file = path.join(dir, "usage.jsonl");
+    const old = { ...usageRow({ agent: "codex", timestamp: "2026-01-01T00:00:00.000Z", costUsd: 1 }), padding: "x".repeat(4096) };
+    const recentA = usageRow({ agent: "claude", timestamp: "2026-07-01T00:00:00.000Z", costUsd: 2 });
+    const recentB = usageRow({ agent: "codex", timestamp: "2026-07-02T00:00:00.000Z", costUsd: 3 });
+    await fs.writeFile(file, [
+      JSON.stringify(old),
+      JSON.stringify(recentA),
+      JSON.stringify(recentB),
+      '{"timestamp":"torn"',
+    ].join("\n"), "utf8");
+
+    const records = await loadUsageRecords(file, { maxBytes: 768 });
+
+    assert.deepEqual(records.map((record) => record.timestamp), [recentA.timestamp, recentB.timestamp]);
+  });
+
+  test("streams day-one Claude spend on day 31 even after the bounded UI window drops it", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-usage-month-day31-"));
+    const file = path.join(dir, "usage.jsonl");
+    const now = new Date("2026-07-31T23:59:59.000Z");
+    const records = [
+      usageRow({ agent: "claude", timestamp: "2026-07-01T00:00:00.000Z", costUsd: 11 }),
+      usageRow({ agent: "claude", timestamp: "2026-07-31T12:00:00.000Z", costUsd: 2 }),
+    ];
+    await fs.writeFile(file, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
+
+    const uiWindow = boundUsageRecords(records, { windowDays: 30, minRecords: 0, now });
+    assert.equal(claudeAutomationSpendThisMonth(uiWindow, now), 2, "the UI replay intentionally drops day one");
+    assert.equal(await loadClaudeAutomationSpendThisMonth(file, now), 13);
+  });
+
+  test("counts custom Claude-kind heads against the same automation credit pool", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-usage-custom-claude-"));
+    const file = path.join(dir, "usage.jsonl");
+    const now = new Date("2026-07-14T12:00:00.000Z");
+    const records = [
+      usageRow({ agent: "claude", agentKind: "claude", timestamp: "2026-07-01T00:00:00.000Z", costUsd: 3 }),
+      usageRow({ agent: "reviewer-claude", agentKind: "claude", timestamp: "2026-07-02T00:00:00.000Z", costUsd: 5 }),
+      usageRow({ agent: "local-head", agentKind: "cli-template", timestamp: "2026-07-03T00:00:00.000Z", costUsd: 7 }),
+    ];
+    await fs.writeFile(file, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
+
+    assert.equal(claudeAutomationSpendThisMonth(records, now), 8);
+    assert.equal(await loadClaudeAutomationSpendThisMonth(file, now), 8);
+  });
+
+  test("streams the complete month through both the 16 MiB tail and 2,000-row replay limits", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-usage-month-overflow-"));
+    const file = path.join(dir, "usage.jsonl");
+    const now = new Date("2026-07-31T23:59:59.000Z");
+    const rowCount = 2_105;
+    const lines = Array.from({ length: rowCount }, (_, index) => JSON.stringify({
+      ...usageRow({
+        agent: "claude",
+        timestamp: "2026-07-01T00:00:00.000Z",
+        costUsd: 0.01,
+        requestId: `request-${index}`,
+      }),
+      padding: "x".repeat(8_192),
+    }));
+    await fs.writeFile(file, `${lines.join("\n")}\n`, "utf8");
+
+    const tailReplay = boundUsageRecords(await loadUsageRecords(file), { now });
+    assert.ok(tailReplay.length < rowCount, "the bounded UI replay should omit early rows in this fixture");
+    assert.ok(claudeAutomationSpendThisMonth(tailReplay, now) < rowCount * 0.01);
+    assert.equal(await loadClaudeAutomationSpendThisMonth(file, now), 21.05);
+  });
+});
 
 describe("parseCodexTextTokens", () => {
   test("parses the trailing tokens-used block Codex prints", () => {

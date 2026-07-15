@@ -1,4 +1,5 @@
 import * as fs from "node:fs/promises";
+import { constants as fsConstants, type Stats } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { StringDecoder } from "node:string_decoder";
@@ -6,7 +7,7 @@ import { parseClaudeEventLine } from "./claudeEvents";
 import { parseCodexEventLine, type AgentMessageItem } from "./codexEvents";
 import type { AgentId } from "./phases";
 import type { Phase } from "./prompts";
-import { serializePerFile } from "./fileQueue";
+import { appendFileSafely, BoundedLineScanner, serializePerFile } from "./fileQueue";
 
 export type LiveChannelOutputMode = "plain" | "claudeStreamJson" | "codexJson";
 
@@ -40,6 +41,9 @@ export interface LiveChannelEvent {
 const MAX_PARTIAL_LINE_CHARS = 1_000_000;
 const MAX_TASK_OUTPUT_FILE_BYTES = 64_000;
 const MAX_PAYLOAD_STRING_CHARS = 20_000;
+const MAX_PENDING_LIVE_LINES = 4_096;
+const MAX_PENDING_LIVE_RECORDS = 4_096;
+const MAX_TRACKED_CODEX_ITEMS = 2_048;
 const TASK_SUBTYPES = new Set(["task_started", "task_updated", "task_progress", "task_summary", "task_notification"]);
 
 export function liveChannelPath(workspaceRoot: string, requestId: string, agent: AgentId): string {
@@ -53,9 +57,18 @@ export function createLiveChannelWriter(args: LiveChannelWriterArgs): LiveChanne
 
 abstract class JsonlLiveChannelWriter implements LiveChannelWriter {
   readonly filePath: string;
-  private buffer = "";
-  private processing: Promise<void> = Promise.resolve();
-  private pending: Promise<void> = Promise.resolve();
+  private readonly lines = new BoundedLineScanner({
+    maxLineChars: MAX_PARTIAL_LINE_CHARS,
+    headLinesPerPush: 3_072,
+    tailLinesPerPush: 1_024,
+  });
+  private readonly lineQueue: string[] = [];
+  private lineQueueOffset = 0;
+  private lineDrain: Promise<void> | undefined;
+  private readonly recordQueue: LiveChannelEvent[] = [];
+  private recordQueueOffset = 0;
+  private recordDrain: Promise<void> | undefined;
+  private droppedQueuedLines = 0;
   private dirEnsured = false;
 
   protected constructor(protected readonly args: LiveChannelWriterArgs) {
@@ -63,27 +76,27 @@ abstract class JsonlLiveChannelWriter implements LiveChannelWriter {
   }
 
   push(chunk: string): void {
-    this.buffer += chunk;
-    const lines = this.buffer.split("\n");
-    this.buffer = lines.pop() ?? "";
-    if (this.buffer.length > MAX_PARTIAL_LINE_CHARS) {
-      // Why: a single unterminated line over the cap is almost certainly a
-      // runaway/garbled stream, not a real JSONL record. Drop it, but emit a
-      // marker so readers see the gap instead of silently losing data.
-      this.buffer = "";
-      this.emit("stream_truncated", { droppedChars: MAX_PARTIAL_LINE_CHARS });
+    let scannerDropped = false;
+    const droppedBefore = this.droppedQueuedLines;
+    this.lines.push(
+      chunk,
+      (line) => this.enqueueLine(line, false),
+      () => { scannerDropped = true; },
+    );
+    if (scannerDropped || this.droppedQueuedLines !== droppedBefore) {
+      this.emit("stream_truncated", {
+        reason: scannerDropped ? "line_limit" : "pending_queue_limit",
+        droppedLines: this.droppedQueuedLines - droppedBefore || undefined,
+      });
     }
-    for (const line of lines) {
-      this.enqueueLine(line);
-    }
+    this.startLineDrain();
   }
 
   async flush(): Promise<void> {
-    const trailing = this.buffer;
-    this.buffer = "";
-    if (trailing.trim()) this.enqueueLine(trailing);
-    await this.processing;
-    await this.pending;
+    this.lines.flush((line) => this.enqueueLine(line, false));
+    this.startLineDrain();
+    while (this.lineDrain) await this.lineDrain;
+    while (this.recordDrain) await this.recordDrain;
   }
 
   protected emit(kind: string, payload?: unknown): void {
@@ -101,21 +114,73 @@ abstract class JsonlLiveChannelWriter implements LiveChannelWriter {
     } catch {
       // Live-channel observers are UI-only; they must not break file writes.
     }
-    this.pending = this.pending.then(() => this.write(record), () => this.write(record));
+    this.enqueueRecord(record);
   }
 
   protected abstract processLine(line: string): void | Promise<void>;
 
-  private enqueueLine(line: string): void {
-    const run = async () => {
+  private enqueueLine(line: string, startDrain = true): void {
+    if (!hasNonWhitespace(line)) return;
+    if (this.lineQueue.length - this.lineQueueOffset >= MAX_PENDING_LIVE_LINES) {
+      this.lineQueueOffset++;
+      this.droppedQueuedLines++;
+      this.compactLineQueue();
+    }
+    this.lineQueue.push(line);
+    if (startDrain) this.startLineDrain();
+  }
+
+  private startLineDrain(): void {
+    if (!this.lineDrain && this.lineQueueOffset < this.lineQueue.length) {
+      this.lineDrain = this.drainLines();
+    }
+  }
+
+  private async drainLines(): Promise<void> {
+    while (this.lineQueueOffset < this.lineQueue.length) {
+      const line = this.lineQueue[this.lineQueueOffset++];
       try {
-        await this.processLine(line);
+        await this.processLine(line ?? "");
       } catch {
         // Live channel parsing is best-effort. A malformed event or transient
         // task-output read problem should drop only that event.
       }
-    };
-    this.processing = this.processing.then(run, run);
+    }
+    this.lineQueue.length = 0;
+    this.lineQueueOffset = 0;
+    this.lineDrain = undefined;
+  }
+
+  private enqueueRecord(record: LiveChannelEvent): void {
+    if (this.recordQueue.length - this.recordQueueOffset >= MAX_PENDING_LIVE_RECORDS) {
+      // Prefer terminal/newest events over stale progress when disk is slow.
+      this.recordQueueOffset++;
+      this.compactRecordQueue();
+    }
+    this.recordQueue.push(record);
+    if (!this.recordDrain) this.recordDrain = this.drainRecords();
+  }
+
+  private async drainRecords(): Promise<void> {
+    while (this.recordQueueOffset < this.recordQueue.length) {
+      const record = this.recordQueue[this.recordQueueOffset++];
+      if (record) await this.write(record);
+    }
+    this.recordQueue.length = 0;
+    this.recordQueueOffset = 0;
+    this.recordDrain = undefined;
+  }
+
+  private compactLineQueue(): void {
+    if (this.lineQueueOffset < 1_024) return;
+    this.lineQueue.splice(0, this.lineQueueOffset);
+    this.lineQueueOffset = 0;
+  }
+
+  private compactRecordQueue(): void {
+    if (this.recordQueueOffset < 1_024) return;
+    this.recordQueue.splice(0, this.recordQueueOffset);
+    this.recordQueueOffset = 0;
   }
 
   private async write(record: LiveChannelEvent): Promise<void> {
@@ -125,7 +190,7 @@ abstract class JsonlLiveChannelWriter implements LiveChannelWriter {
           await fs.mkdir(path.dirname(this.filePath), { recursive: true });
           this.dirEnsured = true;
         }
-        await fs.appendFile(this.filePath, `${JSON.stringify(record)}\n`, "utf8");
+        await appendFileSafely(this.filePath, `${JSON.stringify(record)}\n`);
       });
     } catch {
       // Live channel files are diagnostic/control-plane metadata. A transient
@@ -201,6 +266,10 @@ class CodexLiveChannelWriter extends JsonlLiveChannelWriter {
     if (item.type === "agent_message") {
       const { id, text } = item as AgentMessageItem;
       if (typeof id !== "string" || typeof text !== "string") return;
+      if (!this.emittedByItemId.has(id) && this.emittedByItemId.size >= MAX_TRACKED_CODEX_ITEMS) {
+        const oldest = this.emittedByItemId.keys().next().value as string | undefined;
+        if (oldest !== undefined) this.emittedByItemId.delete(oldest);
+      }
       const emitted = this.emittedByItemId.get(id) ?? "";
       if (!text.startsWith(emitted)) return;
       const delta = text.slice(emitted.length);
@@ -264,7 +333,11 @@ function numberField(record: Record<string, unknown>, key: string): number | und
   return typeof record[key] === "number" && Number.isFinite(record[key]) ? record[key] as number : undefined;
 }
 
-async function readTaskOutputFile(filePath: string, workspaceRoot: string): Promise<Record<string, unknown>> {
+async function readTaskOutputFile(
+  filePath: string,
+  workspaceRoot: string,
+  afterInitialLstat?: () => void | Promise<void>,
+): Promise<Record<string, unknown>> {
   const resolved = path.isAbsolute(filePath) ? path.resolve(filePath) : path.resolve(workspaceRoot, filePath);
   // Fast lexical reject: keeps obviously out-of-bounds (and non-existent) paths
   // returning blocked_path without a filesystem hit.
@@ -283,11 +356,40 @@ async function readTaskOutputFile(filePath: string, workspaceRoot: string): Prom
     if (!(await isRealTaskOutputPathAllowed(realTarget, workspaceRoot))) {
       return { outputFileReadStatus: "blocked_path" };
     }
-    const stat = await fs.stat(realTarget);
-    if (!stat.isFile()) return { outputFileReadStatus: "not_file" };
-    handle = await fs.open(realTarget, "r");
+    const before = await fs.lstat(resolved);
+    if (before.isSymbolicLink() || before.nlink !== 1) {
+      return { outputFileReadStatus: "blocked_path" };
+    }
+    if (!before.isFile()) return { outputFileReadStatus: "not_file" };
+    await afterInitialLstat?.();
+    const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
+    handle = await fs.open(resolved, fsConstants.O_RDONLY | noFollow);
+    const opened = await handle.stat();
+    if (!opened.isFile()) return { outputFileReadStatus: "not_file" };
+    if (opened.nlink !== 1 || !sameFileIdentity(before, opened)) {
+      return { outputFileReadStatus: "blocked_path" };
+    }
+    const afterOpen = await fs.lstat(resolved);
+    if (afterOpen.isSymbolicLink() || afterOpen.nlink !== 1 || !sameFileIdentity(opened, afterOpen)) {
+      return { outputFileReadStatus: "blocked_path" };
+    }
+    const realAfterOpen = await fs.realpath(resolved);
+    if (
+      normalizeForCompare(realAfterOpen) !== normalizeForCompare(realTarget)
+      || !(await isRealTaskOutputPathAllowed(realAfterOpen, workspaceRoot))
+    ) {
+      return { outputFileReadStatus: "blocked_path" };
+    }
     const buffer = Buffer.alloc(MAX_TASK_OUTPUT_FILE_BYTES + 1);
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    const afterRead = await fs.lstat(resolved);
+    if (afterRead.isSymbolicLink() || afterRead.nlink !== 1 || !sameFileIdentity(opened, afterRead)) {
+      return { outputFileReadStatus: "blocked_path" };
+    }
+    const realAfterRead = await fs.realpath(resolved);
+    if (normalizeForCompare(realAfterRead) !== normalizeForCompare(realTarget)) {
+      return { outputFileReadStatus: "blocked_path" };
+    }
     const sliceLen = Math.min(bytesRead, MAX_TASK_OUTPUT_FILE_BYTES);
     // Why: decode whole UTF-8 code points only — a byte-boundary cut would emit
     // a U+FFFD replacement char. StringDecoder drops a trailing partial sequence.
@@ -298,17 +400,29 @@ async function readTaskOutputFile(filePath: string, workspaceRoot: string): Prom
     // or files in the (MAX_PAYLOAD_STRING_CHARS, MAX_TASK_OUTPUT_FILE_BYTES]
     // window would be silently cut while the flag claimed completeness.
     const text = decoded.slice(0, MAX_PAYLOAD_STRING_CHARS);
-    const truncated = decoded.length > text.length || stat.size > sliceLen;
+    const truncated = decoded.length > text.length || opened.size > sliceLen;
     return {
       outputFileReadStatus: "ok",
       outputFileText: text,
       outputFileTruncated: truncated,
     };
-  } catch {
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ELOOP") {
+      return { outputFileReadStatus: "blocked_path" };
+    }
     return { outputFileReadStatus: "read_error" };
   } finally {
     await handle?.close().catch(() => undefined);
   }
+}
+
+/** Test-only deterministic seam for exercising the lstat/open swap window. */
+export function readTaskOutputFileForTests(
+  filePath: string,
+  workspaceRoot: string,
+  afterInitialLstat: () => void | Promise<void>,
+): Promise<Record<string, unknown>> {
+  return readTaskOutputFile(filePath, workspaceRoot, afterInitialLstat);
 }
 
 function isAllowedTaskOutputPath(candidate: string, workspaceRoot: string): boolean {
@@ -343,6 +457,18 @@ function isPathInside(candidate: string, root: string): boolean {
 function normalizeForCompare(value: string): string {
   const resolved = path.resolve(value);
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function sameFileIdentity(left: Stats, right: Stats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function hasNonWhitespace(value: string): boolean {
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code !== 0x20 && code !== 0x09 && code !== 0x0d && code !== 0x0a) return true;
+  }
+  return false;
 }
 
 function safePathSegment(value: string): string {

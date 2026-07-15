@@ -1,6 +1,5 @@
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { ensureFile, readJsonlGuarded, serializePerFile } from "./fileQueue";
+import { appendFileSafely, ensureFile, readJsonlGuarded, serializePerFile } from "./fileQueue";
 import type { AgentId } from "./phases";
 import type { Phase } from "./prompts";
 
@@ -69,8 +68,7 @@ export async function ensureManyHeadsSmokeFile(filePath: string): Promise<void> 
 
 export async function appendManyHeadsSmokeReport(filePath: string, report: ManyHeadsSmokeReport): Promise<void> {
   await serializePerFile(filePath, async () => {
-    await fs.mkdir(path.dirname(filePath), { recursive: true });
-    await fs.appendFile(filePath, `${JSON.stringify(report)}\n`, "utf8");
+    await appendFileSafely(filePath, `${JSON.stringify(report)}\n`);
   });
 }
 
@@ -142,7 +140,7 @@ export function buildManyHeadsSmokeReport(input: BuildManyHeadsSmokeReportInput)
 export function formatManyHeadsSmokeReport(report: ManyHeadsSmokeReport): string {
   const status = report.passed ? "passed" : "failed";
   const lines = [
-    `Many Heads smoke test ${status}.`,
+    `Claude Worker Fanout smoke test ${status}.`,
     `Expected Claude workers: ${report.expectedClaudeWorkers}`,
     `Observed: ${report.observed.codexStarts} Codex start(s), ${report.observed.claudeStarts} Claude start(s), ${report.observed.liveFiles} live file(s), ${report.observed.forwardedTaskEvents} forwarded task event(s).`,
     "Checks:",

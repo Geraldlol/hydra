@@ -1,4 +1,5 @@
 import * as cp from "node:child_process";
+import { windowsSystemExecutable } from "./executablePath";
 
 // Cap accumulated agent stdout per call. A poisoned CLAUDE.md / AGENTS.md
 // can prompt-inject the CLI into emitting hundreds of MB of stream-json
@@ -30,16 +31,18 @@ export function appendBoundedStream(
   chunk: string,
   maxBytes: number,
   marker: string
-): void {
-  if (state.truncated) return;
+): string {
+  if (state.truncated) return "";
+  const previousLength = state.text.length;
   if (state.text.length + chunk.length > maxBytes) {
     const remaining = maxBytes - state.text.length;
     if (remaining > 0) state.text += chunk.slice(0, remaining);
     state.text += `\n${marker}\n`;
     state.truncated = true;
-    return;
+    return state.text.slice(previousLength);
   }
   state.text += chunk;
+  return state.text.slice(previousLength);
 }
 
 export interface RunResult {
@@ -49,6 +52,10 @@ export interface RunResult {
   timedOut: boolean;
   cancelled: boolean;
   timeoutMs?: number;
+  // Set only when Hydra exhausted graceful and forced termination attempts
+  // without observing the child process close. Another turn must not start in
+  // this extension host because the native CLI may still be running.
+  terminationFailed?: boolean;
 }
 
 export interface AgentSpawn {
@@ -122,7 +129,7 @@ export function spawnViaCmdShim(
 ): cp.ChildProcess {
   const line = [command, ...args].map(quoteForCmd).join(" ");
   const wrapped = `"${line}"`;
-  return cp.spawn("cmd.exe", ["/d", "/s", "/c", wrapped], {
+  return cp.spawn(windowsSystemExecutable("cmd.exe"), ["/d", "/s", "/c", wrapped], {
     ...options,
     windowsVerbatimArguments: true,
   });
@@ -175,17 +182,31 @@ export async function runAgent(
     let timedOut = false;
     let cancelled = false;
     let settled = false;
-    let backstop: ReturnType<typeof setTimeout> | undefined;
+    let forceBackstop: ReturnType<typeof setTimeout> | undefined;
+    let failureBackstop: ReturnType<typeof setTimeout> | undefined;
+    let terminationStarted = false;
+    let terminationFailed = false;
 
     // After we ask a child to terminate (timeout or abort), guarantee the
     // returned Promise still resolves even if the child never emits a
     // "close" event — a wedged grandchild can hold the pipe open, or the
     // process group signal can no-op (ESRCH) and leave us hanging forever.
-    // Why 2000ms: gives SIGTERM/taskkill time to land before we escalate
-    // and force-settle, while keeping the worst-case hang bounded.
-    const armBackstop = () => {
-      if (backstop) return;
-      backstop = setTimeout(() => {
+    // Give the initial request one second, force once, then return an explicit
+    // lifecycle failure after a second unconfirmed interval.
+    const beginTermination = () => {
+      if (terminationStarted || settled) return;
+      terminationStarted = true;
+      void terminateProcessTree(child, false).then((requested) => {
+        if (!requested && !settled) {
+          appendTerminationDiagnostic("[Hydra could not confirm the initial process-tree termination request.]");
+        }
+      });
+      forceBackstop = setTimeout(() => {
+        void terminateProcessTree(child, true).then((requested) => {
+          if (!requested && !settled) {
+            appendTerminationDiagnostic("[Hydra could not confirm the forced process-tree termination request.]");
+          }
+        });
         if (process.platform !== "win32" && child.pid) {
           try {
             // Last-resort escalation: SIGKILL the whole process group.
@@ -196,27 +217,29 @@ export async function runAgent(
             // ESRCH: the group is already gone — nothing left to kill.
           }
         }
-        // Unconditionally settle with a null exit code; timedOut/cancelled
-        // were set before terminateProcessTree fired, so the caller still
-        // classifies the outcome correctly.
-        finish(null);
-      }, 2000);
+        // If `close` still never arrives, do not claim the process is gone.
+        failureBackstop = setTimeout(() => {
+          terminationFailed = true;
+          appendTerminationDiagnostic(
+            "[Hydra did not observe the native agent process close; it may still be running. Restart VS Code before starting more Hydra work.]"
+          );
+          finish(null);
+        }, 1_000);
+      }, 1_000);
     };
 
     const hasTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0;
     const timer = hasTimeout
       ? setTimeout(() => {
           timedOut = true;
-          terminateProcessTree(child);
-          armBackstop();
+          beginTermination();
         }, timeoutMs)
       : undefined;
 
     const abortHandler = () => {
       if (!settled) {
         cancelled = true;
-        terminateProcessTree(child);
-        armBackstop();
+        beginTermination();
       }
     };
 
@@ -230,18 +253,17 @@ export async function runAgent(
 
     child.stdout?.on("data", (chunk: Buffer) => {
       const text = stripAnsi(chunk.toString("utf8"));
-      appendBoundedStream(
+      const accepted = appendBoundedStream(
         stdoutState,
         text,
         MAX_AGENT_STDOUT_BYTES,
         `[Hydra: agent stdout truncated at ${MAX_AGENT_STDOUT_BYTES} bytes — likely prompt injection from CLAUDE.md/AGENTS.md or runaway tool output]`
       );
       try {
-        // Forward the raw text to the caller's callback even after we
-        // stop accumulating: the live consumer may already be writing to
-        // disk or another bounded sink, and dropping its feed mid-turn
-        // would orphan partial state.
-        onChunk(text);
+        // Keep live/UI output under the same cumulative cap as RunResult.
+        // Forwarding the original chunk here would let a runaway process keep
+        // growing the webview message after accumulation had stopped.
+        if (accepted) onChunk(accepted);
       } catch {
         // Caller's callback failed (e.g. webview disposed mid-stream).
         // Keep draining stdout into the accumulated result so the final
@@ -261,7 +283,8 @@ export async function runAgent(
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
-      if (backstop) clearTimeout(backstop);
+      if (forceBackstop) clearTimeout(forceBackstop);
+      if (failureBackstop) clearTimeout(failureBackstop);
       signal.removeEventListener("abort", abortHandler);
       resolve({
         stdout: stdoutState.text,
@@ -270,7 +293,18 @@ export async function runAgent(
         timedOut,
         cancelled,
         timeoutMs,
+        ...(terminationFailed ? { terminationFailed: true } : {}),
       });
+    };
+
+    const appendTerminationDiagnostic = (message: string) => {
+      const prefix = stderrState.text && !stderrState.text.endsWith("\n") ? "\n" : "";
+      appendBoundedStream(
+        stderrState,
+        `${prefix}${message}\n`,
+        MAX_AGENT_STDERR_BYTES,
+        `[Hydra: agent stderr truncated at ${MAX_AGENT_STDERR_BYTES} bytes]`
+      );
     };
 
     child.on("error", (err) => {
@@ -322,38 +356,72 @@ function formatSpawnError(spawn: AgentSpawn, err: unknown): string {
   return lines.join("\n");
 }
 
-function terminateProcessTree(child: cp.ChildProcess): void {
+/** @internal — shared by bounded native probes that must confirm teardown. */
+export async function terminateProcessTree(child: cp.ChildProcess, force: boolean): Promise<boolean> {
+  const signal: NodeJS.Signals = force ? "SIGKILL" : "SIGTERM";
   if (!child.pid) {
-    child.kill();
-    return;
+    try {
+      return child.kill(signal);
+    } catch {
+      return false;
+    }
   }
   if (process.platform === "win32") {
-    try {
-      child.kill();
-    } catch {
-      // taskkill below is the stronger Windows fallback.
-    }
-    const killer = cp.spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true });
-    killer.on("error", () => {
+    return new Promise<boolean>((resolve) => {
+      let killer: cp.ChildProcess;
       try {
-        child.kill();
+        killer = cp.spawn(
+          windowsSystemExecutable("taskkill.exe"),
+          ["/PID", String(child.pid), "/T", "/F"],
+          { windowsHide: true }
+        );
       } catch {
-        // already gone
+        try {
+          resolve(child.kill(signal));
+        } catch {
+          resolve(false);
+        }
+        return;
       }
+      let done = false;
+      const finish = (requested: boolean) => {
+        if (done) return;
+        done = true;
+        clearTimeout(killerTimeout);
+        resolve(requested);
+      };
+      const fallback = () => {
+        try {
+          return child.kill(signal);
+        } catch {
+          return false;
+        }
+      };
+      // Bound taskkill itself so a wedged helper cannot hang cancellation.
+      const killerTimeout = setTimeout(() => {
+        try {
+          killer.kill();
+        } catch {
+          // The helper may have exited between the timeout and this kill.
+        }
+        finish(fallback());
+      }, 750);
+      killer.on("error", () => finish(fallback()));
+      killer.on("close", (code) => finish(code === 0 ? true : fallback()));
     });
-    return;
   }
   // POSIX: kill the process group (negative pid). Requires the child to
   // have been spawned with detached:true so it became a group leader.
   // Falls back to direct child.kill() if killing the group fails (e.g.
   // ESRCH because the child already exited).
   try {
-    process.kill(-child.pid, "SIGTERM");
+    process.kill(-child.pid, signal);
+    return true;
   } catch {
     try {
-      child.kill();
+      return child.kill(signal);
     } catch {
-      // already gone
+      return false;
     }
   }
 }

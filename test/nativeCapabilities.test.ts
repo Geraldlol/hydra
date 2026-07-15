@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { describe, test } from "node:test";
 import {
   extractNativeIntegrationSummary,
+  MAX_NATIVE_CAPABILITY_SUMMARY_READ_BYTES,
   nativeCapabilitiesPath,
   readNativeIntegrationSummary,
   renderNativeCapabilitySnapshot,
@@ -94,6 +95,19 @@ describe("native capability snapshot", () => {
     await fs.writeFile(file, markdown, "utf8");
     assert.match(await readNativeIntegrationSummary(file, 80), /Codex mcp list json/);
     assert.match(await readNativeIntegrationSummary(file, 80), /\[truncated\]/);
+  });
+
+  test("does not scan an oversized snapshot looking for a late summary", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-native-integration-cap-"));
+    const file = path.join(dir, "native-capabilities.md");
+    await fs.writeFile(file, [
+      "# Hydra Native Capability Snapshot",
+      "x".repeat(MAX_NATIVE_CAPABILITY_SUMMARY_READ_BYTES),
+      "## Integration Probe Summary",
+      "- late untrusted data",
+      "## Codex help",
+    ].join("\n"), "utf8");
+    assert.equal(await readNativeIntegrationSummary(file), "");
   });
 
   test("detects when integration prompt context is relevant", () => {

@@ -1,5 +1,7 @@
 import { describe, test } from "node:test";
 import { strict as assert } from "node:assert";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { runAgent, RunResult, stripAnsi } from "../src/agents";
 
@@ -124,6 +126,40 @@ describe("runAgent", () => {
     assert.equal(result.cancelled, false);
   });
 
+  test("timeout kills a detached grandchild before returning", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-agent-tree-"));
+    const pidFile = path.join(dir, "grandchild.pid");
+    const script = path.join(dir, "spawn-tree.js");
+    await fs.writeFile(script, [
+      'const cp = require("node:child_process");',
+      'const fs = require("node:fs");',
+      'const child = cp.spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });',
+      'fs.writeFileSync(process.argv[2], String(child.pid));',
+      'setInterval(() => {}, 1000);',
+    ].join("\n"), "utf8");
+
+    let pid = 0;
+    try {
+      const result = await runAgent(
+        { command: process.execPath, args: [script, pidFile], cwd: dir },
+        "",
+        400,
+        () => {},
+        new AbortController().signal,
+      );
+      if (spawnBlockedBySandbox(result)) return;
+      assert.equal(result.timedOut, true);
+      pid = Number.parseInt(await fs.readFile(pidFile, "utf8"), 10);
+      assert.ok(Number.isSafeInteger(pid) && pid > 0);
+      assert.equal(await waitForProcessExit(pid), true, `grandchild ${pid} should be gone`);
+    } finally {
+      if (pid > 0 && processIsAlive(pid)) {
+        try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+      }
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("zero timeout disables the wall-clock cap", async () => {
     const result = await runAgent(
       nodeSpawn(["--delay", "150", "--emit", "slow ok"]),
@@ -210,3 +246,21 @@ describe("runAgent", () => {
     assert.equal(stripAnsi("\x1B_apc-data\x1B\\kept"), "kept");
   });
 });
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForProcessExit(pid: number, timeoutMs = 2_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!processIsAlive(pid)) return true;
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+  }
+  return !processIsAlive(pid);
+}

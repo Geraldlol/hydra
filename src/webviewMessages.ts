@@ -50,6 +50,16 @@ export type WebviewMessage =
   | { type: "openTranscript" }
   | { type: "archiveAndClearRoom" }
   | { type: "openDecisions" }
+  | { type: "openStandings" }
+  | { type: "openScoreEvidence" }
+  | { type: "recordScoreVerdict" }
+  | { type: "reverseScoreVerdict" }
+  | { type: "adjudicatePendingScoreClaim" }
+  | { type: "openDuels" }
+  | { type: "advanceDuel"; duelId?: string }
+  | { type: "cancelDuel"; duelId?: string }
+  | { type: "openDuelAudit" }
+  | { type: "correctDuelResult" }
   | { type: "chooseModelOrEffort" }
   | { type: "chooseModel" }
   | { type: "chooseEffort" }

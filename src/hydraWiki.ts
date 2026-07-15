@@ -1,10 +1,24 @@
 import * as fs from "node:fs";
 import * as crypto from "node:crypto";
 import * as path from "node:path";
-import { atomicWriteFile, ensureFile, serializePerFile } from "./fileQueue";
+import {
+  appendFileSafely,
+  atomicWriteFile,
+  ensureFile,
+  readFileHead,
+  readFileHeadSync,
+  readFileTail,
+  readFileTailSync,
+  serializePerFile,
+  type BoundedFileHead,
+  type BoundedFileTail,
+} from "./fileQueue";
 import { displayNameFor } from "./agentRegistry";
+import type { MessageRole } from "./transcript";
 
 export const HYDRA_WIKI_DIR = path.join(".hydra", "wiki");
+export const HYDRA_WIKI_CORE_READ_BYTES = 128 * 1024;
+const HYDRA_WIKI_LOG_READ_BYTES = 64 * 1024;
 
 export interface HydraWikiPromptFile {
   relativePath: string;
@@ -83,7 +97,7 @@ export interface HydraWikiWrapupPromptInput {
 }
 
 export interface HydraWikiWrapupMessage {
-  role: "user" | "codex" | "claude" | "system";
+  role: MessageRole;
   text: string;
   timestamp: string;
   phase?: string;
@@ -166,7 +180,7 @@ export async function readHydraWikiFiles(workspaceRoot: string): Promise<HydraWi
     schema: await readFileOrDefault(workspaceRoot, "schema.md"),
     context: await readFileOrDefault(workspaceRoot, "context.md"),
     index: await readFileOrDefault(workspaceRoot, "index.md"),
-    log: await readFileOrDefault(workspaceRoot, "log.md"),
+    log: await readWikiLogOrDefault(workspaceRoot),
   };
 }
 
@@ -181,15 +195,20 @@ export function readHydraWikiPromptContext(
   const sections: string[] = [];
   const files: string[] = [];
   let originalChars = 0;
+  let coreReadTruncated = false;
   const promptFiles = options.includeLog
     ? [...HYDRA_WIKI_PROMPT_FILES, HYDRA_WIKI_LOG_PROMPT_FILE]
     : HYDRA_WIKI_PROMPT_FILES;
 
   for (const source of promptFiles) {
     const absolutePath = path.join(workspaceRoot, source.relativePath);
-    const text = readFileIfExists(absolutePath);
+    const read = source.label === "log.md"
+      ? { text: readWikiLogTailSync(absolutePath), truncated: false }
+      : readWikiCoreHeadSync(absolutePath, source.label);
+    const text = read.text;
     const trimmed = text.trim();
     if (!trimmed || isDefaultWikiTemplate(source.relativePath, text)) continue;
+    coreReadTruncated ||= read.truncated;
     originalChars += trimmed.length;
     files.push(source.relativePath.split(path.sep).join("/"));
     sections.push(`### ${source.label}\n\n${trimmed}`);
@@ -209,7 +228,7 @@ export function readHydraWikiPromptContext(
     ].join("\n"),
     files,
     originalChars,
-    truncated: clipped.truncated,
+    truncated: clipped.truncated || coreReadTruncated,
   };
 }
 
@@ -224,7 +243,7 @@ export async function readHydraWikiStatus(
   const logPath = path.join(workspaceRoot, HYDRA_WIKI_DIR, "log.md");
   const rawTurnsDir = path.join(workspaceRoot, HYDRA_WIKI_DIR, "raw", "turns");
 
-  const contextText = await fs.promises.readFile(contextPath, "utf8").catch(() => "");
+  const contextText = (await readWikiCoreHead(contextPath, "context.md")).text;
   const contextChars = isDefaultWikiTemplate(path.join(HYDRA_WIKI_DIR, "context.md"), contextText)
     ? 0
     : contextText.trim().length;
@@ -233,7 +252,7 @@ export async function readHydraWikiStatus(
   const rawTurnCount = rawEntries.filter((entry) =>
     entry.isFile() && /^\d{4}-\d{2}-\d{2}-[a-f0-9]{12}\.md$/i.test(entry.name)
   ).length;
-  const lastWrapup = latestWrapupFromLog(await fs.promises.readFile(logPath, "utf8").catch(() => ""));
+  const lastWrapup = latestWrapupFromLog(await readWikiLogTail(logPath));
 
   return {
     contextChars,
@@ -245,15 +264,6 @@ export async function readHydraWikiStatus(
     lastWrapupDate: lastWrapup?.date,
     lastWrapupTitle: lastWrapup?.title,
   };
-}
-
-function readFileIfExists(filePath: string): string {
-  try {
-    return fs.readFileSync(filePath, "utf8");
-  } catch {
-    // Wiki files are optional until the user initializes them.
-    return "";
-  }
 }
 
 function latestWrapupFromLog(log: string): { date: string; title: string } | undefined {
@@ -379,9 +389,11 @@ export async function pruneHydraWikiRawTurns(
   if (!Number.isFinite(nowMs)) return { prunedPaths: [], invalidNowIso: nowIso };
 
   const cutoffDay = new Date(nowMs - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-  const rawTurnsDir = path.join(workspaceRoot, HYDRA_WIKI_DIR, "raw", "turns");
-  const rawTurnsRoot = path.resolve(rawTurnsDir);
-  const entries = await fs.promises.readdir(rawTurnsDir, { withFileTypes: true }).catch(() => []);
+  const boundary = await establishRawTurnsPruneBoundary(workspaceRoot);
+  if (!boundary) return { prunedPaths: [] };
+
+  await assertRawTurnsPruneBoundary(boundary);
+  const entries = await fs.promises.readdir(boundary.logicalRawTurnsRoot, { withFileTypes: true });
   const prunedPaths: string[] = [];
 
   for (const entry of entries) {
@@ -390,13 +402,217 @@ export async function pruneHydraWikiRawTurns(
     const entryDay = match?.[1];
     if (entryDay === undefined || entryDay >= cutoffDay) continue;
 
-    const absolutePath = path.resolve(rawTurnsDir, entry.name);
-    if (absolutePath !== rawTurnsRoot && !absolutePath.startsWith(`${rawTurnsRoot}${path.sep}`)) continue;
-    await fs.promises.unlink(absolutePath);
-    prunedPaths.push(path.join(HYDRA_WIKI_DIR, "raw", "turns", entry.name).split(path.sep).join("/"));
+    if (await unlinkSafeRawTurnSnapshot(boundary, entry.name)) {
+      prunedPaths.push(path.join(HYDRA_WIKI_DIR, "raw", "turns", entry.name).split(path.sep).join("/"));
+    }
   }
 
   return { prunedPaths };
+}
+
+interface RawTurnsPruneBoundary {
+  logicalWorkspaceRoot: string;
+  logicalRawTurnsRoot: string;
+  realWorkspaceRoot: string;
+  realRawTurnsRoot: string;
+  parents: Array<{
+    logicalPath: string;
+    realPath: string;
+    dev: number;
+    ino: number;
+  }>;
+}
+
+async function establishRawTurnsPruneBoundary(
+  workspaceRoot: string
+): Promise<RawTurnsPruneBoundary | undefined> {
+  const logicalWorkspaceRoot = path.resolve(workspaceRoot);
+  const logicalRawTurnsRoot = path.resolve(logicalWorkspaceRoot, HYDRA_WIKI_DIR, "raw", "turns");
+  if (!isPathWithin(logicalWorkspaceRoot, logicalRawTurnsRoot) || samePath(logicalWorkspaceRoot, logicalRawTurnsRoot)) {
+    throw unsafeRawTurnsParent(logicalRawTurnsRoot);
+  }
+
+  let realWorkspaceRoot: string;
+  try {
+    realWorkspaceRoot = await fs.promises.realpath(logicalWorkspaceRoot);
+    const workspaceStat = await fs.promises.stat(realWorkspaceRoot);
+    if (!workspaceStat.isDirectory()) throw unsafeRawTurnsParent(logicalWorkspaceRoot);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw err;
+  }
+
+  const parents: RawTurnsPruneBoundary["parents"] = [];
+  const segments = [".hydra", "wiki", "raw", "turns"];
+  let logicalParent = logicalWorkspaceRoot;
+  let expectedRealParent = realWorkspaceRoot;
+  for (const segment of segments) {
+    logicalParent = path.join(logicalParent, segment);
+    expectedRealParent = path.join(expectedRealParent, segment);
+    let parentStat: fs.Stats;
+    let realParent: string;
+    try {
+      parentStat = await fs.promises.lstat(logicalParent);
+      realParent = await fs.promises.realpath(logicalParent);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw err;
+    }
+    if (
+      parentStat.isSymbolicLink()
+      || !parentStat.isDirectory()
+      || !samePath(realParent, expectedRealParent)
+      || !isPathWithin(realWorkspaceRoot, realParent)
+    ) {
+      throw unsafeRawTurnsParent(logicalParent);
+    }
+    parents.push({
+      logicalPath: logicalParent,
+      realPath: realParent,
+      dev: parentStat.dev,
+      ino: parentStat.ino,
+    });
+  }
+
+  return {
+    logicalWorkspaceRoot,
+    logicalRawTurnsRoot,
+    realWorkspaceRoot,
+    realRawTurnsRoot: parents[parents.length - 1]!.realPath,
+    parents,
+  };
+}
+
+async function assertRawTurnsPruneBoundary(boundary: RawTurnsPruneBoundary): Promise<void> {
+  let currentRealWorkspace: string;
+  try {
+    currentRealWorkspace = await fs.promises.realpath(boundary.logicalWorkspaceRoot);
+  } catch {
+    throw unsafeRawTurnsParent(boundary.logicalWorkspaceRoot);
+  }
+  if (!samePath(currentRealWorkspace, boundary.realWorkspaceRoot)) {
+    throw unsafeRawTurnsParent(boundary.logicalWorkspaceRoot);
+  }
+
+  for (const parent of boundary.parents) {
+    try {
+      const [currentStat, currentRealPath] = await Promise.all([
+        fs.promises.lstat(parent.logicalPath),
+        fs.promises.realpath(parent.logicalPath),
+      ]);
+      if (
+        currentStat.isSymbolicLink()
+        || !currentStat.isDirectory()
+        || currentStat.dev !== parent.dev
+        || currentStat.ino !== parent.ino
+        || !samePath(currentRealPath, parent.realPath)
+        || !isPathWithin(boundary.realWorkspaceRoot, currentRealPath)
+      ) {
+        throw unsafeRawTurnsParent(parent.logicalPath);
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith("Refusing to prune Hydra Wiki")) throw err;
+      throw unsafeRawTurnsParent(parent.logicalPath);
+    }
+  }
+}
+
+async function unlinkSafeRawTurnSnapshot(
+  boundary: RawTurnsPruneBoundary,
+  entryName: string
+): Promise<boolean> {
+  await assertRawTurnsPruneBoundary(boundary);
+  const filePath = path.resolve(boundary.logicalRawTurnsRoot, entryName);
+  if (!isPathWithin(boundary.logicalRawTurnsRoot, filePath) || samePath(filePath, boundary.logicalRawTurnsRoot)) {
+    return false;
+  }
+
+  let before: fs.Stats;
+  let realFilePath: string;
+  try {
+    before = await fs.promises.lstat(filePath);
+    if (before.isSymbolicLink() || !before.isFile() || before.nlink !== 1) return false;
+    realFilePath = await fs.promises.realpath(filePath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw err;
+  }
+
+  const expectedRealFilePath = path.join(boundary.realRawTurnsRoot, entryName);
+  if (
+    !samePath(realFilePath, expectedRealFilePath)
+    || !isPathWithin(boundary.realRawTurnsRoot, realFilePath)
+    || !isPathWithin(boundary.realWorkspaceRoot, realFilePath)
+  ) {
+    return false;
+  }
+
+  let handle: fs.promises.FileHandle;
+  try {
+    handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT" || (err as NodeJS.ErrnoException).code === "ELOOP") {
+      return false;
+    }
+    throw err;
+  }
+
+  try {
+    const opened = await handle.stat();
+    if (
+      !opened.isFile()
+      || opened.nlink !== 1
+      || opened.dev !== before.dev
+      || opened.ino !== before.ino
+    ) {
+      return false;
+    }
+
+    // Revalidate both the directory chain and the final pathname while the
+    // candidate handle remains open. A parent or file swap after enumeration
+    // must fail closed instead of redirecting unlink() outside the workspace.
+    await assertRawTurnsPruneBoundary(boundary);
+    let current: fs.Stats;
+    let currentRealFilePath: string;
+    try {
+      current = await fs.promises.lstat(filePath);
+      currentRealFilePath = await fs.promises.realpath(filePath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw err;
+    }
+    if (
+      current.isSymbolicLink()
+      || !current.isFile()
+      || current.nlink !== 1
+      || current.dev !== opened.dev
+      || current.ino !== opened.ino
+      || !samePath(currentRealFilePath, expectedRealFilePath)
+      || !isPathWithin(boundary.realRawTurnsRoot, currentRealFilePath)
+    ) {
+      return false;
+    }
+    await assertRawTurnsPruneBoundary(boundary);
+    await fs.promises.unlink(filePath);
+    return true;
+  } finally {
+    await handle.close();
+  }
+}
+
+function unsafeRawTurnsParent(parentPath: string): Error {
+  return new Error(`Refusing to prune Hydra Wiki through a linked, replaced, or external parent: ${parentPath}`);
+}
+
+function samePath(left: string, right: string): boolean {
+  return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
+}
+
+function isPathWithin(root: string, candidate: string): boolean {
+  const normalizedRoot = process.platform === "win32" ? root.toLowerCase() : root;
+  const normalizedCandidate = process.platform === "win32" ? candidate.toLowerCase() : candidate;
+  const relative = path.relative(normalizedRoot, normalizedCandidate);
+  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
 export function buildHydraWikiWrapupPrompt(input: HydraWikiWrapupPromptInput): string {
@@ -518,10 +734,73 @@ export async function applyHydraWikiWrapupDraft(
   };
 }
 
-async function readFileOrDefault(workspaceRoot: string, fileName: "schema.md" | "context.md" | "index.md" | "log.md"): Promise<string> {
+async function readFileOrDefault(workspaceRoot: string, fileName: "schema.md" | "context.md" | "index.md"): Promise<string> {
   const relativePath = path.join(HYDRA_WIKI_DIR, fileName);
-  const text = await fs.promises.readFile(path.join(workspaceRoot, relativePath), "utf8").catch(() => "");
+  const text = (await readWikiCoreHead(path.join(workspaceRoot, relativePath), fileName)).text;
   return text || DEFAULT_WIKI_FILES[relativePath] || "";
+}
+
+interface BoundedWikiCoreRead {
+  text: string;
+  truncated: boolean;
+}
+
+async function readWikiCoreHead(filePath: string, fileName: string): Promise<BoundedWikiCoreRead> {
+  try {
+    return boundedWikiCoreRead(await readFileHead(filePath, HYDRA_WIKI_CORE_READ_BYTES), fileName);
+  } catch {
+    // Wiki files are optional until initialization and remain best-effort context.
+    return { text: "", truncated: false };
+  }
+}
+
+function readWikiCoreHeadSync(filePath: string, fileName: string): BoundedWikiCoreRead {
+  try {
+    return boundedWikiCoreRead(readFileHeadSync(filePath, HYDRA_WIKI_CORE_READ_BYTES), fileName);
+  } catch {
+    // Prompt assembly is synchronous; a missing or unsafe optional file is ignored.
+    return { text: "", truncated: false };
+  }
+}
+
+function boundedWikiCoreRead(head: BoundedFileHead, fileName: string): BoundedWikiCoreRead {
+  if (!head.truncated) return { text: head.text, truncated: false };
+  const suffix = `\n[... remaining ${fileName} content omitted by Hydra wiki core read cap ...]\n`;
+  return {
+    text: `${head.text.trimEnd()}${suffix}`,
+    truncated: true,
+  };
+}
+
+async function readWikiLogOrDefault(workspaceRoot: string): Promise<string> {
+  const relativePath = path.join(HYDRA_WIKI_DIR, "log.md");
+  const text = await readWikiLogTail(path.join(workspaceRoot, relativePath));
+  return text || DEFAULT_WIKI_FILES[relativePath] || "";
+}
+
+async function readWikiLogTail(filePath: string): Promise<string> {
+  try {
+    return markdownTail(await readFileTail(filePath, HYDRA_WIKI_LOG_READ_BYTES));
+  } catch {
+    // Wiki files are optional until initialization and remain best-effort context.
+    return "";
+  }
+}
+
+function readWikiLogTailSync(filePath: string): string {
+  try {
+    return markdownTail(readFileTailSync(filePath, HYDRA_WIKI_LOG_READ_BYTES));
+  } catch {
+    // Wiki files are optional until initialization and remain best-effort context.
+    return "";
+  }
+}
+
+function markdownTail(tail: BoundedFileTail): string {
+  if (!tail.truncated) return tail.text;
+  const nextHeading = tail.text.indexOf("\n## ");
+  const completeTail = nextHeading >= 0 ? tail.text.slice(nextHeading + 1) : tail.text;
+  return `[... earlier wiki log entries omitted ...]\n${completeTail.trimStart()}`;
 }
 
 function wikiFilePath(workspaceRoot: string, fileName: "context.md" | "index.md" | "log.md"): string {
@@ -590,10 +869,12 @@ function clipWikiWrite(markdown: string): string {
 async function writeWikiFileIfChanged(filePath: string, markdown: string | undefined): Promise<boolean> {
   if (!markdown) return false;
   const next = markdown.trimEnd() + "\n";
-  const current = await fs.promises.readFile(filePath, "utf8").catch(() => "");
-  if (current.trimEnd() === next.trimEnd()) return false;
-  await serializePerFile(filePath, () => atomicWriteFile(filePath, next));
-  return true;
+  return serializePerFile(filePath, async () => {
+    const current = await readFileHead(filePath, HYDRA_WIKI_CORE_READ_BYTES).catch(() => undefined);
+    if (current && !current.truncated && current.text.trimEnd() === next.trimEnd()) return false;
+    await atomicWriteFile(filePath, next);
+    return true;
+  });
 }
 
 async function appendWikiLogEntry(
@@ -606,10 +887,10 @@ async function appendWikiLogEntry(
   if (!entry) return false;
   const normalized = normalizeLogEntry(entry, title, nowIso, source);
   await serializePerFile(filePath, async () => {
-    const current = await fs.promises.readFile(filePath, "utf8").catch(() => "");
-    const separator = current.trim() ? "\n\n" : "";
+    const current = await readFileTail(filePath, 1024).catch(() => undefined);
+    const separator = current && current.totalBytes > 0 ? "\n\n" : "";
     await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
-    await fs.promises.appendFile(filePath, `${separator}${normalized}\n`, "utf8");
+    await appendFileSafely(filePath, `${separator}${normalized}\n`);
   });
   return true;
 }

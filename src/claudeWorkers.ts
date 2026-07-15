@@ -13,6 +13,8 @@ export interface ParallelDiscussionWorker {
 }
 
 export interface BuildParallelDiscussionWorkersArgs {
+  /** Independent head identities seated in this room. Defaults to legacy pair. */
+  roster?: ReadonlyArray<AgentId>;
   manyHeads: boolean;
   transport: WorkerTransportMode;
   claudeWorkerCount: number;
@@ -31,24 +33,21 @@ export function buildParallelDiscussionWorkers(args: BuildParallelDiscussionWork
   const enabled = args.manyHeads && args.transport === "oneShot";
   const claudeTotal = enabled ? clampManyHeadsClaudeWorkerCount(args.claudeWorkerCount) : 1;
   const manyHeadsDispatch = enabled && claudeTotal > 1;
-  const workers: ParallelDiscussionWorker[] = [
-    {
-      agent: "codex",
-      workerId: "codex",
-      traceIdOverride: enabled ? args.makeTraceId("codex", "parallel") : undefined,
-      manyHeadsDispatch: false,
-    },
-  ];
+  const roster = [...new Set(args.roster?.length ? args.roster : ["codex", "claude"] as AgentId[])];
+  const workers: ParallelDiscussionWorker[] = [];
 
-  for (let index = 1; index <= claudeTotal; index++) {
-    workers.push({
-      agent: "claude",
-      workerId: claudeTotal > 1 ? `claude-${index}` : "claude",
-      traceIdOverride: enabled ? args.makeTraceId("claude", "parallel") : undefined,
-      claudeOrdinal: index,
-      claudeTotal,
-      manyHeadsDispatch,
-    });
+  for (const agent of roster) {
+    const copies = agent === "claude" ? claudeTotal : 1;
+    for (let index = 1; index <= copies; index++) {
+      workers.push({
+        agent,
+        workerId: copies > 1 ? `${agent}-${index}` : agent,
+        traceIdOverride: enabled ? args.makeTraceId(agent, "parallel") : undefined,
+        claudeOrdinal: agent === "claude" ? index : undefined,
+        claudeTotal: agent === "claude" ? copies : undefined,
+        manyHeadsDispatch: agent === "claude" ? manyHeadsDispatch : false,
+      });
+    }
   }
 
   return workers;
@@ -67,7 +66,7 @@ export function appendClaudeWorkerAssignment(transcript: string, worker: Paralle
   return [
     transcript,
     "",
-    "--- Many Heads worker assignment ---",
+    "--- Claude Worker Fanout assignment ---",
     `You are Claude worker ${worker.claudeOrdinal} of ${worker.claudeTotal} for this parallel turn.`,
     "Work independently from the other Claude workers. Keep your output concise, name concrete files or commands you inspect, and do not wait for sibling workers.",
   ].join("\n");

@@ -3,7 +3,7 @@ import type { UsageTokens, ModelPrices } from "./usage";
 import { buildAgentSpawn } from "./cli";
 import { insertBeforeStdinDash, withModelArgs, withEffortArgs, isBuiltinAgentId } from "./agentArgs";
 import { classifyAgentAuthority } from "./authority";
-import { usageFromClaudeSummary, resolveModelPrices } from "./usage";
+import { usageFromClaudeSummary, resolveModelPrices, coerceModelPrices } from "./usage";
 import { parseClaudeEventStream, summarizeClaudeEvents } from "./claudeEvents";
 
 export const claudeAdapter: AgentAdapter = {
@@ -34,7 +34,8 @@ export const claudeAdapter: AgentAdapter = {
     return usageFromClaudeSummary(summary.usage);
   },
   pricing(def: AgentDefinition): ModelPrices {
-    return def.pricing ?? resolveModelPrices(def.id, def.model, {});
+    const base = resolveModelPrices(def.id, def.model, {});
+    return coerceModelPrices(def.pricing, base);
   },
   authority(def: AgentDefinition, ctx: InvocationContext) {
     return classifyAgentAuthority(def.id, ctx.phase, ctx.rawArgs);

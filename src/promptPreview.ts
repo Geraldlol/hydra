@@ -2,7 +2,12 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AuthorityLevel } from "./authority";
 import type { CapabilityProfileId } from "./capabilityProfiles";
-import { atomicWriteFile, serializePerFile } from "./fileQueue";
+import {
+  appendFileSafely,
+  readJsonlGuarded,
+  rewriteFileLinesAtomically,
+  serializePerFileAcrossProcesses,
+} from "./fileQueue";
 import type { AgentId } from "./phases";
 import type { Phase } from "./prompts";
 
@@ -117,9 +122,9 @@ async function ensureDirOnce(dir: string): Promise<void> {
 
 export async function appendPromptEnvelope(workspaceRoot: string, envelope: PromptEnvelope): Promise<void> {
   const indexPath = promptEnvelopeIndexPath(workspaceRoot);
-  await serializePerFile(indexPath, async () => {
+  await serializePerFileAcrossProcesses(indexPath, async () => {
     await ensureDirOnce(path.dirname(indexPath));
-    await fs.appendFile(indexPath, `${JSON.stringify(envelope)}\n`, "utf8");
+    await appendFileSafely(indexPath, `${JSON.stringify(envelope)}\n`);
   });
 }
 
@@ -142,11 +147,11 @@ export async function compactPromptEnvelopeBodies(
   options: CompactPromptBodiesOptions
 ): Promise<PromptBodyCompactionSummary> {
   const indexPath = promptEnvelopeIndexPath(workspaceRoot);
-  return serializePerFile(indexPath, async () => {
-    let raw: string;
+  return serializePerFileAcrossProcesses(indexPath, async () => {
     try {
-      raw = await fs.readFile(indexPath, "utf8");
-    } catch {
+      await fs.stat(indexPath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
       return emptyCompactionSummary(true);
     }
 
@@ -154,134 +159,69 @@ export async function compactPromptEnvelopeBodies(
     const retentionDays = Number.isFinite(options.retentionDays) ? Math.max(0, options.retentionDays) : 3;
     const cutoffMs = now.getTime() - retentionDays * 24 * 60 * 60 * 1000;
     const summary = emptyCompactionSummary(false);
-    const nextLines: string[] = [];
     let changed = false;
 
-    for (const line of raw.split(/\r?\n/)) {
-      if (!line.trim()) continue;
+    await rewriteFileLinesAtomically(indexPath, (line) => {
+      if (!line.trim()) return undefined;
       let parsed: unknown;
       try {
         parsed = JSON.parse(line);
       } catch {
         summary.malformedLines++;
-        nextLines.push(line);
-        continue;
+        return line;
       }
       if (!isObjectRecord(parsed)) {
         summary.malformedLines++;
-        nextLines.push(line);
-        continue;
+        return line;
       }
 
       summary.totalRecords++;
       const renderedPrompt = parsed.renderedPrompt;
       if (typeof renderedPrompt !== "string" || renderedPrompt.length === 0 || parsed.renderedPromptOmitted === true) {
         summary.alreadyCompactedRecords++;
-        nextLines.push(JSON.stringify(parsed));
-        continue;
+        return JSON.stringify(parsed);
       }
 
       const timestampMs = typeof parsed.timestamp === "string" ? Date.parse(parsed.timestamp) : Number.NaN;
       if (!Number.isFinite(timestampMs) || timestampMs > cutoffMs) {
         summary.retainedBodyRecords++;
-        nextLines.push(JSON.stringify(parsed));
-        continue;
+        return JSON.stringify(parsed);
       }
 
       summary.compactedRecords++;
       changed = true;
-      nextLines.push(JSON.stringify({
+      return JSON.stringify({
         ...parsed,
         renderedPrompt: "",
         renderedPromptOmitted: true,
         renderedPromptOriginalChars: renderedPrompt.length,
         renderedPromptOmittedAt: now.toISOString(),
-      }));
-    }
-
-    if (changed) {
-      await atomicWriteFile(indexPath, nextLines.length ? `${nextLines.join("\n")}\n` : "");
-    }
+      });
+    }, () => changed);
     return summary;
   });
 }
 
-// Why: the prompt index grows unbounded over a long session and each envelope
-// carries a (potentially large) renderedPrompt body, so reading the whole file
-// just to find the last line is wasteful. We stat the size and read only a
-// bounded trailing slice, then parse the newest *complete* line in it. If that
-// window holds no parseable line — e.g. the final envelope is larger than the
-// slice, or every complete line in the tail is torn/legacy — we fall back to a
-// full read so we never regress the "find the latest usable envelope" contract.
-const PROMPT_TAIL_READ_BYTES = 256 * 1024;
+// A rendered prompt can legitimately be hundreds of KiB. Keep enough room for
+// a large newest envelope while still enforcing a hard startup/read ceiling.
+const PROMPT_TAIL_READ_BYTES = 8 * 1024 * 1024;
 
 export async function readLatestPromptEnvelope(workspaceRoot: string): Promise<PromptEnvelope | undefined> {
   const indexPath = promptEnvelopeIndexPath(workspaceRoot);
-
-  let size: number;
-  try {
-    size = (await fs.stat(indexPath)).size;
-  } catch {
-    // ENOENT on first run, or any stat failure: nothing to read.
-    return undefined;
-  }
-
-  if (size > PROMPT_TAIL_READ_BYTES) {
-    const fromTail = await readLatestFromTail(indexPath, size);
-    if (fromTail) return fromTail;
-    // The tail window held no parseable complete line; fall through to a full
-    // read so an oversized final envelope is still surfaced.
-  }
-
-  let raw: string;
-  try {
-    raw = await fs.readFile(indexPath, "utf8");
-  } catch {
-    return undefined;
-  }
-  return latestParseableEnvelope(raw);
+  const newest = await readJsonlGuarded(indexPath, isPromptEnvelopeRecord, {
+    limit: 1,
+    maxBytes: PROMPT_TAIL_READ_BYTES,
+  });
+  return newest[0];
 }
 
-async function readLatestFromTail(indexPath: string, size: number): Promise<PromptEnvelope | undefined> {
-  const start = Math.max(0, size - PROMPT_TAIL_READ_BYTES);
-  let handle: fs.FileHandle;
-  try {
-    handle = await fs.open(indexPath, "r");
-  } catch {
-    // Race: file vanished between stat and open. Caller falls back / returns.
-    return undefined;
-  }
-  let chunk: string;
-  try {
-    const buffer = Buffer.alloc(size - start);
-    await handle.read(buffer, 0, buffer.length, start);
-    chunk = buffer.toString("utf8");
-  } catch {
-    // Read failure mid-tail: let the caller fall back to a full read.
-    return undefined;
-  } finally {
-    await handle.close();
-  }
-  // Drop the first segment: when start > 0 it's a partial line whose head was
-  // truncated by the tail window and can't be trusted to parse.
-  const segments = chunk.split(/\r?\n/);
-  if (start > 0) segments.shift();
-  return latestParseableEnvelope(segments.join("\n"));
-}
-
-function latestParseableEnvelope(raw: string): PromptEnvelope | undefined {
-  const lines = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i];
-    if (line === undefined) continue;
-    try {
-      return JSON.parse(line) as PromptEnvelope;
-    } catch {
-      // Keep walking backward so one torn/legacy line does not hide the
-      // latest usable prompt envelope from the user.
-    }
-  }
-  return undefined;
+function isPromptEnvelopeRecord(value: unknown): value is PromptEnvelope {
+  if (!isObjectRecord(value)) return false;
+  return typeof value.id === "string"
+    && typeof value.timestamp === "string"
+    && typeof value.agent === "string"
+    && typeof value.phase === "string"
+    && typeof value.renderedPrompt === "string";
 }
 
 export function promptEnvelopeIndexPath(workspaceRoot: string): string {

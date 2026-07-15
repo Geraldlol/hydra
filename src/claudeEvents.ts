@@ -19,6 +19,8 @@
 // envelope types flow through as forward-compat passthrough so the parser
 // doesn't drop events Claude adds in future versions.
 
+import { mapBoundedNonEmptyLines } from "./fileQueue";
+
 // ---------- Outer envelope ----------
 
 export type ClaudeEnvelopeType =
@@ -93,10 +95,14 @@ export type ClaudeDeltaType =
 
 // ---------- Parser ----------
 
+const MAX_CLAUDE_EVENT_LINE_CHARS = 1_000_000;
+const MAX_CLAUDE_STREAM_RECORDS = 20_000;
+
 // Returns null for empty / whitespace lines, malformed JSON, or non-object
 // payloads. Returns the parsed event for any object with a string `type`.
 // Unknown `type` values still parse so callers preserve forward-compat.
 export function parseClaudeEventLine(line: string): ClaudeEvent | null {
+  if (line.length > MAX_CLAUDE_EVENT_LINE_CHARS) return null;
   const trimmed = line.trim();
   if (!trimmed) return null;
   let parsed: unknown;
@@ -112,10 +118,19 @@ export function parseClaudeEventLine(line: string): ClaudeEvent | null {
 }
 
 export function parseClaudeEventStream(stdout: string): Array<ClaudeEvent | null> {
-  // Why: drop whitespace-only lines (CRLF remnants, blank-padded streams)
-  // BEFORE they reach the parser, so they don't surface as nulls and inflate
-  // `malformedJsonLines`. parseClaudeEventLine trims internally anyway.
-  return stdout.split(/\r?\n/).filter((line) => line.trim().length > 0).map((line) => parseClaudeEventLine(line));
+  // Keep a bounded prefix plus a larger newest suffix. Claude's terminal
+  // `result` is normally last and must survive an intermediate event flood.
+  // Blank padding is skipped without materializing one string per newline.
+  return mapBoundedNonEmptyLines(
+    stdout,
+    parseClaudeEventLine,
+    () => null,
+    {
+      maxRecords: MAX_CLAUDE_STREAM_RECORDS,
+      headRecords: 4_000,
+      maxLineChars: MAX_CLAUDE_EVENT_LINE_CHARS,
+    },
+  );
 }
 
 // ---------- Summary ----------

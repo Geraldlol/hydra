@@ -23,6 +23,8 @@ const app = document.getElementById("app");
 const ribbonStack = document.getElementById("ribbonStack");
 const ribbonMinimizedSummary = document.getElementById("ribbonMinimizedSummary");
 const toggleRibbonsBtn = document.getElementById("toggleRibbonsBtn");
+const railSecondaryWrap = document.getElementById("railSecondaryWrap");
+const railOverflowBtn = document.getElementById("railOverflowBtn");
 const messagesEl = document.getElementById("messages");
 const srAnnounce = document.getElementById("srAnnounce");
 const composer = document.getElementById("composer");
@@ -31,10 +33,8 @@ const phaseChip = document.getElementById("phaseChip");
 const objectiveText = document.getElementById("objectiveText");
 const objectiveTextShim = document.getElementById("objectiveTextShim");
 const resetObjectiveBtn = document.getElementById("resetObjectiveBtn");
-const codexStatus = document.getElementById("codexStatus");
-const claudeStatus = document.getElementById("claudeStatus");
-const codexAuthority = document.getElementById("codexAuthority");
-const claudeAuthority = document.getElementById("claudeAuthority");
+const agentStatusRail = document.getElementById("agentStatusRail");
+const authorityRail = document.getElementById("authorityRail");
 const terminalSessions = document.getElementById("terminalSessions");
 const setupStrip = document.getElementById("setupStrip");
 const autopilotText = document.getElementById("autopilotText");
@@ -60,8 +60,7 @@ const nativeActionBtn = document.getElementById("nativeActionBtn");
 const sendBtn = document.getElementById("sendBtn");
 const stopBtn = document.getElementById("stopBtn");
 const archiveChatBtn = document.getElementById("archiveChatBtn");
-const assignCodexBtn = document.getElementById("assignCodexBtn");
-const assignClaudeBtn = document.getElementById("assignClaudeBtn");
+const builderButtons = document.getElementById("builderButtons");
 const assignBothBtn = document.getElementById("assignBothBtn");
 const reviewBtn = document.getElementById("reviewBtn");
 const handBackBtn = document.getElementById("handBackBtn");
@@ -130,10 +129,34 @@ const usagePanelCount = document.getElementById("usagePanelCount");
 const usageSummary = document.getElementById("usageSummary");
 const usageBoard = document.getElementById("usageBoard");
 const modelRail = document.getElementById("modelRail");
+const standingsRail = document.getElementById("standingsRail");
+const standingsPanelCount = document.getElementById("standingsPanelCount");
+const standingsBoard = document.getElementById("standingsBoard");
+const recordVerdictBtn = document.getElementById("recordVerdictBtn");
+const adjudicatePendingBtn = document.getElementById("adjudicatePendingBtn");
+const openEvidenceBtn = document.getElementById("openEvidenceBtn");
+const reverseVerdictBtn = document.getElementById("reverseVerdictBtn");
+const openStandingsBtn = document.getElementById("openStandingsBtn");
+const duelsRail = document.getElementById("duelsRail");
+const duelsPanelCount = document.getElementById("duelsPanelCount");
+const duelsBoard = document.getElementById("duelsBoard");
+const agentDuelMode = document.getElementById("agentDuelMode");
+const openDuelAuditBtn = document.getElementById("openDuelAuditBtn");
+const correctDuelResultBtn = document.getElementById("correctDuelResultBtn");
 if (usageRail) {
   const open = () => openPanel("usage");
   usageRail.addEventListener("click", open);
   usageRail.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } });
+}
+if (standingsRail) {
+  const open = () => openPanel("standings");
+  standingsRail.addEventListener("click", open);
+  standingsRail.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } });
+}
+if (duelsRail) {
+  const open = () => openPanel("duels");
+  duelsRail.addEventListener("click", open);
+  duelsRail.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } });
 }
 if (modelRail) {
   const open = () => vscode.postMessage({ type: "chooseModelOrEffort" });
@@ -151,6 +174,10 @@ const commandList = document.getElementById("commandList");
 const panelOverlay = document.getElementById("panelOverlay");
 
 const labels = { user: "human", codex: "codex", claude: "claude", system: "system" };
+const DEFAULT_WEBVIEW_ROSTER = [
+  { id: "codex", displayName: "Codex", colorIndex: 1 },
+  { id: "claude", displayName: "Claude", colorIndex: 2 }
+];
 let lastMessages = [];
 let pendingLocalUserMessages = [];
 let lastFilteredNativeActions = [];
@@ -162,10 +189,15 @@ let lastNativeActions = [];
 let lastState = {};
 /** Roster metadata ({id, displayName, colorIndex}) keyed by agent id, sent by
  *  the host in state.roster (see listAgentDefinitions in src/agentRegistry.ts).
- *  Empty until the first "state" message arrives. */
+ *  The ordered roster starts with the legacy two-head fallback; this lookup is
+ *  populated from the first normalized state payload. */
 let rosterById = {};
+let currentRoster = DEFAULT_WEBVIEW_ROSTER.slice();
 let ribbonsMinimized = !!webviewState.ribbonsMinimized;
-let collapsedRibbons = new Set(Array.isArray(webviewState.collapsedRibbons) ? webviewState.collapsedRibbons : []);
+let railExpanded = !!webviewState.railExpanded;
+let collapsedRibbons = new Set(Array.isArray(webviewState.collapsedRibbons)
+  ? webviewState.collapsedRibbons
+  : ["setupStrip", "verificationStrip", "nativeActionStrip", "workQueueStrip"]);
 /** Cheap signature of the rendered message list. renderMessages() bails early
  *  when it matches, so unrelated state pushes (the 5s elapsed-label ticker,
  *  usage/status/work-queue updates) skip the DOM reconcile entirely. Starts as
@@ -188,10 +220,10 @@ const ACTIONS = [
   { id: "clean-workspace-state", group: "Objective", name: "Clean Workspace State", what: "Compact old prompt bodies and prune stale .hydra diagnostics", run: () => vscode.postMessage({ type: "cleanWorkspaceState" }), enabled: () => !lastState.canOpenFolder },
   { id: "archive-chat", group: "Objective", name: "Archive Chat", what: "Archive transcript and clear room", run: () => archiveChatBtn.click(), enabled: () => !archiveChatBtn.disabled },
   { id: "accept-default", group: "Workflow", name: "Accept Default", what: "Run the latest decision default", run: () => acceptDefaultBtn.click(), enabled: () => !acceptDefaultBtn.disabled },
-  { id: "toggle-auto-accept-default", group: "Workflow", name: "Toggle Auto Accept Default", what: "Turn automatic default acceptance on or off", run: () => autoAdvanceDefaultsBtn.click(), enabled: () => !autoAdvanceDefaultsBtn.disabled },
-  { id: "assign-codex", group: "Workflow", name: "Assign Builder: Codex", what: "Let Codex edit files", run: () => assignCodexBtn.click(), enabled: () => !assignCodexBtn.classList.contains("hidden") && !assignCodexBtn.disabled },
-  { id: "assign-claude", group: "Workflow", name: "Assign Builder: Claude", what: "Let Claude edit files", run: () => assignClaudeBtn.click(), enabled: () => !assignClaudeBtn.classList.contains("hidden") && !assignClaudeBtn.disabled },
-  { id: "assign-both", group: "Workflow", name: "Assign Builders: Both", what: "Run Codex and Claude as parallel Build workers", run: () => assignBothBtn.click(), enabled: () => !assignBothBtn.classList.contains("hidden") && !assignBothBtn.disabled },
+  { id: "toggle-auto-accept-default", group: "Workflow", name: "Toggle Safe-default Auto-advance", what: "Turn automatic advancement of safe, unblocked defaults on or off", run: () => autoAdvanceDefaultsBtn.click(), enabled: () => !autoAdvanceDefaultsBtn.disabled },
+  { id: "assign-codex", group: "Workflow", name: "Assign Builder: Codex", what: "Let Codex edit files", run: () => vscode.postMessage({ type: "assignBuilder", builder: "codex" }), enabled: () => canAssignRegisteredBuilder("codex") },
+  { id: "assign-claude", group: "Workflow", name: "Assign Builder: Claude", what: "Let Claude edit files", run: () => vscode.postMessage({ type: "assignBuilder", builder: "claude" }), enabled: () => canAssignRegisteredBuilder("claude") },
+  { id: "assign-both", group: "Workflow", name: "Assign Builders: All Configured Heads", what: "Run every configured Hydra head as a parallel Build worker", run: () => assignBothBtn.click(), enabled: () => !assignBothBtn.classList.contains("hidden") && !assignBothBtn.disabled },
   { id: "request-review", group: "Workflow", name: "Request Review", what: "Ask the non-builder to review the diff", run: () => reviewBtn.click(), enabled: () => !reviewBtn.classList.contains("hidden") && !reviewBtn.disabled },
   { id: "hand-back", group: "Workflow", name: "Hand Back to Builder", what: "Return review feedback to the builder", run: () => handBackBtn.click(), enabled: () => !handBackBtn.classList.contains("hidden") && !handBackBtn.disabled },
   { id: "reset-turn", group: "Workflow", name: "Reset Stuck Turn", what: "Recover from a stuck state", run: () => resetTurnBtn.click(), enabled: () => !resetTurnBtn.classList.contains("hidden") && !resetTurnBtn.disabled },
@@ -210,6 +242,8 @@ const ACTIONS = [
   { id: "open-edits", group: "Panels", name: "Open Edits Panel", what: "Inspect current workspace edits", run: () => openPanel("edits") },
   { id: "open-verify", group: "Panels", name: "Open Verification Details", what: "Inspect verification status", run: () => openPanel("verify") },
   { id: "open-decisions-panel", group: "Panels", name: "Open Decisions Panel", what: "Inspect decision packets", run: () => openPanel("decisions") },
+  { id: "open-standings-panel", group: "Panels", name: "Open Evidence Scoreboard", what: "Inspect the passive, evidence-backed scoreboard and head standings", run: () => openPanel("standings") },
+  { id: "open-duels-panel", group: "Panels", name: "Open Formal Duels", what: "Inspect agent-initiated domain competition without changing authority", run: () => openPanel("duels") },
   { id: "open-usage-panel", group: "Panels", name: "Open Usage Panel", what: "Inspect session tokens, cache, reasoning, and estimated cost", run: () => openPanel("usage") },
   { id: "open-terminal-panel", group: "Panels", name: "Open Terminal Sessions Panel", what: "Inspect terminal sessions", run: () => openPanel("term") },
   { id: "toggle-ribbons", group: "Panels", name: "Toggle Status Ribbons", what: "Minimize or restore the status ribbons above the composer", run: () => toggleRibbonsBtn.click() },
@@ -217,6 +251,14 @@ const ACTIONS = [
   { id: "open-native-actions-file", group: "Files", name: "Open Native Actions Log", what: "Open durable native action log", run: () => openNativeActionsFooterBtn.click(), enabled: () => !openNativeActionsFooterBtn.disabled },
   { id: "open-agent-calls", group: "Files", name: "Open Agent Call Log", what: "Open native dispatch traces and stderr previews", run: () => vscode.postMessage({ type: "openAgentCalls" }), enabled: () => !lastState.canOpenFolder },
   { id: "open-decisions", group: "Files", name: "Open Decisions", what: "Open decisions log", run: () => openDecisionsBtn.click(), enabled: () => !openDecisionsBtn.disabled },
+  { id: "open-standings", group: "Files", name: "Open Scoreboard Markdown", what: "Open the derived passive scoreboard and standings mirror", run: () => vscode.postMessage({ type: "openStandings" }), enabled: () => !lastState.canOpenFolder },
+  { id: "open-score-evidence", group: "Files", name: "Review Score Evidence", what: "Inspect every active claim, source, and rationale driving the standings", run: () => vscode.postMessage({ type: "openScoreEvidence" }), enabled: () => !lastState.canOpenFolder },
+  { id: "open-duel-audit", group: "Files", name: "Open Duel Audit", what: "Open the derived formal-duel audit", run: () => vscode.postMessage({ type: "openDuelAudit" }), enabled: () => !lastState.canOpenFolder },
+  { id: "cancel-duel", group: "Workflow", name: "Cancel Formal Duel", what: "Cancel an accepted unresolved duel without changing Elo", run: () => vscode.postMessage({ type: "cancelDuel" }), enabled: () => !lastState.canOpenFolder },
+  { id: "correct-duel-result", group: "Workflow", name: "Correct Duel Result", what: "Append an audited correction to a resolved duel", run: () => vscode.postMessage({ type: "correctDuelResult" }), enabled: () => !lastState.canOpenFolder },
+  { id: "record-score-verdict", group: "Workflow", name: "Record Evidence Verdict", what: "Adjudicate one falsifiable claim without changing head authority", run: () => vscode.postMessage({ type: "recordScoreVerdict" }), enabled: () => !lastState.canOpenFolder },
+  { id: "adjudicate-pending-score-claim", group: "Workflow", name: "Adjudicate Pending Score Claim", what: "Attach a corrected verdict to a claim whose earlier verdict was reversed", run: () => vscode.postMessage({ type: "adjudicatePendingScoreClaim" }), enabled: () => !lastState.canOpenFolder },
+  { id: "reverse-score-verdict", group: "Workflow", name: "Reverse Evidence Verdict", what: "Append an audited reversal so a bad verdict no longer affects standings", run: () => vscode.postMessage({ type: "reverseScoreVerdict" }), enabled: () => !lastState.canOpenFolder },
   { id: "open-verification-file", group: "Files", name: "Open Verification Log", what: "Open the durable verification result log", run: () => openVerificationBtn.click(), enabled: () => !openVerificationBtn.disabled },
   { id: "open-transcript", group: "Files", name: "Open Transcript", what: "Open the Hydra transcript", run: () => openTranscriptBtn.click(), enabled: () => !openTranscriptBtn.disabled },
   { id: "session-brief", group: "Files", name: "Session Brief", what: "Open the current session brief", run: () => openSessionBriefBtn.click(), enabled: () => !openSessionBriefBtn.disabled },
@@ -224,8 +266,8 @@ const ACTIONS = [
   { id: "wiki-wrapup-now", group: "Files", name: "Run Wiki Wrapup Now", what: "Force a wiki wrapup from the latest completed room turn", run: () => vscode.postMessage({ type: "runWikiWrapupNow" }), enabled: () => !!lastState.canRunWikiWrapup },
   { id: "choose-model", group: "Settings", name: "Choose Model", what: "Pick Codex or Claude model overrides", run: () => vscode.postMessage({ type: "chooseModel" }), enabled: () => !lastState.canOpenFolder },
   { id: "choose-effort", group: "Settings", name: "Choose Thinking Level", what: "Pick Codex reasoning or Claude effort overrides", run: () => vscode.postMessage({ type: "chooseEffort" }), enabled: () => !lastState.canOpenFolder },
-  { id: "toggle-many-heads", group: "Settings", name: "Toggle Many Heads Mode", what: "Enable or disable local Claude worker fanout for parallel discussion", run: () => vscode.postMessage({ type: "toggleManyHeadsMode" }), enabled: () => !lastState.canOpenFolder },
-  { id: "many-heads-workers", group: "Settings", name: "Set Many Heads Worker Count", what: "Choose local subscription-backed Claude worker fanout", run: () => vscode.postMessage({ type: "configureManyHeadsWorkers" }), enabled: () => !lastState.canOpenFolder },
+  { id: "toggle-many-heads", group: "Settings", name: "Toggle Claude Worker Fanout", what: "Run parallel Claude workers; this does not add independent Hydra heads", run: () => vscode.postMessage({ type: "toggleManyHeadsMode" }), enabled: () => !lastState.canOpenFolder },
+  { id: "many-heads-workers", group: "Settings", name: "Set Claude Fanout Workers", what: "Choose the local subscription-backed Claude worker count", run: () => vscode.postMessage({ type: "configureManyHeadsWorkers" }), enabled: () => !lastState.canOpenFolder },
   { id: "test-telegram", group: "Settings", name: "Send Test Telegram", what: "Verify Telegram decision notifications", run: () => vscode.postMessage({ type: "testTelegram" }), enabled: () => !lastState.canOpenFolder },
   { id: "change-profile", group: "Settings", name: "Change Capability Profile", what: "Pick safe, native build, review, full-native, or custom CLI profiles", run: () => profileBtn.click(), enabled: () => !profileBtn.disabled },
   { id: "fix-codex", group: "Setup", name: "Fix Codex Path", what: "Update the configured Codex CLI command", run: () => fixCodexBtn.click(), enabled: () => !!lastState.needsCodexPath },
@@ -253,7 +295,7 @@ sendBtn.addEventListener("click", () => {
   hasOpenerOverride = false;
 });
 openerBtn.addEventListener("click", () => {
-  selectedOpener = selectedOpener === "codex" ? "claude" : "codex";
+  selectedOpener = nextRosterAgent(selectedOpener);
   hasOpenerOverride = selectedOpener !== defaultOpener;
   renderOpenerButton();
 });
@@ -262,12 +304,14 @@ commandCenterBtn.addEventListener("click", () => {
   else openPalette();
 });
 toggleRibbonsBtn.addEventListener("click", () => setRibbonsMinimized(!ribbonsMinimized));
+railOverflowBtn.addEventListener("click", () => setRailExpanded(!railExpanded));
 ribbonStack.addEventListener("click", (event) => {
   const button = event.target && event.target.closest ? event.target.closest("[data-ribbon-toggle]") : undefined;
   if (!button) return;
   toggleRibbonCollapsed(button.dataset.ribbonToggle || "");
 });
 setRibbonsMinimized(ribbonsMinimized);
+setRailExpanded(railExpanded);
 setObjectiveBtn.addEventListener("click", () => {
   const text = composer.value.trim();
   if (!text) return composer.focus();
@@ -292,8 +336,6 @@ composer.addEventListener("keydown", (e) => {
   }
 });
 stopBtn.addEventListener("click", () => vscode.postMessage({ type: "stop" }));
-assignCodexBtn.addEventListener("click", () => vscode.postMessage({ type: "assignBuilder", builder: "codex" }));
-assignClaudeBtn.addEventListener("click", () => vscode.postMessage({ type: "assignBuilder", builder: "claude" }));
 assignBothBtn.addEventListener("click", () => vscode.postMessage({ type: "assignParallelBuilders" }));
 reviewBtn.addEventListener("click", () => vscode.postMessage({ type: "requestReview" }));
 acceptDefaultBtn.addEventListener("click", () => vscode.postMessage({ type: "acceptDefaultDecision" }));
@@ -338,6 +380,13 @@ openTranscriptBtn.addEventListener("click", () => vscode.postMessage({ type: "op
 archiveClearBtn.addEventListener("click", () => vscode.postMessage({ type: "archiveAndClearRoom" }));
 openDecisionsBtn.addEventListener("click", () => vscode.postMessage({ type: "openDecisions" }));
 openNativeActionsFooterBtn.addEventListener("click", () => vscode.postMessage({ type: "openNativeActions" }));
+if (recordVerdictBtn) recordVerdictBtn.addEventListener("click", () => vscode.postMessage({ type: "recordScoreVerdict" }));
+if (adjudicatePendingBtn) adjudicatePendingBtn.addEventListener("click", () => vscode.postMessage({ type: "adjudicatePendingScoreClaim" }));
+if (openEvidenceBtn) openEvidenceBtn.addEventListener("click", () => vscode.postMessage({ type: "openScoreEvidence" }));
+if (reverseVerdictBtn) reverseVerdictBtn.addEventListener("click", () => vscode.postMessage({ type: "reverseScoreVerdict" }));
+if (openStandingsBtn) openStandingsBtn.addEventListener("click", () => vscode.postMessage({ type: "openStandings" }));
+if (openDuelAuditBtn) openDuelAuditBtn.addEventListener("click", () => vscode.postMessage({ type: "openDuelAudit" }));
+if (correctDuelResultBtn) correctDuelResultBtn.addEventListener("click", () => vscode.postMessage({ type: "correctDuelResult" }));
 nativeAgentFilter.addEventListener("change", () => renderNativeActions(lastState));
 nativeStatusFilter.addEventListener("change", () => renderNativeActions(lastState));
 clearNativeActionsBtn.addEventListener("click", () => {
@@ -412,7 +461,8 @@ window.addEventListener("message", (event) => {
   // Why: one malformed inbound message must not throw and kill the listener
   // for the rest of the session — guard the shape before reading msg.type.
   if (!msg || typeof msg !== "object") return;
-  if (msg.type === "state") renderState(msg);
+  if (msg.type === "openPanel" && msg.panel === "duels") openPanel("duels");
+  else if (msg.type === "state") renderState(msg);
   else if (msg.type === "chunk") appendChunk(msg.messageId, msg.text);
   else if (msg.type === "replaceMessageText") replaceMessageText(msg.messageId, msg.text);
   else if (msg.type === "liveChannelEvent") appendLiveChannelEvent(msg.messageId, msg.event);
@@ -492,16 +542,43 @@ function buildRosterById(roster) {
   return map;
 }
 
+function normalizeRoster(roster) {
+  const source = Array.isArray(roster) && roster.length > 0 ? roster : DEFAULT_WEBVIEW_ROSTER;
+  const normalized = [];
+  const seen = new Set();
+  for (const candidate of source) {
+    if (!candidate || typeof candidate.id !== "string") continue;
+    const id = candidate.id.trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const displayName = typeof candidate.displayName === "string" && candidate.displayName.trim()
+      ? candidate.displayName.trim()
+      : id;
+    const colorIndex = Number.isInteger(candidate.colorIndex) && candidate.colorIndex >= 1 && candidate.colorIndex <= 8
+      ? candidate.colorIndex
+      : (normalized.length % 8) + 1;
+    normalized.push({ id, displayName, colorIndex });
+  }
+  return normalized.length > 0 ? normalized : DEFAULT_WEBVIEW_ROSTER.slice();
+}
+
 function renderState(state) {
   lastState = state;
-  rosterById = buildRosterById(state.roster);
+  currentRoster = normalizeRoster(state.roster);
+  rosterById = buildRosterById(currentRoster);
   const hostMessages = state.messages || [];
   pendingLocalUserMessages = pendingLocalUserMessages.filter((pending) => !hostMessages.some((m) => sameUserMessage(m, pending)));
   lastMessages = hostMessages.concat(pendingLocalUserMessages);
   renderMessages();
   transport = state.transport || "oneShot";
-  defaultOpener = state.defaultOpener || "codex";
-  if (!hasOpenerOverride) selectedOpener = defaultOpener;
+  const requestedOpener = state.firstSpeaker || state.defaultOpener || currentRoster[0].id;
+  defaultOpener = rosterById[requestedOpener] ? requestedOpener : currentRoster[0].id;
+  if (!hasOpenerOverride || !rosterById[selectedOpener]) {
+    selectedOpener = defaultOpener;
+    hasOpenerOverride = false;
+  } else {
+    hasOpenerOverride = selectedOpener !== defaultOpener;
+  }
   renderTransport();
   phaseChip.textContent = state.phaseLabel || state.phase || "Idle";
   phaseChip.className = "phase-chip" + (!state.canStop && state.canSend ? " idle" : "");
@@ -521,6 +598,8 @@ function renderState(state) {
   renderDecision(state.latestDecision, state.decisionsCount || 0, state.latestDecisionRisky, !!state.latestDecisionAccepted);
   renderAutoAdvanceDefaults(!!state.autoAdvanceActionableDefaults);
   renderDecisionAction(state.decisionAction, !!state.canAcceptDefault, !!state.latestDecisionAccepted, !!state.canStop);
+  renderStandings(state.standings || {});
+  renderDuels(state.duels || {});
   renderSessionUsage(state.sessionUsage, state.weeklyUsage);
   renderModels(state.models, state.efforts);
   renderProfiles(state.capabilityProfiles);
@@ -532,7 +611,7 @@ function renderState(state) {
   sendBtn.title = state.canStop
     ? "Queue this follow-up and send it after the active turn finishes"
     : "Send message";
-  openerBtn.disabled = !state.canSend;
+  openerBtn.disabled = !state.canSend || currentRoster.length < 2;
   attachFilesBtn.disabled = !state.canAttachFiles;
   clearAttachmentsBtn.disabled = !hasAttachments;
   previewPromptBtn.disabled = !!state.canOpenFolder;
@@ -543,9 +622,7 @@ function renderState(state) {
   composer.disabled = !state.canSend;
   stopBtn.classList.toggle("hidden", !state.canStop);
   resetTurnBtn.classList.toggle("hidden", !state.canStop);
-  assignCodexBtn.classList.toggle("hidden", !state.canAssignBuilder);
-  assignClaudeBtn.classList.toggle("hidden", !state.canAssignBuilder);
-  assignBothBtn.classList.toggle("hidden", !state.canAssignBuilder);
+  renderBuilderButtons(!!state.canAssignBuilder, state.suggestedBuilder);
   reviewBtn.classList.toggle("hidden", !state.canRequestReview);
   handBackBtn.classList.toggle("hidden", !state.canHandBack);
   archiveChatBtn.disabled = !state.canArchiveRoom;
@@ -594,8 +671,13 @@ function renderState(state) {
   archiveClearBtn.disabled = !state.canArchiveRoom;
   openDecisionsBtn.disabled = !!state.canOpenFolder;
   openNativeActionsFooterBtn.disabled = !!state.canOpenFolder;
-  assignCodexBtn.classList.toggle("suggested", state.suggestedBuilder === "codex");
-  assignClaudeBtn.classList.toggle("suggested", state.suggestedBuilder === "claude");
+  if (recordVerdictBtn) recordVerdictBtn.disabled = !!state.canOpenFolder;
+  if (adjudicatePendingBtn) adjudicatePendingBtn.disabled = !!state.canOpenFolder;
+  if (openEvidenceBtn) openEvidenceBtn.disabled = !!state.canOpenFolder;
+  if (reverseVerdictBtn) reverseVerdictBtn.disabled = !!state.canOpenFolder;
+  if (openStandingsBtn) openStandingsBtn.disabled = !!state.canOpenFolder;
+  if (openDuelAuditBtn) openDuelAuditBtn.disabled = !!state.canOpenFolder;
+  if (correctDuelResultBtn) correctDuelResultBtn.disabled = !!state.canOpenFolder;
   renderOpenerButton();
   renderPalette(paletteInput.value || "");
   applyCollapsedRibbons();
@@ -656,11 +738,20 @@ function renderAttachmentTray(attachments) {
 function setRibbonsMinimized(value) {
   ribbonsMinimized = !!value;
   ribbonStack.classList.toggle("is-minimized", ribbonsMinimized);
-  toggleRibbonsBtn.textContent = ribbonsMinimized ? "Restore Panel" : "Minimize Panel";
-  toggleRibbonsBtn.title = ribbonsMinimized ? "Restore pinned status panel" : "Minimize pinned status panel";
+  toggleRibbonsBtn.textContent = ribbonsMinimized ? "Show status" : "Hide status";
+  toggleRibbonsBtn.title = ribbonsMinimized ? "Show pinned room status" : "Hide pinned room status";
   toggleRibbonsBtn.setAttribute("aria-expanded", String(!ribbonsMinimized));
   persistWebviewState();
   updateRibbonMinimizedSummary(lastState || {});
+}
+
+function setRailExpanded(value) {
+  railExpanded = !!value;
+  railSecondaryWrap.classList.toggle("is-expanded", railExpanded);
+  railOverflowBtn.textContent = railExpanded ? "Compact" : "All status";
+  railOverflowBtn.title = railExpanded ? "Show only active operational status" : "Show every operational status";
+  railOverflowBtn.setAttribute("aria-expanded", String(railExpanded));
+  persistWebviewState();
 }
 
 function toggleRibbonCollapsed(id) {
@@ -675,11 +766,13 @@ function toggleRibbonCollapsed(id) {
 function applyCollapsedRibbons() {
   document.querySelectorAll("[data-ribbon-toggle]").forEach((button) => {
     const id = button.dataset.ribbonToggle || "";
+    const label = button.dataset.ribbonLabel || "status";
     const el = document.getElementById(id);
     const collapsed = collapsedRibbons.has(id);
     if (el) el.classList.toggle("is-collapsed", collapsed);
-    button.textContent = collapsed ? "Restore" : "Minimize";
-    button.title = collapsed ? "Restore this pinned strip" : "Minimize this pinned strip";
+    button.textContent = collapsed ? "+" : "\u2212";
+    button.title = (collapsed ? "Expand " : "Collapse ") + label;
+    button.setAttribute("aria-label", button.title);
     button.setAttribute("aria-expanded", String(!collapsed));
   });
 }
@@ -689,7 +782,8 @@ function persistWebviewState(extra) {
   const base = Object.assign({}, vscode.getState ? (vscode.getState() || {}) : {});
   vscode.setState(Object.assign(base, {
     ribbonsMinimized,
-    collapsedRibbons: Array.from(collapsedRibbons)
+    collapsedRibbons: Array.from(collapsedRibbons),
+    railExpanded
   }, extra || {}));
 }
 
@@ -775,7 +869,7 @@ function applyMessageArticle(article, m) {
   }
   const speaker = document.createElement("span");
   speaker.className = "speaker " + (m.role || "system");
-  speaker.textContent = labels[m.role] || m.role || "system";
+  speaker.textContent = agentDisplayName(m.role || "system");
   const role = document.createElement("span");
   role.className = "role-tag";
   role.textContent = m.phase || "";
@@ -1002,13 +1096,15 @@ function renderRunFailureCard(card) {
   meta.append(
     runFailureMeta("Duration", formatDuration(card.durationMs)),
     runFailureMeta("Transport", card.transport === "terminalBridge" ? "Terminal bridge" : card.transport === "http" ? "HTTP" : "One-shot"),
-    runFailureMeta("Prompt", shortSha(card.promptSha256))
+    runFailureMeta("Prompt", shortSha(card.promptSha256)),
+    runFailureMeta("Preview source", runFailurePreviewSourceLabel(card))
   );
 
   const stderr = document.createElement("pre");
   stderr.className = "run-failure-stderr";
-  stderr.textContent = card.stderrPreview || "No stderr captured";
-  if (!card.stderrPreview) stderr.classList.add("muted");
+  const diagnosticPreview = card.diagnosticPreview || card.stderrPreview || "";
+  stderr.textContent = diagnosticPreview || "No diagnostic output captured";
+  if (!diagnosticPreview) stderr.classList.add("muted");
 
   const actions = document.createElement("div");
   actions.className = "run-failure-actions";
@@ -1039,6 +1135,12 @@ function renderRunFailureCard(card) {
 
   section.append(header, meta, stderr, actions);
   return section;
+}
+
+function runFailurePreviewSourceLabel(card) {
+  if (card.diagnosticPreviewSource === "normalizedReplyOrStdout") return "Normalized reply / stdout";
+  if (card.diagnosticPreviewSource === "stderr" || card.stderrPreview) return "stderr";
+  return "none";
 }
 
 function runFailureMeta(label, value) {
@@ -1081,10 +1183,87 @@ function formatDuration(ms) {
 }
 
 function renderOpenerButton() {
-  const label = selectedOpener === "codex" ? "Codex" : "Claude";
+  const label = agentDisplayName(selectedOpener);
   openerBtn.textContent = hasOpenerOverride ? "Opener: " + label + " (this turn)" : "Opener: " + label;
-  openerBtn.setAttribute("aria-label", "Flip opener, currently " + label);
+  openerBtn.setAttribute("aria-label", "Choose next opener, currently " + label);
+  openerBtn.title = currentRoster.length > 1
+    ? "Choose the next configured opener for this turn only"
+    : label + " is the only configured opener";
   openerBtn.classList.toggle("suggested", hasOpenerOverride);
+}
+
+function nextRosterAgent(agent) {
+  if (currentRoster.length < 2) return currentRoster[0] ? currentRoster[0].id : agent;
+  const index = currentRoster.findIndex((def) => def.id === agent);
+  return currentRoster[(index + 1 + currentRoster.length) % currentRoster.length].id;
+}
+
+function agentDisplayName(agent) {
+  const def = rosterById[agent];
+  return def && def.displayName ? def.displayName : labels[agent] || agent || "Agent";
+}
+
+function canAssignRegisteredBuilder(agent) {
+  return !!lastState.canAssignBuilder && !!rosterById[agent];
+}
+
+function availableActions() {
+  const staticActions = ACTIONS.filter((action) => {
+    if (action.id === "assign-codex") return currentRoster.some((def) => def.id === "codex");
+    if (action.id === "assign-claude") return currentRoster.some((def) => def.id === "claude");
+    return true;
+  });
+  const dynamicBuilders = currentRoster
+    .filter((def) => def.id !== "codex" && def.id !== "claude")
+    .map((def) => ({
+      id: "assign-builder-" + def.id,
+      group: "Workflow",
+      name: "Assign Builder: " + def.displayName,
+      what: "Let " + def.displayName + " edit files",
+      run: () => vscode.postMessage({ type: "assignBuilder", builder: def.id }),
+      enabled: () => canAssignRegisteredBuilder(def.id)
+    }));
+  return staticActions.concat(dynamicBuilders);
+}
+
+function renderBuilderButtons(canAssignBuilder, suggestedBuilder) {
+  const existing = new Map(
+    Array.from(builderButtons.querySelectorAll("button[data-builder-id]"))
+      .map((button) => [button.dataset.builderId, button])
+  );
+  const retained = new Set();
+  for (const def of currentRoster) {
+    let button = existing.get(def.id);
+    if (!button) {
+      button = document.createElement("button");
+      button.type = "button";
+      button.className = "secondary";
+      button.addEventListener("click", () => {
+        const builder = button.dataset.builderId;
+        if (builder && rosterById[builder]) vscode.postMessage({ type: "assignBuilder", builder });
+      });
+    }
+    button.dataset.builderId = def.id;
+    button.textContent = "Assign Builder: " + def.displayName;
+    button.setAttribute("aria-label", "Assign " + def.displayName + " as the builder");
+    button.classList.toggle("suggested", suggestedBuilder === def.id);
+    button.disabled = !canAssignBuilder;
+    builderButtons.append(button);
+    retained.add(def.id);
+  }
+  for (const [id, button] of existing) {
+    if (!retained.has(id)) button.remove();
+  }
+  builderButtons.classList.toggle("hidden", !canAssignBuilder || currentRoster.length === 0);
+
+  const canAssignAll = canAssignBuilder && currentRoster.length > 1;
+  assignBothBtn.classList.toggle("hidden", !canAssignAll);
+  assignBothBtn.disabled = !canAssignAll;
+  assignBothBtn.textContent = currentRoster.length === 2
+    ? "Assign Builders: Both"
+    : "Assign Builders: All " + currentRoster.length + " Heads";
+  assignBothBtn.setAttribute("aria-label", "Assign all configured Hydra heads as parallel builders");
+  assignBothBtn.title = "Assign all configured Hydra heads as parallel builders";
 }
 
 function pokeNativeTerminal(agent, includeEditorContext, includeWorkspaceDiff) {
@@ -1120,16 +1299,20 @@ function renderTransport() {
   nativeTerminalsBtn.title = terminal ? "Switch back to the stable one-shot transport" : "Inject future calls into visible native terminals";
 }
 function renderAgentStatuses(statuses) {
-  renderAgentStatus(codexStatus, "Codex", statuses.codex, "codex");
-  renderAgentStatus(claudeStatus, "Claude", statuses.claude, "claude");
+  const nodes = currentRoster.map((def) => renderAgentStatus(def, statuses && statuses[def.id]));
+  agentStatusRail.replaceChildren(...nodes);
 }
-function renderAgentStatus(el, label, status, agent) {
-  const state = status && status.state ? status.state : "idle";
+function renderAgentStatus(def, status) {
+  const el = document.createElement("span");
+  const state = ["idle", "running", "replied", "error"].includes(status && status.state) ? status.state : "idle";
   const detail = status && status.detail ? status.detail : "Idle";
-  el.className = "agent-status " + agent + " " + state;
-  el.title = label + ": " + detail;
-  el.textContent = label + ": " + compactStatusDetail(detail);
-  announceAgentTransition(agent, label, state, detail);
+  el.className = "agent-status " + headColorClass(def.id) + " " + state;
+  el.dataset.agentId = def.id;
+  el.setAttribute("role", "listitem");
+  el.title = def.displayName + ": " + detail;
+  el.textContent = def.displayName + ": " + compactStatusDetail(detail);
+  announceAgentTransition(def.id, def.displayName, state, detail);
+  return el;
 }
 function announceAgentTransition(agent, label, state, detail) {
   const prev = lastAnnouncedActivity.get(agent);
@@ -1140,15 +1323,25 @@ function announceAgentTransition(agent, label, state, detail) {
   else if (state === "error") announce(label + " failed: " + compactStatusDetail(detail));
 }
 function renderAuthorityBadges(summaries) {
-  renderAuthorityBadge(codexAuthority, "Codex", summaries.codex);
-  renderAuthorityBadge(claudeAuthority, "Claude", summaries.claude);
+  const nodes = currentRoster.map((def) => renderAuthorityBadge(def, summaries && summaries[def.id]));
+  authorityRail.replaceChildren(...nodes);
 }
-function renderAuthorityBadge(el, label, summary) {
+function renderAuthorityBadge(def, summary) {
+  const el = document.createElement("span");
   const authority = summary && summary.authority ? summary.authority : { level: "unknown", label: "Unknown/custom", detail: "No authority data yet" };
   const profile = summary && summary.profile ? summary.profile : { label: "Custom" };
-  el.className = "authority-badge " + (authority.level || "unknown");
-  el.title = label + ": " + (authority.label || "Unknown/custom") + " / " + (profile.label || "Custom") + "\\n" + (authority.detail || "") + "\\nProfile: " + (profile.detail || profile.label || "Custom");
-  el.innerHTML = '<span class="rail-value"><strong>' + escapeHtml(label) + '</strong> ' + escapeHtml(compactAuthority(authority, profile)) + "</span>";
+  const level = ["readOnly", "workspaceWrite", "fullNative", "unknown"].includes(authority.level) ? authority.level : "unknown";
+  el.className = "authority-badge " + level;
+  el.dataset.agentId = def.id;
+  el.setAttribute("role", "listitem");
+  el.title = def.displayName + ": " + (authority.label || "Unknown/custom") + " / " + (profile.label || "Custom") + "\n" + (authority.detail || "") + "\nProfile: " + (profile.detail || profile.label || "Custom");
+  const value = document.createElement("span");
+  value.className = "rail-value";
+  const name = document.createElement("strong");
+  name.textContent = def.displayName;
+  value.append(name, document.createTextNode(" " + compactAuthority(authority, profile)));
+  el.append(value);
+  return el;
 }
 function compactStatusDetail(detail) {
   return String(detail || "Idle")
@@ -1201,12 +1394,13 @@ function sessionLine(label, value) {
   return line;
 }
 function renderAutopilot(state) {
-  setupStrip.classList.toggle("hidden", !!state.canOpenFolder && !state.autopilotSummary);
   const summary = state.autopilotSummary || "Not run";
+  const summaryNeedsAttention = /fail|error|missing|not found|unavailable|blocked|needs attention/i.test(summary);
+  const showSetup = !!state.autopilotRunning || !!state.needsCodexPath || !!state.needsClaudePath || summaryNeedsAttention;
+  setupStrip.classList.toggle("hidden", !showSetup);
   autopilotText.textContent = state.autopilotRunning ? summary + "..." : summary;
   fixCodexBtn.classList.toggle("hidden", !state.needsCodexPath);
   fixClaudeBtn.classList.toggle("hidden", !state.needsClaudePath);
-  setupStrip.classList.toggle("hidden", !state.needsCodexPath && !state.needsClaudePath && !state.autopilotRunning && !state.autopilotSummary);
 }
 function renderVerification(state) {
   const text = state.verificationRunning ? "running..." : (state.verificationSummary || "No verification yet");
@@ -1382,6 +1576,542 @@ function renderProfiles(profiles) {
   profileBtn.textContent = "profiles: C " + claude.text + " | Cx " + codex.text;
   profileBtn.title = "Change capability profiles. Claude: " + claude.title + ". Codex: " + codex.title + ".";
 }
+function setInteractiveRailState(element, text, actionLabel) {
+  element.textContent = text;
+  element.setAttribute("aria-label", text + ". " + actionLabel);
+}
+function renderStandings(data) {
+  if (!standingsRail || !standingsPanelCount || !standingsBoard) return;
+  const eventCount = Number(data && data.eventCount) || 0;
+  const overall = Array.isArray(data && data.overall) ? data.overall : [];
+  const error = data && typeof data.error === "string" ? data.error.trim() : "";
+  const mirrorError = data && typeof data.mirrorError === "string" ? data.mirrorError.trim() : "";
+
+  standingsPanelCount.textContent = eventCount + " event" + (eventCount === 1 ? "" : "s") + " / " + overall.length + " head" + (overall.length === 1 ? "" : "s");
+  standingsBoard.replaceChildren();
+
+  if (error) {
+    setInteractiveRailState(standingsRail, "scoreboard: unavailable", "Open passive Hydra Scoreboard");
+    standingsRail.className = "rail-chip warn";
+    standingsRail.title = "The private evidence ledger failed validation. Scores are hidden until it is repaired.";
+    const message = document.createElement("p");
+    message.className = "empty";
+    message.textContent = error;
+    standingsBoard.append(message);
+    return;
+  }
+
+  if (mirrorError) {
+    const warning = document.createElement("p");
+    warning.className = "standing-policy";
+    warning.textContent = mirrorError + " The private evidence ledger and in-room standings remain valid.";
+    standingsBoard.append(warning);
+  }
+
+  if (overall.length === 0) {
+    setInteractiveRailState(standingsRail, "scoreboard: unranked", "Open passive Hydra Scoreboard");
+    standingsRail.className = "rail-chip";
+    standingsRail.title = "No independently adjudicated claims yet. Open the passive evidence scoreboard.";
+    const message = document.createElement("p");
+    message.className = "empty";
+    message.textContent = "No evidence-backed verdicts yet. Record a falsifiable claim only after deterministic verification or explicit human adjudication.";
+    standingsBoard.append(message);
+    return;
+  }
+
+  const ranked = overall.filter((standing) => typeof standing.score === "number" && Number.isFinite(standing.score));
+  if (ranked.length > 0) {
+    const leader = ranked[0];
+    const leaders = ranked.filter((standing) => standing.score === leader.score);
+    const leaderEvidence = Math.min(...leaders.map((standing) => Number(standing && standing.counts && (standing.counts.independentRounds ?? standing.counts.independentlyResolved)) || 0));
+    const leadersProvisional = leaders.some((standing) => standing.provisional);
+    const maturity = leadersProvisional ? "provisional " : "";
+    const scoreboardText = leaders.length === 1
+      ? "scoreboard: " + maturity + "#1 " + agentDisplayName(leader.agentId) + " " + scorePercent(leader.score)
+      : "scoreboard: " + leaders.length + "-way " + maturity + "tie #1 " + scorePercent(leader.score);
+    setInteractiveRailState(standingsRail, scoreboardText, "Open passive Hydra Scoreboard");
+    standingsRail.className = "rail-chip " + (leadersProvisional ? "warn" : "ok");
+    standingsRail.title = "Passive evidence scoreboard only. " + (leadersProvisional ? "Provisional " : "") + (leaders.length === 1 ? "leader" : "joint leaders") + " have at least " + leaderEvidence + " independently resolved round" + (leaderEvidence === 1 ? "" : "s") + "; this never changes native authority or speaking order.";
+  } else {
+    setInteractiveRailState(standingsRail, "scoreboard: unranked", "Open passive Hydra Scoreboard");
+    standingsRail.className = "rail-chip";
+    standingsRail.title = "Claims exist, but none has deterministic or human-adjudicated evidence yet.";
+  }
+
+  let scoredPosition = 0;
+  let visibleRank = 0;
+  let previousScore;
+  overall.forEach((standing) => {
+    const counts = standing && standing.counts ? standing.counts : {};
+    const trusted = Number(counts.independentlyResolved) || 0;
+    const trustedRounds = Number(counts.independentRounds ?? counts.independentlyResolved) || 0;
+    const advisory = Number(counts.advisoryResolved) || 0;
+    const scoreable = typeof standing.score === "number" && Number.isFinite(standing.score);
+    if (scoreable) {
+      scoredPosition += 1;
+      if (previousScore === undefined || standing.score !== previousScore) visibleRank = scoredPosition;
+      previousScore = standing.score;
+    }
+    const row = document.createElement("div");
+    row.className = "standing-row" + (scoreable && visibleRank === 1 ? " leader" : "");
+
+    const rank = document.createElement("span");
+    rank.className = "standing-rank";
+    rank.textContent = scoreable ? "#" + visibleRank : "—";
+
+    const identity = document.createElement("div");
+    const name = document.createElement("strong");
+    name.textContent = agentDisplayName(standing.agentId);
+    const domains = document.createElement("div");
+    domains.className = "standing-meta";
+    domains.textContent = Array.isArray(standing.domains) && standing.domains.length > 0
+      ? standing.domains.join(" · ")
+      : "no scored domains";
+    identity.append(name, domains);
+
+    const score = document.createElement("span");
+    score.className = "standing-score";
+    score.textContent = scorePercent(standing.score);
+    score.title = "Wilson lower confidence bound over source-weighted correctness";
+
+    const evidence = document.createElement("div");
+    const record = document.createElement("div");
+    record.textContent = (Number(counts.trustedCorrect ?? counts.correct) || 0) + "W / " + (Number(counts.trustedPartial ?? counts.partial) || 0) + "P / " + (Number(counts.trustedIncorrect ?? counts.incorrect) || 0) + "L";
+    const evidenceMeta = document.createElement("div");
+    evidenceMeta.className = "standing-meta";
+    evidenceMeta.textContent = trustedRounds + " round" + (trustedRounds === 1 ? "" : "s") + " · " + trusted + " outcome" + (trusted === 1 ? "" : "s") + (advisory ? " · " + advisory + " advisory" : "");
+    evidence.append(record, evidenceMeta);
+
+    const maturity = document.createElement("span");
+    maturity.className = "standing-meta";
+    maturity.textContent = standing.provisional ? "provisional" : "established";
+    maturity.title = standing.provisional
+      ? "Fewer than five independently resolved rounds"
+      : "At least five independently resolved rounds";
+
+    row.append(rank, identity, score, evidence, maturity);
+    standingsBoard.append(row);
+  });
+}
+function renderDuels(data) {
+  if (!duelsRail || !duelsPanelCount || !duelsBoard) return;
+  const eventCount = Number(data && data.eventCount) || 0;
+  const active = Array.isArray(data && data.active) ? data.active : [];
+  const ratings = Array.isArray(data && data.ratings) ? data.ratings : [];
+  const recent = Array.isArray(data && data.recent) ? data.recent : [];
+  const activeTotal = Math.max(active.length, Number(data && data.activeTotal) || 0);
+  const ratingsTotal = Math.max(ratings.length, Number(data && data.ratingsTotal) || 0);
+  const recentTotal = Math.max(recent.length, Number(data && data.recentTotal) || 0);
+  const error = data && typeof data.error === "string" ? data.error.trim() : "";
+  const mirrorError = data && typeof data.mirrorError === "string" ? data.mirrorError.trim() : "";
+  if (agentDuelMode) {
+    const enabled = !!(data && data.agentInitiatedEnabled);
+    const running = !!(data && data.automationRunning);
+    const queued = Math.max(0, Number(data && data.automationQueued) || 0);
+    agentDuelMode.textContent = running
+      ? "Agent challenges: running"
+      : queued > 0
+        ? "Agent challenges: " + queued + " queued"
+        : enabled
+          ? "Agent challenges: enabled"
+          : "Agent challenges: paused";
+    agentDuelMode.className = "duel-status" + (!enabled ? " warn" : "");
+  }
+  // Every rated duel increments both participants, so the ratings table's
+  // match total is exactly twice the number of rated duels.
+  const visibleRatedMatches = Math.floor(ratings.reduce((total, rating) => total + (Number(rating && rating.ratedMatches) || 0), 0) / 2);
+  const ratedMatches = Number.isFinite(Number(data && data.ratedDuelCount))
+    ? Math.max(0, Math.floor(Number(data.ratedDuelCount)))
+    : visibleRatedMatches;
+
+  duelsPanelCount.textContent = activeTotal + " active / " + ratingsTotal + " domain rating" + (ratingsTotal === 1 ? "" : "s") + " / " + eventCount + " event" + (eventCount === 1 ? "" : "s");
+  duelsBoard.replaceChildren();
+
+  if (error) {
+    setInteractiveRailState(duelsRail, "duels: unavailable", "Open formal Hydra duels");
+    duelsRail.className = "rail-chip warn";
+    duelsRail.title = "The private duel ledger failed validation. Challenges and ratings are hidden until it is repaired.";
+    const message = document.createElement("p");
+    message.className = "empty";
+    message.textContent = error;
+    duelsBoard.append(message);
+    return;
+  }
+
+  if (active.length > 0) {
+    setInteractiveRailState(duelsRail, "duels: " + active.length + " active", "Open formal Hydra duels");
+    duelsRail.className = "rail-chip warn";
+    duelsRail.title = active.length + " formal duel" + (active.length === 1 ? " is" : "s are") + " waiting for action. Competitive ratings never change Hydra authority.";
+  } else if (ratedMatches > 0) {
+    setInteractiveRailState(duelsRail, "duels: " + ratedMatches + " rated", "Open formal Hydra duels");
+    duelsRail.className = "rail-chip";
+    duelsRail.title = "Formal duel history by domain. Ratings never change Hydra authority.";
+  } else {
+    setInteractiveRailState(duelsRail, "duels: none", "Open formal Hydra duels");
+    duelsRail.className = "rail-chip";
+    duelsRail.title = "No formal duels yet. Ordinary disagreement is not automatically a duel.";
+  }
+
+  if (mirrorError) {
+    const warning = document.createElement("p");
+    warning.className = "standing-policy";
+    warning.textContent = mirrorError + " The private duel ledger and in-room ratings remain valid.";
+    duelsBoard.append(warning);
+  }
+
+  const activeSection = duelSection("Active duels", active.length + " requiring attention");
+  if (active.length === 0) {
+    activeSection.body.append(duelEmpty("No active challenges. A reactor or closer head may initiate one consequential, falsifiable challenge; Hydra admits or rejects it automatically."));
+  } else {
+    active.forEach((duel) => activeSection.body.append(renderDuelCard(duel, true)));
+    if (activeTotal > active.length) activeSection.body.append(duelEmpty("Showing " + active.length + " of " + activeTotal + " active duels. Open Audit for the complete history."));
+  }
+  duelsBoard.append(activeSection.section);
+
+  const ratingSection = duelSection("Domain ratings", ratings.length + " entries");
+  if (ratings.length === 0) {
+    ratingSection.body.append(duelEmpty("No rated outcomes yet. Void and unresolved duels do not affect ratings."));
+  } else {
+    const groups = groupDuelRatingsByDomain(ratings);
+    groups.forEach((group) => {
+      const domainGroup = document.createElement("section");
+      domainGroup.className = "duel-rating-domain";
+      const groupHead = document.createElement("h5");
+      groupHead.className = "duel-section-head";
+      groupHead.id = duelHeadingId("duel-domain", group.domain);
+      domainGroup.setAttribute("aria-labelledby", groupHead.id);
+      const domain = document.createElement("strong");
+      domain.textContent = group.domain;
+      const count = document.createElement("span");
+      count.textContent = group.ratings.length + " ranked head" + (group.ratings.length === 1 ? "" : "s");
+      groupHead.append(domain, count);
+      domainGroup.append(groupHead);
+
+      const leaderRating = Number(group.ratings[0] && group.ratings[0].rating);
+      const leaderCount = group.ratings.filter((rating) => Number(rating && rating.rating) === leaderRating).length;
+      let visibleRank = 0;
+      let previousRating;
+      group.ratings.forEach((rating, index) => {
+        const currentRating = Number(rating && rating.rating);
+        if (previousRating === undefined || currentRating !== previousRating) visibleRank = index + 1;
+        previousRating = currentRating;
+        domainGroup.append(renderDuelRating(rating, {
+          rank: visibleRank,
+          gap: Math.max(0, Math.round(leaderRating - currentRating)),
+          jointLeader: visibleRank === 1 && leaderCount > 1,
+        }));
+      });
+      ratingSection.body.append(domainGroup);
+    });
+    if (ratingsTotal > ratings.length) ratingSection.body.append(duelEmpty("Showing " + ratings.length + " of " + ratingsTotal + " rating rows. Open Audit for the complete table."));
+  }
+  duelsBoard.append(ratingSection.section);
+
+  const recentSection = duelSection("Recent outcomes", recent.length + " shown");
+  if (recent.length === 0) {
+    recentSection.body.append(duelEmpty("No completed, declined, or cancelled duels yet."));
+  } else {
+    recent.forEach((duel) => recentSection.body.append(renderDuelCard(duel, false)));
+    if (recentTotal > recent.length) recentSection.body.append(duelEmpty("Showing " + recent.length + " of " + recentTotal + " recent outcomes. Open Audit for the complete history."));
+  }
+  duelsBoard.append(recentSection.section);
+}
+function duelSection(title, count) {
+  const section = document.createElement("section");
+  section.className = "duel-section";
+  const heading = document.createElement("h4");
+  heading.className = "duel-section-head";
+  heading.id = duelHeadingId("duel-section", title);
+  section.setAttribute("aria-labelledby", heading.id);
+  const name = document.createElement("strong");
+  name.textContent = title;
+  const meta = document.createElement("span");
+  meta.textContent = count;
+  heading.append(name, meta);
+  const body = document.createElement("div");
+  body.className = "duel-section";
+  section.append(heading, body);
+  return { section, body };
+}
+function duelHeadingId(prefix, value) {
+  const slug = String(value || "section").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  return prefix + "-" + (slug || "section");
+}
+function duelEmpty(text) {
+  const message = document.createElement("p");
+  message.className = "empty";
+  message.textContent = text;
+  return message;
+}
+function renderDuelCard(duel, actionable) {
+  const card = document.createElement("article");
+  card.className = "duel-card" + (actionable ? " active" : "");
+
+  const header = document.createElement("div");
+  header.className = "duel-card-head";
+  const chips = document.createElement("div");
+  chips.className = "duel-card-head";
+  const status = document.createElement("span");
+  status.className = "duel-status";
+  status.textContent = duelStatusLabel(duel && duel.status);
+  const domain = document.createElement("span");
+  domain.className = "duel-domain";
+  domain.textContent = duelText(duel && duel.domain, "unclassified");
+  const rated = document.createElement("span");
+  rated.className = "duel-rated";
+  const duelStatus = duelText(duel && duel.status, "unknown");
+  const hasSharedEvidencePacket = !!(duel && typeof duel.sharedEvidencePacket === "string" && duel.sharedEvidencePacket.trim());
+  rated.textContent = duelStatus === "awaiting_acceptance"
+    ? "legacy closure pending"
+    : duelStatus === "declined" || duelStatus === "cancelled"
+      ? "no rating"
+      : duel && duel.rated
+        ? "rated · full access"
+        : "legacy unranked";
+  if (!(duel && duel.rated) && duel && duel.ratingIneligibilityReason) rated.title = String(duel.ratingIneligibilityReason);
+  if (duel && duel.rated && duel.capabilityPolicy) rated.title = "Capability policy: " + String(duel.capabilityPolicy);
+  chips.append(status, domain, rated);
+  const duelId = duelText(duel && duel.duelId, "unknown duel");
+  const id = document.createElement("span");
+  id.className = "duel-meta";
+  id.textContent = duelId;
+  header.append(chips, id);
+
+  const matchup = document.createElement("div");
+  matchup.className = "duel-matchup";
+  const challenger = document.createElement("span");
+  challenger.textContent = agentDisplayName(duel && duel.challengerId);
+  const versus = document.createElement("span");
+  versus.className = "duel-meta";
+  versus.textContent = "versus";
+  const challenged = document.createElement("span");
+  challenged.textContent = agentDisplayName(duel && duel.challengedId);
+  matchup.append(challenger, versus, challenged);
+
+  const origin = document.createElement("div");
+  origin.className = "duel-meta";
+  origin.textContent = duel && duel.createdBy === "hydra-runtime"
+    ? agentDisplayName(duel.challengerId) + " initiated this challenge from its own room reply Â· Hydra policy admitted it"
+    : "Legacy operator-created challenge";
+
+  const proposition = document.createElement("p");
+  proposition.className = "duel-proposition";
+  proposition.textContent = duelText(duel && duel.proposition, "No proposition recorded");
+
+  const evidence = document.createElement("div");
+  evidence.className = "duel-meta";
+  const adjudicator = duel && duel.adjudicatorId ? " by " + agentDisplayName(duel.adjudicatorId) : "";
+  evidence.textContent = "Adjudication contract: " + duelText(duel && duel.evidenceContract, "not recorded") + " · " + duelText(duel && duel.adjudicatorType, "unknown") + adjudicator;
+
+  const evidencePacket = document.createElement("details");
+  evidencePacket.className = "duel-evidence-packet";
+  const evidencePacketSummary = document.createElement("summary");
+  evidencePacketSummary.textContent = hasSharedEvidencePacket
+    ? "Shared evidence starting brief"
+    : "No shared evidence brief · legacy unranked";
+  const evidencePacketText = document.createElement("pre");
+  evidencePacketText.tabIndex = 0;
+  evidencePacketText.setAttribute("aria-label", "Locked shared evidence packet text");
+  evidencePacketText.textContent = duelText(
+    duel && duel.sharedEvidencePacket,
+    "Legacy duel: no shared evidence brief was locked. It cannot enter the current agent-initiated ladder and should be closed.",
+  );
+  evidencePacket.append(evidencePacketSummary, evidencePacketText);
+
+  const ratingNote = document.createElement("div");
+  ratingNote.className = "duel-meta";
+  ratingNote.textContent = duelStatus === "awaiting_acceptance"
+    ? "Historical operator-created challenge: close it without Elo. New rated challenges originate only from agent discussion turns."
+    : duelStatus === "declined" || duelStatus === "cancelled"
+      ? ""
+      : duel && !duel.rated && duel.ratingIneligibilityReason
+        ? "Legacy unranked history: " + String(duel.ratingIneligibilityReason)
+        : "";
+
+  const commitmentCount = Math.max(0, Math.min(2, Number(duel && duel.commitmentCount) || 0));
+  const safeCommitments = Array.isArray(duel && duel.commitments) && duel.commitments.length === 2 ? duel.commitments : [];
+  const commitmentState = document.createElement("div");
+  commitmentState.className = "duel-commitment-state";
+  commitmentState.textContent = duelStatus === "declined"
+    ? "Declined: " + duelText(duel && duel.declineReason, "no reason recorded")
+    : duelStatus === "cancelled"
+      ? "Cancelled: " + duelText(duel && duel.cancellationReason, "no reason recorded")
+      : safeCommitments.length === 2
+        ? "Both sealed commitments are recorded and revealed together below."
+        : "Sealed commitments: " + commitmentCount + " / 2. Answers remain hidden until both heads have committed.";
+
+  card.append(header, matchup, origin, proposition, evidence, evidencePacket);
+  if (ratingNote.textContent) card.append(ratingNote);
+  card.append(commitmentState);
+
+  if (safeCommitments.length === 2) {
+    const reveal = document.createElement("div");
+    reveal.className = "duel-reveal";
+    safeCommitments.forEach((commitment) => {
+      const answer = document.createElement("div");
+      answer.className = "duel-answer";
+      const name = document.createElement("strong");
+      name.textContent = agentDisplayName(commitment && (commitment.agentId || commitment.headId));
+      const text = document.createElement("p");
+      text.textContent = duelText(commitment && (commitment.answer ?? commitment.position), "No answer recorded");
+      const confidence = document.createElement("div");
+      confidence.className = "duel-meta";
+      confidence.textContent = duelConfidence(commitment && commitment.confidence);
+      const provenance = document.createElement("div");
+      provenance.className = "duel-meta";
+      const receipt = commitment && commitment.agentReceipt && typeof commitment.agentReceipt === "object" ? commitment.agentReceipt : null;
+      const runtime = receipt
+        ? [receipt.agentKind, receipt.model, receipt.transport].filter(Boolean).join(" / ")
+        : "configured head";
+      provenance.textContent = commitment && commitment.captureType === "agent-call"
+        ? "Hydra-bound head run · " + runtime + " · " + duelText(commitment.captureRef, "receipt unavailable")
+        : "Legacy operator entry · unranked history only";
+      if (commitment && commitment.captureType === "agent-call" && receipt && typeof receipt.sharedEvidenceSha256 === "string") {
+        provenance.textContent += " · packet " + receipt.sharedEvidenceSha256.slice(0, 12);
+        provenance.title = "Shared evidence SHA-256: " + receipt.sharedEvidenceSha256;
+      }
+      if (receipt && typeof receipt.capabilityPolicy === "string") {
+        provenance.textContent += " · " + receipt.capabilityPolicy;
+        provenance.title = (provenance.title ? provenance.title + "\n" : "") + "Capability policy: " + receipt.capabilityPolicy;
+      }
+      answer.append(name, text, confidence, provenance);
+      reveal.append(answer);
+    });
+    card.append(reveal);
+  }
+
+  if (duel && duel.resolution) {
+    const resolution = document.createElement("div");
+    resolution.className = "duel-resolution";
+    const outcome = duelOutcomeLabel(duel.resolution.outcome);
+    const winner = duel.resolution.winnerId ? " · winner: " + agentDisplayName(duel.resolution.winnerId) : "";
+    const rationale = duel.resolution.rationale ? " · " + String(duel.resolution.rationale) : "";
+    const rawDeltas = duel.resolution.ratingDeltas && typeof duel.resolution.ratingDeltas === "object"
+      ? Object.entries(duel.resolution.ratingDeltas).filter(([, delta]) => Number.isFinite(Number(delta)))
+      : [];
+    const moved = rawDeltas.some(([, delta]) => Number(delta) !== 0);
+    const elo = moved
+      ? " / Elo: " + rawDeltas.map(([agentId, delta]) => agentDisplayName(agentId) + " " + (Number(delta) >= 0 ? "+" : "") + Math.round(Number(delta))).join(", ")
+      : " / Elo: no change";
+    resolution.textContent = "Result: " + outcome + winner + elo + rationale;
+    const resolutionEvidence = document.createElement("div");
+    resolutionEvidence.className = "duel-meta";
+    resolutionEvidence.textContent = "Ruling evidence: "
+      + duelText(duel.resolution.source, "human")
+      + " by " + agentDisplayName(duel.resolution.adjudicatorId || duel.adjudicatorId)
+      + " / " + duelText(duel.resolution.evidenceRef, "reference unavailable");
+    card.append(resolution, resolutionEvidence);
+  }
+
+  if (actionable && duelId !== "unknown duel") {
+    const actions = document.createElement("div");
+    actions.className = "duel-card-actions";
+    const advance = document.createElement("button");
+    advance.type = "button";
+    advance.className = "secondary";
+    advance.textContent = duelActionLabel(duelStatus, !!(duel && duel.rated));
+    const actionHint = duelActionHint(duelStatus, !!(duel && duel.rated));
+    if (actionHint) advance.title = actionHint;
+    advance.addEventListener("click", () => vscode.postMessage({ type: "advanceDuel", duelId }));
+    actions.append(advance);
+    if (duelStatus !== "awaiting_acceptance") {
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.className = "secondary";
+      cancel.textContent = "Cancel Duel";
+      cancel.addEventListener("click", () => vscode.postMessage({ type: "cancelDuel", duelId }));
+      actions.append(cancel);
+    }
+    card.append(actions);
+  }
+  return card;
+}
+function renderDuelRating(rating, rankInfo) {
+  const row = document.createElement("div");
+  row.className = "duel-rating-row" + (rankInfo && rankInfo.rank === 1 ? " leader" : "");
+  const identity = document.createElement("strong");
+  identity.textContent = agentDisplayName(rating && rating.agentId);
+  const chase = document.createElement("span");
+  chase.className = "duel-rank-chase";
+  chase.textContent = rankInfo && rankInfo.rank === 1
+    ? (rating && rating.provisional
+      ? (rankInfo.jointLeader ? "Joint provisional #1" : "Provisional #1")
+      : (rankInfo.jointLeader ? "Joint #1" : "Supreme Head · #1"))
+    : "#" + (rankInfo ? rankInfo.rank : "—") + " · " + (rankInfo ? rankInfo.gap : "—") + " Elo to #1";
+  chase.title = "Competitive rank for this domain only. It grants no Hydra authority.";
+  const value = document.createElement("span");
+  value.className = "duel-rating-value";
+  value.textContent = Number.isFinite(Number(rating && rating.rating)) ? String(Math.round(Number(rating.rating))) : "—";
+  const record = document.createElement("span");
+  record.textContent = (Number(rating && rating.wins) || 0) + "W / " + (Number(rating && rating.draws) || 0) + "D / " + (Number(rating && rating.losses) || 0) + "L";
+  const maturity = document.createElement("span");
+  maturity.className = "duel-meta";
+  const matches = Number(rating && rating.ratedMatches) || 0;
+  maturity.textContent = (rating && rating.provisional ? "provisional · " : "") + matches + " rated";
+  row.append(identity, chase, value, record, maturity);
+  return row;
+}
+function groupDuelRatingsByDomain(ratings) {
+  const groups = new Map();
+  ratings.forEach((rating) => {
+    const domain = duelText(rating && rating.domain, "unclassified");
+    if (!groups.has(domain)) groups.set(domain, []);
+    groups.get(domain).push(rating);
+  });
+  return Array.from(groups.entries())
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([domain, domainRatings]) => ({
+      domain,
+      ratings: domainRatings.slice().sort((left, right) => {
+        const ratingDifference = Number(right && right.rating) - Number(left && left.rating);
+        return ratingDifference || agentDisplayName(left && left.agentId).localeCompare(agentDisplayName(right && right.agentId));
+      }),
+    }));
+}
+function duelStatusLabel(value) {
+  const normalized = duelText(value, "unknown").replace(/[_-]+/g, " ").trim();
+  return normalized ? normalized.charAt(0).toUpperCase() + normalized.slice(1) : "Unknown";
+}
+function duelActionLabel(status, rated) {
+  if (status === "awaiting_acceptance") return "Close Legacy Challenge";
+  if (status === "awaiting_commitments") return rated
+    ? "Resume Agent Automation"
+    : "Close Legacy Challenge";
+  if (status === "awaiting_reveal") return "Verify Paired Reveal";
+  if (status === "awaiting_adjudication") return "Judge Revealed Duel";
+  return "Advance Duel";
+}
+function duelActionHint(status, rated) {
+  if (status === "awaiting_commitments" && rated) {
+    return "Resume Hydra's automatic private calls to both configured heads. The operator never authors a commitment, and rating never changes Hydra authority.";
+  }
+  if (status === "awaiting_acceptance" || (status === "awaiting_commitments" && !rated)) {
+    return "This historical operator-created duel cannot advance or enter the current ladder. Close it without Elo; future challenges originate from agent discussion turns.";
+  }
+  return "";
+}
+function duelOutcomeLabel(value) {
+  if (value === "challengerWin" || value === "challenger_win") return "Challenger win";
+  if (value === "challengedWin" || value === "challenged_win") return "Challenged head win";
+  if (value === "tie") return "Tie";
+  if (value === "unresolved") return "Unresolved";
+  if (value === "void") return "Void";
+  return duelStatusLabel(value || "resolved");
+}
+function duelConfidence(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return value ? "Confidence: " + String(value) : "Confidence not recorded";
+  const percent = numeric >= 0 && numeric <= 1 ? numeric * 100 : numeric;
+  return "Confidence: " + Math.round(percent) + "%";
+}
+function duelText(value, fallback) {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return fallback;
+}
+function scorePercent(value) {
+  return typeof value === "number" && Number.isFinite(value) ? (value * 100).toFixed(1) + "%" : "—";
+}
 function renderSessionUsage(u, weekly) {
   if (!usageRail) return;
   const session = u || {};
@@ -1403,7 +2133,7 @@ function renderSessionUsage(u, weekly) {
   // input rate) with fresh tokens, so the raw total reads ~4x scarier than
   // what the turn actually cost. "fresh" = input + output + cache writes.
   const fresh = (session.inputTokens || 0) + (session.outputTokens || 0) + (session.cacheCreateTokens || 0);
-  usageRail.textContent = "session " + (session.turns || 0) + "t " + costStr + " · " + formatTokens(fresh) + " fresh / " + tokenStr + " w/cache | 7d " + formatCost(weekCost);
+  usageRail.textContent = "session " + (session.turns || 0) + "t " + costStr + " · " + formatTokens(fresh) + " fresh | 7d " + formatCost(weekCost);
   usageRail.className = "rail-chip " + (Math.max(cost, weekCost) >= 1 ? "warn" : "ok");
   usageRail.title = "Open usage panel. Session cost " + costStr + ": fresh input " + formatTokens(session.inputTokens || 0) + ", output " + formatTokens(session.outputTokens || 0) + ", cache writes " + formatTokens(session.cacheCreateTokens || 0) + "; plus " + formatTokens(session.cacheReadTokens || 0) + " cache reads billed at ~10% of the input rate. Rolling 7-day cost " + formatCost(weekCost) + " (" + formatTokens(week.totalTokens || 0) + " tokens incl. cache).";
   renderUsagePanel(session, week, lastState.recentUsageRecords || []);
@@ -1428,9 +2158,22 @@ function renderUsagePanel(u, weekly, records) {
     usageStat(formatTokens(summary.cacheCreateTokens || 0), "cache write")
   );
   const agents = summary.byAgent || {};
+  const usageAgentIds = [];
+  const seenAgents = new Set();
+  for (const head of currentRoster) {
+    if (!head || seenAgents.has(head.id)) continue;
+    seenAgents.add(head.id);
+    usageAgentIds.push(head.id);
+  }
+  for (const agentId of Object.keys(agents)) {
+    if (seenAgents.has(agentId)) continue;
+    seenAgents.add(agentId);
+    usageAgentIds.push(agentId);
+  }
+  for (const agentId of usageAgentIds) {
+    usageSummary.append(usageStat(agentUsageLabel(agentId, agents[agentId]), agentDisplayName(agentId)));
+  }
   usageSummary.append(
-    usageStat(agentUsageLabel("codex", agents.codex), "codex"),
-    usageStat(agentUsageLabel("claude", agents.claude), "claude"),
     usageStat(formatTokens(summary.totalTokens || 0), "total incl. cache"),
     usageStat(formatTokens(week.totalTokens || 0), "7d total incl. cache")
   );
@@ -1454,7 +2197,7 @@ function renderUsagePanel(u, weekly, records) {
     row.title = (record.model ? "model: " + record.model + "\n" : "") + "source: " + (record.source || "unknown");
     row.append(
       cell(record.timestamp ? new Date(record.timestamp).toLocaleTimeString() : "unknown"),
-      cell(record.agent || "unknown"),
+      cell(record.agent ? agentDisplayName(record.agent) : "unknown"),
       cell(record.phase || ""),
       cell(formatTokens(record.inputTokens || 0)),
       cell(formatTokens(record.outputTokens || 0)),
@@ -1505,24 +2248,32 @@ function renderDecision(decision, count, risky, accepted) {
     }
   }
   if (!decision) return;
+  const needed = String(decision.decisionNeededFromUser || "").trim();
+  const hasUserQuestion = !!needed && !/^(?:none|n\/?a|not needed)$/i.test(needed);
+  const needsUser = hasUserQuestion && !accepted;
+  decisionStrip.classList.toggle("needs-user", needsUser);
   decisionCount.textContent = count > 0 ? "(" + count + ")" : "";
   decisionDefault.textContent = decision.defaultNextAction || "None";
   decisionRecommendation.textContent = decision.recommendation || "None";
-  decisionNeeded.textContent = decision.decisionNeededFromUser || "none";
+  decisionNeeded.textContent = accepted ? "Decision accepted" : hasUserQuestion ? needed : "No user decision requested";
   decisionBlockers.textContent = decision.blockers || "none";
 }
 function renderDecisionAction(action, canAccept, accepted, running) {
   const label = accepted ? (running ? "Default Running" : "Default Accepted") : action && action.label ? action.label : "Accept Default";
   const detail = accepted ? "The latest decision default has already been accepted." : action && action.detail ? action.detail : "No default action is available";
+  const noAction = !accepted && !canAccept && (!action || action.kind === "none" || /^no default action$/i.test(label));
   acceptDefaultBtn.textContent = label;
   acceptDefaultBtn.title = detail;
   acceptDefaultBtn.disabled = !canAccept;
+  acceptDefaultBtn.classList.toggle("suggested", !!canAccept && !accepted);
+  acceptDefaultBtn.classList.toggle("hidden", noAction);
 }
 function renderAutoAdvanceDefaults(enabled) {
-  autoAdvanceDefaultsBtn.textContent = enabled ? "Auto Accept: On" : "Auto Accept: Off";
+  autoAdvanceDefaultsBtn.textContent = enabled ? "Auto-advance safe defaults: On" : "Auto-advance safe defaults: Off";
+  autoAdvanceDefaultsBtn.setAttribute("aria-pressed", String(enabled));
   autoAdvanceDefaultsBtn.title = enabled
-    ? "Turn off automatic acceptance of unblocked decision defaults"
-    : "Turn on automatic acceptance of unblocked decision defaults";
+    ? "Turn off automatic advancement of safe, unblocked decision defaults"
+    : "Turn on automatic advancement of safe, unblocked decision defaults";
 }
 function renderDecisionBoard(decisions) {
   decisionPanelCount.textContent = decisions.length + " decisions";
@@ -1531,12 +2282,12 @@ function renderDecisionBoard(decisions) {
   for (const decision of decisions) {
     const row = document.createElement("div");
     row.className = "decision-row";
-    row.append(cell((labels[decision.agent] || decision.agent) + (decision.phase ? " / " + decision.phase : "")), cell("Next: " + (decision.defaultNextAction || "none")), cell("Needs: " + (decision.decisionNeededFromUser || "none")), cell("Blockers: " + (decision.blockers || "none")));
+    row.append(cell(agentDisplayName(decision.agent) + (decision.phase ? " / " + decision.phase : "")), cell("Next: " + (decision.defaultNextAction || "none")), cell("Needs: " + (decision.decisionNeededFromUser || "none")), cell("Blockers: " + (decision.blockers || "none")));
     decisionBoard.append(row);
   }
 }
 function pendingPlaceholder(message) {
-  const speaker = labels[message.role] || message.role || "Agent";
+  const speaker = agentDisplayName(message.role);
   if (message.phase === "opener") return speaker + " is starting the opener...";
   if (message.phase === "reactor") return speaker + " is reading and reacting...";
   if (message.phase === "closer") return speaker + " is closing the loop...";
@@ -1548,7 +2299,7 @@ function pendingPlaceholder(message) {
 
 // Tab-focus trap helpers. When a dialog is open, Tab/Shift+Tab cycle through
 // the visible focusable controls inside it instead of escaping to the page.
-const FOCUSABLE_SELECTOR = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+const FOCUSABLE_SELECTOR = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])';
 function focusEl(el) {
   if (el && typeof el.focus === "function") el.focus();
 }
@@ -1615,9 +2366,12 @@ function openPanel(panel) {
   panelOverlay.dataset.panel = panel;
   panelOverlay.dataset.open = "true";
   panelOverlay.setAttribute("aria-hidden", "false");
+  const dialog = panelOverlay.querySelector(".inspector");
+  const activeView = Array.from(panelOverlay.querySelectorAll(".panel-view")).find((view) => view.dataset.view === panel);
+  const heading = activeView && activeView.querySelector(".insp-head h3");
+  if (dialog) dialog.setAttribute("aria-label", heading && heading.textContent ? heading.textContent.trim() : "Hydra inspector");
   // Move focus into the inspector so keyboard/SR users land inside the dialog.
   setTimeout(() => {
-    const dialog = panelOverlay.querySelector(".inspector");
     const focusables = dialogFocusables(dialog);
     focusEl(focusables[0] || dialog || panelOverlay);
   }, 0);
@@ -1655,6 +2409,11 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     if (panelOpen) { closePanel(); return; }
     if (paletteOpen) { closePalette(); return; }
+    if (lastState.canStop && !stopBtn.disabled && !stopBtn.classList.contains("hidden")) {
+      event.preventDefault();
+      stopBtn.click();
+      return;
+    }
   }
   if (!paletteOpen) return;
   if (event.key === "ArrowDown") { event.preventDefault(); moveSelection(1); }
@@ -1665,7 +2424,7 @@ function renderPalette(query) {
   const q = (query || "").trim();
   commandList.innerHTML = "";
   const groups = new Map();
-  const sorted = ACTIONS.filter((action) => fuzzyMatch(q, action.name + " " + action.what + " " + action.group));
+  const sorted = availableActions().filter((action) => fuzzyMatch(q, action.name + " " + action.what + " " + action.group));
   const suggested = sorted.filter((action) => isSuggested(action));
   if (!q && suggested.length) groups.set("Suggested", suggested.slice(0, 5));
   for (const action of sorted) {
@@ -1708,7 +2467,7 @@ function isSuggested(action) {
   if (lastState.needsClaudePath && action.id === "fix-claude") return true;
   if (lastState.canStop && ["stop", "open-actions", "open-queue"].includes(action.id)) return true;
   if (lastState.canAcceptDefault && action.id === "accept-default") return true;
-  if (lastState.canAssignBuilder && (action.id === "assign-codex" || action.id === "assign-claude" || action.id === "assign-both")) return true;
+  if (lastState.canAssignBuilder && action.id.indexOf("assign-") === 0) return true;
   if (lastState.canRequestReview && action.id === "request-review") return true;
   if (String(lastState.verificationSummary || "").toLowerCase().includes("fail") && (action.id === "verification" || action.id === "open-verify")) return true;
   if (lastState.canSend && (action.id === "send" || action.id === "pin-objective")) return true;
@@ -1754,7 +2513,7 @@ function moveSelection(delta) {
 function activateSelection() {
   const selected = document.querySelector('.command-option[aria-selected="true"]');
   if (!selected || selected.getAttribute("aria-disabled") === "true") return;
-  const action = ACTIONS.find((item) => item.id === selected.dataset.actionId);
+  const action = availableActions().find((item) => item.id === selected.dataset.actionId);
   if (!action) return;
   action.run();
   closePalette();

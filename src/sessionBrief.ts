@@ -8,6 +8,7 @@ import type { NativeActionReceipt } from "./nativeActions";
 import type { VerificationResult } from "./verification";
 import { verificationPassed, verificationSummary } from "./verification";
 import type { WorkQueueItem } from "./workQueue";
+import { displayNameFor } from "./agentRegistry";
 
 export interface SessionBriefMessage {
   role: "user" | AgentId | "system";
@@ -125,10 +126,9 @@ function renderMessages(messages: SessionBriefMessage[]): string[] {
 }
 
 function labelAgent(value: AgentId | "user" | "system"): string {
-  if (value === "codex") return "Codex";
-  if (value === "claude") return "Claude";
   if (value === "user") return "You";
-  return "System";
+  if (value === "system") return "System";
+  return displayNameFor(value);
 }
 
 function singleLine(value: string): string {

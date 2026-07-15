@@ -9,6 +9,7 @@ import {
   inferVerificationCommand,
   readVerifications,
   resolveVerificationCommand,
+  runVerificationCommand,
   verificationProcessForCommand,
   verificationAsReviewContext,
   verificationPassed,
@@ -34,6 +35,16 @@ describe("verification evidence", () => {
       "utf8"
     );
     assert.equal(await inferVerificationCommand(dir), "npm run verify:fast");
+  });
+
+  test("refuses oversized package.json files during command inference", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-verify-oversized-"));
+    await fs.writeFile(
+      path.join(dir, "package.json"),
+      `${JSON.stringify({ scripts: { test: "node --test" } })}${" ".repeat(1024 * 1024)}`,
+      "utf8",
+    );
+    assert.equal(await inferVerificationCommand(dir), undefined);
   });
 
   test("round-trips verification JSONL and skips malformed lines", async () => {
@@ -86,6 +97,9 @@ describe("verification evidence", () => {
     assert.equal(verificationPassed({ ...base, exitCode: 1 }), false);
     assert.equal(verificationPassed({ ...base, exitCode: null }), false);
     assert.equal(verificationPassed({ ...base, timedOut: true }), false);
+    assert.equal(verificationPassed({ ...base, terminationFailed: true }), false);
+    assert.match(verificationSummary({ ...base, terminationFailed: true }), /^termination unconfirmed:/);
+    assert.match(verificationAsReviewContext({ ...base, terminationFailed: true }), /Termination confirmed: no/);
     assert.equal(verificationPassed(undefined), false);
   });
 });
@@ -181,7 +195,7 @@ describe("verification shell selection", () => {
   test("uses PowerShell on Windows for subexpression interpolation", () => {
     const processSpec = verificationProcessForCommand('Write-Output "Hydra $($env:USERNAME)"', "win32");
 
-    assert.equal(processSpec.command, "powershell.exe");
+    assert.match(processSpec.command, /[\\/]WindowsPowerShell[\\/]v1\.0[\\/]powershell\.exe$/i);
     assert.equal(processSpec.shell, false);
     assert.deepEqual(processSpec.args.slice(0, 4), ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass"]);
     assert.equal(processSpec.args.at(-1), 'Write-Output "Hydra $($env:USERNAME)"');
@@ -190,35 +204,31 @@ describe("verification shell selection", () => {
   test("uses PowerShell on Windows for braced environment interpolation", () => {
     const processSpec = verificationProcessForCommand('Write-Output "Hydra ${env:USERNAME}"', "win32");
 
-    assert.equal(processSpec.command, "powershell.exe");
+    assert.match(processSpec.command, /[\\/]WindowsPowerShell[\\/]v1\.0[\\/]powershell\.exe$/i);
     assert.equal(processSpec.shell, false);
   });
 
   test("uses PowerShell on Windows for env-drive interpolation", () => {
     const processSpec = verificationProcessForCommand('Write-Output "Hydra $env:USERNAME"', "win32");
 
-    assert.equal(processSpec.command, "powershell.exe");
+    assert.match(processSpec.command, /[\\/]WindowsPowerShell[\\/]v1\.0[\\/]powershell\.exe$/i);
     assert.equal(processSpec.shell, false);
   });
 
   test("keeps ordinary npm verification commands on the default shell", () => {
     const processSpec = verificationProcessForCommand("npm run check && npm test", "win32");
 
-    assert.deepEqual(processSpec, {
-      command: "npm run check && npm test",
-      args: [],
-      shell: true,
-    });
+    assert.equal(processSpec.command, "npm run check && npm test");
+    assert.deepEqual(processSpec.args, []);
+    assert.match(String(processSpec.shell), /[\\/]System32[\\/]cmd\.exe$/i);
   });
 
   test("keeps escaped PowerShell interpolation literals on the default shell", () => {
     const processSpec = verificationProcessForCommand('echo "`$(literal)"', "win32");
 
-    assert.deepEqual(processSpec, {
-      command: 'echo "`$(literal)"',
-      args: [],
-      shell: true,
-    });
+    assert.equal(processSpec.command, 'echo "`$(literal)"');
+    assert.deepEqual(processSpec.args, []);
+    assert.match(String(processSpec.shell), /[\\/]System32[\\/]cmd\.exe$/i);
   });
 
   test("does not force PowerShell on non-Windows platforms", () => {
@@ -231,3 +241,61 @@ describe("verification shell selection", () => {
     });
   });
 });
+
+describe("verification process lifecycle", () => {
+  test("a timed-out command with a pipe-holding grandchild always settles", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-verify-tree-"));
+    const script = path.join(dir, "hold-open.js");
+    const pidFile = path.join(dir, "grandchild.pid");
+    await fs.writeFile(
+      script,
+      [
+        'const cp = require("node:child_process");',
+        'const fs = require("node:fs");',
+        'const child = cp.spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: ["ignore", 1, 2] });',
+        'fs.writeFileSync(process.argv[2], String(child.pid));',
+        'setInterval(() => {}, 1000);',
+      ].join("\n"),
+      "utf8",
+    );
+    let pid = 0;
+    try {
+      const started = Date.now();
+      const result = await runVerificationCommand({
+        cwd: dir,
+        command: `"${process.execPath}" "${script}" "${pidFile}"`,
+        timeoutMs: 400,
+        maxOutputChars: 4_096,
+      });
+
+      assert.equal(result.timedOut, true);
+      assert.ok(Date.now() - started < 3_000, "verification should force-settle after timeout");
+      pid = Number.parseInt(await fs.readFile(pidFile, "utf8"), 10);
+      assert.ok(Number.isSafeInteger(pid) && pid > 0);
+      assert.equal(await waitForProcessExit(pid), true, `grandchild ${pid} should be gone`);
+    } finally {
+      if (pid > 0 && processIsAlive(pid)) {
+        try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+      }
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForProcessExit(pid: number, timeoutMs = 2_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!processIsAlive(pid)) return true;
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+  }
+  return !processIsAlive(pid);
+}

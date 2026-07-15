@@ -34,6 +34,8 @@ describe("run failure card", () => {
     assert.equal(card.status, "Exit 1");
     assert.equal(card.durationMs, 2500);
     assert.equal(card.stderrPreview, "bad native output");
+    assert.equal(card.diagnosticPreviewSource, "stderr");
+    assert.equal(card.diagnosticPreview, "bad native output");
     assert.deepEqual(card.requestFiles.map((file) => file.path), [
       ".hydra/prompts/request.md",
       ".hydra/replies/request.json",
@@ -93,6 +95,60 @@ describe("run failure card", () => {
       workspaceRoot,
       result: { stdout: "", stderr: "stopped", exitCode: null, timedOut: false, cancelled: true },
     }), undefined);
+  });
+
+  test("falls back to a bounded normalized reply or stdout preview when stderr is empty", () => {
+    const usefulPrefix = "typed JSON-stream error: request refused\n";
+    const card = createRunFailureCard({
+      id: "trace-stdout",
+      agent: "codex",
+      phase: "opener",
+      transport: "oneShot",
+      startedAt: 0,
+      nowMs: 100,
+      promptSha256: "f".repeat(64),
+      workspaceRoot,
+      result: {
+        stdout: usefulPrefix + "x".repeat(1600),
+        stderr: "",
+        exitCode: 1,
+        timedOut: false,
+        cancelled: false,
+      },
+    });
+
+    assert.ok(card);
+    assert.equal(card.stderrPreview, undefined);
+    assert.equal(card.diagnosticPreviewSource, "normalizedReplyOrStdout");
+    assert.equal(card.diagnosticPreviewChars, usefulPrefix.length + 1600);
+    assert.match(card.diagnosticPreview || "", /^typed JSON-stream error/);
+    assert.match(card.diagnosticPreview || "", /\[truncated \d+ chars\]$/);
+    assert.ok((card.diagnosticPreview || "").length < 1300);
+  });
+
+  test("keeps a cancellation card when process termination was not confirmed", () => {
+    const card = createRunFailureCard({
+      id: "trace-unconfirmed",
+      agent: "codex",
+      phase: "build",
+      transport: "oneShot",
+      startedAt: 0,
+      nowMs: 2000,
+      promptSha256: "e".repeat(64),
+      workspaceRoot,
+      result: {
+        stdout: "",
+        stderr: "process may still be running",
+        exitCode: null,
+        timedOut: false,
+        cancelled: true,
+        terminationFailed: true,
+      },
+    });
+
+    assert.ok(card);
+    assert.equal(card.status, "Process termination unconfirmed");
+    assert.equal(card.terminationFailed, true);
   });
 
   test("request diagnostic paths are limited to Hydra prompt, reply, and log files", () => {

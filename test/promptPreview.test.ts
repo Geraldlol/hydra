@@ -1,5 +1,6 @@
 import { describe, test } from "node:test";
 import { strict as assert } from "node:assert";
+import * as cp from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -127,8 +128,8 @@ describe("prompt preview envelopes", () => {
 
   test("reads the latest envelope via the tail path on a large index", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-tail-prompt-envelope-"));
-    // First envelope's body is >256 KB so the index overflows the tail window
-    // and forces the trailing-read branch. The newest line must still win.
+    // A bulky older record must not prevent the bounded reader from finding
+    // the newest complete line in chronological order.
     await appendPromptEnvelope(dir, createPromptEnvelope({
       id: "bulky",
       agent: "codex",
@@ -157,7 +158,7 @@ describe("prompt preview envelopes", () => {
     assert.equal(latest?.renderedPrompt, "Newest prompt body.");
   });
 
-  test("falls back to a full read when the final envelope exceeds the tail window", async () => {
+  test("reads a large final envelope without an unbounded full-file fallback", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-tail-fallback-prompt-envelope-"));
     await appendPromptEnvelope(dir, createPromptEnvelope({
       id: "first",
@@ -170,9 +171,8 @@ describe("prompt preview envelopes", () => {
       args: ["exec", "-"],
       renderedPrompt: "x".repeat(300 * 1024),
     }));
-    // The newest (and only other) envelope's body is itself larger than the
-    // tail window, so the tail slice contains no parseable complete line and
-    // the reader must fall back to a full read to surface it.
+    // The newest envelope is large enough to exercise a meaningful bounded
+    // read, but remains inside the explicit 8 MiB per-record ceiling.
     await appendPromptEnvelope(dir, createPromptEnvelope({
       id: "huge-latest",
       agent: "claude",
@@ -187,6 +187,26 @@ describe("prompt preview envelopes", () => {
 
     const latest = await readLatestPromptEnvelope(dir);
     assert.equal(latest?.id, "huge-latest");
+  });
+
+  test("ignores a torn newest record and returns the latest complete envelope", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-torn-prompt-envelope-"));
+    await appendPromptEnvelope(dir, createPromptEnvelope({
+      id: "complete",
+      agent: "codex",
+      otherAgent: "claude",
+      phase: "opener",
+      transport: "oneShot",
+      cwd: dir,
+      command: "codex",
+      args: ["exec", "-"],
+      renderedPrompt: "Complete prompt.",
+    }));
+    await fs.appendFile(promptEnvelopeIndexPath(dir), '{"id":"torn"', "utf8");
+
+    const latest = await readLatestPromptEnvelope(dir);
+
+    assert.equal(latest?.id, "complete");
   });
 
   test("compacts old rendered prompt bodies while preserving recent bodies", async () => {
@@ -262,6 +282,81 @@ describe("prompt preview envelopes", () => {
     assert.match(raw, /\{not json\}/);
   });
 
+  test("does not lose a cross-process append that arrives during compaction commit", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-compact-cross-process-"));
+    const indexPath = promptEnvelopeIndexPath(dir);
+    await appendPromptEnvelope(dir, createPromptEnvelope({
+      id: "old",
+      timestamp: "2026-05-01T00:00:00.000Z",
+      agent: "codex",
+      otherAgent: "claude",
+      phase: "opener",
+      transport: "oneShot",
+      cwd: dir,
+      command: "codex",
+      args: ["exec", "-"],
+      renderedPrompt: "Old prompt body.",
+    }));
+
+    const promptModule = path.join(__dirname, "..", "src", "promptPreview.js");
+    const compactReady = path.join(dir, "compact-ready");
+    const compactRelease = path.join(dir, "compact-release");
+    const appendStarted = path.join(dir, "append-started");
+    const compactScript = path.join(dir, "compact-child.js");
+    const appendScript = path.join(dir, "append-child.js");
+    await fs.writeFile(compactScript, [
+      'const fs = require("node:fs");',
+      'const fsp = require("node:fs/promises");',
+      'const path = require("node:path");',
+      'const [modulePath, workspace, indexPath, readyPath, releasePath] = process.argv.slice(2);',
+      'const originalRename = fsp.rename.bind(fsp);',
+      'fsp.rename = async (source, destination) => {',
+      '  if (path.resolve(destination) === path.resolve(indexPath) && String(source).endsWith(".tmp")) {',
+      '    await fsp.writeFile(readyPath, "ready", "utf8");',
+      '    while (!fs.existsSync(releasePath)) await new Promise((resolve) => setTimeout(resolve, 5));',
+      '  }',
+      '  return originalRename(source, destination);',
+      '};',
+      '(async () => {',
+      '  const { compactPromptEnvelopeBodies } = require(modulePath);',
+      '  await compactPromptEnvelopeBodies(workspace, { retentionDays: 3, now: new Date("2026-05-22T00:00:00.000Z") });',
+      '})().catch((error) => { console.error(error); process.exitCode = 1; });',
+    ].join("\n"), "utf8");
+    await fs.writeFile(appendScript, [
+      'const fsp = require("node:fs/promises");',
+      'const [modulePath, workspace, startedPath] = process.argv.slice(2);',
+      '(async () => {',
+      '  const { appendPromptEnvelope, createPromptEnvelope } = require(modulePath);',
+      '  await fsp.writeFile(startedPath, "started", "utf8");',
+      '  await appendPromptEnvelope(workspace, createPromptEnvelope({',
+      '    id: "concurrent", timestamp: "2026-05-22T00:00:01.000Z", agent: "claude", otherAgent: "codex",',
+      '    phase: "review", transport: "oneShot", cwd: workspace, command: "claude", args: ["-p"],',
+      '    renderedPrompt: "Concurrent prompt survives."',
+      '  }));',
+      '})().catch((error) => { console.error(error); process.exitCode = 1; });',
+    ].join("\n"), "utf8");
+
+    const compact = runPromptChild(compactScript, [promptModule, dir, indexPath, compactReady, compactRelease]);
+    await waitForPath(compactReady);
+    const append = runPromptChild(appendScript, [promptModule, dir, appendStarted]);
+    await waitForPath(appendStarted);
+    const earlyAppend = await Promise.race([
+      append.then(() => "completed" as const),
+      new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 100)),
+    ]);
+    await fs.writeFile(compactRelease, "release", "utf8");
+    await Promise.all([compact, append]);
+    assert.equal(earlyAppend, "pending", "append must wait while compaction holds the shared writer lane");
+
+    const records = (await fs.readFile(indexPath, "utf8"))
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line) as { id: string; renderedPrompt: string; renderedPromptOmitted?: boolean });
+    assert.deepEqual(records.map((record) => record.id), ["old", "concurrent"]);
+    assert.equal(records[0]?.renderedPromptOmitted, true);
+    assert.equal(records[1]?.renderedPrompt, "Concurrent prompt survives.");
+  });
+
   test("renders omitted prompt bodies with a cleanup note", () => {
     const envelope = createPromptEnvelope({
       id: "omitted",
@@ -289,3 +384,30 @@ describe("prompt preview envelopes", () => {
     assert.equal(formatCommand("codex", ["exec", "--cd", "C:\\repo with spaces", "-"]), 'codex exec --cd "C:\\repo with spaces" -');
   });
 });
+
+function runPromptChild(script: string, args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = cp.spawn(process.execPath, [script, ...args], { windowsHide: true });
+    let stderr = "";
+    child.stderr?.on("data", (chunk: Buffer) => { stderr = `${stderr}${chunk.toString("utf8")}`.slice(-8_192); });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`prompt child exited ${code}: ${stderr}`));
+    });
+  });
+}
+
+async function waitForPath(filePath: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  for (;;) {
+    try {
+      await fs.stat(filePath);
+      return;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for test path: ${filePath}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}

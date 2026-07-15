@@ -25,24 +25,24 @@ describe("terminal bridge reply nonce", () => {
     assert.equal(reply.nonce, undefined);
   });
 
-  test("buildPowerShellDispatchInvocation injects the nonce env var and a scrub-in-finally", () => {
+  test("buildPowerShellDispatchInvocation keeps the reply key local and scrubs the legacy env var before launch", () => {
     const out = buildPowerShellDispatchInvocation(
       "C:\\repo\\.hydra\\dispatch\\turn-1-codex-opener.ps1",
       "abc123"
     );
-    assert.match(out, /\$env:HYDRA_REPLY_NONCE = 'abc123'/);
+    assert.match(out, /Remove-Item env:HYDRA_REPLY_NONCE[^;]+; \$__hydraReplyKey = 'abc123'; try \{/);
+    assert.doesNotMatch(out, /\$env:HYDRA_REPLY_NONCE\s*=/);
     assert.match(out, /try \{ Invoke-Expression \(Get-Content -LiteralPath 'C:\\repo\\.hydra\\dispatch\\turn-1-codex-opener\.ps1' -Raw\) \}/);
-    assert.match(out, /finally \{ Remove-Item env:HYDRA_REPLY_NONCE -ErrorAction SilentlyContinue \}/);
+    assert.match(out, /finally \{ \$__hydraReplyKey = \$null; Remove-Variable __hydraReplyKey/);
   });
 
-  test("buildPowerShellDispatchInvocation omits the env var assignment when no nonce is supplied", () => {
+  test("buildPowerShellDispatchInvocation leaves authentication fail-closed when no key is supplied", () => {
     const out = buildPowerShellDispatchInvocation(
       "C:\\repo\\.hydra\\dispatch\\turn-1-codex-opener.ps1"
     );
     assert.doesNotMatch(out, /\$env:HYDRA_REPLY_NONCE = /);
-    // The scrub-in-finally still runs so any leftover env var from a prior
-    // dispatch (e.g. an earlier call that did pass a nonce) is cleared.
-    assert.match(out, /finally \{ Remove-Item env:HYDRA_REPLY_NONCE -ErrorAction SilentlyContinue \}/);
+    assert.match(out, /\$__hydraReplyKey = ''/);
+    assert.match(out, /Remove-Item env:HYDRA_REPLY_NONCE/);
   });
 
   test("buildPowerShellDispatchInvocation doubles single quotes in a nonce so it can't break out of the PS literal", () => {
@@ -53,13 +53,13 @@ describe("terminal bridge reply nonce", () => {
     // quotePowerShell rule: wrap in single quotes, double any embedded '.
     // The malicious "abc'; iex 'pwned" must serialize as the literal string
     // 'abc''; iex ''pwned' — a single PS expression, not a statement chain.
-    assert.match(out, /\$env:HYDRA_REPLY_NONCE = 'abc''; iex ''pwned'/);
+    assert.match(out, /\$__hydraReplyKey = 'abc''; iex ''pwned'/);
     // The literal must be properly terminated before the next statement
     // separator (a `;` we control, not one smuggled inside the nonce).
     assert.match(out, /'abc''; iex ''pwned'; try \{ Invoke-Expression/);
   });
 
-  test("dispatch script reads HYDRA_REPLY_NONCE from the live PS session and embeds it in the reply payload", () => {
+  test("dispatch script authenticates from a PowerShell-local key, never a child-visible env var", () => {
     const out = buildPowerShellDispatchCommand(
       {
         command: "codex",
@@ -70,9 +70,9 @@ describe("terminal bridge reply nonce", () => {
       "C:\\repo\\.hydra\\replies\\r.json",
       "C:\\repo\\.hydra\\logs\\r.log"
     );
-    // The nonce must come from the env var (live PS session memory), not from
-    // a string literal baked into the on-disk .ps1.
-    assert.match(out, /\$__hydraPayload = \[ordered\]@\{ text = \$__hydraText; nonce = \(\$env:HYDRA_REPLY_NONCE\) \}/);
+    assert.match(out, /reply authentication key is missing/);
+    assert.match(out, /__HydraHmacSha256 \(\[string\]\$__hydraReplyKey\)/);
+    assert.doesNotMatch(out, /env:HYDRA_REPLY_NONCE/);
     // Reply JSON must still flow through ConvertTo-Json and be written with
     // the existing UTF-8 no-BOM helper.
     assert.match(out, /\$__hydraReplyJson = \$__hydraPayload \| ConvertTo-Json -Compress/);

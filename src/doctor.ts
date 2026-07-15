@@ -81,6 +81,8 @@ export const TRUST_SCOPED_SETTINGS = [
   "claudeDiscussionProfile",
   "claudeBuildProfile",
   "claudeReviewProfile",
+  "manyHeadsMode",
+  "agentInitiatedDuels",
   "manyHeadsClaudeWorkerCount",
   "nativePathPrepend",
   "nativeEnv",
@@ -96,9 +98,16 @@ export const TRUST_SCOPED_SETTINGS = [
   "geminiNativeEnv",
   "geminiNativePathPrepend",
   "agents",
+  "roomRoster",
   "codexTerminalCommand",
   "claudeTerminalCommand",
+  "autopilotOnStart",
+  "preferTerminalBridgeOnStart",
   "verifyCommand",
+  "autoVerifyAfterBuild",
+  "autoAdvanceActionableDefaults",
+  "autoSkipCloserOnAgreement",
+  "autoRequestReviewAfterPassingVerification",
   "promptBodyRetentionDays",
   "diagnosticRetentionDays",
   "attachmentMaxBytes",
@@ -158,7 +167,7 @@ export async function runHydraDoctor(input: DoctorInput): Promise<DoctorReport> 
       id: "trust-scope",
       label: "Workspace trust scope",
       status: "pass",
-      detail: "Sensitive CLI command and arg settings are not overridden by this workspace.",
+      detail: "Sensitive native and automatic-execution settings are not overridden by this workspace.",
     });
   }
 
@@ -199,7 +208,7 @@ export function trustScopeWarnings(inspections: TrustedSettingInspection[]): str
     if (inspection.workspaceFolderValue !== undefined) scopes.push("workspace-folder");
     if (!scopes.length) return [];
     return [
-      `${inspection.key} is set at ${scopes.join(" and ")} scope. Prefer User/Machine settings for executable paths and raw CLI authority.`,
+      `${inspection.key} is set at ${scopes.join(" and ")} scope. Prefer User/Machine settings for native authority and automatic execution controls.`,
     ];
   });
 }

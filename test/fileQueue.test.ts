@@ -3,7 +3,17 @@ import { strict as assert } from "node:assert";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { atomicWriteFile, ensureFile, readJsonlGuarded, serializePerFile } from "../src/fileQueue";
+import {
+  appendFileSafely,
+  atomicWriteFile,
+  ensureFile,
+  readFileHead,
+  readFileHeadSync,
+  readFileTail,
+  readJsonlGuarded,
+  rewriteFileLinesAtomically,
+  serializePerFile,
+} from "../src/fileQueue";
 
 // Helper: check whether the host supports creating symlinks. On Windows this
 // requires either admin rights or Developer Mode; without those, fs.symlink
@@ -27,6 +37,77 @@ async function canSymlink(dir: string): Promise<boolean> {
 }
 
 describe("fileQueue symlink safety", () => {
+  test("safe append refuses a final-file symlink swapped in after initialization", async (t) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-filequeue-"));
+    if (!(await canSymlink(dir))) {
+      t.skip("symlink creation not permitted on this host");
+      return;
+    }
+
+    const artifact = path.join(dir, "events.jsonl");
+    await ensureFile(artifact, "seed\n");
+    await fs.unlink(artifact);
+
+    const sensitive = path.join(dir, "sensitive.txt");
+    const sensitiveOriginal = "DO NOT APPEND";
+    await fs.writeFile(sensitive, sensitiveOriginal, "utf8");
+    await fs.symlink(sensitive, artifact);
+
+    await assert.rejects(
+      () => appendFileSafely(artifact, "attacker payload\n"),
+      /Refusing to write Hydra artifact through symlink/
+    );
+    assert.equal(await fs.readFile(sensitive, "utf8"), sensitiveOriginal);
+  });
+
+  test("safe append refuses a hard link swapped in after initialization", async (t) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-filequeue-"));
+    const artifact = path.join(dir, "events.jsonl");
+    await ensureFile(artifact, "seed\n");
+    await fs.unlink(artifact);
+
+    const sensitive = path.join(dir, "sensitive.txt");
+    const sensitiveOriginal = "DO NOT APPEND";
+    await fs.writeFile(sensitive, sensitiveOriginal, "utf8");
+    try {
+      await fs.link(sensitive, artifact);
+    } catch {
+      t.skip("hard-link creation not supported on this filesystem");
+      return;
+    }
+
+    await assert.rejects(
+      () => appendFileSafely(artifact, "attacker payload\n"),
+      /Refusing to write Hydra artifact with multiple hard links/
+    );
+    assert.equal(await fs.readFile(sensitive, "utf8"), sensitiveOriginal);
+  });
+
+  test("safe append refuses a linked .hydra parent directory", async (t) => {
+    const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-filequeue-workspace-"));
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-filequeue-outside-"));
+    try {
+      await fs.symlink(outside, path.join(workspace, ".hydra"), process.platform === "win32" ? "junction" : "dir");
+    } catch (error) {
+      t.skip(`directory links are unavailable: ${String(error)}`);
+      return;
+    }
+
+    const artifact = path.join(workspace, ".hydra", "events.jsonl");
+    await assert.rejects(() => appendFileSafely(artifact, "payload\n"), /linked \.hydra directory/i);
+    await assert.rejects(() => fs.stat(path.join(outside, "events.jsonl")), { code: "ENOENT" });
+  });
+
+  test("safe append creates a missing file and appends to an existing file", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-filequeue-"));
+    const artifact = path.join(dir, "nested", "events.jsonl");
+
+    await appendFileSafely(artifact, "one\n");
+    await appendFileSafely(artifact, "two\n");
+
+    assert.equal(await fs.readFile(artifact, "utf8"), "one\ntwo\n");
+  });
+
   test("atomicWriteFile refuses to write through a destination symlink", async (t) => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-filequeue-"));
     if (!(await canSymlink(dir))) {
@@ -51,7 +132,7 @@ describe("fileQueue symlink safety", () => {
     assert.equal(after, sensitiveOriginal);
   });
 
-  test("atomicWriteFile refuses to write through a planted tmp symlink", async (t) => {
+  test("atomicWriteFile ignores a planted legacy fixed tmp symlink", async (t) => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-filequeue-"));
     if (!(await canSymlink(dir))) {
       t.skip("symlink creation not permitted on this host");
@@ -68,16 +149,11 @@ describe("fileQueue symlink safety", () => {
     const tmp = `${dest}.tmp`;
     await fs.symlink(sensitive, tmp);
 
-    await assert.rejects(
-      () => atomicWriteFile(dest, "attacker payload"),
-      // Either O_EXCL refuses (EEXIST) or the destination guard fires; both
-      // are acceptable, both prove the symlink wasn't followed.
-      (err: NodeJS.ErrnoException) =>
-        err.code === "EEXIST" || /Refusing to write Hydra artifact through symlink/.test(err.message)
-    );
+    await atomicWriteFile(dest, "safe payload");
 
     const after = await fs.readFile(sensitive, "utf8");
     assert.equal(after, sensitiveOriginal);
+    assert.equal(await fs.readFile(dest, "utf8"), "safe payload");
   });
 
   test("atomicWriteFile still works for normal writes (no symlinks involved)", async () => {
@@ -92,7 +168,7 @@ describe("fileQueue symlink safety", () => {
     assert.equal(await fs.readFile(dest, "utf8"), "second pass");
   });
 
-  test("atomicWriteFile clears stale regular-file tmp from a prior crash", async () => {
+  test("atomicWriteFile leaves unrelated stale fixed tmp files untouched", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-filequeue-"));
     const dest = path.join(dir, "artifact.md");
     const tmp = `${dest}.tmp`;
@@ -101,6 +177,18 @@ describe("fileQueue symlink safety", () => {
 
     await atomicWriteFile(dest, "fresh content");
     assert.equal(await fs.readFile(dest, "utf8"), "fresh content");
+    assert.equal(await fs.readFile(tmp, "utf8"), "stale content from prior crash");
+  });
+
+  test("concurrent atomic writes use independent temporary files", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-filequeue-"));
+    const dest = path.join(dir, "state.json");
+    const values = Array.from({ length: 20 }, (_, index) => `value-${index}`);
+
+    await Promise.all(values.map((value) => atomicWriteFile(dest, value)));
+
+    assert.ok(values.includes(await fs.readFile(dest, "utf8")));
+    assert.deepEqual((await fs.readdir(dir)).filter((name) => name.endsWith(".tmp")), []);
   });
 
   test("ensureFile refuses to seed through a planted symlink", async (t) => {
@@ -221,5 +309,96 @@ describe("readJsonlGuarded", () => {
 
     const items = await readJsonlGuarded(file, isWidget, { limit: 2 });
     assert.deepEqual(items.map((w) => w.name), ["c", "d"]);
+  });
+
+  test("reads a bounded chronological tail from a large JSONL file", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-readjsonl-large-"));
+    const file = path.join(dir, "data.jsonl");
+    const recent = ["new-1", "new-2", "new-3"].map((name) => JSON.stringify({ name })).join("\n");
+    await fs.writeFile(file, `${"x".repeat(2 * 1024 * 1024)}\n${recent}\n`, "utf8");
+
+    const items = await readJsonlGuarded(file, isWidget, { maxBytes: 256 });
+
+    assert.deepEqual(items.map((w) => w.name), ["new-1", "new-2", "new-3"]);
+  });
+
+  test("ignores torn edge records while retaining complete newest records", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-readjsonl-torn-"));
+    const file = path.join(dir, "data.jsonl");
+    await fs.writeFile(file, [
+      JSON.stringify({ name: "old-with-a-long-prefix" }),
+      JSON.stringify({ name: "recent-a" }),
+      JSON.stringify({ name: "recent-b" }),
+      '{"name":"torn',
+    ].join("\n"), "utf8");
+
+    const items = await readJsonlGuarded(file, isWidget, { maxBytes: 80 });
+
+    assert.deepEqual(items.map((w) => w.name), ["recent-a", "recent-b"]);
+  });
+
+  test("does not amplify newline-dense tails and still keeps the newest record", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-readjsonl-newlines-"));
+    const file = path.join(dir, "data.jsonl");
+    await fs.writeFile(file, "\n".repeat(250_000) + JSON.stringify({ name: "final" }) + "\n", "utf8");
+
+    const items = await readJsonlGuarded(file, isWidget, { limit: 1 });
+
+    assert.deepEqual(items.map((w) => w.name), ["final"]);
+  });
+});
+
+describe("bounded file reads and rewrites", () => {
+  test("head and tail helpers enforce their byte caps", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-bounded-read-"));
+    const file = path.join(dir, "data.log");
+    await fs.writeFile(file, "0123456789", "utf8");
+
+    const head = await readFileHead(file, 4);
+    const syncHead = readFileHeadSync(file, 4);
+    const tail = await readFileTail(file, 4);
+
+    assert.equal(head.text, "0123");
+    assert.deepEqual(syncHead, head);
+    assert.equal(tail.text, "6789");
+    assert.equal(head.totalBytes, 10);
+    assert.equal(tail.totalBytes, 10);
+    assert.equal(head.truncated, true);
+    assert.equal(tail.truncated, true);
+  });
+
+  test("streaming rewrite preserves chronological lines and a partial final record", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-line-rewrite-"));
+    const file = path.join(dir, "data.jsonl");
+    await fs.writeFile(file, 'one\ntwo\n{"partial"', "utf8");
+
+    await rewriteFileLinesAtomically(file, (line) => line === "two" ? "TWO" : line);
+
+    assert.equal(await fs.readFile(file, "utf8"), 'one\nTWO\n{"partial"\n');
+  });
+
+  test("streaming rewrite leaves the source untouched when compaction has no changes", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-line-rewrite-noop-"));
+    const file = path.join(dir, "data.jsonl");
+    await fs.writeFile(file, "one\ntwo\n", "utf8");
+
+    await rewriteFileLinesAtomically(file, (line) => line.toUpperCase(), () => false);
+
+    assert.equal(await fs.readFile(file, "utf8"), "one\ntwo\n");
+    assert.deepEqual((await fs.readdir(dir)).sort(), ["data.jsonl"]);
+  });
+
+  test("streaming rewrite refuses oversized individual records without leaving a temp file", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-line-rewrite-cap-"));
+    const file = path.join(dir, "data.jsonl");
+    await fs.writeFile(file, "short\nthis-line-is-too-large\n", "utf8");
+
+    await assert.rejects(
+      () => rewriteFileLinesAtomically(file, (line) => line, () => true, { maxLineChars: 8 }),
+      /oversized line/,
+    );
+
+    assert.equal(await fs.readFile(file, "utf8"), "short\nthis-line-is-too-large\n");
+    assert.deepEqual((await fs.readdir(dir)).sort(), ["data.jsonl"]);
   });
 });

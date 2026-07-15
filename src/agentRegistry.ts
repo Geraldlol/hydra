@@ -5,17 +5,13 @@ import { geminiAdapter } from "./geminiAdapter";
 import { openaiCompatibleAdapter } from "./openaiCompatibleAdapter";
 import { cliTemplateAdapter } from "./cliTemplateAdapter";
 import { mergeAgentDefinitions } from "./agentValidation";
+export { assignColorIndexes } from "./agentColors";
 
 export const BUILTIN_AGENT_DEFINITIONS: AgentDefinition[] = [
   { id: "codex", displayName: "Codex", kind: "codex" },
   { id: "claude", displayName: "Claude", kind: "claude" },
   { id: "gemini", displayName: "Gemini", kind: "gemini" },
 ];
-
-/** Assign a 1-based head-ramp slot to any definition missing an explicit one. */
-export function assignColorIndexes(defs: AgentDefinition[]): AgentDefinition[] {
-  return defs.map((def, i) => ({ ...def, colorIndex: def.colorIndex ?? i + 1 }));
-}
 
 function readUserAgents(): unknown {
   try {
@@ -31,15 +27,29 @@ function readUserAgents(): unknown {
 
 let cached: AgentDefinition[] | undefined;
 let cachedWarnings: string[] = [];
+let cachedConfigFingerprint: string | undefined;
 
-function loadDefinitions(): AgentDefinition[] {
-  const merged = mergeAgentDefinitions(BUILTIN_AGENT_DEFINITIONS.map((d) => ({ ...d })), readUserAgents());
+function userAgentFingerprint(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? "undefined";
+  } catch {
+    return "unserializable";
+  }
+}
+
+function loadDefinitions(userAgents: unknown): AgentDefinition[] {
+  const merged = mergeAgentDefinitions(BUILTIN_AGENT_DEFINITIONS.map((d) => ({ ...d })), userAgents);
   cachedWarnings = merged.warnings;
   return merged.defs;
 }
 
 function definitions(): AgentDefinition[] {
-  if (!cached) cached = loadDefinitions();
+  const userAgents = readUserAgents();
+  const fingerprint = userAgentFingerprint(userAgents);
+  if (!cached || fingerprint !== cachedConfigFingerprint) {
+    cached = loadDefinitions(userAgents);
+    cachedConfigFingerprint = fingerprint;
+  }
   return cached;
 }
 
@@ -47,6 +57,7 @@ function definitions(): AgentDefinition[] {
 export function reloadAgentDefinitions(): void {
   cached = undefined;
   cachedWarnings = [];
+  cachedConfigFingerprint = undefined;
 }
 
 /** Validation warnings from the last load (invalid user defs that were dropped). */

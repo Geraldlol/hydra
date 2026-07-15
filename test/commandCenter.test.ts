@@ -104,8 +104,8 @@ describe("command center", () => {
     assert.match(wiki.detail, /name\/path mentions 75% \(9\)/);
     const manyHeads = actions.find((action) => action.id === "toggleManyHeadsMode");
     assert.ok(manyHeads);
-    assert.equal(manyHeads.label, "Turn On Many Heads Mode");
-    assert.equal(manyHeads.description, "Many Heads off");
+    assert.equal(manyHeads.label, "Turn On Claude Worker Fanout");
+    assert.equal(manyHeads.description, "Claude Worker Fanout off");
   });
 
   test("labels Many Heads settings with current mode and worker count", () => {
@@ -132,9 +132,33 @@ describe("command center", () => {
     const workers = actions.find((action) => action.id === "configureManyHeadsWorkers");
     assert.ok(toggle);
     assert.ok(workers);
-    assert.equal(toggle.label, "Turn Off Many Heads Mode");
-    assert.equal(toggle.description, "Many Heads on (5 Claude workers)");
+    assert.equal(toggle.label, "Turn Off Claude Worker Fanout");
+    assert.equal(toggle.description, "Claude Worker Fanout on (5 workers)");
     assert.equal(workers.description, "5 Claude workers");
+  });
+
+  test("omits automatic execution toggles in an untrusted workspace", () => {
+    const actions = buildCommandCenterActions({
+      workspaceReady: true,
+      isWorkspaceTrusted: false,
+      canStop: false,
+      canAcceptDefault: false,
+      autoAdvanceActionableDefaults: false,
+      canAssignBuilder: false,
+      canRequestReview: false,
+      canHandBack: false,
+      canRunVerification: false,
+      canPokeNativeTerminals: false,
+      needsCodexPath: false,
+      needsClaudePath: false,
+      transport: "oneShot",
+      workQueueCount: 0,
+      nativeActionsCount: 0,
+    });
+
+    assert.equal(actions.some((action) => action.id === "toggleManyHeadsMode"), false);
+    assert.equal(actions.some((action) => action.id === "configureManyHeadsWorkers"), false);
+    assert.equal(actions.some((action) => action.id === "toggleAutoAdvanceActionableDefaults"), false);
   });
 
   test("shows disabled wiki injection in Command Center status", () => {

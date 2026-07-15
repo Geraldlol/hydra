@@ -13,13 +13,21 @@ export type State =
   | { name: "ParallelBuild"; agents: ReadonlyArray<AgentId> }
   | { name: "BuildDone"; builder: AgentId }
   | { name: "ParallelBuildDone"; agents: ReadonlyArray<AgentId> }
-  | { name: "Review"; reviewer: AgentId }
-  | { name: "ParallelReview"; agents: ReadonlyArray<AgentId> }
-  | { name: "ReviewDone"; reviewer: AgentId; approved: boolean }
-  | { name: "ParallelReviewDone"; agents: ReadonlyArray<AgentId>; approved: boolean };
+  | { name: "Review"; reviewer: AgentId; builder: AgentId }
+  | { name: "ParallelReview"; agents: ReadonlyArray<AgentId>; builders: ReadonlyArray<AgentId> }
+  | { name: "ReviewDone"; reviewer: AgentId; builder: AgentId; approved: boolean }
+  | { name: "ParallelReviewDone"; agents: ReadonlyArray<AgentId>; builders: ReadonlyArray<AgentId>; approved: boolean };
 
 export type Event =
-  | { type: "userSent"; opener: AgentId; parallel?: boolean }
+  | {
+      type: "userSent";
+      opener: AgentId;
+      parallel?: boolean;
+      /** Explicit identity chosen from the active room roster. */
+      reactor?: AgentId;
+      /** Explicit identities chosen from the active room roster. */
+      parallelAgents?: ReadonlyArray<AgentId>;
+    }
   | { type: "openerDone" }
   | { type: "reactorDone" }
   | { type: "closerDone" }
@@ -28,11 +36,12 @@ export type Event =
   | { type: "assignBuilders"; agents: ReadonlyArray<AgentId> }
   | { type: "buildDone" }
   | { type: "parallelBuildDone" }
-  | { type: "requestReview" }
+  | { type: "requestReview"; reviewers?: ReadonlyArray<AgentId> }
   | { type: "reviewDone"; approved: boolean }
   | { type: "parallelReviewDone"; approved: boolean }
   | { type: "handBack" }
   | { type: "requestReviewSkipped" }
+  | { type: "reservationFailed"; restore: State }
   | { type: "stop" };
 
 export const DEFAULT_ROSTER: ReadonlyArray<AgentId> = ["codex", "claude"];
@@ -50,10 +59,23 @@ export function pickReviewers(
   return roster.filter((a) => a !== builder).slice(0, 1);
 }
 
-// Why: keep the internal binary flip used by transition() but route it through
-// pickReviewers over the default two-head roster, so the state machine stays
-// exactly as-is while the reviewer choice has a single generalized home.
-const otherAgent = (a: AgentId): AgentId => pickReviewers(a, DEFAULT_ROSTER)[0] ?? a;
+const defaultPeer = (agent: AgentId): AgentId => pickReviewers(agent, DEFAULT_ROSTER)[0] ?? agent;
+
+function beginDiscussion(event: Extract<Event, { type: "userSent" }>): State {
+  if (event.parallel) {
+    const agents = event.parallelAgents?.length ? event.parallelAgents : DEFAULT_ROSTER;
+    return { name: "ParallelDiscussion", agents: [...agents] };
+  }
+  return {
+    name: "Opener",
+    opener: event.opener,
+    reactor: event.reactor ?? defaultPeer(event.opener),
+  };
+}
+
+function requestedReviewers(event: Extract<Event, { type: "requestReview" }>): ReadonlyArray<AgentId> {
+  return event.reviewers?.length ? event.reviewers : [];
+}
 
 export function isInFlight(state: State): boolean {
   return (
@@ -69,14 +91,16 @@ export function isInFlight(state: State): boolean {
 }
 
 export function transition(state: State, event: Event): State {
+  if (event.type === "reservationFailed") {
+    return isInFlight(state) && !isInFlight(event.restore) ? event.restore : state;
+  }
   if (event.type === "stop") {
     return isInFlight(state) ? { name: "AwaitingUser" } : state;
   }
 
   switch (state.name) {
     case "Idle":
-      if (event.type === "userSent" && event.parallel) return { name: "ParallelDiscussion", agents: ["codex", "claude"] };
-      if (event.type === "userSent") return { name: "Opener", opener: event.opener, reactor: otherAgent(event.opener) };
+      if (event.type === "userSent") return beginDiscussion(event);
       return state;
     case "Opener":
       if (event.type === "openerDone") return { name: "Reactor", opener: state.opener, reactor: state.reactor };
@@ -91,8 +115,7 @@ export function transition(state: State, event: Event): State {
       if (event.type === "parallelDone") return { name: "AwaitingUser" };
       return state;
     case "AwaitingUser":
-      if (event.type === "userSent" && event.parallel) return { name: "ParallelDiscussion", agents: ["codex", "claude"] };
-      if (event.type === "userSent") return { name: "Opener", opener: event.opener, reactor: otherAgent(event.opener) };
+      if (event.type === "userSent") return beginDiscussion(event);
       if (event.type === "assignBuilder")
         return { name: "Build", builder: event.builder };
       if (event.type === "assignBuilders")
@@ -107,38 +130,47 @@ export function transition(state: State, event: Event): State {
         return { name: "ParallelBuildDone", agents: state.agents };
       return state;
     case "BuildDone":
-      if (event.type === "userSent" && event.parallel) return { name: "ParallelDiscussion", agents: ["codex", "claude"] };
-      if (event.type === "userSent") return { name: "Opener", opener: event.opener, reactor: otherAgent(event.opener) };
-      if (event.type === "requestReview")
-        return { name: "Review", reviewer: otherAgent(state.builder) };
+      if (event.type === "userSent") return beginDiscussion(event);
+      if (event.type === "requestReview") {
+        const reviewer = requestedReviewers(event)[0] ?? defaultPeer(state.builder);
+        return { name: "Review", reviewer, builder: state.builder };
+      }
       if (event.type === "requestReviewSkipped") return { name: "AwaitingUser" };
       return state;
     case "ParallelBuildDone":
-      if (event.type === "userSent" && event.parallel) return { name: "ParallelDiscussion", agents: ["codex", "claude"] };
-      if (event.type === "userSent") return { name: "Opener", opener: event.opener, reactor: otherAgent(event.opener) };
-      if (event.type === "requestReview")
-        return { name: "ParallelReview", agents: state.agents };
+      if (event.type === "userSent") return beginDiscussion(event);
+      if (event.type === "requestReview") {
+        const reviewers = requestedReviewers(event);
+        return {
+          name: "ParallelReview",
+          agents: [...(reviewers.length ? reviewers : state.agents)],
+          builders: [...state.agents],
+        };
+      }
       if (event.type === "requestReviewSkipped") return { name: "AwaitingUser" };
       return state;
     case "Review":
       if (event.type === "reviewDone")
-        return { name: "ReviewDone", reviewer: state.reviewer, approved: event.approved };
+        return { name: "ReviewDone", reviewer: state.reviewer, builder: state.builder, approved: event.approved };
       return state;
     case "ParallelReview":
       if (event.type === "parallelReviewDone")
-        return { name: "ParallelReviewDone", agents: state.agents, approved: event.approved };
+        return {
+          name: "ParallelReviewDone",
+          agents: state.agents,
+          builders: state.builders,
+          approved: event.approved,
+        };
       return state;
     case "ReviewDone":
-      if (event.type === "userSent" && event.parallel) return { name: "ParallelDiscussion", agents: ["codex", "claude"] };
-      if (event.type === "userSent") return { name: "Opener", opener: event.opener, reactor: otherAgent(event.opener) };
+      if (event.type === "userSent") return beginDiscussion(event);
       if (event.type === "handBack")
-        return { name: "Build", builder: otherAgent(state.reviewer) };
+        return { name: "Build", builder: state.builder };
       return state;
     case "ParallelReviewDone":
-      if (event.type === "userSent" && event.parallel) return { name: "ParallelDiscussion", agents: ["codex", "claude"] };
-      if (event.type === "userSent") return { name: "Opener", opener: event.opener, reactor: otherAgent(event.opener) };
+      if (event.type === "userSent") return beginDiscussion(event);
       if (event.type === "handBack")
-        return { name: "ParallelBuild", agents: state.agents };
+        return { name: "ParallelBuild", agents: state.builders };
       return state;
   }
 }
@@ -150,6 +182,9 @@ export function shouldRunParallelDiscussion(text: string, mode: DiscussionMode =
   const normalized = text.toLowerCase().replace(/\s+/g, " ").trim();
   if (!normalized) return false;
   const patterns = [
+    /\ball\s+of\s+you\b/,
+    /\byou\s+all\b/,
+    /\ball\s+(?:agents|heads)\b/,
     /\bboth\s+of\s+you\b/,
     /\byou\s+both\b/,
     /\bboth\s+(?:agents|heads)\b/,

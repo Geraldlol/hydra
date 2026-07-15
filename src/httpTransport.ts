@@ -13,6 +13,10 @@ interface OpenAiStreamChunk {
   usage?: unknown;
 }
 
+// SSE permits CRLF, LF, or CR line endings. Matching the raw buffer preserves
+// delimiters split across network chunks without misclassifying half a CRLF.
+const SSE_EVENT_BOUNDARY = /(?:\r\n|\r|\n){2}/;
+
 /**
  * Parse an SSE body into the assembled assistant text plus the raw JSON text
  * of whichever chunk carried token usage (if any). Tolerant of blank lines,
@@ -21,7 +25,7 @@ interface OpenAiStreamChunk {
 export function assembleSseText(sseBody: string): { text: string; usageJson: string | undefined } {
   let text = "";
   let usageJson: string | undefined;
-  for (const rawLine of sseBody.split(/\r?\n/)) {
+  for (const rawLine of sseBody.split(/\r\n|\r|\n/)) {
     const line = rawLine.trim();
     if (!line.startsWith("data:")) continue;
     const payload = line.slice("data:".length).trim();
@@ -40,6 +44,27 @@ export function assembleSseText(sseBody: string): { text: string; usageJson: str
 
 function cancelledResult(): HttpAgentResult {
   return { stdout: "", stderr: "", exitCode: null, timedOut: false, cancelled: true, rawBody: "" };
+}
+
+function emitChunk(onChunk: ((text: string) => void) | undefined, text: string): void {
+  if (!text) return;
+  try {
+    onChunk?.(text);
+  } catch {
+    // Live display is cosmetic; keep draining for the authoritative result.
+  }
+}
+
+function appendAndEmitBounded(
+  state: BoundedStreamState,
+  text: string,
+  cap: number,
+  marker: string,
+  onChunk: ((text: string) => void) | undefined,
+): void {
+  // Emit only the accepted slice. The original delta can be much larger than
+  // the accumulator cap and must not bypass it through the webview callback.
+  emitChunk(onChunk, appendBoundedStream(state, text, cap, marker));
 }
 
 /** Read a response body through `cap` so a huge non-streaming or error body
@@ -96,11 +121,15 @@ export async function runHttpAgent(
   // firing aborts the same underlying fetch/stream-read; `timedOut` records
   // which one fired so the caller can tell a deadline apart from a user Stop.
   const controller = new AbortController();
-  const onAbort = () => controller.abort();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const onAbort = () => {
+    if (timer) clearTimeout(timer);
+    controller.abort();
+  };
   opts.signal.addEventListener("abort", onAbort, { once: true });
   const hasTimeout = Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0;
   let timedOut = false;
-  const timer = hasTimeout
+  timer = hasTimeout
     ? setTimeout(() => {
         timedOut = true;
         controller.abort();
@@ -119,7 +148,13 @@ export async function runHttpAgent(
     });
 
     if (!res.ok) {
-      const errText = (await readBoundedText(res, MAX_AGENT_STDOUT_BYTES, marker).catch(() => "")).slice(0, 4000);
+      let errText = "";
+      try {
+        errText = (await readBoundedText(res, MAX_AGENT_STDOUT_BYTES, marker)).slice(0, 4000);
+      } catch (err) {
+        // Let the outer catch classify an aborted body read as timeout/Stop.
+        if (controller.signal.aborted) throw err;
+      }
       return { stdout: "", stderr: `HTTP ${res.status}: ${errText || res.statusText}`, exitCode: res.status, timedOut, cancelled: false, rawBody: errText };
     }
 
@@ -140,16 +175,16 @@ export async function runHttpAgent(
         const { value, done } = await reader.read();
         if (done) break;
         sseBuf += decoder.decode(value, { stream: true });
-        // Emit deltas as complete SSE events (double-newline delimited) arrive.
-        let idx: number;
-        while ((idx = sseBuf.indexOf("\n\n")) >= 0) {
-          const event = sseBuf.slice(0, idx);
-          sseBuf = sseBuf.slice(idx + 2);
+        // Emit deltas as complete SSE events (blank-line delimited) arrive.
+        for (;;) {
+          const boundary = SSE_EVENT_BOUNDARY.exec(sseBuf);
+          if (!boundary) break;
+          const event = sseBuf.slice(0, boundary.index);
+          sseBuf = sseBuf.slice(boundary.index + boundary[0].length);
           const { text, usageJson: eventUsage } = assembleSseText(event);
           if (eventUsage) usageJson = eventUsage;
           if (text) {
-            appendBoundedStream(state, text, MAX_AGENT_STDOUT_BYTES, marker);
-            opts.onChunk?.(text);
+            appendAndEmitBounded(state, text, MAX_AGENT_STDOUT_BYTES, marker, opts.onChunk);
           }
           if (state.truncated) {
             // Already at the output cap — stop pulling more network data
@@ -170,12 +205,13 @@ export async function runHttpAgent(
           const { text, usageJson: eventUsage } = assembleSseText(sseBuf);
           if (eventUsage) usageJson = eventUsage;
           if (text) {
-            appendBoundedStream(state, text, MAX_AGENT_STDOUT_BYTES, marker);
-            opts.onChunk?.(text);
+            appendAndEmitBounded(state, text, MAX_AGENT_STDOUT_BYTES, marker, opts.onChunk);
           }
           if (!state.truncated) {
             state.truncated = true;
-            state.text += `\n${marker}\n`;
+            const truncationNotice = `\n${marker}\n`;
+            state.text += truncationNotice;
+            emitChunk(opts.onChunk, truncationNotice);
           }
           sseBuf = "";
           stopReading();
@@ -188,11 +224,12 @@ export async function runHttpAgent(
       sseBuf += decoder.decode();
       // Flush a trailing partial event left in the buffer (server closed the
       // connection without a final blank-line delimiter).
-      const { text: tailText, usageJson: tailUsage } = assembleSseText(sseBuf);
-      if (tailUsage) usageJson = tailUsage;
-      if (tailText) {
-        appendBoundedStream(state, tailText, MAX_AGENT_STDOUT_BYTES, marker);
-        opts.onChunk?.(tailText);
+      if (!state.truncated) {
+        const { text: tailText, usageJson: tailUsage } = assembleSseText(sseBuf);
+        if (tailUsage) usageJson = tailUsage;
+        if (tailText) {
+          appendAndEmitBounded(state, tailText, MAX_AGENT_STDOUT_BYTES, marker, opts.onChunk);
+        }
       }
       const rawBody = JSON.stringify({
         choices: [{ message: { content: state.text } }],
@@ -204,7 +241,7 @@ export async function runHttpAgent(
     // Non-streaming: single JSON object (or plain text).
     const rawBody = await readBoundedText(res, MAX_AGENT_STDOUT_BYTES, marker);
     const content = extractNonStreamingContent(rawBody);
-    if (content) opts.onChunk?.(content);
+    emitChunk(opts.onChunk, content);
     return { stdout: content, stderr: "", exitCode: 0, timedOut, cancelled: false, rawBody };
   } catch (err) {
     if (controller.signal.aborted) {

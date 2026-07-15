@@ -133,6 +133,12 @@ describe("claude live text extraction", () => {
     // still extracts.
     assert.equal(extractor.push(claudeTextDelta("recovered") + "\n"), "recovered");
   });
+
+  test("bounds newline-dense chunks while retaining the final text event", () => {
+    const extractor = createLiveTextExtractor("claudeStreamJson")!;
+    const out = extractor.push("\n".repeat(100_000) + claudeTextDelta("final") + "\n");
+    assert.equal(out, "final");
+  });
 });
 
 describe("codex live text extraction", () => {

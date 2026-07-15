@@ -5,6 +5,31 @@ import { buildPrompt, APPROVED_SENTINEL_RE, SOFT_APPROVAL_RE } from "../src/prom
 const TRANSCRIPT = "## 2026-05-08T14:00:00Z You\n\nWhat shall we build?\n";
 
 describe("buildPrompt()", () => {
+  test("offers a strict autonomous duel request only to serial reactor and closer phases", () => {
+    for (const phase of ["reactor", "closer"] as const) {
+      const out = buildPrompt({
+        agent: phase === "reactor" ? "claude" : "codex",
+        otherAgent: phase === "reactor" ? "codex" : "claude",
+        phase,
+        transcript: TRANSCRIPT,
+        allowAgentDuelChallenge: true,
+      });
+      assert.match(out, /HYDRA_DUEL_CHALLENGE_V1:/);
+      assert.match(out, /automatically runs both sealed commitments/i);
+      assert.match(out, /The user judges/i);
+    }
+    for (const phase of ["opener", "parallel", "build"] as const) {
+      const out = buildPrompt({
+        agent: "codex",
+        otherAgent: "claude",
+        phase,
+        transcript: TRANSCRIPT,
+        allowAgentDuelChallenge: true,
+      });
+      assert.doesNotMatch(out, /HYDRA_DUEL_CHALLENGE_V1:/);
+    }
+  });
+
   test("opener includes preamble, transcript, and opener rules", () => {
     const out = buildPrompt({
       agent: "codex",

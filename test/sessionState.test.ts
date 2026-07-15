@@ -40,13 +40,14 @@ describe("terminal session state", () => {
     assert.equal(session.lastError, undefined);
   });
 
-  test("writes session snapshots under .hydra/sessions", async () => {
+  test("writes session snapshots under the supplied extension storage root", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-session-"));
     const session = updateTerminalSession(createTerminalSession("codex"), {
       state: "ready",
       detail: "Terminal ready",
     });
     await writeTerminalSession(dir, session);
+    assert.equal(terminalSessionPath(dir, "codex"), path.join(dir, "sessions", "codex.session.json"));
     const raw = await fs.readFile(terminalSessionPath(dir, "codex"), "utf8");
     assert.equal(JSON.parse(raw).state, "ready");
   });

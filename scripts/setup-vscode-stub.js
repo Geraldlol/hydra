@@ -43,6 +43,7 @@ function getConfiguration(_section) {
 
 module.exports = {
   workspace: {
+    isTrusted: true,
     getConfiguration,
     workspaceFolders: undefined,
     onDidChangeConfiguration: () => ({ dispose() {} }),

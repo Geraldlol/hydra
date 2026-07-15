@@ -1,6 +1,6 @@
-import { promises as fs } from "node:fs";
+import { constants as fsConstants, promises as fs, type Stats } from "node:fs";
 import * as path from "node:path";
-import { serializePerFile } from "./fileQueue";
+import { appendFileSafely, assertSafeArtifactParent, readJsonlGuarded, serializePerFile } from "./fileQueue";
 import type { AgentId } from "./phases";
 import type { Phase } from "./prompts";
 import type { AgentKind } from "./agentAdapter";
@@ -9,11 +9,17 @@ import type { AgentKind } from "./agentAdapter";
 // directory is known to exist. First write still creates it; the durable
 // .hydra/ dir is never deleted mid-session.
 const ensuredUsageDirs = new Set<string>();
+// Usage rows are normally a few hundred bytes. Capping one streamed line keeps
+// a hand-edited or hostile ledger from turning the monthly credit scan into an
+// unbounded allocation while still leaving ample room for historical schemas.
+const MAX_USAGE_LEDGER_LINE_CHARS = 1024 * 1024;
 
 export interface UsageRecord {
   timestamp: string;
   sessionId: string;
   agent: AgentId;
+  /** Adapter family at capture time; lets custom N-head seats share vendor guards. */
+  agentKind?: AgentKind;
   phase: Phase;
   requestId?: string;
   model?: string;
@@ -81,7 +87,7 @@ export const DEFAULT_PRICES_BY_KIND: Record<AgentKind, ModelPrices> = {
  *  or their per-kind default. */
 export function seatDefinitionPrices(
   base: Record<AgentId, ModelPrices>,
-  defs: Array<{ id: string; kind: AgentKind; pricing?: ModelPrices }>,
+  defs: Array<{ id: string; kind: AgentKind; pricing?: Partial<ModelPrices> }>,
 ): Record<string, ModelPrices> {
   const out: Record<string, ModelPrices> = { ...base };
   for (const def of defs) {
@@ -277,6 +283,7 @@ export function usageFromCodexSummary(usage: CodexUsageInput | undefined): {
 export function buildUsageRecord(input: {
   sessionId: string;
   agent: AgentId;
+  agentKind?: AgentKind;
   phase: Phase;
   requestId?: string;
   model?: string;
@@ -307,6 +314,7 @@ export function buildUsageRecord(input: {
     timestamp: new Date().toISOString(),
     sessionId: input.sessionId,
     agent: input.agent,
+    agentKind: input.agentKind,
     phase: input.phase,
     requestId: input.requestId,
     model: input.model?.trim() || undefined,
@@ -328,29 +336,133 @@ export async function appendUsageRecord(filePath: string, record: UsageRecord): 
       await fs.mkdir(path.dirname(filePath), { recursive: true });
       ensuredUsageDirs.add(filePath);
     }
-    await fs.appendFile(filePath, `${JSON.stringify(record)}\n`, "utf8");
+    await appendFileSafely(filePath, `${JSON.stringify(record)}\n`);
   });
 }
 
-export async function loadUsageRecords(filePath: string): Promise<UsageRecord[]> {
+export async function loadUsageRecords(
+  filePath: string,
+  options: { maxBytes?: number } = {},
+): Promise<UsageRecord[]> {
   try {
-    const text = await fs.readFile(filePath, "utf8");
-    const out: UsageRecord[] = [];
-    for (const line of text.split(/\r?\n/)) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      try {
-        const parsed = JSON.parse(trimmed);
-        if (parsed && typeof parsed === "object") out.push(parsed as UsageRecord);
-      } catch {
-        // Skip malformed lines silently — they don't affect aggregates.
-      }
-    }
-    return out;
+    // Usage gets a larger tail than UI activity logs because weekly/monthly
+    // summaries span more rows. The shared reader still applies its hard cap.
+    return await readJsonlGuarded(filePath, isUsageRecordObject, {
+      maxBytes: options.maxBytes ?? 16 * 1024 * 1024,
+      throwOnReadError: true,
+    });
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw err;
   }
+}
+
+/** UTC calendar-month identity shared by the durable guard accumulator. */
+export function usageCalendarMonthKey(now = new Date()): string {
+  return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+/**
+ * Stream the complete usage ledger and total Claude spend for `now`'s UTC
+ * calendar month. Unlike `loadUsageRecords`, this deliberately has no file-tail
+ * or row-count cutoff: the credit guard must not forget day-one spend on day 31
+ * or during a month with thousands of calls. Memory remains bounded to one
+ * capped JSONL line and the stream's current chunk.
+ */
+export async function loadClaudeAutomationSpendThisMonth(filePath: string, now = new Date()): Promise<number> {
+  const startMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1);
+  const nextMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1);
+  let handle: fs.FileHandle | undefined;
+  let stream: ReturnType<fs.FileHandle["createReadStream"]> | undefined;
+  try {
+    await assertSafeArtifactParent(filePath);
+    const before = await fs.lstat(filePath);
+    assertSafeUsageLedgerFile(before, filePath);
+    const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
+    handle = await fs.open(filePath, fsConstants.O_RDONLY | noFollow);
+    const opened = await handle.stat();
+    assertSafeUsageLedgerFile(opened, filePath);
+    if (!sameUsageLedgerIdentity(before, opened)) {
+      throw new Error(`Refusing to read Hydra usage ledger after path swap: ${filePath}`);
+    }
+
+    stream = handle.createReadStream({ encoding: "utf8", autoClose: false });
+    let total = 0;
+    let pending = "";
+    let discardingOversizedLine = false;
+    const consumeLine = (line: string): void => {
+      const trimmed = (line.endsWith("\r") ? line.slice(0, -1) : line).trim();
+      if (!trimmed) return;
+      try {
+        const parsed = JSON.parse(trimmed) as unknown;
+        total += claudeCostInMonth(parsed, startMs, nextMs);
+      } catch {
+        // A torn/malformed line is not a usage record. Keep scanning later rows.
+      }
+    };
+
+    for await (const chunk of stream) {
+      let text = String(chunk);
+      if (discardingOversizedLine) {
+        const newline = text.indexOf("\n");
+        if (newline < 0) continue;
+        text = text.slice(newline + 1);
+        discardingOversizedLine = false;
+      }
+      pending += text;
+      for (;;) {
+        const newline = pending.indexOf("\n");
+        if (newline < 0) break;
+        const line = pending.slice(0, newline);
+        pending = pending.slice(newline + 1);
+        if (line.length <= MAX_USAGE_LEDGER_LINE_CHARS) consumeLine(line);
+      }
+      if (pending.length > MAX_USAGE_LEDGER_LINE_CHARS) {
+        pending = "";
+        discardingOversizedLine = true;
+      }
+    }
+    if (!discardingOversizedLine && pending.length <= MAX_USAGE_LEDGER_LINE_CHARS) consumeLine(pending);
+
+    const afterRead = await fs.lstat(filePath);
+    assertSafeUsageLedgerFile(afterRead, filePath);
+    if (!sameUsageLedgerIdentity(opened, afterRead)) {
+      throw new Error(`Refusing to read Hydra usage ledger after path swap: ${filePath}`);
+    }
+    return Math.round(total * 10_000) / 10_000;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return 0;
+    throw err;
+  } finally {
+    stream?.destroy();
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+function claudeCostInMonth(value: unknown, startMs: number, nextMs: number): number {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return 0;
+  const row = value as Record<string, unknown>;
+  if ((row.agent !== "claude" && row.agentKind !== "claude") || typeof row.timestamp !== "string") return 0;
+  const timestampMs = Date.parse(row.timestamp);
+  if (!Number.isFinite(timestampMs) || timestampMs < startMs || timestampMs >= nextMs) return 0;
+  // Invalid and negative values must never reduce the guard's spend total.
+  return typeof row.costUsd === "number" && Number.isFinite(row.costUsd) && row.costUsd >= 0 ? row.costUsd : 0;
+}
+
+function assertSafeUsageLedgerFile(stat: Stats, filePath: string): void {
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) {
+    throw new Error(`Refusing to read Hydra usage ledger through a linked or non-file entry: ${filePath}`);
+  }
+}
+
+function sameUsageLedgerIdentity(left: Stats, right: Stats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function isUsageRecordObject(value: unknown): value is UsageRecord {
+  // Historical rows pre-date fields such as reasoningTokens/costSource. Keep
+  // the original object-shape tolerance; summary code coerces absent numbers.
+  return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
 export interface UsageSummary {
@@ -426,7 +538,7 @@ export function claudeAutomationSpendThisMonth(records: UsageRecord[], now = new
   const nextMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1);
   let total = 0;
   for (const r of records) {
-    if (r.agent !== "claude") continue;
+    if (r.agent !== "claude" && r.agentKind !== "claude") continue;
     const ts = Date.parse(r.timestamp);
     if (!Number.isFinite(ts) || ts < startMs || ts >= nextMs) continue;
     total += r.costUsd || 0;

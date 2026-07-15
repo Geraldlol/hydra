@@ -29,7 +29,9 @@ const fs = require("node:fs");
 const fsp = require("node:fs/promises");
 const path = require("node:path");
 
-const repoRoot = path.resolve(__dirname, "..", "..", "..");
+// scripts/ is a direct child of the repository root. This path is also passed
+// to Codex as its cwd, so resolving beyond the checkout widens agent access.
+const repoRoot = path.resolve(__dirname, "..");
 const probeRoot = path.join(repoRoot, ".hydra", "codex-json-probe");
 const runId = new Date().toISOString().replace(/[:.]/g, "-");
 const outDir = path.join(probeRoot, runId);

@@ -34,7 +34,7 @@ describe("many heads smoke report", () => {
     assert.equal(report.passed, true);
     assert.equal(report.observed.claudeStarts, 2);
     assert.equal(report.observed.liveEvents, 8);
-    assert.match(formatManyHeadsSmokeReport(report), /Many Heads smoke test passed/);
+    assert.match(formatManyHeadsSmokeReport(report), /Claude Worker Fanout smoke test passed/);
   });
 
   test("fails loudly when task events never reach the live channel or webview forwarding path", () => {

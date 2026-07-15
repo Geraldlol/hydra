@@ -55,7 +55,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       --border-strong: #3A4A57;  /* emphasized edge */
       --text: #E6ECEF;           /* primary text, cool ivory */
       --text-muted: #93A4AD;     /* secondary */
-      --text-faint: #5E6E78;     /* tertiary / disabled */
+      --text-faint: #83939D;     /* tertiary / disabled; AA on raised surfaces */
 
       /* ---- Brand — bioluminescent hydra glow ---- */
       --hydra: #74D0C9;
@@ -91,6 +91,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       --button-text: var(--ink);
       --input: var(--ink);
       --input-border: var(--border-strong);
+      --stream-width: 1120px;
 
       /* ---- Type — serif display + mono instrument layer (no generic sans) ---- */
       --font-display: "Hoefler Text", "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, "Times New Roman", serif;
@@ -166,6 +167,8 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     button:hover:not(:disabled) { border-color: var(--text-faint); background: var(--abyss-overlay); }
     button:active:not(:disabled) { filter: brightness(.94); }
     button:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--ink), 0 0 0 4px var(--hydra-glow); }
+    [role="button"]:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--ink), 0 0 0 4px var(--hydra-glow); }
+    [role="button"] { cursor: pointer; }
     button:disabled { opacity: .5; cursor: not-allowed; }
     button.secondary,
     .rail-chip,
@@ -211,19 +214,23 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     }
 
     #operationalRail {
-      min-height: 54px;
+      min-height: 76px;
       display: grid;
-      grid-template-columns: auto minmax(180px, 0.45fr) minmax(260px, 1fr);
+      grid-template-areas:
+        "brand primary"
+        "secondary secondary";
+      grid-template-columns: auto minmax(0, 1fr);
       align-items: center;
       gap: 5px 12px;
       padding: 7px 12px;
       border-bottom: 1px solid var(--border);
       background: linear-gradient(180deg, var(--abyss-raised), var(--abyss));
       box-shadow: inset 0 1px 0 rgba(255,255,255,.03);
-      overflow: visible;
+      overflow: hidden;
       font-size: 12px;
     }
     .brand {
+      grid-area: brand;
       display: inline-flex;
       align-items: center;
       gap: 9px;
@@ -261,12 +268,57 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       gap: 6px;
       min-width: 0;
     }
-    .rail-primary { flex-wrap: nowrap; }
-    .rail-secondary {
-      flex-wrap: wrap;
-      max-height: 46px;
+    .rail-primary {
+      grid-area: primary;
+      display: grid;
+      grid-template-columns: auto minmax(180px, 320px) minmax(0, 1fr) auto;
+      flex-wrap: nowrap;
       overflow: hidden;
+    }
+    .rail-secondary-wrap {
+      grid-area: secondary;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+    }
+    .rail-secondary {
+      flex-wrap: nowrap;
+      max-height: 38px;
+      overflow-x: auto;
+      overflow-y: hidden;
       align-content: center;
+      padding-bottom: 3px;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border-strong) transparent;
+    }
+    .rail-secondary > * { flex: 0 0 auto; }
+    .agent-rail {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      flex: 0 0 auto;
+    }
+    .rail-secondary-wrap:not(.is-expanded) .rail-secondary > .optional:not(.warn):not(.error) {
+      display: none;
+    }
+    .rail-secondary-wrap.is-expanded {
+      align-items: start;
+    }
+    .rail-secondary-wrap.is-expanded .rail-secondary {
+      flex-wrap: wrap;
+      max-height: 84px;
+      overflow-x: hidden;
+      overflow-y: auto;
+      padding-bottom: 0;
+    }
+    #railOverflowBtn {
+      min-height: 24px;
+      padding: 3px 8px;
+      color: var(--text-muted);
+      font-size: 10.5px;
     }
     .rail-spacer { display: none; }
     .rail-chip,
@@ -327,8 +379,14 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     .agent-status.error::before,
     .authority-badge.unknown::before,
     .rail-chip.error::before { background: var(--error); }
-    .agent-status.codex::before { background: var(--head-1); }
-    .agent-status.claude::before { background: var(--head-2); }
+    .agent-status.head-1::before { background: var(--head-1); }
+    .agent-status.head-2::before { background: var(--head-2); }
+    .agent-status.head-3::before { background: var(--head-3); }
+    .agent-status.head-4::before { background: var(--head-4); }
+    .agent-status.head-5::before { background: var(--head-5); }
+    .agent-status.head-6::before { background: var(--head-6); }
+    .agent-status.head-7::before { background: var(--head-7); }
+    .agent-status.head-8::before { background: var(--head-8); }
     .agent-status.running { color: var(--hydra); border-color: rgba(116,208,201,.4); background: rgba(116,208,201,.07); }
     .agent-status.replied { color: var(--ok); border-color: rgba(116,194,154,.35); }
     .agent-status.error { color: var(--error); border-color: rgba(224,139,139,.4); background: rgba(224,139,139,.06); }
@@ -352,13 +410,17 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       max-width: 100%;
       color: var(--text-muted);
       overflow: hidden;
+      white-space: nowrap;
     }
     #objectiveLabel { font-size: 9px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--text-faint); flex: none; }
     #objectiveText {
+      min-width: 0;
       color: var(--text);
       overflow: hidden;
       text-overflow: ellipsis;
+      white-space: nowrap;
     }
+    #resetObjectiveBtn { flex: none; }
 
     #messages {
       overflow: auto;
@@ -381,7 +443,8 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       display: flex;
       align-items: center;
       gap: 14px;
-      margin: 10px 0 12px;
+      width: min(100%, var(--stream-width));
+      margin: 10px auto 12px;
     }
     .phase-mark::before,
     .phase-mark::after {
@@ -408,7 +471,8 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       display: grid;
       grid-template-columns: 74px minmax(0, 1fr);
       gap: 12px;
-      margin: 0 0 13px;
+      width: min(100%, var(--stream-width));
+      margin: 0 auto 13px;
     }
     .message-time {
       color: var(--text-faint);
@@ -617,8 +681,8 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       .message-time { font-size: 10px; }
       #messages { padding-left: 10px; padding-right: 10px; }
       #operationalRail { grid-template-columns: auto minmax(0, 1fr); }
-      .rail-secondary { grid-column: 1 / -1; }
-      .rail-objective, .rail-chip.optional, .authority-badge .rail-value { display: none; }
+      .rail-secondary-wrap { grid-column: 1 / -1; }
+      .rail-objective, .authority-badge .rail-value { display: none; }
     }
 
     #composer-region {
@@ -628,6 +692,9 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     .ribbon-stack {
       display: grid;
       position: relative;
+      max-height: min(40vh, 360px);
+      overflow-y: auto;
+      overscroll-behavior: contain;
     }
     .ribbon-toggle {
       position: absolute;
@@ -716,8 +783,10 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     }
     .ribbon-collapse-btn {
       min-height: 22px;
-      padding: 2px 8px;
-      font-size: 11px;
+      width: 24px;
+      padding: 2px;
+      color: var(--text-faint);
+      font-size: 14px;
       flex: none;
     }
     .setup-strip.is-collapsed,
@@ -741,8 +810,9 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     #workQueueStrip { border-left-color: var(--info); }
     #decisionStrip {
       display: grid;
-      grid-template-columns: minmax(100px, 0.4fr) repeat(4, minmax(110px, 1fr));
-      align-items: start;
+      grid-template-columns: minmax(150px, auto) minmax(300px, 1fr) auto;
+      align-items: center;
+      gap: 8px 14px;
       border-left-color: var(--hydra);
       background: linear-gradient(90deg, rgba(116,208,201,.08), transparent 42%), var(--abyss-raised);
       box-shadow: 0 0 26px -14px var(--hydra-glow);
@@ -754,6 +824,10 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       padding-bottom: 4px;
     }
     #decisionStrip.is-collapsed .decision-field {
+      display: none !important;
+    }
+    #decisionStrip.is-collapsed .decision-details,
+    #decisionStrip.is-collapsed .decision-actions {
       display: none !important;
     }
     .decision-title {
@@ -781,8 +855,50 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       white-space: nowrap;
     }
     .decision-field strong { font-size: 9px; letter-spacing: .1em; text-transform: uppercase; color: var(--text-faint); }
+    .decision-needed {
+      min-width: 0;
+      padding: 7px 10px;
+      border: 1px solid rgba(116,208,201,.25);
+      border-radius: var(--r-card);
+      background: rgba(116,208,201,.06);
+    }
+    .decision-needed strong { color: var(--hydra); }
+    .decision-needed span {
+      margin-top: 4px;
+      overflow: visible;
+      text-overflow: clip;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      color: var(--text);
+      font-size: 12.5px;
+      font-weight: 650;
+      line-height: 1.4;
+    }
+    #decisionStrip:not(.needs-user) .decision-needed {
+      border-color: var(--border);
+      background: transparent;
+    }
+    #decisionStrip:not(.needs-user) .decision-needed span {
+      color: var(--text-muted);
+      font-weight: 400;
+    }
+    .decision-details {
+      grid-column: 1 / -1;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      padding-top: 7px;
+      border-top: 1px solid var(--border);
+    }
+    #decisionStrip .decision-actions {
+      align-self: center;
+    }
     @media (max-width: 880px) {
-      #decisionStrip { grid-template-columns: 1fr; }
+      #decisionStrip { grid-template-columns: minmax(0, 1fr) auto; }
+      #decisionStrip .decision-needed,
+      #decisionStrip .decision-details { grid-column: 1 / -1; }
+      .decision-details { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      #decisionStrip .decision-actions { justify-content: flex-end; }
       .setup-strip,
       .verification-strip,
       .native-action-strip,
@@ -793,8 +909,8 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     .composer {
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
-      gap: 10px;
-      padding: 12px 13px 13px;
+      gap: 8px;
+      padding: 8px 12px 10px;
     }
     #composerFrame {
       position: relative;
@@ -808,8 +924,8 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     #composer {
       display: block;
       width: 100%;
-      min-height: 78px;
-      max-height: 240px;
+      min-height: 62px;
+      max-height: 180px;
       resize: vertical;
       padding: 11px 13px 36px;
       border: none;
@@ -886,13 +1002,15 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       font-size: 10.5px;
     }
     #composerActions {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-      min-width: 126px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      align-content: start;
+      gap: 4px;
+      width: 224px;
     }
     #sendBtn {
-      min-height: 38px;
+      grid-column: 1 / -1;
+      min-height: 34px;
       font-weight: 700;
       letter-spacing: 0.04em;
       color: var(--ink);
@@ -904,7 +1022,8 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     #sendBtn:disabled { background: var(--abyss); color: var(--text-faint); box-shadow: none; border-color: var(--border); }
     #stopBtn {
       display: none;
-      min-height: 38px;
+      grid-column: 1 / -1;
+      min-height: 34px;
       font-weight: 700;
       letter-spacing: 0.04em;
       background: rgba(224,139,139,.1);
@@ -912,6 +1031,8 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       border-color: rgba(224,139,139,.5);
     }
     .app.in-flight #stopBtn { display: inline-flex; }
+    #autoAdvanceDefaultsBtn { grid-column: 1 / -1; }
+    #composerActions > .secondary { min-height: 24px; padding: 4px 8px; font-size: 10.5px; }
     .workflow-actions {
       display: flex;
       flex-wrap: wrap;
@@ -920,6 +1041,12 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       grid-column: 1 / -1;
     }
     .workflow-actions button { font-size: 12px; }
+    .builder-buttons {
+      display: inline-flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+    }
     .action-bank { display: none; }
 
     .overlay {
@@ -1028,6 +1155,8 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     #panelOverlay[data-panel="edits"] .panel-view[data-view="edits"],
     #panelOverlay[data-panel="verify"] .panel-view[data-view="verify"],
     #panelOverlay[data-panel="decisions"] .panel-view[data-view="decisions"],
+    #panelOverlay[data-panel="standings"] .panel-view[data-view="standings"],
+    #panelOverlay[data-panel="duels"] .panel-view[data-view="duels"],
     #panelOverlay[data-panel="term"] .panel-view[data-view="term"],
     #panelOverlay[data-panel="usage"] .panel-view[data-view="usage"] {
       display: grid;
@@ -1037,6 +1166,8 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     .work-queue-board,
     .edit-board,
     .decision-board,
+    .standings-board,
+    .duels-board,
     .terminal-sessions,
     .usage-board {
       display: grid;
@@ -1154,21 +1285,24 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     select:focus { outline: none; border-color: var(--hydra-deep); box-shadow: 0 0 0 3px var(--hydra-glow); }
     @media (max-width: 900px) {
       #operationalRail { grid-template-columns: auto minmax(150px, 1fr); }
-      .rail-secondary { grid-column: 1 / -1; }
-      .rail-chip.optional, #objectiveLabel { display: none; }
+      .rail-secondary-wrap { grid-column: 1 / -1; }
+      .rail-primary { grid-template-columns: auto minmax(140px, 240px) minmax(0, 1fr) auto; }
+      #objectiveLabel { display: none; }
       .native-action-row,
       .work-queue-row,
       .edit-row,
       .decision-row { grid-template-columns: 1fr; gap: 4px; align-items: stretch; }
       .composer { grid-template-columns: 1fr; }
-      #composerActions { flex-direction: row; min-width: 0; flex-wrap: wrap; }
+      #composerActions { display: flex; width: auto; min-width: 0; flex-direction: row; flex-wrap: wrap; }
       #sendBtn, #stopBtn { flex: 1 1 140px; }
+      #autoAdvanceDefaultsBtn { flex: 1 1 230px; }
       .usage-summary { grid-template-columns: 1fr 1fr; }
       .usage-row { grid-template-columns: 1fr; gap: 4px; align-items: stretch; }
     }
     @media (max-width: 720px) {
       #operationalRail {
         min-height: 44px;
+        grid-template-areas: "brand" "primary" "secondary";
         grid-template-columns: minmax(0, 1fr);
         gap: 6px;
       }
@@ -1180,7 +1314,11 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
         flex-wrap: nowrap;
         scrollbar-width: thin;
       }
-      .rail-secondary { grid-column: auto; }
+      .rail-primary {
+        display: flex;
+        overflow-y: hidden;
+      }
+      .rail-secondary-wrap { grid-column: auto; }
       .phase-chip,
       .agent-status,
       .authority-badge,
@@ -1217,7 +1355,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
         padding-top: 0;
       }
       .message-card { padding: 7px 10px; }
-      .rail-primary { flex-direction: column; align-items: stretch; overflow-x: visible; }
+      .rail-primary { flex-direction: row; align-items: center; overflow-x: auto; }
       .rail-secondary { max-height: 30px; }
       .phase-chip,
       .rail-objective,
@@ -1225,7 +1363,10 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
         max-width: 100%;
       }
       .ribbon-stack { max-height: 28vh; }
-      #composerFrame { min-height: 104px; }
+      #decisionStrip { grid-template-columns: 1fr; }
+      .decision-details { grid-template-columns: 1fr; }
+      #decisionStrip .decision-actions { justify-content: flex-start; }
+      #composerFrame { min-height: 82px; }
       #composerToolbar { align-items: flex-start; }
       #composerHint { display: none; }
       #composerActions {
@@ -1249,6 +1390,163 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     @media (prefers-reduced-motion: reduce) {
       * { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
     }
+    .standings-board { gap: 7px; }
+    .standing-policy {
+      margin: 0 0 10px;
+      padding: 9px 11px;
+      border: 1px solid var(--border);
+      border-radius: var(--r-chip);
+      color: var(--text-faint);
+      background: var(--ink);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+    .standing-row {
+      display: grid;
+      grid-template-columns: 42px minmax(120px, .7fr) 88px minmax(150px, 1fr) 92px;
+      gap: 10px;
+      align-items: center;
+      padding: 10px 11px;
+      border: 1px solid var(--border);
+      border-radius: var(--r-chip);
+      background: var(--ink);
+    }
+    .standing-row.leader { border-color: var(--hydra-line); box-shadow: inset 2px 0 0 var(--hydra); }
+    .standing-rank, .standing-score { font-family: var(--font-display); font-variant-numeric: tabular-nums; }
+    .standing-rank { color: var(--hydra); font-size: 18px; }
+    .standing-score { color: var(--text); font-size: 16px; }
+    .standing-meta { color: var(--text-faint); font-family: var(--font-mono); font-size: 10px; }
+    .standing-actions { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 10px; }
+    .duels-board { gap: 14px; }
+    .duel-policy {
+      margin: 0 0 10px;
+      padding: 9px 11px;
+      border: 1px solid var(--warn);
+      border-radius: var(--r-chip);
+      color: var(--text);
+      background: color-mix(in srgb, var(--warn) 7%, var(--ink));
+      font-size: 11px;
+      line-height: 1.45;
+    }
+    .duel-actions { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 12px; }
+    .duel-section { display: grid; gap: 7px; }
+    .duel-rating-domain { display: grid; gap: 5px; padding-top: 3px; }
+    .duel-section-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+      margin: 0;
+      color: var(--text);
+      font-size: 11px;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+    .duel-section-head span { color: var(--text-faint); font-family: var(--font-mono); font-size: 10px; letter-spacing: 0; text-transform: none; }
+    .duel-card,
+    .duel-rating-row {
+      border: 1px solid var(--border);
+      border-radius: var(--r-chip);
+      background: var(--ink);
+    }
+    .duel-card { display: grid; gap: 9px; padding: 10px 11px; }
+    .duel-card.active { border-color: var(--hydra-line); box-shadow: inset 2px 0 0 var(--hydra); }
+    .duel-card-head,
+    .duel-matchup,
+    .duel-card-actions {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      flex-wrap: wrap;
+    }
+    .duel-card-head { justify-content: space-between; }
+    .duel-matchup { color: var(--text); font-size: 13px; font-weight: 700; }
+    .duel-status,
+    .duel-domain,
+    .duel-rated {
+      padding: 2px 6px;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--r-pill);
+      color: var(--text-faint);
+      font-family: var(--font-mono);
+      font-size: 10px;
+    }
+    .duel-status { color: var(--hydra); border-color: var(--hydra-line); }
+    .duel-proposition { margin: 0; color: var(--text); line-height: 1.5; overflow-wrap: anywhere; }
+    .duel-meta { color: var(--text-faint); font-family: var(--font-mono); font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
+    .duel-evidence-packet { color: var(--text-muted); font-size: 11px; }
+    .duel-evidence-packet summary { cursor: pointer; color: var(--hydra); font-family: var(--font-mono); }
+    .duel-evidence-packet pre {
+      max-height: 220px;
+      margin: 7px 0 0;
+      padding: 8px 9px;
+      overflow: auto;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      border: 1px solid var(--border);
+      border-radius: var(--r-chip);
+      background: var(--abyss-raised);
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+      font-size: 10px;
+      line-height: 1.45;
+    }
+    .duel-commitment-state {
+      padding: 8px 9px;
+      border: 1px dashed var(--border-strong);
+      border-radius: var(--r-chip);
+      color: var(--text-muted);
+      font-size: 11px;
+    }
+    .duel-reveal { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .duel-answer { min-width: 0; padding: 9px; border: 1px solid var(--border); border-radius: var(--r-chip); background: var(--abyss-raised); }
+    .duel-answer strong { display: block; margin-bottom: 5px; color: var(--text); }
+    .duel-answer p { margin: 0; color: var(--text-muted); line-height: 1.45; overflow-wrap: anywhere; }
+    .duel-resolution { padding-top: 7px; border-top: 1px solid var(--border); color: var(--text-muted); }
+    .duel-rating-row {
+      display: grid;
+      grid-template-columns: minmax(120px, 1fr) minmax(150px, .9fr) 82px minmax(130px, .8fr) 82px;
+      gap: 9px;
+      align-items: center;
+      padding: 9px 10px;
+    }
+    .duel-rating-row.leader { border-color: var(--hydra-line); box-shadow: inset 2px 0 0 var(--hydra); }
+    .duel-rating-value { color: var(--text); font-family: var(--font-display); font-size: 16px; font-variant-numeric: tabular-nums; }
+    .duel-rank-chase { color: var(--text-muted); font-family: var(--font-mono); font-size: 10px; }
+    .duel-rating-row.leader .duel-rank-chase { color: var(--hydra); font-weight: 700; }
+    .duel-card-actions { justify-content: flex-end; }
+    @media (max-width: 720px) {
+      .standing-row {
+        grid-template-columns: 38px minmax(0, 1fr) auto;
+        gap: 7px;
+      }
+      .standing-row > :nth-child(4) { grid-column: 2 / -1; }
+      .standing-row > :nth-child(5) { grid-column: 2 / -1; }
+      .duel-reveal { grid-template-columns: 1fr; }
+      .duel-rating-row { grid-template-columns: minmax(0, 1fr) auto; gap: 5px 8px; }
+      .duel-rating-row > :nth-child(n+3) { grid-column: 1 / -1; }
+      .duel-card-actions { justify-content: stretch; }
+      .duel-card-actions button { flex: 1 1 150px; }
+    }
+    body.vscode-high-contrast,
+    body.vscode-high-contrast-light {
+      --ink: var(--vscode-editor-background);
+      --abyss: var(--vscode-editor-background);
+      --abyss-raised: var(--vscode-sideBar-background);
+      --abyss-overlay: var(--vscode-editorWidget-background);
+      --border: var(--vscode-contrastBorder);
+      --border-strong: var(--vscode-contrastActiveBorder);
+      --text: var(--vscode-editor-foreground);
+      --text-muted: var(--vscode-descriptionForeground);
+      --text-faint: var(--vscode-descriptionForeground);
+      background: var(--vscode-editor-background);
+    }
+    @media (forced-colors: active) {
+      body { background: Canvas; color: CanvasText; }
+      body::before, body::after, .abyss-tendrils { display: none; }
+      button, textarea, select, input, [role="button"], .message-card, .phase-chip,
+      .agent-status, .authority-badge, .rail-chip, .decision-needed { forced-color-adjust: auto; }
+    }
   </style>
 </head>
 <body data-head-assets="${headAssetsAttr}">
@@ -1269,19 +1567,22 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
         <span class="rail-objective"><span id="objectiveLabel">Objective</span><span id="objectiveText">Not set</span></span>
         <button id="resetObjectiveBtn" class="secondary rail-link" type="button" title="Clear the pinned room objective">Reset</button>
       </div>
-      <div class="rail-secondary">
-        <span id="transportChip" class="rail-chip">Safe one-shot</span>
-        <span id="codexStatus" class="agent-status codex idle">Codex: idle</span>
-        <span id="claudeStatus" class="agent-status claude idle">Claude: idle</span>
-        <span id="codexAuthority" class="authority-badge unknown"><span class="rail-value"><strong>Codex</strong> unknown</span></span>
-        <span id="claudeAuthority" class="authority-badge unknown"><span class="rail-value"><strong>Claude</strong> unknown</span></span>
-        <span id="verificationRail" class="rail-chip optional">verify: none</span>
-        <span id="editsRail" class="rail-chip optional" role="button" tabindex="0" title="Open current workspace edits">edits: 0</span>
-        <span id="nativeActionRail" class="rail-chip optional">actions: 0</span>
-        <span id="workQueueRail" class="rail-chip optional">queue clear</span>
-        <span id="decisionRail" class="rail-chip optional">decision: none</span>
-        <span id="modelRail" class="rail-chip" role="button" tabindex="0" title="Click to change model or thinking level.">models: CLI default</span>
-        <button id="profileBtn" class="secondary rail-link" type="button" title="Change Codex or Claude capability profile">Profiles</button>
+      <div id="railSecondaryWrap" class="rail-secondary-wrap">
+        <div id="railSecondary" class="rail-secondary" role="region" tabindex="0" aria-label="Operational status. Scroll horizontally for more details." title="Scroll horizontally for more status, or choose All status.">
+          <span id="transportChip" class="rail-chip">Safe one-shot</span>
+          <span id="standingsRail" class="rail-chip" role="button" tabindex="0" aria-label="scoreboard: unranked. Open passive Hydra Scoreboard" aria-haspopup="dialog" aria-controls="panelOverlay">scoreboard: unranked</span>
+          <span id="duelsRail" class="rail-chip" role="button" tabindex="0" aria-label="duels: none. Open formal Hydra duels" aria-haspopup="dialog" aria-controls="panelOverlay">duels: none</span>
+          <span id="agentStatusRail" class="agent-rail" role="list" aria-label="Hydra head status"></span>
+          <span id="authorityRail" class="agent-rail" role="list" aria-label="Hydra head authority"></span>
+          <span id="verificationRail" class="rail-chip optional">verify: none</span>
+          <span id="editsRail" class="rail-chip optional" role="button" tabindex="0" title="Open current workspace edits">edits: 0</span>
+          <span id="nativeActionRail" class="rail-chip optional">actions: 0</span>
+          <span id="workQueueRail" class="rail-chip optional">queue clear</span>
+          <span id="decisionRail" class="rail-chip optional">decision: none</span>
+          <span id="modelRail" class="rail-chip" role="button" tabindex="0" title="Click to change model or thinking level.">models: CLI default</span>
+          <button id="profileBtn" class="secondary rail-link" type="button" title="Change Codex or Claude capability profile">Profiles</button>
+        </div>
+        <button id="railOverflowBtn" class="secondary" type="button" aria-expanded="false" aria-controls="railSecondary" title="Show every operational status">All status</button>
       </div>
     </header>
 
@@ -1291,7 +1592,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     <section id="composer-region">
       <div class="ribbon-stack" id="ribbonStack">
         <div id="ribbonMinimizedSummary" class="ribbon-minimized-summary">Status ribbons hidden</div>
-        <button id="toggleRibbonsBtn" class="secondary ribbon-toggle" type="button" aria-expanded="true">Minimize Panel</button>
+        <button id="toggleRibbonsBtn" class="secondary ribbon-toggle" type="button" aria-expanded="true">Hide status</button>
         <div class="objective"><strong>Objective</strong><span id="objectiveTextShim">Not set</span></div>
         <div id="setupStrip" class="setup-strip">
           <span><strong>Autopilot</strong> <span id="autopilotText">Not run</span></span>
@@ -1300,7 +1601,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
             <button id="fixClaudeBtn" class="secondary hidden" type="button">Fix Claude Path</button>
             <button id="retryAutopilotBtn" class="secondary" type="button">Retry Autopilot</button>
             <button id="safeModeBtn" class="secondary" type="button">Use Safe Mode</button>
-            <button class="secondary ribbon-collapse-btn" type="button" data-ribbon-toggle="setupStrip" aria-expanded="true">Minimize</button>
+            <button class="secondary ribbon-collapse-btn" type="button" data-ribbon-toggle="setupStrip" data-ribbon-label="Autopilot" aria-label="Collapse Autopilot status" title="Collapse Autopilot status" aria-expanded="true">&#8722;</button>
           </span>
         </div>
         <div id="verificationStrip" class="verification-strip">
@@ -1308,18 +1609,20 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
           <span class="ribbon-actions">
             <button id="runVerificationBtn" class="secondary" type="button">Run Verification</button>
             <button id="openVerificationBtn" class="secondary" type="button">Open Verification</button>
-            <button class="secondary ribbon-collapse-btn" type="button" data-ribbon-toggle="verificationStrip" aria-expanded="true">Minimize</button>
+            <button class="secondary ribbon-collapse-btn" type="button" data-ribbon-toggle="verificationStrip" data-ribbon-label="Verification" aria-label="Collapse Verification status" title="Collapse Verification status" aria-expanded="true">&#8722;</button>
           </span>
         </div>
         <div id="nativeActionStrip" class="native-action-strip">
           <span><strong>Native Actions</strong> <span id="nativeActionText">No native actions yet</span></span>
           <span class="ribbon-actions">
+            <label class="visually-hidden" for="nativeAgentFilter">Filter native actions by target</label>
             <select id="nativeAgentFilter" title="Filter native actions by target">
               <option value="all">All heads</option>
               <option value="codex">Codex</option>
               <option value="claude">Claude</option>
               <option value="both">Both</option>
             </select>
+            <label class="visually-hidden" for="nativeStatusFilter">Filter native actions by status</label>
             <select id="nativeStatusFilter" title="Filter native actions by status">
               <option value="all">All statuses</option>
               <option value="completed">Completed</option>
@@ -1328,28 +1631,32 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
             </select>
             <button id="clearNativeActionsBtn" class="secondary" type="button" title="Clear all native actions currently shown by the filters">Clear Shown</button>
             <button id="openNativeActionsBtn" class="secondary" type="button">Open Actions</button>
-            <button class="secondary ribbon-collapse-btn" type="button" data-ribbon-toggle="nativeActionStrip" aria-expanded="true">Minimize</button>
+            <button class="secondary ribbon-collapse-btn" type="button" data-ribbon-toggle="nativeActionStrip" data-ribbon-label="Native actions" aria-label="Collapse Native actions status" title="Collapse Native actions status" aria-expanded="true">&#8722;</button>
           </span>
         </div>
         <div id="workQueueStrip" class="work-queue-strip">
           <span><strong>Work Queue</strong> <span id="workQueueText">Queue clear</span></span>
-          <span class="ribbon-actions"><button id="openWorkQueuePanelBtn" class="secondary" type="button">Open Queue</button><button class="secondary ribbon-collapse-btn" type="button" data-ribbon-toggle="workQueueStrip" aria-expanded="true">Minimize</button></span>
+          <span class="ribbon-actions"><button id="openWorkQueuePanelBtn" class="secondary" type="button">Open Queue</button><button class="secondary ribbon-collapse-btn" type="button" data-ribbon-toggle="workQueueStrip" data-ribbon-label="Work queue" aria-label="Collapse Work queue status" title="Collapse Work queue status" aria-expanded="true">&#8722;</button></span>
         </div>
         <div id="decisionStrip" class="decision-strip hidden">
-          <div class="decision-title">Latest Decision<span id="decisionCount" class="decision-count"></span><span id="decisionRiskChip" class="risk-chip" style="display:none"></span><button class="secondary ribbon-collapse-btn" type="button" data-ribbon-toggle="decisionStrip" aria-expanded="true">Minimize</button></div>
-          <div class="decision-field"><strong>Default next action</strong><span id="decisionDefault">None yet</span></div>
-          <div class="decision-field"><strong>Recommendation</strong><span id="decisionRecommendation">None yet</span></div>
-          <div class="decision-field"><strong>Needs user</strong><span id="decisionNeeded">None</span></div>
-          <div class="decision-field"><strong>Blockers</strong><span id="decisionBlockers">None</span><button id="acceptDefaultBtn" class="secondary" type="button">Accept Default</button></div>
+          <div class="decision-title">Latest Decision<span id="decisionCount" class="decision-count"></span><span id="decisionRiskChip" class="risk-chip" style="display:none"></span><button class="secondary ribbon-collapse-btn" type="button" data-ribbon-toggle="decisionStrip" data-ribbon-label="Latest decision" aria-label="Collapse Latest decision" title="Collapse Latest decision" aria-expanded="true">&#8722;</button></div>
+          <div class="decision-field decision-needed"><strong>Needs your decision</strong><span id="decisionNeeded">None</span></div>
+          <div class="decision-actions"><button id="acceptDefaultBtn" class="secondary" type="button">Accept Default</button></div>
+          <div class="decision-details">
+            <div class="decision-field"><strong>Default next action</strong><span id="decisionDefault">None yet</span></div>
+            <div class="decision-field"><strong>Recommendation</strong><span id="decisionRecommendation">None yet</span></div>
+            <div class="decision-field"><strong>Blockers</strong><span id="decisionBlockers">None</span></div>
+          </div>
         </div>
       </div>
 
       <footer class="composer">
         <div id="composerFrame">
+          <label class="visually-hidden" for="composer">Message Hydra heads</label>
           <textarea id="composer" placeholder="message - type / for commands, Ctrl+Enter to send"></textarea>
           <div id="attachmentTray" aria-live="polite"></div>
           <div id="composerToolbar">
-            <button id="openerBtn" class="secondary" type="button" title="Flip the opener for this turn only" aria-label="Flip opener, currently Codex">Opener: Codex</button>
+            <button id="openerBtn" class="secondary" type="button" title="Choose the next configured opener for this turn only" aria-label="Choose next opener, currently Codex">Opener: Codex</button>
             <button id="attachFilesBtn" class="secondary" type="button" title="Attach files to the next room turn">Attach</button>
             <span id="composerHint">Ctrl+Enter send - Shift+Enter newline - Ctrl+K commands</span>
           </div>
@@ -1358,12 +1665,11 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
           <button id="sendBtn" type="button">SEND</button>
           <button id="stopBtn" class="danger" type="button">STOP TURN</button>
           <button id="commandCenterBtn" class="secondary" type="button" title="Open Command Center (Ctrl+K)">Commands</button>
-          <button id="autoAdvanceDefaultsBtn" class="secondary" type="button">Auto Accept: On</button>
           <button id="nativeActionBtn" class="secondary hidden" type="button" title="Choose a direct native terminal action">Native Action...</button>
+          <button id="autoAdvanceDefaultsBtn" class="secondary" type="button">Auto-advance safe defaults: On</button>
         </div>
         <div id="workflowActions" class="workflow-actions">
-          <button id="assignCodexBtn" class="secondary hidden" type="button">Assign Builder: Codex</button>
-          <button id="assignClaudeBtn" class="secondary hidden" type="button">Assign Builder: Claude</button>
+          <span id="builderButtons" class="builder-buttons hidden" role="group" aria-label="Choose a Hydra builder"></span>
           <button id="assignBothBtn" class="secondary hidden" type="button">Assign Builders: Both</button>
           <button id="reviewBtn" class="secondary hidden" type="button">Request Review</button>
           <button id="handBackBtn" class="secondary hidden" type="button">Hand back to Builder</button>
@@ -1412,7 +1718,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       <div id="commandCenter" role="dialog" aria-modal="true" aria-label="Command Center">
         <div class="palette-input">
           <span class="brand-mark"><img src="${heads.brand}" alt=""></span>
-          <input id="paletteInput" role="combobox" aria-controls="commandList" aria-expanded="true" aria-activedescendant="" placeholder="Search commands" autocomplete="off">
+          <input id="paletteInput" role="combobox" aria-label="Search Hydra commands" aria-controls="commandList" aria-expanded="true" aria-activedescendant="" placeholder="Search commands" autocomplete="off">
           <span class="kbd">Esc</span>
         </div>
         <div id="commandList" role="listbox" aria-label="Hydra commands"></div>
@@ -1420,7 +1726,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     </div>
 
     <div class="overlay" id="panelOverlay" data-open="false" data-panel="actions" aria-hidden="true">
-      <div class="inspector" role="dialog" aria-modal="true" aria-label="Inspector">
+      <div class="inspector" role="dialog" aria-modal="true" aria-label="Hydra inspector">
         <section class="panel-view" data-view="actions">
           <div class="insp-head"><h3>Native Actions</h3><span class="count" id="nativePanelCount"></span><button class="secondary close" type="button">Close</button></div>
           <div class="insp-body"><div id="nativeActionBoard" class="native-action-board hidden"></div></div>
@@ -1446,6 +1752,22 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
           <div class="insp-body">
             <div id="usageSummary" class="usage-summary"></div>
             <div id="usageBoard" class="usage-board hidden"></div>
+          </div>
+        </section>
+        <section class="panel-view" data-view="standings">
+          <div class="insp-head"><h3>Evidence Scoreboard</h3><span class="count" id="standingsPanelCount"></span><button class="secondary close" type="button">Close</button></div>
+          <div class="insp-body">
+            <p class="standing-policy">Passive only: evidence scores never change native permissions, approval rights, builder assignment, or speaking order. Peer opinions are advisory; duel rating will remain separate.</p>
+            <div class="standing-actions"><button id="recordVerdictBtn" type="button">Record Verdict</button><button id="adjudicatePendingBtn" class="secondary" type="button">Adjudicate Pending</button><button id="openEvidenceBtn" class="secondary" type="button">Review Evidence</button><button id="reverseVerdictBtn" class="secondary" type="button">Reverse Verdict</button><button id="openStandingsBtn" class="secondary" type="button">Open Standings File</button></div>
+            <div id="standingsBoard" class="standings-board"></div>
+          </div>
+        </section>
+        <section class="panel-view" data-view="duels">
+          <div class="insp-head"><h3>Formal Duels</h3><span class="count" id="duelsPanelCount"></span><button class="secondary close" type="button">Close</button></div>
+          <div class="insp-body">
+            <p class="duel-policy">Heads initiate their own formal duels from consequential, falsifiable disagreements in serial discussion. Hydra admits or rejects each challenge by policy, then automatically runs both sealed commitments—the human does not create, accept, or author either answer. No duel is downgraded to an exhibition. Both heads receive equal maximum Hydra-granted permissions and the same host-built evidence brief. Hydra locks each effective command, model, arguments, working directory, and environment digest; vendor-native tool catalogs and provider capabilities can still differ. The project is read-only by duel contract, with bounded content and entry-metadata checks plus live mutation monitoring outside <code>.git</code> and Hydra-owned <code>.hydra</code>. A detected or unverifiable change cancels without Elo; this is not an absolute defense against a malicious same-user process. Persistent full-native consent is still required. The human independently judges the revealed evidence. Results never change permissions, approvals, builder assignment, speaking order, safety policy, or orchestration authority.</p>
+            <div class="duel-actions"><span id="agentDuelMode" class="duel-status">Agent challenges: enabled</span><button id="openDuelAuditBtn" class="secondary" type="button">Open Audit</button><button id="correctDuelResultBtn" class="secondary" type="button">Correct Result</button></div>
+            <div id="duelsBoard" class="duels-board"></div>
           </div>
         </section>
         <section class="panel-view" data-view="term">

@@ -11,6 +11,7 @@
 
 import { parseClaudeEventLine } from "./claudeEvents";
 import { parseCodexEventLine, type AgentMessageItem } from "./codexEvents";
+import { BoundedLineScanner } from "./fileQueue";
 
 export type LiveTextOutputMode = "plain" | "claudeStreamJson" | "codexJson";
 
@@ -33,31 +34,28 @@ export function createLiveTextExtractor(mode: LiveTextOutputMode): LiveTextExtra
 // normalized reply replaces the streamed text at completion.
 const MAX_LIVE_TEXT_CHARS = 2_000_000;
 const MAX_PARTIAL_LINE_CHARS = 1_000_000;
+const MAX_TRACKED_CODEX_ITEMS = 2_048;
 const LIVE_TRUNCATION_MARKER = "\n[Hydra: live stream truncated - full reply arrives at completion]";
 
 // Splits buffered input into complete lines, retaining the trailing partial
 // line until its newline arrives in a later push.
 abstract class LineBufferedExtractor implements LiveTextExtractor {
-  private buffer = "";
+  private readonly lines = new BoundedLineScanner({
+    maxLineChars: MAX_PARTIAL_LINE_CHARS,
+    headLinesPerPush: 3_072,
+    tailLinesPerPush: 1_024,
+  });
   private emittedChars = 0;
   private capped = false;
 
   push(chunk: string): string {
     if (this.capped) return "";
-    this.buffer += chunk;
-    const lines = this.buffer.split("\n");
-    // Why: pop() before iterating - the final element is either "" (chunk
-    // ended on a newline) or a partial line that must wait for its remainder.
-    this.buffer = lines.pop() ?? "";
-    if (this.buffer.length > MAX_PARTIAL_LINE_CHARS) {
-      // A newline-less flood (or one giant hostile line) - drop it rather
-      // than grow the buffer toward V8's string limit.
-      this.buffer = "";
-    }
-    let out = "";
-    for (const line of lines) {
-      out += this.extractFromLine(line);
-    }
+    const fragments: string[] = [];
+    this.lines.push(chunk, (line) => {
+      const extracted = this.extractFromLine(line);
+      if (extracted) fragments.push(extracted);
+    });
+    let out = fragments.join("");
     if (!out) return "";
     this.emittedChars += out.length;
     if (this.emittedChars > MAX_LIVE_TEXT_CHARS) {
@@ -155,6 +153,10 @@ class CodexLiveTextExtractor extends LineBufferedExtractor {
     if (!item || typeof item !== "object" || item.type !== "agent_message") return "";
     const { id, text } = item as AgentMessageItem;
     if (typeof text !== "string" || typeof id !== "string") return "";
+    if (!this.emittedByItemId.has(id) && this.emittedByItemId.size >= MAX_TRACKED_CODEX_ITEMS) {
+      const oldest = this.emittedByItemId.keys().next().value as string | undefined;
+      if (oldest !== undefined) this.emittedByItemId.delete(oldest);
+    }
     const emitted = this.emittedByItemId.get(id) ?? "";
     if (!text.startsWith(emitted)) {
       // The item's text was rewritten rather than extended (shouldn't happen

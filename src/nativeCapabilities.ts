@@ -1,7 +1,9 @@
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentId } from "./phases";
 import { displayNameFor } from "./agentRegistry";
+import { atomicWriteFile, readFileHead } from "./fileQueue";
+
+export const MAX_NATIVE_CAPABILITY_SUMMARY_READ_BYTES = 256 * 1024;
 
 export interface NativeCapabilityProbe {
   agent: AgentId;
@@ -26,14 +28,13 @@ export function nativeCapabilitiesPath(workspaceRoot: string): string {
 }
 
 export async function writeNativeCapabilities(filePath: string, markdown: string): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, markdown, "utf8");
+  await atomicWriteFile(filePath, markdown);
 }
 
 export async function readNativeIntegrationSummary(filePath: string, maxChars = 3000): Promise<string> {
   let markdown: string;
   try {
-    markdown = await fs.readFile(filePath, "utf8");
+    markdown = (await readFileHead(filePath, MAX_NATIVE_CAPABILITY_SUMMARY_READ_BYTES)).text;
   } catch {
     return "";
   }

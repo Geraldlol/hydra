@@ -13,7 +13,8 @@
 
 import * as vscode from "vscode";
 import type { Phase } from "./prompts";
-import type { DiscussionMode } from "./phases";
+import { DEFAULT_ROSTER, type AgentId, type DiscussionMode } from "./phases";
+import { isValidAgentId } from "./agentValidation";
 import type { TelegramConfig } from "./telegram";
 import { CLAUDE_AUTOMATION_GUARD_MODES, type ClaudeAutomationGuardMode } from "./claudeAuth";
 import { clampManyHeadsClaudeWorkerCount } from "./claudeWorkers";
@@ -23,6 +24,14 @@ function normalizeAgentTimeoutMs(value: number | undefined, fallback: number): n
   const timeout = Math.floor(value);
   if (shouldClearLegacyAgentTimeout(timeout)) return 0;
   return timeout <= 0 ? 0 : Math.max(1000, timeout);
+}
+
+/**
+ * Fail closed if a nonstandard host ever omits Workspace Trust. The node:test
+ * VS Code stub declares the trusted default explicitly.
+ */
+export function workspaceExecutionControlsAllowed(): boolean {
+  return vscode.workspace.isTrusted === true;
 }
 
 export function shouldClearLegacyAgentTimeout(value: number | undefined): boolean {
@@ -48,16 +57,22 @@ export function terminalBridgeTimeoutMs(): number {
 }
 
 export function autopilotOnStart(): boolean {
+  if (!workspaceExecutionControlsAllowed()) return false;
   return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("autopilotOnStart", true);
 }
 
-// Why: gates the shared live-channel writer (Many Heads Mode). Not
-// scope:"application" — it only flips whether Hydra writes diagnostic
-// .hydra/live metadata; it touches no spawn/exec/env/PATH/terminal/webhook
-// surface, so it follows the codexJson/claudeStreamJson precedent, not the
-// trust-scoped class.
+// This setting launches extra native Claude workers as well as writing their
+// live-channel metadata. Keep the runtime trust clamp even though VS Code also
+// rejects resource-scoped overrides for its application-scoped declaration.
 export function manyHeadsMode(): boolean {
+  if (!workspaceExecutionControlsAllowed()) return false;
   return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("manyHeadsMode", false);
+}
+
+/** Autonomous rated challenges spend two full-native head calls when admitted. */
+export function agentInitiatedDuels(): boolean {
+  if (!workspaceExecutionControlsAllowed()) return false;
+  return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("agentInitiatedDuels", true);
 }
 
 export function manyHeadsClaudeWorkerCount(): number {
@@ -66,6 +81,7 @@ export function manyHeadsClaudeWorkerCount(): number {
 }
 
 export function preferTerminalBridgeOnStart(): boolean {
+  if (!workspaceExecutionControlsAllowed()) return false;
   return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("preferTerminalBridgeOnStart", false);
 }
 
@@ -85,10 +101,14 @@ export function verificationMaxOutputChars(): number {
 }
 
 export function autoVerifyAfterBuild(): boolean {
+  if (!workspaceExecutionControlsAllowed()) return false;
   return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("autoVerifyAfterBuild", true);
 }
 
 export function autoSkipCloserOnAgreement(): boolean {
+  // The safe value is true here: skipping the closer prevents an additional
+  // native agent dispatch in an untrusted workspace.
+  if (!workspaceExecutionControlsAllowed()) return true;
   return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("autoSkipCloserOnAgreement", true);
 }
 
@@ -98,13 +118,38 @@ export function discussionMode(): DiscussionMode {
 }
 
 export function autoRequestReviewAfterPassingVerification(): boolean {
+  if (!workspaceExecutionControlsAllowed()) return false;
   return vscode.workspace
     .getConfiguration("hydraRoom")
     .get<boolean>("autoRequestReviewAfterPassingVerification", false);
 }
 
 export function autoAdvanceActionableDefaults(): boolean {
+  if (!workspaceExecutionControlsAllowed()) return false;
   return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("autoAdvanceActionableDefaults", true);
+}
+
+/**
+ * Ordered Hydra head identities that participate in this room. Invalid and
+ * duplicate entries are ignored; fewer than two usable identities fails back
+ * to the built-in two-head roster so a malformed user setting cannot strand
+ * serialized discussion without a reactor.
+ */
+export function normalizeRoomRoster(raw: unknown): AgentId[] {
+  if (!Array.isArray(raw)) return [...DEFAULT_ROSTER];
+  const seen = new Set<AgentId>();
+  const roster: AgentId[] = [];
+  for (const value of raw) {
+    if (!isValidAgentId(value) || seen.has(value)) continue;
+    seen.add(value);
+    roster.push(value);
+  }
+  return roster.length >= 2 ? roster : [...DEFAULT_ROSTER];
+}
+
+export function roomRoster(): AgentId[] {
+  const raw = vscode.workspace.getConfiguration("hydraRoom").get<unknown>("roomRoster", DEFAULT_ROSTER);
+  return normalizeRoomRoster(raw);
 }
 
 export function sessionCostCapUsd(): number {

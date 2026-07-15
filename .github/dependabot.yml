@@ -9,8 +9,8 @@ updates:
         patterns:
           - "*"
     # Major bumps on these three are deliberate decisions, not auto-PRs:
-    #   @types/node  — pinned to ^20 to match VS Code 1.95's Node 20 runtime
-    #   @types/vscode — must stay aligned with the engines.vscode range
+    #   @types/node  — pinned to ^22 to match VS Code 1.120's Node 22 runtime
+    #   @types/vscode — pinned exactly to the minimum engines.vscode API
     #   typescript    — major TS upgrades touch compilation surface
     # Patch and minor bumps still flow through normally.
     ignore:

@@ -1,6 +1,7 @@
 import { AgentId } from "./phases";
 import type { HydraEventKind } from "./events";
 import { displayNameFor } from "./agentRegistry";
+import { isAgentMessageRole, type MessageRole } from "./transcript";
 import {
   telegramConfig,
   telegramInboundAllowedSenderIds,
@@ -17,10 +18,11 @@ import {
   type TelegramConfig,
 } from "./telegram";
 import {
-  appendTelegramInboxRecord,
+  acknowledgeTelegramInboxRecord,
   appendTelegramRoutingRecord,
   ensureTelegramCoordinator,
   findTelegramRoutingRecord,
+  persistTelegramInboxRecordAndOffset,
   readTelegramInboxForRoom,
   readTelegramOffset,
   telegramBotKey,
@@ -29,6 +31,7 @@ import {
   withTelegramPollerLease,
   writeTelegramOffset,
   type TelegramCoordinatorPaths,
+  type TelegramPollerLease,
 } from "./telegramCoordinator";
 
 // Telegram inbound payloads are attacker-controlled (anyone with the bot
@@ -94,7 +97,7 @@ export interface TelegramDecisionPacket {
 
 /** The slice of a room message the inbound reply path reads. */
 export interface TelegramReplyMessage {
-  role: "user" | "codex" | "claude" | "system";
+  role: MessageRole;
   text: string;
   phase?: string;
   pending?: boolean;
@@ -106,6 +109,8 @@ export interface TelegramInboundTurnOutcome {
   beforeReplyAt: number;
   /** True if the triggering turn was cancelled (user pressed Stop mid-turn). */
   cancelled: boolean;
+  /** True when room state changed before dispatch and the durable inbox item should be retried later. */
+  deferred: boolean;
 }
 
 // Narrow dependency surface the controller needs from the panel. Keeping this
@@ -157,16 +162,19 @@ export class TelegramController {
   private inboundAbort: AbortController | undefined;
   private inboundPolling = false;
   private inboundGeneration = 0;
+  private disposed = false;
 
   constructor(private readonly deps: TelegramControllerDeps) {}
 
   async restartInboundPolling(): Promise<void> {
     await this.deps.ready().catch(() => undefined);
+    if (this.disposed) return;
     this.stopInboundPolling();
     this.startInboundPolling();
   }
 
   startInboundPolling(): void {
+    if (this.disposed) return;
     if (!this.deps.isWorkspaceReady() || !telegramInboundEnabled()) return;
     if (!telegramConfig()) return;
     this.inboundGeneration++;
@@ -184,12 +192,21 @@ export class TelegramController {
 
   /** Tear down all timers and in-flight polls. Called from panel.dispose(). */
   dispose(): void {
+    this.disposed = true;
     this.stopInboundPolling();
   }
 
   private scheduleInboundPoll(delayMs = telegramInboundPollIntervalMs(), generation = this.inboundGeneration): void {
     if (this.inboundTimer) clearTimeout(this.inboundTimer);
     this.inboundTimer = setTimeout(() => void this.pollInboundOnce(generation), delayMs);
+  }
+
+  private isInboundGenerationCurrent(generation: number): boolean {
+    return !this.disposed && generation === this.inboundGeneration;
+  }
+
+  private isInboundRunActive(generation: number, controller: AbortController): boolean {
+    return this.isInboundGenerationCurrent(generation) && !controller.signal.aborted;
   }
 
   private async pollInboundOnce(generation: number): Promise<void> {
@@ -199,34 +216,46 @@ export class TelegramController {
     const cfg = telegramConfig();
     if (!cfg) return;
     this.inboundPolling = true;
-    this.inboundAbort = new AbortController();
+    const runAbort = new AbortController();
+    this.inboundAbort = runAbort;
     try {
       const paths = telegramCoordinatorPaths(cfg.botToken);
       await ensureTelegramCoordinator(paths);
-      await withTelegramPollerLease(paths, this.deps.sessionId, telegramInboundPollIntervalMs() * 2, async () => {
-        await this.pollBotIntoSharedInbox(cfg, paths);
+      await withTelegramPollerLease(paths, this.deps.sessionId, telegramInboundPollIntervalMs() * 2, async (lease) => {
+        const signal = AbortSignal.any([runAbort.signal, lease.signal]);
+        await this.pollBotIntoSharedInbox(cfg, paths, lease, signal);
       });
+      if (!this.isInboundRunActive(generation, runAbort)) return;
       const records = await readTelegramInboxForRoom(paths, {
         roomSessionId: this.deps.sessionId,
         stateFile: this.deps.telegramInboundStateFsPath(),
       });
       for (const record of records) {
+        if (!this.isInboundRunActive(generation, runAbort)) break;
         if (!record.command.trim()) {
           await this.deps.appendSystemMessage("Telegram inbound ignored: empty routed command.");
-          this.deps.postState();
+          await acknowledgeTelegramInboxRecord(this.deps.telegramInboundStateFsPath(), record.id);
+          if (this.isInboundRunActive(generation, runAbort)) this.deps.postState();
           continue;
         }
-        // Why: sanitize the untrusted sender name here too — this line is stored
-        // as a System-role message and fed to the agents (buildPromptContext),
-        // so an unsanitized name is a prompt-injection vector, same as the fenced
-        // prompt path below. Route both through sanitizeSenderName so they match.
-        const safeFrom = sanitizeSenderName(record.message.from);
-        const source = safeFrom ? ` from ${safeFrom}` : "";
-        await this.deps.appendSystemMessage(`Telegram inbound${source}: ${truncateForLog(record.command, 160)}`);
+        // System-role transcript entries are trusted prompt context. Never copy
+        // remote sender text or command content into that role; the command is
+        // already preserved inside the explicitly fenced User-role prompt.
+        const sourceMessage = `Telegram inbound accepted (update_id=${record.updateId}, message_id=${record.message.messageId ?? "?"}).`;
         const telegramPrompt = formatTelegramInboundPrompt(record.message.from, record.command);
         const outcome = await this.deps.sendInboundUserMessage(telegramPrompt, this.deps.getFirstSpeaker(), {
           telegramChatId: record.message.chatId,
         });
+        // A room that became busy/non-sendable leaves the durable inbox item
+        // unacknowledged; the next poll can dispatch it without an in-memory
+        // queue becoming the only copy of the remote command.
+        if (outcome.deferred) break;
+        // The room turn/transcript is durable now. A later diagnostic or
+        // Telegram-send failure must not replay the expensive agent turn.
+        await acknowledgeTelegramInboxRecord(this.deps.telegramInboundStateFsPath(), record.id);
+        // Log only accepted work. Writing this before the room reservation
+        // caused a busy record to append the same system message on every retry.
+        await this.deps.appendSystemMessage(sourceMessage);
         // Why: if the user pressed Stop mid-turn, the turn was aborted; replying
         // with the (partial/absent) agent output would be misleading. Skip the
         // auto-reply and annotate the transcript instead.
@@ -234,29 +263,43 @@ export class TelegramController {
           await this.deps.appendSystemMessage("Telegram inbound reply skipped: the triggering turn was cancelled.");
           continue;
         }
+        // Why: the turn completed and its record is acknowledged above, so the
+        // reply MUST go out even if the inbound generation advanced mid-turn
+        // (e.g. a hydraRoom.telegram settings change restarted polling). Gating
+        // the send on the current generation here silently dropped the user's
+        // answer: the record was already acked, so it was never retried.
         await this.sendInboundReply({ ...cfg, chatId: record.message.chatId }, outcome.beforeReplyAt);
       }
     } finally {
-      this.inboundPolling = false;
-      this.inboundAbort = undefined;
-      if (generation === this.inboundGeneration && this.deps.isWorkspaceReady() && telegramInboundEnabled()) {
+      // A restarted generation may already own a different controller. Never
+      // let this stale completion clear its in-flight state or abort handle.
+      if (this.inboundAbort === runAbort) {
+        this.inboundPolling = false;
+        this.inboundAbort = undefined;
+      }
+      if (this.isInboundGenerationCurrent(generation) && this.deps.isWorkspaceReady() && telegramInboundEnabled()) {
         this.scheduleInboundPoll(telegramInboundPollIntervalMs(), generation);
       }
     }
   }
 
-  private async pollBotIntoSharedInbox(cfg: TelegramConfig, paths: TelegramCoordinatorPaths): Promise<void> {
+  private async pollBotIntoSharedInbox(
+    cfg: TelegramConfig,
+    paths: TelegramCoordinatorPaths,
+    lease: TelegramPollerLease,
+    signal: AbortSignal
+  ): Promise<void> {
     const offset = await readTelegramOffset(paths);
     if (offset === undefined) {
       const bootstrap = await getTelegramUpdates(cfg, {
         offset: -1,
         limit: 1,
         timeoutSeconds: 0,
-        signal: this.inboundAbort?.signal,
+        signal,
       });
       if (bootstrap.ok) {
         const latest = bootstrap.updates[bootstrap.updates.length - 1];
-        await writeTelegramOffset(paths, latest ? latest.updateId + 1 : 0);
+        await writeTelegramOffset(paths, lease, latest ? latest.updateId + 1 : 0);
       } else if (bootstrap.error !== "aborted") {
         await this.deps.recordEvent("error", `Telegram inbound bootstrap failed: ${bootstrap.error ?? "unknown"}`, {
           status: bootstrap.status ?? null,
@@ -269,7 +312,7 @@ export class TelegramController {
       offset,
       limit: 25,
       timeoutSeconds: 0,
-      signal: this.inboundAbort?.signal,
+      signal,
     });
     if (!result.ok) {
       if (result.error !== "aborted") {
@@ -282,28 +325,40 @@ export class TelegramController {
 
     const prefix = telegramInboundPrefix();
     const allowedSenderIds = telegramInboundAllowedSenderIds();
-    for (const update of result.updates) {
-      await writeTelegramOffset(paths, update.updateId + 1);
+    const updates = [...result.updates].sort((left, right) => left.updateId - right.updateId);
+    for (const update of updates) {
       const message = update.message;
-      if (!message || message.fromIsBot || message.chatId !== cfg.chatId.trim()) continue;
+      if (!message || message.fromIsBot || message.chatId !== cfg.chatId.trim()) {
+        if (!(await writeTelegramOffset(paths, lease, update.updateId + 1))) return;
+        continue;
+      }
       // Per-sender allowlist (empty = allow every sender in the configured chat).
       // For a group chatId this is the only gate on individual members; skip
       // silently, like the chat-id mismatch above, to avoid transcript spam from
       // an unauthorized sender flooding the chat.
-      if (!isTelegramSenderAllowed(message.fromId, allowedSenderIds)) continue;
+      if (!isTelegramSenderAllowed(message.fromId, allowedSenderIds)) {
+        if (!(await writeTelegramOffset(paths, lease, update.updateId + 1))) return;
+        continue;
+      }
       const routed = await this.routeInboundMessage(paths, message, prefix);
-      if (!routed) continue;
-      await appendTelegramInboxRecord(paths, {
-        id: `${telegramBotKey(cfg.botToken)}-${update.updateId}`,
-        updateId: update.updateId,
-        botKey: telegramBotKey(cfg.botToken),
-        chatId: message.chatId,
-        roomSessionId: routed.roomSessionId,
-        workspace: routed.workspace,
-        command: routed.command,
-        message,
-        receivedAt: new Date().toISOString(),
-      });
+      if (routed) {
+        // Persist the routed command before acknowledging it to Telegram. If
+        // this append fails, the offset remains unchanged and Telegram retries.
+        const persisted = await persistTelegramInboxRecordAndOffset(paths, lease, {
+          id: `${telegramBotKey(cfg.botToken)}-${update.updateId}`,
+          updateId: update.updateId,
+          botKey: telegramBotKey(cfg.botToken),
+          chatId: message.chatId,
+          roomSessionId: routed.roomSessionId,
+          workspace: routed.workspace,
+          command: routed.command,
+          message,
+          receivedAt: new Date().toISOString(),
+        }, update.updateId + 1);
+        if (!persisted) return;
+        continue;
+      }
+      if (!(await writeTelegramOffset(paths, lease, update.updateId + 1))) return;
     }
   }
 
@@ -395,20 +450,25 @@ export class TelegramController {
   private async prepareOutboundRouting(cfg: TelegramConfig, paths: TelegramCoordinatorPaths): Promise<void> {
     await ensureTelegramCoordinator(paths);
     if (await readTelegramOffset(paths) !== undefined) return;
-    const bootstrap = await getTelegramUpdates(cfg, {
-      offset: -1,
-      limit: 1,
-      timeoutSeconds: 0,
-      signal: this.inboundAbort?.signal,
-    });
-    if (bootstrap.ok) {
-      const latest = bootstrap.updates[bootstrap.updates.length - 1];
-      await writeTelegramOffset(paths, latest ? latest.updateId + 1 : 0);
-    } else if (bootstrap.error !== "aborted") {
-      await this.deps.recordEvent("error", `Telegram inbound bootstrap before outbound failed: ${bootstrap.error ?? "unknown"}`, {
-        status: bootstrap.status ?? null,
+    await withTelegramPollerLease(paths, `${this.deps.sessionId}:outbound`, telegramInboundPollIntervalMs() * 2, async (lease) => {
+      // Another poller may have initialized the offset while this request was
+      // waiting for its token. Re-read under the lease before bootstrapping.
+      if (await readTelegramOffset(paths) !== undefined) return;
+      const bootstrap = await getTelegramUpdates(cfg, {
+        offset: -1,
+        limit: 1,
+        timeoutSeconds: 0,
+        signal: lease.signal,
       });
-    }
+      if (bootstrap.ok) {
+        const latest = bootstrap.updates[bootstrap.updates.length - 1];
+        await writeTelegramOffset(paths, lease, latest ? latest.updateId + 1 : 0);
+      } else if (bootstrap.error !== "aborted") {
+        await this.deps.recordEvent("error", `Telegram inbound bootstrap before outbound failed: ${bootstrap.error ?? "unknown"}`, {
+          status: bootstrap.status ?? null,
+        });
+      }
+    });
   }
 
   private async appendOutboundRoute(
@@ -433,13 +493,13 @@ export class TelegramController {
   async sendInboundReply(cfg: TelegramConfig, afterMessageIndex: number): Promise<void> {
     const reply = this.latestInboundReply(afterMessageIndex);
     if (!reply) {
-      const result = await sendTelegramMessage(cfg, "Hydra queued your message; the reply will follow when the active turn finishes.");
+      const result = await sendTelegramMessage(cfg, "Hydra handled your message, but the turn produced no agent reply.");
       if (!result.ok) {
-        await this.deps.recordEvent("error", `Telegram inbound queue ack failed: ${result.error ?? "unknown"}`, {
+        await this.deps.recordEvent("error", `Telegram inbound empty-reply notice failed: ${result.error ?? "unknown"}`, {
           status: result.status ?? null,
         });
       }
-      await this.deps.appendSystemMessage("Telegram inbound message was queued behind active work; a Telegram queue acknowledgement was sent.");
+      await this.deps.appendSystemMessage("Telegram inbound turn completed without an agent reply; a Telegram notice was sent.");
       return;
     }
     const result = await sendTelegramMessage(cfg, reply);
@@ -454,7 +514,7 @@ export class TelegramController {
     const agentMessages = this.deps
       .getMessages()
       .slice(afterMessageIndex)
-      .filter((message): message is TelegramReplyMessage & { role: AgentId } => (message.role === "codex" || message.role === "claude") && !message.pending);
+      .filter((message): message is TelegramReplyMessage & { role: AgentId } => isAgentMessageRole(message.role) && !message.pending);
     const latest = agentMessages[agentMessages.length - 1];
     if (!latest) return undefined;
     const label = displayNameFor(latest.role);

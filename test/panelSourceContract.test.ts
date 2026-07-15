@@ -44,6 +44,75 @@ describe("auto-advance security gate source contract", () => {
   });
 });
 
+describe("unconfirmed native termination safety latch", () => {
+  test("blocks new room and native automation until the extension host restarts", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    assert.match(source, /private static unconfirmedNativeTerminationForHost = false/);
+    assert.match(source, /private get unconfirmedNativeTermination\(\): boolean/);
+    assert.match(source, /return HydraRoomPanel\.unconfirmedNativeTerminationForHost/);
+    assert.match(source, /HydraRoomPanel\.unconfirmedNativeTerminationForHost = value/);
+    assert.match(source, /this\.latchUnconfirmedNativeTermination\(normalized, `\$\{agent\} \$\{phase\}`/);
+    assert.match(source, /canSend: automationReady/);
+    assert.match(source, /canRunVerification: automationReady/);
+    assert.match(source, /return this\.finishBlockedAgentCall\(messageId\)/);
+    assert.match(source, /Restart VS Code before continuing/);
+    assert.equal(source.match(/unconfirmedNativeTerminationForHost = false;/g)?.length, 1);
+    assert.doesNotMatch(source, /this\.unconfirmedNativeTermination = false/);
+  });
+});
+
+describe("terminal storage and registry refresh source contracts", () => {
+  test("terminal bridge uses VS Code storage instead of workspace .hydra", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    const start = source.indexOf("private createTerminalBridge()");
+    const end = source.indexOf("\n  }", start);
+    assert.ok(start >= 0 && end > start);
+    const method = source.slice(start, end);
+    assert.match(method, /this\.workspacePrivateStorageRoot\(\)/);
+    assert.match(method, /artifactRoot: path\.join\(workspaceStorageRoot, "terminal-bridge"\)/);
+    assert.doesNotMatch(method, /this\.workspaceRoot, "\.hydra"/);
+    assert.match(source, /private workspacePrivateStorageRoot\(\): string \{[\s\S]*this\.context\.storageUri\?\.fsPath/);
+  });
+
+  test("agent configuration changes invalidate the live registry", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    assert.match(source, /e\.affectsConfiguration\("hydraRoom\.agents"\)/);
+    assert.match(source, /if \(e\.affectsConfiguration\("hydraRoom\.agents"\)\) reloadAgentDefinitions\(\)/);
+    assert.match(source, /e\.affectsConfiguration\("hydraRoom\.agents"\) \|\| e\.affectsConfiguration\("hydraRoom\.roomRoster"\)[\s\S]*this\.postState\(\)/);
+    assert.match(source, /e\.affectsConfiguration\("hydraRoom\.telegram"\)/);
+  });
+});
+
+describe("passive standings source contracts", () => {
+  test("requires anchored evidence and keeps mirror failures non-authoritative", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    assert.match(source, /deterministicEvidence = latestVerification && verificationPassed\(latestVerification\)/);
+    assert.match(source, /deterministicEvidence && outcomePick\.value === "correct"/);
+    assert.match(source, /value: "deterministic"[\s\S]*Creates a fixed claim/);
+    assert.match(source, /statement = `Hydra verification passed at \$\{deterministicEvidence\.timestamp\}/);
+    assert.match(source, /An evidence note is required/);
+    assert.match(source, /evidenceRef,[\s\S]*rationale: rationale\.trim\(\)/);
+    assert.match(source, /private async refreshScoreboardMirror\(\): Promise<boolean>/);
+    assert.match(source, /The private ledger remains authoritative/);
+    assert.match(source, /mirrorError: this\.scoreboardMirrorError/);
+    assert.match(source, /async openScoreEvidence\(\)/);
+    assert.match(source, /writeScoreEvidenceMirror\(this\.scoreEvidenceMirrorUri\.fsPath, events, displayNameFor\)/);
+    assert.match(source, /async reverseScoreVerdict\(\)/);
+    assert.match(source, /reversedBy: "local-user"/);
+    assert.match(source, /A reversal reason is required/);
+    assert.match(source, /async adjudicatePendingScoreClaim\(\)/);
+    assert.match(source, /listPendingScoreClaims\(events\)/);
+    assert.match(source, /A corrected evidence note is required/);
+
+    const recordStart = source.indexOf("async recordScoreVerdict()");
+    const recordEnd = source.indexOf("async openNativeActions()", recordStart);
+    const record = source.slice(recordStart, recordEnd);
+    assert.ok(recordStart >= 0 && recordEnd > recordStart);
+    assert.ok(record.indexOf("await appendScoreboardEvents(") < record.indexOf("await this.refreshScoreboardMirror()"));
+    assert.match(record, /Hydra could not record the verdict:[\s\S]*return;[\s\S]*const mirrorOk = await this\.refreshScoreboardMirror\(\)/);
+  });
+});
+
 describe("terminal bridge usage source contracts", () => {
   test("terminal bridge usage is extracted from the raw log output", () => {
     const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
@@ -56,6 +125,8 @@ describe("terminal bridge usage source contracts", () => {
     assert.match(branch, /result: await this\.terminalBridgeUsageResult\(normalized\)/);
     assert.match(branch, /outputMode: terminalPrepared\.outputMode/);
     assert.doesNotMatch(branch, /outputMode: "passthrough"/);
+    assert.match(source, /if \(result\.verifiedLog !== undefined\) return result\.verifiedLog \|\| result\.stdout/);
+    assert.doesNotMatch(source, /this\.terminalBridge\?\.readLog/);
   });
 
   test("codex terminal bridge exec uses structured output even when global flags precede exec", () => {
@@ -70,7 +141,7 @@ describe("terminal bridge usage source contracts", () => {
     assert.ok(methodStart >= 0 && methodEnd > methodStart);
 
     const method = source.slice(methodStart, methodEnd);
-    assert.match(method, /agent === "codex" && spawn\.args\.includes\("exec"\)/);
+    assert.match(method, /agentKind === "codex" && spawn\.args\.includes\("exec"\)/);
     assert.doesNotMatch(method, /spawn\.args\[0\] === "exec"/);
     assert.match(method, /withCodexJsonArgs\(spawn\)/);
     assert.match(method, /outputMode: "codexJson"/);
@@ -88,6 +159,18 @@ describe("terminal bridge usage source contracts", () => {
     assert.match(source, /import \{ detectNativeReplyLeak, formatNativeReplyLeakError \} from "\.\/nativeReplyGuard"/);
     assert.match(oneShot, /return guardNativeReply\(\{ \.\.\.result, stdout \}\)/);
     assert.match(terminal, /return guardNativeReply\(\{ \.\.\.result, stdout \}\)/);
+  });
+
+  test("structured terminal live text is always replaced by the authenticated normalized result", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    const branchStart = source.indexOf("if (forceTerminalBridge || this.transportMode() === \"terminalBridge\")");
+    const branchEnd = source.indexOf("const prepared = await this.prepareOneShotRequestFiles", branchStart);
+    assert.ok(branchStart >= 0 && branchEnd > branchStart);
+    const branch = source.slice(branchStart, branchEnd);
+
+    assert.match(branch, /if \(m\) \{[\s\S]*if \(terminalPrepared\.outputMode === "plain"\)/);
+    assert.match(branch, /else \{[\s\S]*m\.text = normalized\.stdout;[\s\S]*type: "replaceMessageText"/);
+    assert.doesNotMatch(branch, /if \(m && normalized\.stdout\)/);
   });
 
   test("workspace instructions filter out the recipient agent's native instruction files in both transports", () => {
@@ -148,6 +231,17 @@ describe("terminal bridge usage source contracts", () => {
     assert.match(method, /nextPollMs = Math\.min\(maxPollMs, nextPollMs \* 2\)/);
   });
 
+  test("terminal bridge log polling reads only from the previous byte offset", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "terminalBridge.ts"), "utf8");
+    const start = source.indexOf("async function readLogChunk(");
+    const end = source.indexOf("\n}\n", start);
+    assert.ok(start >= 0 && end > start);
+    const method = source.slice(start, end);
+    assert.match(method, /handle\.read\(buffer, 0, length, start\)/);
+    assert.match(method, /opened\.size < offset \? 0 : offset/);
+    assert.doesNotMatch(method, /fs\.readFile\(logPath\)/);
+  });
+
   test("terminal bridge caches resolved agent commands per agent and command", () => {
     const source = fs.readFileSync(path.join(process.cwd(), "src", "terminalBridge.ts"), "utf8");
 
@@ -157,14 +251,44 @@ describe("terminal bridge usage source contracts", () => {
     const helperEnd = source.indexOf("private retireTerminal(", helperStart);
     assert.ok(helperStart >= 0 && helperEnd > helperStart, "missing resolveAgentCommandCached");
     const helper = source.slice(helperStart, helperEnd);
-    assert.match(helper, /const cacheKey = `\$\{agent\}\\0\$\{command\}`/);
+    assert.match(helper, /const cacheKey = `\$\{agent\}\\0\$\{command\}\\0\$\{pathValue\}`/);
     assert.match(helper, /this\.resolvedCommandCache\.get\(cacheKey\)/);
     assert.match(helper, /this\.resolvedCommandCache\.delete\(cacheKey\)/);
     assert.match(helper, /this\.resolvedCommandCache\.set\(cacheKey, resolved\)/);
 
-    const dispatchCall = /terminalSpawn = \{ \.\.\.spawn, command: await this\.resolveAgentCommandCached\(agent, spawn\.command\) \}/;
-    assert.match(source, dispatchCall);
+    assert.match(source, /this\.resolveAgentCommandCached\(agent, spawn\.command, effectiveSpawnEnvironment\(spawn\)\)/);
     assert.doesNotMatch(source, /command: await resolveAgentCommand\(agent, spawn\.command\)/);
+  });
+
+  test("foreground operations reserve their state before the first awaited preflight", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+
+    const assign = source.slice(source.indexOf("async assignBuilder("), source.indexOf("async assignParallelBuilders("));
+    const assignReservation = assign.indexOf('this.applyEvent({ type: "assignBuilder", builder })');
+    const assignedMessage = assign.indexOf("assigned as builder", assignReservation);
+    assert.ok(assignReservation >= 0 && assignedMessage > assignReservation);
+
+    const verify = source.slice(source.indexOf("private async runVerificationInternal("), source.indexOf("async acceptDefaultDecision("));
+    assert.ok(verify.indexOf("this.verificationRunning = true") < verify.indexOf("await resolveVerificationCommand("));
+
+    const poke = source.slice(source.indexOf("async pokeNativeTerminals("), source.indexOf("async showNativeActionPicker("));
+    assert.ok(poke.indexOf("this.terminalPokeInFlight = true") < poke.indexOf("await captureGitDiff("));
+  });
+
+  test("a failed initial transcript append releases the reserved discussion state", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    const start = source.indexOf("private async startUserMessageTurn(");
+    const end = source.indexOf("\n  async stop()", start);
+    assert.ok(start >= 0 && end > start);
+    const method = source.slice(start, end);
+
+    assert.ok(method.indexOf("const previousState = this.state") < method.indexOf("this.applyEvent({"));
+    assert.match(method, /catch \(err\) \{[\s\S]*this\.applyEvent\(\{ type: "reservationFailed", restore: previousState \}\);[\s\S]*this\.postState\(\);[\s\S]*throw err/);
+  });
+
+  test("webview builder messages are normalized before dispatch", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    assert.match(source, /this\.assignBuilder\(normalizeAgentId\(msg\.builder, this\.getFirstSpeaker\(\), this\.roster\(\)\)\)/);
   });
 
   test("terminal startup uses a readiness probe instead of a fixed 2.5 second sleep", () => {
@@ -215,7 +339,7 @@ describe("live streaming source contracts", () => {
     assert.ok(methodStart >= 0 && methodEnd > methodStart, "could not bound runOneShotPipeline body");
     const method = source.slice(methodStart, methodEnd);
     // Gated by Many Heads Mode so ordinary turns write no .hydra/live files.
-    assert.match(method, /manyHeadsMode\(\)/);
+    assert.match(method, /this\.effectiveManyHeadsMode\(\)/);
     assert.match(method, /createLiveChannelWriter\(\{/);
     assert.match(method, /onEvent: onLiveChannelEvent/);
     assert.match(method, /liveChannel\?\.push\(chunk\)/);
@@ -253,7 +377,7 @@ describe("live streaming source contracts", () => {
     assert.ok(methodStart >= 0 && methodEnd > methodStart, "could not bound runParallelDiscussionTurn body");
     const method = source.slice(methodStart, methodEnd);
     assert.match(method, /buildParallelDiscussionWorkers\(\{/);
-    assert.match(method, /manyHeads: manyHeadsMode\(\)/);
+    assert.match(method, /manyHeads: this\.effectiveManyHeadsMode\(\)/);
     assert.match(method, /claudeWorkerCount: manyHeadsClaudeWorkerCount\(\)/);
     assert.match(method, /const claudeLiveRequestIds = claudeWorkerTraceIds\(workers\)/);
     assert.match(method, /agent === "codex" && claudeLiveRequestIds\.length > 0/);
@@ -268,7 +392,7 @@ describe("live streaming source contracts", () => {
     const helper = source.slice(helperStart, helperEnd);
     assert.match(helper, /claudeRequestIds\.map/);
     assert.match(helper, /liveChannelPath\(workspaceRoot, requestId, "claude"\)/);
-    assert.match(helper, /Many Heads live channel/);
+    assert.match(helper, /Claude Worker Fanout live channel/);
     assert.match(helper, /tail those files/);
   });
 
@@ -353,7 +477,8 @@ describe("usage tracker source contracts", () => {
     // The rail chip must lead with cost, and the panel must label the raw
     // total as cache-inclusive instead of presenting it as the headline.
     const source = fs.readFileSync(path.join(process.cwd(), "media", "webview.js"), "utf8");
-    assert.match(source, /usageRail\.textContent = "session " \+ \(session\.turns \|\| 0\) \+ "t " \+ costStr \+ " · " \+ formatTokens\(fresh\) \+ " fresh \/ " \+ tokenStr \+ " w\/cache/);
+    assert.match(source, /usageRail\.textContent = "session " \+ \(session\.turns \|\| 0\) \+ "t " \+ costStr \+ " · " \+ formatTokens\(fresh\) \+ " fresh \| 7d " \+ formatCost\(weekCost\)/);
+    assert.match(source, /usageRail\.title = "Open usage panel\.[\s\S]*tokens incl\. cache/);
     const costIdx = source.indexOf('"session cost"');
     const totalIdx = source.indexOf('"total incl. cache"');
     assert.ok(costIdx >= 0, "usage panel must keep a session cost stat");
@@ -377,7 +502,7 @@ describe("claude automation credit guard source contract", () => {
     const method = source.slice(methodStart, methodEnd);
 
     assert.match(method, /manyHeadsDispatch = false/);
-    assert.match(method, /if \(agent === "claude"\)/);
+    assert.match(method, /if \(getAgentDefinition\(agent\)\?\.kind === "claude"\)/);
     assert.match(method, /claudeAgentEstimatedRunCostUsd\(\)/);
     assert.match(method, /await this\.evaluateClaudeCreditGuard\(signal, manyHeadsDispatch\)/);
     assert.match(method, /this\.reserveClaudeCreditEstimate\(projectedDispatchUsd\)/);
@@ -432,11 +557,32 @@ describe("claude automation credit guard source contract", () => {
     // Off means the user opted out: skip the auth probe overhead entirely.
     assert.match(method, /if \(mode === "off"\) return undefined/);
     assert.match(method, /claudeAutomationCreditGuard\(\)/);
-    assert.match(method, /claudeAutomationSpendThisMonth\(this\.usageRecords\)/);
+    assert.match(method, /await this\.currentClaudeCreditMonthSpend\(\)/);
     assert.match(method, /pendingReservationUsd: this\.claudeCreditReservedUsd/);
     assert.doesNotMatch(method, /projectedDispatchUsd/);
     assert.match(method, /capUsd: claudeAgentCreditCapUsd\(\)/);
     assert.match(method, /evaluateClaudeAutomationGuard\(\{/);
+  });
+
+  test("the monthly credit total is independent of the bounded UI usage replay", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    assert.match(source, /private claudeCreditMonthSpendUsd = 0/);
+    assert.match(source, /loadClaudeAutomationSpendThisMonth\(this\.usageUri\.fsPath, usageNow\)/);
+    assert.match(source, /this\.usageRecords = boundUsageRecords\(await loadUsageRecords\(this\.usageUri\.fsPath\)\)/);
+
+    const recordStart = source.indexOf("private async recordUsage(");
+    const recordEnd = source.indexOf("private async extractAndRecordUsage(", recordStart);
+    const recordMethod = source.slice(recordStart, recordEnd);
+    assert.match(recordMethod, /record\.agent === "claude"/);
+    assert.match(recordMethod, /record\.agentKind === "claude"/);
+    assert.match(recordMethod, /this\.claudeCreditMonthSpendUsd = Math\.round/);
+
+    const refreshStart = source.indexOf("private async currentClaudeCreditMonthSpend(");
+    const refreshEnd = source.indexOf("private buildPromptContext(", refreshStart);
+    const refreshMethod = source.slice(refreshStart, refreshEnd);
+    assert.match(refreshMethod, /usageCalendarMonthKey\(now\)/);
+    assert.match(refreshMethod, /loadClaudeAutomationSpendThisMonth\(this\.usageUri\.fsPath, now\)/);
+    assert.doesNotMatch(refreshMethod, /this\.usageRecords/);
   });
 
   test("the auth probe requests JSON, sanitizes at capture time, and caches per session", () => {
@@ -458,30 +604,51 @@ describe("claude automation credit guard source contract", () => {
 describe("many heads smoke command source contract", () => {
   test("command palette command routes to the panel smoke runner", () => {
     const extension = fs.readFileSync(path.join(process.cwd(), "src", "extension.ts"), "utf8");
-    const pkg = fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8");
+    const pkgText = fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8");
+    const pkg = JSON.parse(pkgText) as { contributes?: { commands?: Array<{ command?: string; enablement?: string }> } };
 
-    assert.match(pkg, /"command": "hydraRoom\.runManyHeadsSmokeTest"/);
+    const command = pkg.contributes?.commands?.find((item) => item.command === "hydraRoom.runManyHeadsSmokeTest");
+    assert.equal(command?.enablement, "isWorkspaceTrusted");
     assert.match(extension, /"hydraRoom\.runManyHeadsSmokeTest"/);
     assert.match(extension, /await panel\.runManyHeadsSmokeTest\(\)/);
+    const handlerStart = extension.indexOf('"hydraRoom.runManyHeadsSmokeTest"');
+    const handlerEnd = extension.indexOf("vscode.commands.registerCommand(", handlerStart + 1);
+    const handler = extension.slice(handlerStart, handlerEnd);
+    assert.ok(handler.indexOf("vscode.workspace.isTrusted !== true") < handler.indexOf("HydraRoomPanel.current()"));
   });
 
-  test("auto accept setting supports folder-scoped command center toggles", () => {
+  test("auto accept setting and command-center toggle are application scoped", () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8")) as {
       contributes?: { configuration?: { properties?: Record<string, { scope?: string }> } };
     };
     const prop = pkg.contributes?.configuration?.properties?.["hydraRoom.autoAdvanceActionableDefaults"];
-    assert.equal(prop?.scope, "resource");
+    assert.equal(prop?.scope, "application");
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    const start = source.indexOf("async toggleAutoAdvanceActionableDefaults(");
+    const end = source.indexOf("async handBack(", start);
+    const method = source.slice(start, end);
+    assert.match(method, /vscode\.workspace\.isTrusted !== true/);
+    assert.match(method, /cfg\.update\("autoAdvanceActionableDefaults", !current, vscode\.ConfigurationTarget\.Global\)/);
+    assert.doesNotMatch(method, /ConfigurationTarget\.(?:Workspace|WorkspaceFolder)/);
   });
 
   test("panel smoke runner uses the real parallel turn path and durable report", () => {
     const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    const toggleStart = source.indexOf("async toggleManyHeadsMode(");
+    const toggleEnd = source.indexOf("async configureManyHeadsWorkers(", toggleStart);
+    const toggle = source.slice(toggleStart, toggleEnd);
+    assert.match(toggle, /vscode\.workspace\.isTrusted !== true/);
+    assert.match(toggle, /\.update\("manyHeadsMode", next, vscode\.ConfigurationTarget\.Global\)/);
+    assert.doesNotMatch(toggle, /ConfigurationTarget\.(?:Workspace|WorkspaceFolder)/);
+
     const methodStart = source.indexOf("async runManyHeadsSmokeTest(");
     const methodEnd = source.indexOf("private modelChooserDeps(", methodStart);
     assert.ok(methodStart >= 0 && methodEnd > methodStart, "could not bound runManyHeadsSmokeTest");
     const method = source.slice(methodStart, methodEnd);
 
-    assert.match(method, /cfg\.update\("manyHeadsMode", true, vscode\.ConfigurationTarget\.Workspace\)/);
-    assert.match(method, /cfg\.update\("autoAdvanceActionableDefaults", false, vscode\.ConfigurationTarget\.Workspace\)/);
+    assert.match(method, /this\.manyHeadsModeOverride = true/);
+    assert.match(method, /this\.autoAdvanceActionableDefaultsOverride = false/);
+    assert.doesNotMatch(method, /cfg\.update\("(?:manyHeadsMode|autoAdvanceActionableDefaults)"/);
     assert.match(method, /await this\.sendUserMessage\(prompt, "codex"\)/);
     assert.match(method, /readJsonlGuarded\(\s*this\.agentCallsUri\.fsPath,\s*isManyHeadsSmokeAgentCall/s);
     assert.match(method, /this\.readManyHeadsSmokeLiveFiles\(agentCalls\)/);
@@ -734,7 +901,7 @@ describe("wiki wrapup source contracts", () => {
     assert.ok(methodStart >= 0 && methodEnd > methodStart);
 
     const method = source.slice(methodStart, methodEnd);
-    assert.match(method, /await appendMessage\(this\.transcriptUri\.fsPath/);
+    assert.match(method, /await this\.persistTranscriptMessage\(\{/);
     assert.match(method, /const promptTranscriptWindow = this\.pendingPromptTranscriptWindows\.get\(messageId\)/);
     assert.match(method, /await this\.recordWikiUsageTelemetry\(m, promptTranscriptWindow\)/);
     assert.match(method, /this\.pendingPromptTranscriptWindows\.delete\(messageId\)/);

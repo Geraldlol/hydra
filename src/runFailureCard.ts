@@ -20,10 +20,14 @@ export interface RunFailureCard {
   durationMs: number;
   exitCode: number | null;
   timedOut: boolean;
+  terminationFailed?: boolean;
   timeoutMs?: number;
   promptSha256: string;
   stderrChars: number;
   stderrPreview?: string;
+  diagnosticPreviewSource?: "stderr" | "normalizedReplyOrStdout";
+  diagnosticPreviewChars?: number;
+  diagnosticPreview?: string;
   requestFiles: RunFailureRequestFile[];
 }
 
@@ -39,7 +43,11 @@ export function createRunFailureCard(input: {
   workspaceRoot: string;
   nowMs?: number;
 }): RunFailureCard | undefined {
-  if (input.result.cancelled || (!input.result.timedOut && input.result.exitCode === 0)) return undefined;
+  if (
+    (input.result.cancelled && !input.result.terminationFailed) ||
+    (!input.result.timedOut && !input.result.terminationFailed && input.result.exitCode === 0)
+  ) return undefined;
+  const diagnostic = diagnosticPreview(input.result);
   return {
     id: input.id,
     agent: input.agent,
@@ -49,12 +57,30 @@ export function createRunFailureCard(input: {
     durationMs: Math.max(0, (input.nowMs ?? Date.now()) - input.startedAt),
     exitCode: input.result.exitCode,
     timedOut: input.result.timedOut,
+    ...(input.result.terminationFailed ? { terminationFailed: true } : {}),
     timeoutMs: input.result.timeoutMs,
     promptSha256: input.promptSha256,
     stderrChars: input.result.stderr.length,
     stderrPreview: input.result.stderr ? truncateForRunFailure(input.result.stderr, 1200) : undefined,
+    ...(diagnostic ? {
+      diagnosticPreviewSource: diagnostic.source,
+      diagnosticPreviewChars: diagnostic.value.length,
+      diagnosticPreview: truncateForRunFailure(diagnostic.value, 1200),
+    } : {}),
     requestFiles: requestFilesForCard(input.requestFiles, input.workspaceRoot),
   };
+}
+
+function diagnosticPreview(result: RunResult): {
+  source: "stderr" | "normalizedReplyOrStdout";
+  value: string;
+} | undefined {
+  // One-shot adapters normalize typed JSON-stream errors and reply-file text
+  // into stdout. A failed call can therefore have useful diagnostics even
+  // when the native process did not write stderr.
+  if (result.stderr.trim()) return { source: "stderr", value: result.stderr };
+  if (result.stdout.trim()) return { source: "normalizedReplyOrStdout", value: result.stdout };
+  return undefined;
 }
 
 export function isSafeRunFailureRequestPath(relativePath: string): boolean {
@@ -66,6 +92,7 @@ export function isSafeRunFailureRequestPath(relativePath: string): boolean {
 }
 
 function failureStatus(result: RunResult): string {
+  if (result.terminationFailed) return "Process termination unconfirmed";
   if (result.timedOut) {
     return `Timed out after ${formatMs(result.timeoutMs)}`;
   }

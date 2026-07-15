@@ -72,6 +72,24 @@ describe("parseCodexEventStream", () => {
     assert.equal(events[2]?.type, "turn.started");
     assert.equal(events[3]?.type, "turn.completed");
   });
+
+  test("bounds record floods while preserving thread setup and terminal completion", () => {
+    const events = parseCodexEventStream([
+      '{"type":"thread.started","thread_id":"t-1"}',
+      ...Array.from({ length: 20_100 }, (_, index) =>
+        JSON.stringify({ type: "item.updated", item: { id: `r-${index}`, type: "reasoning", text: "" } })),
+      '{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0}}',
+    ].join("\n"));
+    assert.equal(events.length, 20_000);
+    assert.equal(events[0]?.type, "thread.started");
+    assert.equal(events.at(-1)?.type, "turn.completed");
+  });
+
+  test("skips newline-dense padding without losing the final event", () => {
+    const events = parseCodexEventStream("\n".repeat(250_000) + '{"type":"turn.failed","error":{"message":"final"}}');
+    assert.equal(events.length, 1);
+    assert.equal(events[0]?.type, "turn.failed");
+  });
 });
 
 describe("summarizeCodexEvents", () => {

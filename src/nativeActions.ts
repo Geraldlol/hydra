@@ -1,9 +1,19 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { ensureFile, readJsonlGuarded, serializePerFile } from "./fileQueue";
+import {
+  appendFileSafely,
+  atomicWriteFile,
+  ensureFile,
+  readFileHead,
+  readJsonlGuarded,
+  serializePerFile,
+} from "./fileQueue";
 import type { AgentId } from "./phases";
 import { displayNameFor } from "./agentRegistry";
+import { isValidAgentId } from "./agentValidation";
+
+export const MAX_NATIVE_SESSION_JSON_BYTES = 256 * 1024;
 
 export type NativeActionStatus = "completed" | "cancelled" | "failed";
 
@@ -52,17 +62,18 @@ export async function ensureNativeActionsFile(filePath: string): Promise<void> {
 
 export async function appendNativeAction(filePath: string, receipt: NativeActionReceipt): Promise<void> {
   await serializePerFile(filePath, async () => {
-    await fs.mkdir(path.dirname(filePath), { recursive: true });
-    await fs.appendFile(filePath, `${JSON.stringify(receipt)}\n`, "utf8");
+    await appendFileSafely(filePath, `${JSON.stringify(receipt)}\n`);
   });
 }
 
 export async function writeNativeActions(filePath: string, receipts: NativeActionReceipt[]): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
   const body = receipts.length > 0
     ? receipts.map((receipt) => JSON.stringify(receipt)).join("\n") + "\n"
     : "";
-  await fs.writeFile(filePath, body, "utf8");
+  // Clearing/replacing rows must share the same in-process lane as appends.
+  // Otherwise an append can target the inode that atomicWriteFile is about to
+  // replace and silently disappear from the visible action log.
+  await serializePerFile(filePath, () => atomicWriteFile(filePath, body));
 }
 
 export async function collectNativeSessionHints(
@@ -102,7 +113,7 @@ function isNativeActionReceipt(value: unknown): value is NativeActionReceipt {
     typeof receipt.id === "string" &&
     typeof receipt.timestamp === "string" &&
     Array.isArray(receipt.agents) &&
-    receipt.agents.every((agent) => agent === "codex" || agent === "claude") &&
+    receipt.agents.every(isValidAgentId) &&
     typeof receipt.instruction === "string" &&
     typeof receipt.includeEditorContext === "boolean" &&
     typeof receipt.includeWorkspaceDiff === "boolean" &&
@@ -124,20 +135,21 @@ function isNativeSessionHint(value: unknown): value is NativeSessionHint {
 }
 
 async function codexSessionHints(indexPath: string): Promise<NativeSessionHint[]> {
-  const text = await readText(indexPath);
-  if (!text) return [];
-  return text
-    .split(/\r?\n/)
-    .map((line) => parseJsonObject(line))
-    .filter((value): value is Record<string, unknown> => !!value)
-    .slice(-3)
-    .map((item) => ({
-      agent: "codex",
-      source: "codex-session-index",
-      sessionId: stringValue(item.id),
-      updatedAt: stringValue(item.updated_at),
-      pathLabel: path.basename(indexPath),
-    }));
+  const records = await readJsonlGuarded(indexPath, isObjectRecord, {
+    limit: 3,
+    maxBytes: 256 * 1024,
+  });
+  return records.map((item) => ({
+    agent: "codex",
+    source: "codex-session-index",
+    sessionId: stringValue(item.id),
+    updatedAt: stringValue(item.updated_at),
+    pathLabel: path.basename(indexPath),
+  }));
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
 async function claudeLiveSessionHints(dir: string, workspaceRoot: string): Promise<NativeSessionHint[]> {
@@ -176,16 +188,13 @@ async function listFiles(dir: string, extension: string): Promise<string[]> {
   }
 }
 
-async function readText(filePath: string): Promise<string> {
-  try {
-    return await fs.readFile(filePath, "utf8");
-  } catch {
-    return "";
-  }
-}
-
 async function readJson(filePath: string): Promise<Record<string, unknown> | undefined> {
-  return parseJsonObject(await readText(filePath));
+  try {
+    const bounded = await readFileHead(filePath, MAX_NATIVE_SESSION_JSON_BYTES);
+    return bounded.truncated ? undefined : parseJsonObject(bounded.text);
+  } catch {
+    return undefined;
+  }
 }
 
 function parseJsonObject(text: string): Record<string, unknown> | undefined {

@@ -150,6 +150,71 @@ describe("agent definition validation", () => {
     assert.equal(def?.headers?.Authorization, "Bearer ${env:MY_TOKEN}");
   });
 
+  test("reserves user and system ids for durable transcript roles", () => {
+    for (const id of ["user", "User", "system", "SYSTEM"]) {
+      const { error } = validateAgentDefinition(
+        { id, displayName: id, kind: "cli-template", command: "agent", argsTemplate: ["{prompt}"] },
+        new Set(),
+      );
+      assert.match(error ?? "", /reserved/);
+    }
+  });
+
+  test("caps durable agent ids at 64 characters", () => {
+    const { error } = validateAgentDefinition(
+      { id: `a${"b".repeat(64)}`, displayName: "Too Long", kind: "cli-template", command: "agent", argsTemplate: ["{prompt}"] },
+      new Set(),
+    );
+    assert.match(error ?? "", /1-64 characters/);
+  });
+
+  test("rejects non-string, malformed, and prototype-shaped HTTP headers", () => {
+    for (const headers of [
+      { "X-Count": 42 },
+      { "Bad Header": "value" },
+      { "X-Test": "safe\r\ninjected: value" },
+      JSON.parse('{"__proto__":"value"}') as unknown,
+    ]) {
+      const { def, error } = validateAgentDefinition(
+        { id: "bad-header", displayName: "Bad", kind: "openai-compatible", baseUrl: "https://x/v1", headers },
+        new Set(),
+      );
+      assert.equal(def, undefined);
+      assert.match(error ?? "", /header/i);
+    }
+  });
+
+  test("validates color indexes and partial pricing without unsafe casts", () => {
+    const valid = validateAgentDefinition(
+      {
+        id: "priced",
+        displayName: "Priced",
+        kind: "openai-compatible",
+        baseUrl: "https://x/v1",
+        colorIndex: 8,
+        pricing: { inputPerMTok: 1.25 },
+      },
+      new Set(),
+    );
+    assert.equal(valid.error, undefined);
+    assert.deepEqual(valid.def?.pricing, { inputPerMTok: 1.25 });
+
+    for (const entry of [
+      { colorIndex: 0 },
+      { colorIndex: 2.5 },
+      { pricing: { outputPerMTok: -1 } },
+      { pricing: { outputPerMTok: "1" } },
+      { pricing: { surprise: 1 } },
+    ]) {
+      const { def, error } = validateAgentDefinition(
+        { id: "invalid-config", displayName: "Invalid", kind: "openai-compatible", baseUrl: "https://x/v1", ...entry },
+        new Set(),
+      );
+      assert.equal(def, undefined);
+      assert.match(error ?? "", /colorIndex|pricing/i);
+    }
+  });
+
   test("still rejects a baseUrl carrying inline credentials or a secret-shaped query on validateAgentDefinition", () => {
     assert.match(
       validateAgentDefinition({ id: "cred", displayName: "Cred", kind: "openai-compatible", baseUrl: "https://user:sk-live-x@host/v1" }, new Set()).error ?? "",
