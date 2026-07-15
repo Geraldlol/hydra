@@ -20,7 +20,7 @@ describe("safe executable PATH resolution", () => {
       : { PATH: `.:${trustedBin}` };
     const resolved = await findExecutableOnPath("git", { env });
 
-    assert.equal(resolved, executable);
+    assert.equal(resolved, await fs.realpath(executable));
     assert.ok(path.isAbsolute(resolved ?? ""));
   });
 

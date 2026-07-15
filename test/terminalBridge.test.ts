@@ -258,7 +258,8 @@ describe("terminal bridge artifact storage", () => {
   });
 
   test("revalidates the parent and real file after opening, before writing content", async () => {
-    const source = await fs.readFile(path.join(process.cwd(), "src", "terminalBridge.ts"), "utf8");
+    const source = (await fs.readFile(path.join(process.cwd(), "src", "terminalBridge.ts"), "utf8"))
+      .replace(/\r\n?/g, "\n");
     const start = source.indexOf("async function createPrivateArtifact(");
     const end = source.indexOf("\n}\n\nasync function writePrivateArtifactSnapshot", start);
     assert.ok(start >= 0 && end > start);

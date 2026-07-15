@@ -232,7 +232,8 @@ describe("terminal bridge usage source contracts", () => {
   });
 
   test("terminal bridge log polling reads only from the previous byte offset", () => {
-    const source = fs.readFileSync(path.join(process.cwd(), "src", "terminalBridge.ts"), "utf8");
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "terminalBridge.ts"), "utf8")
+      .replace(/\r\n?/g, "\n");
     const start = source.indexOf("async function readLogChunk(");
     const end = source.indexOf("\n}\n", start);
     assert.ok(start >= 0 && end > start);
