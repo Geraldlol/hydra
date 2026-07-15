@@ -140,14 +140,15 @@ describe("telegram coordinator", () => {
       const oldRelease = new Promise<void>((resolve) => { releaseOld = resolve; });
       let signalOldStarted!: () => void;
       const oldStarted = new Promise<void>((resolve) => { signalOldStarted = resolve; });
-      const oldRun = withTelegramPollerLease(paths, "old-owner", 35, async (lease) => {
+      const oldRun = withTelegramPollerLease(paths, "old-owner", 1_000, async (lease) => {
         oldLease = lease;
         signalOldStarted();
         await oldRelease;
         return "old-finished";
       });
       await oldStarted;
-      await new Promise<void>((resolve) => setTimeout(resolve, 60));
+      assert.ok(oldLease);
+      await waitForAbort(oldLease.signal, 5_000);
 
       const successor = await withTelegramPollerLease(paths, "new-owner", 1_000, async (lease) => {
         assert.ok(oldLease);
@@ -332,6 +333,23 @@ function inboxRecord(id: string, updateId: number) {
     message: { chatId: "chat", text: "continue", messageId: updateId },
     receivedAt: "2026-05-18T10:00:00.000Z",
   };
+}
+
+async function waitForAbort(signal: AbortSignal, timeoutMs: number): Promise<void> {
+  if (signal.aborted) return;
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timeout);
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    };
+    const timeout = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      reject(new Error(`Timed out waiting ${timeoutMs}ms for Telegram lease expiry`));
+    }, timeoutMs);
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
 }
 
 async function useTempAppData(): Promise<() => void> {
