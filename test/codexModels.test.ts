@@ -136,6 +136,7 @@ describe("runCodexDebugModels", () => {
   test("timeout kills a model-discovery grandchild before rejecting", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-codex-model-tree-"));
     const pidFile = path.join(dir, "grandchild.pid");
+    const timeoutMs = 2_000;
     const grandchildCode = "setInterval(() => {}, 1000);";
     const command = await fakeCodexCommand(
       dir,
@@ -150,8 +151,8 @@ describe("runCodexDebugModels", () => {
     );
 
     await assert.rejects(
-      runCodexDebugModels(command, { ...process.env }, 150),
-      /timed out after 150ms/
+      runCodexDebugModels(command, { ...process.env }, timeoutMs),
+      new RegExp(`timed out after ${timeoutMs}ms`)
     );
     const grandchildPid = Number(await fs.readFile(pidFile, "utf8"));
     assert.equal(Number.isInteger(grandchildPid) && grandchildPid > 0, true);

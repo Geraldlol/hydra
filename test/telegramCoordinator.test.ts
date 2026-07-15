@@ -90,14 +90,35 @@ describe("telegram coordinator", () => {
       const paths = telegramCoordinatorPaths("123:token");
       await ensureTelegramCoordinator(paths);
       let workCalls = 0;
-      const contenders = Array.from({ length: 8 }, (_, index) =>
-        withTelegramPollerLease(paths, `owner-${index}`, 60_000, async () => {
-          workCalls += 1;
-          await new Promise<void>((resolve) => setTimeout(resolve, 20));
-          return index;
-        })
+      let losingCalls = 0;
+      let releaseWinner!: () => void;
+      let rejectWinner!: (error: Error) => void;
+      const winnerMayFinish = new Promise<void>((resolve, reject) => {
+        releaseWinner = resolve;
+        rejectWinner = reject;
+      });
+      const guard = setTimeout(
+        () => rejectWinner(new Error("Timed out waiting for losing Telegram pollers")),
+        5_000
       );
-      const results = await Promise.all(contenders);
+      const contenders = Array.from({ length: 8 }, async (_, index) => {
+        const result = await withTelegramPollerLease(paths, `owner-${index}`, 60_000, async () => {
+          workCalls += 1;
+          await winnerMayFinish;
+          return index;
+        });
+        if (result === undefined) {
+          losingCalls += 1;
+          if (losingCalls === 7) releaseWinner();
+        }
+        return result;
+      });
+      let results: Array<number | undefined>;
+      try {
+        results = await Promise.all(contenders);
+      } finally {
+        clearTimeout(guard);
+      }
       assert.equal(workCalls, 1);
       assert.equal(results.filter((result) => result !== undefined).length, 1);
     } finally {
