@@ -1,6 +1,6 @@
-# Hydra Public Beta Release Checklist
+# Hydra Marketplace Release Checklist
 
-This checklist is for the first public Marketplace beta of Hydra.
+This checklist is for packaging and publishing the current Marketplace preview of Hydra.
 
 ## Confirm Identity
 
@@ -8,7 +8,7 @@ This checklist is for the first public Marketplace beta of Hydra.
 - Extension id: `geraldlol.vscode-hydra-room`
 - Marketplace display name: `Hydra Agents`
 - Package name: `vscode-hydra-room`
-- Release version: `0.5.1`
+- Release version: `0.6.1`
 
 The display name is reversible in a later release. The publisher id and package name are the durable extension identity.
 
@@ -18,18 +18,17 @@ The display name is reversible in a later release. The publisher id and package 
 corepack enable
 pnpm install --frozen-lockfile
 pnpm run verify:fast
-pnpm run package:pre-release
-pnpm exec vsce ls --no-dependencies
+pnpm run package
+pnpm exec vsce ls --no-dependencies --tree
 ```
 
 Inspect the VSIX contents before publishing. `.hydra/`, source TypeScript, tests, local VS Code settings, and native reconnaissance notes should not be shipped.
 
 ## Required Human Actions
 
-1. Claim or create the `geraldlol` publisher in the VS Code Marketplace account.
-2. Make `https://github.com/Geraldlol/hydra` public.
-3. Create a GitHub release and attach the pre-release VSIX.
-4. Publish to Marketplace with `vsce publish --pre-release` or upload the VSIX manually.
+1. Merge the release branch so README assets resolve from the repository's default branch.
+2. Create a GitHub release and attach the versioned VSIX.
+3. Upload the VSIX to the Marketplace under the existing `geraldlol` publisher.
 
 Do not publish from automation until the first manual beta has been tested from the Marketplace listing.
 
