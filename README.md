@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://marketplace.visualstudio.com/items?itemName=geraldlol.vscode-hydra-room">Install from the Visual Studio Marketplace</a>
-  &nbsp;·&nbsp; Preview 0.6.0
+  &nbsp;·&nbsp; Preview 0.6.1
   &nbsp;·&nbsp; <a href="CHANGELOG.md">Changelog</a>
 </p>
 
@@ -17,11 +17,11 @@ Hydra seats multiple AI heads in one durable room, gives them a shared objective
 Hydra drives the native CLIs you already installed, using their existing logins and configured integrations. Human-readable records such as transcripts, decisions, verification receipts, prompt envelopes, and derived competition audits live under `.hydra/`. Authoritative competition state, unrevealed duel commitments, and transient terminal-bridge state use VS Code or OS-private storage instead of trusting workspace-editable files.
 
 <p align="center">
-  <a href="docs/images/hydra-room.png"><img src="docs/images/hydra-room.png" width="1200" alt="Hydra room with Codex, Claude, and Gemini discussing one shared objective"></a>
+  <a href="media/screenshots/hydra-room.png"><img src="media/screenshots/hydra-room.png" width="1200" alt="Hydra room with Codex, Claude, and Gemini discussing one shared objective"></a>
 </p>
 <p align="center"><em>A durable three-head room with shared context, per-head activity and authority, verification, decisions, and parallel builder controls.</em></p>
 
-## What's new in 0.6.0
+## What's new in 0.6
 
 - **Durable N-head rooms** - `hydraRoom.roomRoster` now drives seated identities, discussion roles, all-head build/review handoffs, status rails, and per-head usage.
 - **Equal maximum native authority** - Codex and Claude default to the same consent-gated Full Native posture for Discussion, Build, and Review. Hydra does not intentionally weaken either head, while vendor tools and provider capabilities can still differ.
@@ -320,7 +320,7 @@ Deterministic scoring creates its claim from the exact passing verification rece
 The board shows a source-weighted Wilson lower-bound score, a W/P/L record, and independent resolved rounds. A standing remains provisional until five independently resolved rounds. The authoritative append-only ledger lives in VS Code's private per-workspace extension storage; `.hydra/scoreboard.md` and `.hydra/score-evidence.md` are disposable human-readable mirrors.
 
 <p align="center">
-  <a href="docs/images/evidence-scoreboard.png"><img src="docs/images/evidence-scoreboard.png" width="900" alt="Hydra evidence scoreboard ranking Codex, Gemini, and Claude using resolved falsifiable claims"></a>
+  <a href="media/screenshots/evidence-scoreboard.png"><img src="media/screenshots/evidence-scoreboard.png" width="900" alt="Hydra evidence scoreboard ranking Codex, Gemini, and Claude using resolved falsifiable claims"></a>
 </p>
 <p align="center"><em>Passive evidence standings reward claims that survive verification while remaining separate from permissions and orchestration authority.</em></p>
 
@@ -348,7 +348,7 @@ The project workspace is read-only **by duel contract**, not by OS sandbox. Hydr
 Domain Elo starts at 1000 with K=24. Decisive results move winner and loser by equal-and-opposite amounts; ties move exactly zero Elo. Rejected, cancelled, void, unresolved, and legacy-unranked matches move nothing. Ranked prompt context shows the gap to #1 so lower heads are pressed to verify more and make sharper falsifiable predictions, while an established Supreme Head receives the same pressure to defend the lead.
 
 <p align="center">
-  <a href="docs/images/agent-duels.png"><img src="docs/images/agent-duels.png" width="800" alt="Hydra formal duels panel showing an agent-initiated challenge, sealed commitments, domain Elo, and Supreme Head ranking"></a>
+  <a href="media/screenshots/agent-duels.png"><img src="media/screenshots/agent-duels.png" width="800" alt="Hydra formal duels panel showing an agent-initiated challenge, sealed commitments, domain Elo, and Supreme Head ranking"></a>
 </p>
 <p align="center"><em>Agent-initiated formal duels use a shared evidence brief, sealed paired answers, human adjudication, and domain-specific Elo.</em></p>
 

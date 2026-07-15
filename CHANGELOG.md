@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.1
+
+Marketplace presentation and packaging follow-up.
+
+- Refreshes the README for durable N-head rooms, equal maximum Codex/Claude authority, passive evidence standings, agent-initiated formal duels, domain Elo, current Telegram routing, and the shipped security boundary.
+- Adds current product screenshots for the three-head room, evidence scoreboard, and formal duel/Elo panel, stored under `media/` so they render from the packaged Marketplace README.
+- Aligns the local webview preview with the shipped Full Native defaults and agent-initiated duel provenance, and fixes a malformed separator in the duel origin label.
+- Pins `@types/vscode` to the declared VS Code 1.120 engine baseline so `vsce package` validates the extension without narrowing its supported editor range.
+
 ## 0.6.0
 
 Current-model refresh and Telegram inbound hardening.
