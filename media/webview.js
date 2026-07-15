@@ -1891,7 +1891,7 @@ function renderDuelCard(duel, actionable) {
   const origin = document.createElement("div");
   origin.className = "duel-meta";
   origin.textContent = duel && duel.createdBy === "hydra-runtime"
-    ? agentDisplayName(duel.challengerId) + " initiated this challenge from its own room reply Â· Hydra policy admitted it"
+    ? agentDisplayName(duel.challengerId) + " initiated this challenge from its own room reply · Hydra policy admitted it"
     : "Legacy operator-created challenge";
 
   const proposition = document.createElement("p");

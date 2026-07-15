@@ -16,6 +16,11 @@ Hydra seats multiple AI heads in one durable room, gives them a shared objective
 
 Hydra drives the native CLIs you already installed, using their existing logins and configured integrations. Human-readable records such as transcripts, decisions, verification receipts, prompt envelopes, and derived competition audits live under `.hydra/`. Authoritative competition state, unrevealed duel commitments, and transient terminal-bridge state use VS Code or OS-private storage instead of trusting workspace-editable files.
 
+<p align="center">
+  <a href="docs/images/hydra-room.png"><img src="docs/images/hydra-room.png" width="1200" alt="Hydra room with Codex, Claude, and Gemini discussing one shared objective"></a>
+</p>
+<p align="center"><em>A durable three-head room with shared context, per-head activity and authority, verification, decisions, and parallel builder controls.</em></p>
+
 ## What's new in 0.6.0
 
 - **Durable N-head rooms** - `hydraRoom.roomRoster` now drives seated identities, discussion roles, all-head build/review handoffs, status rails, and per-head usage.
@@ -314,6 +319,11 @@ Deterministic scoring creates its claim from the exact passing verification rece
 
 The board shows a source-weighted Wilson lower-bound score, a W/P/L record, and independent resolved rounds. A standing remains provisional until five independently resolved rounds. The authoritative append-only ledger lives in VS Code's private per-workspace extension storage; `.hydra/scoreboard.md` and `.hydra/score-evidence.md` are disposable human-readable mirrors.
 
+<p align="center">
+  <a href="docs/images/evidence-scoreboard.png"><img src="docs/images/evidence-scoreboard.png" width="900" alt="Hydra evidence scoreboard ranking Codex, Gemini, and Claude using resolved falsifiable claims"></a>
+</p>
+<p align="center"><em>Passive evidence standings reward claims that survive verification while remaining separate from permissions and orchestration authority.</em></p>
+
 ### Rated formal duels
 
 Formal Duels are a separate competition with one current path: **agent-initiated, then rated or rejected by Hydra policy**.
@@ -336,6 +346,11 @@ The two participants receive equal maximum Hydra-grantable authority, but keep t
 The project workspace is read-only **by duel contract**, not by OS sandbox. Hydra fingerprints bounded project content and entry metadata and monitors for changes around both commitments; a detected mutation or unverifiable state cancels the duel with no Elo. This is an application-integrity tripwire, not protection from a malicious process running as the same OS user. Unrevealed payloads use SecretStorage, but full-native same-user processes remain inside the same host trust boundary.
 
 Domain Elo starts at 1000 with K=24. Decisive results move winner and loser by equal-and-opposite amounts; ties move exactly zero Elo. Rejected, cancelled, void, unresolved, and legacy-unranked matches move nothing. Ranked prompt context shows the gap to #1 so lower heads are pressed to verify more and make sharper falsifiable predictions, while an established Supreme Head receives the same pressure to defend the lead.
+
+<p align="center">
+  <a href="docs/images/agent-duels.png"><img src="docs/images/agent-duels.png" width="800" alt="Hydra formal duels panel showing an agent-initiated challenge, sealed commitments, domain Elo, and Supreme Head ranking"></a>
+</p>
+<p align="center"><em>Agent-initiated formal duels use a shared evidence brief, sealed paired answers, human adjudication, and domain-specific Elo.</em></p>
 
 **Neither passive standings nor duel Elo grants authority.** They never change native permissions, approvals, builder assignment, speaking order, context allocation, orchestration priority, or safety policy. Truth, safety, honesty, and the user's objective always outrank the competition.
 

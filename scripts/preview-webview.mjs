@@ -70,12 +70,12 @@ const previewState = {
   },
   authoritySummaries: {
     codex: {
-      authority: { level: "workspaceWrite", label: "Workspace write", detail: "May edit files under the workspace." },
-      profile: { label: "Native Build", detail: "Workspace-write build profile" },
+      authority: { level: "fullNative", label: "Full native", detail: "Equal maximum native access after explicit consent." },
+      profile: { label: "Full Native - Equal Maximum Access", detail: "Full-native profile for Discussion, Build, and Review" },
     },
     claude: {
-      authority: { level: "readOnly", label: "Read only", detail: "Review without modifying files." },
-      profile: { label: "Native Review", detail: "Read-only review profile" },
+      authority: { level: "fullNative", label: "Full native", detail: "Equal maximum native access after explicit consent." },
+      profile: { label: "Full Native - Equal Maximum Access", detail: "Full-native profile for Discussion, Build, and Review" },
     },
     gemini: {
       authority: { level: "readOnly", label: "Read only", detail: "Review without modifying files." },
@@ -135,8 +135,8 @@ const previewState = {
   models: { codex: "gpt-5", claude: "sonnet" },
   efforts: { codex: "high", claude: "high" },
   capabilityProfiles: {
-    codex: { text: "native/native/build", title: "Discussion: Native, Build: Native Build, Review: Native Review" },
-    claude: { text: "native/native/review", title: "Discussion: Native, Build: Native Build, Review: Native Review" },
+    codex: { text: "full/full/full", title: "Discussion, Build, and Review: Full Native - Equal Maximum Access" },
+    claude: { text: "full/full/full", title: "Discussion, Build, and Review: Full Native - Equal Maximum Access" },
   },
   manyHeads: { enabled: true, claudeWorkerCount: 2 },
   latestDecision: {
@@ -310,6 +310,8 @@ const previewState = {
         sharedEvidencePacket: "Focused concurrency test: 40/40 passes. Ordered receipts show the second logical append starts only after the first durable append completes.",
         adjudicatorType: "human",
         adjudicatorId: "local-user",
+        createdBy: "hydra-runtime",
+        ratingPolicy: "elo-v3-agent-initiated",
         rated: true,
         capabilityPolicy: "hydra-duel-full-native-v1",
         commitmentCount: 1,
@@ -347,6 +349,8 @@ const previewState = {
         sharedEvidencePacket: "Traversal fixture: ../CLAUDE.md rejected; /identity/self.md rejected; knowledge/safe.md accepted. Build and focused guard tests pass.",
         adjudicatorType: "human",
         adjudicatorId: "local-user",
+        createdBy: "hydra-runtime",
+        ratingPolicy: "elo-v3-agent-initiated",
         rated: true,
         capabilityPolicy: "hydra-duel-full-native-v1",
         commitmentCount: 2,
