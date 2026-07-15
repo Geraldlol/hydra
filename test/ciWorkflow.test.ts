@@ -12,11 +12,10 @@ describe("CI workflow contracts", () => {
     assert.match(workflow, /if: runner\.os == 'Windows'[\s\S]*pnpm run test:integration/);
   });
 
-  test("uses released action majors and pins the supported Node runtime", () => {
+  test("uses current released action majors and pins the supported Node runtime", () => {
     const workflow = fs.readFileSync(path.join(process.cwd(), ".github", "workflows", "ci.yml"), "utf8");
-    assert.doesNotMatch(workflow, /actions\/checkout@v7/);
-    assert.match(workflow, /actions\/checkout@v6/);
-    assert.match(workflow, /actions\/setup-node@v6/);
+    assert.match(workflow, /actions\/checkout@v7/);
+    assert.match(workflow, /actions\/setup-node@v7/);
     assert.match(workflow, /node-version: 22\.22\.1/);
   });
 });
