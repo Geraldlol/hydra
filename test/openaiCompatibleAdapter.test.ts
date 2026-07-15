@@ -36,6 +36,18 @@ describe("openai-compatible adapter", () => {
     assert.equal(headers.Authorization, undefined);
   });
 
+  test("rejects newline injection introduced by environment expansion", () => {
+    process.env.HYDRA_TEST_KEY = "safe\r\nX-Injected: yes";
+    assert.throws(
+      () => openaiHeaders({ ...def, headers: { "X-Token": "${env:HYDRA_TEST_KEY}" } }),
+      /invalid|unsafe/i,
+    );
+    assert.throws(
+      () => openaiHeaders({ ...def, apiKeyEnv: "HYDRA_TEST_KEY" }),
+      /invalid/i,
+    );
+  });
+
   test("parseOpenAiReply extracts the assistant message content", () => {
     const raw = JSON.stringify({ choices: [{ message: { role: "assistant", content: "the answer" } }] });
     assert.equal(parseOpenAiReply(raw), "the answer");
@@ -50,5 +62,13 @@ describe("openai-compatible adapter", () => {
 
   test("authority is read-only (remote endpoint cannot touch the local workspace)", () => {
     assert.equal(openaiCompatibleAdapter.authority(def, ctx).level, "readOnly");
+  });
+
+  test("partial pricing is completed from the adapter default", () => {
+    const pricing = openaiCompatibleAdapter.pricing({ ...def, pricing: { inputPerMTok: 1.5 } });
+    assert.equal(pricing.inputPerMTok, 1.5);
+    assert.equal(typeof pricing.outputPerMTok, "number");
+    assert.equal(typeof pricing.cacheReadPerMTok, "number");
+    assert.equal(typeof pricing.cacheCreatePerMTok, "number");
   });
 });

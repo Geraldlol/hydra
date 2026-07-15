@@ -1,5 +1,6 @@
 import { describe, test } from "node:test";
 import { strict as assert } from "node:assert";
+import * as cp from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -8,11 +9,14 @@ import {
   archiveAndResetTranscript,
   buildPromptContext,
   maybeAutoArchive,
+  MAX_TRANSCRIPT_BYTES,
   readTranscript,
   parseTranscript,
   serializeMessage,
   ensureGitignore,
   ensureTranscriptFile,
+  isAgentMessageRole,
+  dropArchivedMessagePrefix,
   TranscriptMessage,
   transcriptAsContext,
   transcriptAsWindowedContext,
@@ -23,6 +27,13 @@ async function makeTmpDir(): Promise<string> {
 }
 
 describe("transcript", () => {
+  test("drops only the persisted prefix after automatic rotation", () => {
+    const pending = { id: "pending" };
+    assert.deepEqual(dropArchivedMessagePrefix([{ id: "old-1" }, { id: "old-2" }, pending], 2), [pending]);
+    assert.deepEqual(dropArchivedMessagePrefix([pending], -1), [pending]);
+    assert.deepEqual(dropArchivedMessagePrefix([pending], 99), []);
+  });
+
   test("serializeMessage formats user message", () => {
     const out = serializeMessage({
       role: "user",
@@ -222,6 +233,42 @@ describe("transcript", () => {
     assert.match(out.markdown, /fresh task/);
   });
 
+  test("custom head ids round-trip without collapsing into system", () => {
+    const serialized = serializeMessage({
+      role: "gemini",
+      text: "independent answer",
+      timestamp: "2026-05-08T14:00:03Z",
+      phase: "parallel",
+    });
+    assert.equal(serialized, "## 2026-05-08T14:00:03Z @gemini (parallel)\n\nindependent answer\n");
+    const [parsed] = parseTranscript(`# Hydra Room Transcript\n\n${serialized}`);
+    assert.equal(parsed?.role, "gemini");
+    assert.equal(parsed?.phase, "parallel");
+    assert.equal(isAgentMessageRole(parsed?.role ?? "system"), true);
+  });
+
+  test("refuses unsafe custom role ids that could forge transcript headers", () => {
+    assert.throws(
+      () => serializeMessage({ role: "bad role\n## forged", text: "x", timestamp: "t" }),
+      /invalid Hydra agent role/,
+    );
+  });
+
+  test("a single newest message cannot bypass the transcript character cap", () => {
+    const messages: TranscriptMessage[] = [
+      { role: "user", text: `important prefix ${"X".repeat(2_000)}`, timestamp: "t1" },
+    ];
+
+    const out = transcriptAsWindowedContext(messages, 120);
+
+    assert.equal(out.truncated, true);
+    assert.equal(out.omittedMessages, 0);
+    assert.ok(out.keptChars <= 120);
+    assert.match(out.markdown, /important prefix/);
+    assert.match(out.markdown, /newest message truncated/);
+    assert.ok(out.originalChars > out.keptChars);
+  });
+
   test("readTranscript returns [] when file does not exist", async () => {
     const dir = await makeTmpDir();
     const out = await readTranscript(path.join(dir, "missing.md"));
@@ -264,6 +311,16 @@ describe("transcript", () => {
     await ensureGitignore(dir);
     const text = await fs.readFile(path.join(dir, ".gitignore"), "utf8");
     assert.match(text, /node_modules\/\n\.hydra\/\n/);
+  });
+
+  test("ensureGitignore remains bounded and idempotent for oversized files", async () => {
+    const dir = await makeTmpDir();
+    const gitignore = path.join(dir, ".gitignore");
+    await fs.writeFile(gitignore, "ignored-entry\n".repeat(25_000), "utf8");
+    await ensureGitignore(dir);
+    await ensureGitignore(dir);
+    const tail = (await fs.readFile(gitignore, "utf8")).slice(-64);
+    assert.equal((tail.match(/^\.hydra\/$/gm) ?? []).length, 1);
   });
 
   test("ensureTranscriptFile creates file with header if missing", async () => {
@@ -319,6 +376,24 @@ describe("transcript", () => {
     assert.equal(messages[1]!.phase, "reactor");
   });
 
+  test("parses a newline-dense body without allocating one entry per line", () => {
+    const text = "# Hydra Room Transcript\n\n"
+      + "## 2026-05-08T14:00:00Z Codex (opener)\n\n"
+      + "\n".repeat(250_000);
+    const messages = parseTranscript(text);
+    assert.equal(messages.length, 1);
+    assert.equal(messages[0]!.text, "");
+  });
+
+  test("caps parsed messages at the newest transcript window", () => {
+    const text = Array.from({ length: 10_005 }, (_, index) =>
+      `## t-${index} System\n\nmessage-${index}\n`).join("\n");
+    const messages = parseTranscript(text);
+    assert.equal(messages.length, 10_000);
+    assert.equal(messages[0]!.timestamp, "t-5");
+    assert.equal(messages.at(-1)!.timestamp, "t-10004");
+  });
+
   test("auto-archives when transcript file exceeds size threshold", async () => {
     const dir = await makeTmpDir();
     const file = path.join(dir, ".hydra", "transcript.md");
@@ -359,6 +434,152 @@ describe("transcript", () => {
     assert.equal(messages[0]!.text, "after rotate");
   });
 
+  test("append reports a pre-write rotation and keeps the newest message active", async () => {
+    const dir = await makeTmpDir();
+    const file = path.join(dir, ".hydra", "transcript.md");
+    const old = { role: "user" as const, text: "old", timestamp: "2026-05-08T14:00:00Z" };
+    await appendMessage(file, old);
+
+    // Inflate the existing active transcript past the production threshold;
+    // the next ordinary append must rotate the old prefix before it writes.
+    await fs.appendFile(file, "x".repeat(MAX_TRANSCRIPT_BYTES), "utf8");
+    const newest = { role: "system" as const, text: "newest survives", timestamp: "2026-05-08T14:00:01Z" };
+    const archived = await appendMessage(file, newest);
+
+    assert.ok(archived);
+    assert.equal(archived.archivedMessages, undefined);
+    assert.deepEqual(await readTranscript(file), [newest]);
+    assert.match(await fs.readFile(archived.archivePath, "utf8"), /old/);
+  });
+
+  test("bounds a single pathological message before it reaches disk", async () => {
+    const dir = await makeTmpDir();
+    const file = path.join(dir, ".hydra", "transcript.md");
+    await appendMessage(file, {
+      role: "user",
+      text: "z".repeat(MAX_TRANSCRIPT_BYTES + 1024),
+      timestamp: "2026-05-08T14:00:00Z",
+    });
+
+    const stat = await fs.stat(file);
+    assert.ok(stat.size <= MAX_TRANSCRIPT_BYTES);
+    const messages = await readTranscript(file);
+    assert.equal(messages.length, 1);
+    assert.match(messages[0]!.text, /transcript message truncated from/);
+  });
+
+  test("serializes rotation and appends across extension-host processes", async () => {
+    const dir = await makeTmpDir();
+    const file = path.join(dir, ".hydra", "transcript.md");
+    const barrier = path.join(dir, "start.barrier");
+    const childScript = path.join(dir, "append-child.js");
+    const transcriptModule = path.join(__dirname, "..", "src", "transcript.js");
+    const prefix = "# Hydra Room Transcript\n\n## 2026-05-08T14:00:00Z You\n\nold-prefix\n";
+    const paddingBytes = MAX_TRANSCRIPT_BYTES - Buffer.byteLength(prefix, "utf8") - 64;
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, `${prefix}${"x".repeat(paddingBytes)}\n`, "utf8");
+    await fs.writeFile(childScript, [
+      'const fs = require("node:fs");',
+      'const [modulePath, filePath, barrierPath, role, text, timestamp] = process.argv.slice(2);',
+      '(async () => {',
+      '  while (!fs.existsSync(barrierPath)) await new Promise((resolve) => setTimeout(resolve, 5));',
+      '  const { appendMessage } = require(modulePath);',
+      '  const result = await appendMessage(filePath, { role, text, timestamp });',
+      '  process.stdout.write(JSON.stringify(result || null));',
+      '})().catch((error) => { console.error(error); process.exitCode = 1; });',
+    ].join("\n"), "utf8");
+
+    const first = runAppendChild(childScript, [
+      transcriptModule, file, barrier, "codex", "child-one", "2026-05-08T14:00:01Z",
+    ]);
+    const second = runAppendChild(childScript, [
+      transcriptModule, file, barrier, "claude", "child-two", "2026-05-08T14:00:02Z",
+    ]);
+    await fs.writeFile(barrier, "go", "utf8");
+    const outcomes = await Promise.all([first, second]);
+
+    const active = await readTranscript(file);
+    const archives = await fs.readdir(path.join(dir, ".hydra", "archive"));
+    assert.equal(archives.length, 1);
+    const archiveText = await fs.readFile(path.join(dir, ".hydra", "archive", archives[0]!), "utf8");
+    const allMessages = [...parseTranscript(archiveText), ...active];
+    assert.equal(allMessages.filter((message) => message.text.startsWith("old-prefix")).length, 1);
+    assert.equal(allMessages.filter((message) => message.text === "child-one").length, 1);
+    assert.equal(allMessages.filter((message) => message.text === "child-two").length, 1);
+    assert.equal(allMessages.length, 3, `child outcomes: ${outcomes.join(" | ")}`);
+    await assert.rejects(fs.stat(`${file}.lock`), { code: "ENOENT" });
+  });
+
+  test("recovers an expired malformed filesystem writer lock", async () => {
+    const dir = await makeTmpDir();
+    const file = path.join(dir, ".hydra", "transcript.md");
+    await appendMessage(file, { role: "user", text: "before stale lock", timestamp: "2026-05-08T14:00:00Z" });
+    const lock = `${file}.lock`;
+    await fs.writeFile(lock, "malformed", "utf8");
+    const expired = new Date(Date.now() - 3 * 60_000);
+    await fs.utimes(lock, expired, expired);
+
+    await appendMessage(file, { role: "system", text: "after stale lock", timestamp: "2026-05-08T14:00:01Z" });
+    assert.deepEqual((await readTranscript(file)).map((message) => message.text), [
+      "before stale lock",
+      "after stale lock",
+    ]);
+    await assert.rejects(fs.stat(lock), { code: "ENOENT" });
+  });
+
+  test("stale-lock recovery does not move an in-flight replacement owner", async () => {
+    const dir = await makeTmpDir();
+    const file = path.join(dir, ".hydra", "transcript.md");
+    await appendMessage(file, { role: "user", text: "before recovery", timestamp: "2026-05-08T14:00:00Z" });
+    const lock = `${file}.lock`;
+    await fs.writeFile(lock, "stale-owner", "utf8");
+    const expired = new Date(Date.now() - 3 * 60_000);
+    await fs.utimes(lock, expired, expired);
+
+    // Model a contender that announced its acquisition just before recovery.
+    // The recovery marker must fence retirement until this contender either
+    // publishes and validates its replacement lease or stands down.
+    const acquisitionMarker = `${lock}.acquire-controlled-replacement`;
+    await fs.writeFile(acquisitionMarker, `${process.pid}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    const pendingAppend = appendMessage(file, {
+      role: "system",
+      text: "after replacement",
+      timestamp: "2026-05-08T14:00:01Z",
+    });
+    await waitForDirectoryEntry(path.dirname(lock), `${path.basename(lock)}.recover-`);
+
+    const retiredFixture = `${lock}.fixture-stale`;
+    await fs.rename(lock, retiredFixture);
+    const replacementToken = "controlled-replacement-owner";
+    await fs.writeFile(lock, `${JSON.stringify({
+      token: replacementToken,
+      createdAt: new Date().toISOString(),
+    })}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    await fs.unlink(acquisitionMarker);
+
+    let earlyAppend: "completed" | "pending";
+    let canonicalToken: string | undefined;
+    try {
+      earlyAppend = await Promise.race([
+        pendingAppend.then(() => "completed" as const),
+        new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 100)),
+      ]);
+      canonicalToken = (JSON.parse(await fs.readFile(lock, "utf8")) as { token?: string }).token;
+    } finally {
+      await fs.unlink(acquisitionMarker).catch(() => undefined);
+      await fs.unlink(lock).catch(() => undefined);
+      await pendingAppend;
+      await fs.unlink(retiredFixture).catch(() => undefined);
+    }
+    assert.equal(earlyAppend, "pending", "replacement owner must remain canonical and block the waiter");
+    assert.equal(canonicalToken, replacementToken);
+    assert.deepEqual((await readTranscript(file)).map((message) => message.text), [
+      "before recovery",
+      "after replacement",
+    ]);
+    await assert.rejects(fs.stat(lock), { code: "ENOENT" });
+  });
+
   test("parseTranscript accepts parallel discussion phase", () => {
     const text =
       "# Hydra Room Transcript\n\n" +
@@ -368,3 +589,28 @@ describe("transcript", () => {
     assert.equal(messages[0]!.phase, "parallel");
   });
 });
+
+function runAppendChild(script: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = cp.spawn(process.execPath, [script, ...args], { windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (chunk: Buffer) => { stdout = `${stdout}${chunk.toString("utf8")}`.slice(-8_192); });
+    child.stderr?.on("data", (chunk: Buffer) => { stderr = `${stderr}${chunk.toString("utf8")}`.slice(-8_192); });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve(stdout);
+      else reject(new Error(`append child exited ${code}: ${stderr}`));
+    });
+  });
+}
+
+async function waitForDirectoryEntry(directory: string, prefix: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  for (;;) {
+    const entries = await fs.readdir(directory);
+    if (entries.some((entry) => entry.startsWith(prefix))) return;
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${prefix} in ${directory}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}

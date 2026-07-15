@@ -1,5 +1,6 @@
 import { describe, test } from "node:test";
 import { strict as assert } from "node:assert";
+import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -7,6 +8,7 @@ import {
   applyHydraWikiWrapupDraft,
   buildHydraWikiWrapupPrompt,
   ensureHydraWikiFiles,
+  HYDRA_WIKI_CORE_READ_BYTES,
   hydraWikiContextRefreshSourceFromMessages,
   hydraWikiContextPath,
   hydraWikiWrapupSourceFromMessages,
@@ -129,6 +131,101 @@ describe("Hydra wiki context", () => {
     assert.equal(status.rawTurnCount, 1);
     assert.equal(status.lastWrapupDate, "2026-05-21");
     assert.equal(status.lastWrapupTitle, "Latest Lesson");
+  });
+
+  test("reads only the bounded newest tail of a large wiki append log", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-wiki-log-tail-"));
+    await ensureHydraWikiFiles(dir);
+    const logPath = path.join(dir, ".hydra", "wiki", "log.md");
+    await fs.writeFile(logPath, [
+      "# Hydra Wiki Log",
+      "",
+      `OLD_START ${"x".repeat(96 * 1024)}`,
+      "",
+      "## [2026-07-14] wrapup | Bounded Latest",
+      "",
+      "- Updated: [[context]]",
+      "",
+    ].join("\n"), "utf8");
+
+    const files = await readHydraWikiFiles(dir);
+    const status = await readHydraWikiStatus(dir, 8000);
+
+    assert.match(files.log, /earlier wiki log entries omitted/);
+    assert.match(files.log, /Bounded Latest/);
+    assert.doesNotMatch(files.log, /OLD_START/);
+    assert.ok(Buffer.byteLength(files.log, "utf8") < 66 * 1024);
+    assert.equal(status.lastWrapupDate, "2026-07-14");
+    assert.equal(status.lastWrapupTitle, "Bounded Latest");
+  });
+
+  test("preserves a full maximum-size multibyte generated wiki page", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-wiki-core-multibyte-"));
+    await ensureHydraWikiFiles(dir);
+    const contextPath = path.join(dir, ".hydra", "wiki", "context.md");
+    const generated = `# Hydra Wiki Context\n\n${"界".repeat(24_000)}`;
+    await fs.writeFile(contextPath, generated, "utf8");
+
+    const files = await readHydraWikiFiles(dir);
+    const prompt = readHydraWikiPromptContext(dir, 30_000);
+
+    assert.equal(files.context, generated);
+    assert.ok(prompt);
+    assert.equal(prompt.truncated, false);
+    assert.match(prompt.markdown, /界界界/);
+    assert.doesNotMatch(prompt.markdown, /wiki core read cap/);
+  });
+
+  test("bounds oversized schema, context, index, status, and prompt reads", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-wiki-core-bounded-"));
+    await ensureHydraWikiFiles(dir);
+    const wikiDir = path.join(dir, ".hydra", "wiki");
+    const oversized = (label: string) => [
+      `# ${label}`,
+      "",
+      `${label}_HEAD`,
+      "x".repeat(HYDRA_WIKI_CORE_READ_BYTES + 4096),
+      `${label}_TAIL_MUST_NOT_BE_READ`,
+    ].join("\n");
+
+    await Promise.all([
+      fs.writeFile(path.join(wikiDir, "schema.md"), oversized("SCHEMA"), "utf8"),
+      fs.writeFile(path.join(wikiDir, "context.md"), oversized("CONTEXT"), "utf8"),
+      fs.writeFile(path.join(wikiDir, "index.md"), oversized("INDEX"), "utf8"),
+    ]);
+
+    const files = await readHydraWikiFiles(dir);
+    const prompt = readHydraWikiPromptContext(dir, HYDRA_WIKI_CORE_READ_BYTES * 3);
+    const status = await readHydraWikiStatus(dir, HYDRA_WIKI_CORE_READ_BYTES * 3);
+
+    assert.ok(prompt);
+    for (const core of [files.schema, files.context, files.index]) {
+      assert.match(core, /wiki core read cap/);
+      assert.doesNotMatch(core, /_TAIL_MUST_NOT_BE_READ/);
+      assert.ok(Buffer.byteLength(core, "utf8") < HYDRA_WIKI_CORE_READ_BYTES + 128);
+    }
+    assert.match(prompt.markdown, /CONTEXT_HEAD/);
+    assert.match(prompt.markdown, /INDEX_HEAD/);
+    assert.doesNotMatch(prompt.markdown, /_TAIL_MUST_NOT_BE_READ/);
+    assert.equal(prompt.truncated, true);
+    assert.equal(status.promptTruncated, true);
+    assert.ok(status.contextChars < HYDRA_WIKI_CORE_READ_BYTES + 128);
+  });
+
+  test("replaces an oversized wiki page without an unbounded read-before-write", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-wiki-core-replace-"));
+    await ensureHydraWikiFiles(dir);
+    const contextPath = path.join(dir, ".hydra", "wiki", "context.md");
+    await fs.writeFile(contextPath, `# Old\n\n${"x".repeat(HYDRA_WIKI_CORE_READ_BYTES * 2)}`, "utf8");
+
+    const applied = await applyHydraWikiWrapupDraft(dir, {
+      changed: true,
+      title: "Bounded replacement",
+      contextMarkdown: "# Hydra Wiki Context\n\nCompact replacement.",
+    }, "2026-07-14T12:00:00.000Z");
+
+    assert.equal(applied.contextChanged, true);
+    assert.equal(await fs.readFile(contextPath, "utf8"), "# Hydra Wiki Context\n\nCompact replacement.\n");
   });
 
   test("builds a wrapup source from the latest room turn only", () => {
@@ -363,6 +460,108 @@ describe("Hydra wiki context", () => {
     await fs.stat(path.join(rawDir, "2026-04-21-bbbbbbbbbbbb.md"));
     await fs.stat(path.join(rawDir, "2026-05-20-cccccccccccc.md"));
     await fs.stat(path.join(rawDir, "notes.md"));
+  });
+
+  test("refuses to prune through a symlinked raw turns directory", async (t) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-wiki-linked-parent-"));
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-wiki-linked-target-"));
+    const rawParent = path.join(dir, ".hydra", "wiki", "raw");
+    const rawDir = path.join(rawParent, "turns");
+    const outsideFile = path.join(outside, "2026-04-20-aaaaaaaaaaaa.md");
+    await fs.mkdir(rawParent, { recursive: true });
+    await fs.writeFile(outsideFile, "outside evidence", "utf8");
+    try {
+      await fs.symlink(outside, rawDir, process.platform === "win32" ? "junction" : "dir");
+    } catch (err) {
+      t.skip(`directory symlinks are unavailable: ${String(err)}`);
+      return;
+    }
+
+    await assert.rejects(
+      pruneHydraWikiRawTurns(dir, "2026-05-21T12:00:00.000Z", 30),
+      /Refusing to prune Hydra Wiki through a linked, replaced, or external parent/
+    );
+    assert.equal(await fs.readFile(outsideFile, "utf8"), "outside evidence");
+  });
+
+  test("does not prune a raw turn snapshot with multiple hard links", async (t) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-wiki-hardlink-"));
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-wiki-hardlink-target-"));
+    const rawDir = path.join(dir, ".hydra", "wiki", "raw", "turns");
+    const fileName = "2026-04-20-aaaaaaaaaaaa.md";
+    const outsideFile = path.join(outside, fileName);
+    const linkedFile = path.join(rawDir, fileName);
+    await fs.mkdir(rawDir, { recursive: true });
+    await fs.writeFile(outsideFile, "shared evidence", "utf8");
+    try {
+      await fs.link(outsideFile, linkedFile);
+    } catch (err) {
+      t.skip(`hard links are unavailable: ${String(err)}`);
+      return;
+    }
+
+    const pruned = await pruneHydraWikiRawTurns(dir, "2026-05-21T12:00:00.000Z", 30);
+
+    assert.deepEqual(pruned.prunedPaths, []);
+    assert.equal(await fs.readFile(outsideFile, "utf8"), "shared evidence");
+    assert.equal(await fs.readFile(linkedFile, "utf8"), "shared evidence");
+  });
+
+  test("aborts if the raw turns parent is swapped after enumeration", async (t) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-wiki-parent-swap-"));
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-wiki-parent-swap-target-"));
+    const rawDir = path.join(dir, ".hydra", "wiki", "raw", "turns");
+    const savedRawDir = path.join(dir, ".hydra", "wiki", "raw", "turns-before-swap");
+    const fileName = "2026-04-20-aaaaaaaaaaaa.md";
+    const outsideFile = path.join(outside, fileName);
+    await fs.mkdir(rawDir, { recursive: true });
+    await fs.writeFile(path.join(rawDir, fileName), "workspace evidence", "utf8");
+    await fs.writeFile(outsideFile, "outside evidence", "utf8");
+
+    const probe = path.join(dir, ".hydra", "wiki", "raw", "symlink-probe");
+    try {
+      await fs.symlink(outside, probe, process.platform === "win32" ? "junction" : "dir");
+      await fs.unlink(probe);
+    } catch (err) {
+      t.skip(`directory symlinks are unavailable: ${String(err)}`);
+      return;
+    }
+
+    const originalReaddir = nodeFs.promises.readdir;
+    let swapped = false;
+    Object.defineProperty(nodeFs.promises, "readdir", {
+      configurable: true,
+      writable: true,
+      value: async (target: nodeFs.PathLike, options?: unknown) => {
+        const entries = await (originalReaddir as (...args: unknown[]) => Promise<unknown>)(target, options);
+        if (!swapped && path.resolve(String(target)) === path.resolve(rawDir)) {
+          swapped = true;
+          await fs.rename(rawDir, savedRawDir);
+          await fs.symlink(outside, rawDir, process.platform === "win32" ? "junction" : "dir");
+        }
+        return entries;
+      },
+    });
+
+    try {
+      await assert.rejects(
+        pruneHydraWikiRawTurns(dir, "2026-05-21T12:00:00.000Z", 30),
+        /Refusing to prune Hydra Wiki through a linked, replaced, or external parent/
+      );
+      assert.equal(swapped, true);
+      assert.equal(await fs.readFile(outsideFile, "utf8"), "outside evidence");
+      assert.equal(await fs.readFile(path.join(savedRawDir, fileName), "utf8"), "workspace evidence");
+    } finally {
+      Object.defineProperty(nodeFs.promises, "readdir", {
+        configurable: true,
+        writable: true,
+        value: originalReaddir,
+      });
+      if (swapped) {
+        await fs.unlink(rawDir).catch(() => undefined);
+        await fs.rename(savedRawDir, rawDir).catch(() => undefined);
+      }
+    }
   });
 
   test("keeps raw turn snapshots indefinitely when retention is zero", async () => {

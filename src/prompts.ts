@@ -1,5 +1,6 @@
 import { AgentId } from "./phases";
 import { displayNameFor } from "./agentRegistry";
+import { renderAgentDuelChallengeInstructions } from "./duelIntent";
 
 export type Phase = "opener" | "reactor" | "closer" | "parallel" | "build" | "review";
 
@@ -11,6 +12,7 @@ export interface PromptInput {
   diff?: string;
   verification?: string;
   nativeCapabilities?: string;
+  allowAgentDuelChallenge?: boolean;
 }
 
 const DECISION_PACKET =
@@ -128,6 +130,10 @@ export function buildPrompt(input: PromptInput): string {
       parts.push("", "--- Latest verification evidence ---", input.verification.trim());
     }
     parts.push("", "--- Diff to review (git diff HEAD) ---", input.diff);
+  }
+
+  if (input.allowAgentDuelChallenge && (input.phase === "reactor" || input.phase === "closer")) {
+    parts.push("", renderAgentDuelChallengeInstructions(input.otherAgent, them));
   }
 
   parts.push("", PHASE_RULES[input.phase]);

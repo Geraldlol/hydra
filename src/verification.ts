@@ -1,8 +1,11 @@
 import * as cp from "node:child_process";
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { resolveGitExecutable } from "./gitExecutable";
+import { windowsSystemExecutable } from "./executablePath";
 import { stripAnsi } from "./agents";
-import { ensureFile, readJsonlGuarded, serializePerFile } from "./fileQueue";
+import { appendFileSafely, ensureFile, readFileHead, readJsonlGuarded, serializePerFile } from "./fileQueue";
+
+const MAX_VERIFICATION_PACKAGE_JSON_BYTES = 1024 * 1024;
 
 export interface VerificationResult {
   timestamp: string;
@@ -13,6 +16,8 @@ export interface VerificationResult {
   durationMs: number;
   stdout: string;
   stderr: string;
+  /** True when Hydra could not observe the spawned process closing after cancellation. */
+  terminationFailed?: boolean;
   // Git HEAD at the moment verification ran. Captured so reviewers can
   // detect a forged or stale verification record — if HEAD has moved
   // since the result was written, the diff being reviewed isn't the
@@ -32,7 +37,7 @@ export interface VerificationRunOptions {
 interface VerificationProcess {
   command: string;
   args: string[];
-  shell: boolean;
+  shell: boolean | string;
 }
 
 export async function ensureVerificationFile(filePath: string): Promise<void> {
@@ -41,8 +46,7 @@ export async function ensureVerificationFile(filePath: string): Promise<void> {
 
 export async function appendVerification(filePath: string, result: VerificationResult): Promise<void> {
   await serializePerFile(filePath, async () => {
-    await fs.mkdir(path.dirname(filePath), { recursive: true });
-    await fs.appendFile(filePath, `${JSON.stringify(result)}\n`, "utf8");
+    await appendFileSafely(filePath, `${JSON.stringify(result)}\n`);
   });
 }
 
@@ -53,7 +57,12 @@ export async function readVerifications(filePath: string): Promise<VerificationR
 export async function inferVerificationCommand(workspaceRoot: string): Promise<string | undefined> {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(await fs.readFile(path.join(workspaceRoot, "package.json"), "utf8"));
+    const bounded = await readFileHead(
+      path.join(workspaceRoot, "package.json"),
+      MAX_VERIFICATION_PACKAGE_JSON_BYTES,
+    );
+    if (bounded.truncated) return undefined;
+    parsed = JSON.parse(bounded.text);
   } catch {
     // No package.json, or it is unreadable/unparseable -> no command to infer.
     return undefined;
@@ -105,12 +114,17 @@ export async function runVerificationCommand(options: VerificationRunOptions): P
       shell: processSpec.shell,
       windowsHide: true,
       env: process.env,
+      detached: process.platform !== "win32",
     });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
     let cancelled = false;
     let settled = false;
+    let forceBackstop: ReturnType<typeof setTimeout> | undefined;
+    let failureBackstop: ReturnType<typeof setTimeout> | undefined;
+    let terminationStarted = false;
+    let terminationFailed = false;
     const signal = options.signal;
     const appendStdout = (text: string) => {
       stdout = truncateTail(stdout + text, options.maxOutputChars);
@@ -122,6 +136,8 @@ export async function runVerificationCommand(options: VerificationRunOptions): P
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (forceBackstop) clearTimeout(forceBackstop);
+      if (failureBackstop) clearTimeout(failureBackstop);
       if (signal && abortHandler) signal.removeEventListener("abort", abortHandler);
       resolve({
         timestamp: new Date().toISOString(),
@@ -133,18 +149,43 @@ export async function runVerificationCommand(options: VerificationRunOptions): P
         stdout: stdout.trimEnd(),
         stderr: stderr.trimEnd(),
         ...(cancelled ? { cancelled: true } : {}),
+        ...(terminationFailed ? { terminationFailed: true } : {}),
       });
+    };
+    const beginTermination = () => {
+      if (terminationStarted || settled) return;
+      terminationStarted = true;
+      void terminateProcessTree(child, false).then((requested) => {
+        if (!requested && !settled) {
+          appendStderr("\n[Hydra could not confirm the initial process-tree termination request.]\n");
+        }
+      });
+      // `close` is the confirmation that inherited stdio handles are gone. If
+      // it never arrives, escalate once, then return an explicitly failed
+      // lifecycle result instead of silently claiming the run ended.
+      forceBackstop = setTimeout(() => {
+        void terminateProcessTree(child, true).then((requested) => {
+          if (!requested && !settled) {
+            appendStderr("\n[Hydra could not confirm the forced process-tree termination request.]\n");
+          }
+        });
+        failureBackstop = setTimeout(() => {
+          terminationFailed = true;
+          appendStderr("\n[Hydra did not observe the verification process close; it may still be running.]\n");
+          finish(null);
+        }, 1_000);
+      }, 1_000);
     };
     const timer = setTimeout(() => {
       timedOut = true;
-      terminateProcessTree(child);
+      beginTermination();
     }, options.timeoutMs);
 
     const abortHandler = signal
       ? () => {
           if (!settled) {
             cancelled = true;
-            terminateProcessTree(child);
+            beginTermination();
           }
         }
       : undefined;
@@ -171,12 +212,16 @@ export function verificationProcessForCommand(
   // run under PowerShell or `$()` / `$env:NAME` are treated as plain cmd text.
   if (platform === "win32" && isPowerShellInterpolatedCommand(command)) {
     return {
-      command: "powershell.exe",
+      command: windowsSystemExecutable("powershell.exe"),
       args: ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
       shell: false,
     };
   }
-  return { command, args: [], shell: true };
+  return {
+    command,
+    args: [],
+    shell: platform === "win32" ? windowsSystemExecutable("cmd.exe") : true,
+  };
 }
 
 function isPowerShellInterpolatedCommand(command: string): boolean {
@@ -188,8 +233,10 @@ function isPowerShellInterpolatedCommand(command: string): boolean {
 }
 
 export async function captureGitHead(cwd: string): Promise<string | undefined> {
+  const gitExecutable = await resolveGitExecutable(cwd);
+  if (!gitExecutable) return undefined;
   return new Promise<string | undefined>((resolve) => {
-    const child = cp.spawn("git", ["rev-parse", "HEAD"], { cwd, windowsHide: true, env: process.env });
+    const child = cp.spawn(gitExecutable, ["rev-parse", "HEAD"], { cwd, windowsHide: true, env: process.env });
     let out = "";
     let settled = false;
     const finish = (sha: string | undefined) => {
@@ -220,6 +267,7 @@ export function verificationAsReviewContext(result: VerificationResult | undefin
     `Command: ${result.command}`,
     `Exit code: ${result.exitCode === null ? "spawn-failed" : result.exitCode}`,
     `Timed out: ${result.timedOut}`,
+    `Termination confirmed: ${result.terminationFailed ? "no" : "yes"}`,
     `Duration: ${formatDuration(result.durationMs)}`,
     headLine,
     result.stdout ? `Stdout:\n${result.stdout}` : "Stdout: <empty>",
@@ -229,16 +277,18 @@ export function verificationAsReviewContext(result: VerificationResult | undefin
 
 export function verificationSummary(result: VerificationResult | undefined): string {
   if (!result) return "No verification yet";
-  const status = result.timedOut
-    ? "timed out"
-    : result.exitCode === 0
-      ? "passed"
-      : "failed";
+  const status = result.terminationFailed
+    ? "termination unconfirmed"
+    : result.timedOut
+      ? "timed out"
+      : result.exitCode === 0
+        ? "passed"
+        : "failed";
   return `${status}: ${result.command} (${formatDuration(result.durationMs)})`;
 }
 
 export function verificationPassed(result: VerificationResult | undefined): boolean {
-  return !!result && !result.timedOut && result.exitCode === 0;
+  return !!result && !result.timedOut && !result.terminationFailed && result.exitCode === 0;
 }
 
 function isVerificationResult(value: unknown): value is VerificationResult {
@@ -252,7 +302,8 @@ function isVerificationResult(value: unknown): value is VerificationResult {
     typeof result.timedOut === "boolean" &&
     typeof result.durationMs === "number" &&
     typeof result.stdout === "string" &&
-    typeof result.stderr === "string"
+    typeof result.stderr === "string" &&
+    (result.terminationFailed === undefined || typeof result.terminationFailed === "boolean")
   );
 }
 
@@ -269,15 +320,41 @@ function formatDuration(ms: number): string {
   return `${minutes}m ${rest.toString().padStart(2, "0")}s`;
 }
 
-function terminateProcessTree(child: cp.ChildProcess): void {
+async function terminateProcessTree(child: cp.ChildProcess, force: boolean): Promise<boolean> {
+  const signal: NodeJS.Signals = force ? "SIGKILL" : "SIGTERM";
   if (!child.pid) {
-    child.kill();
-    return;
+    return child.kill(signal);
   }
   if (process.platform === "win32") {
-    const killer = cp.spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true });
-    killer.on("error", () => child.kill());
-    return;
+    return new Promise<boolean>((resolve) => {
+      const killer = cp.spawn(
+        windowsSystemExecutable("taskkill.exe"),
+        ["/PID", String(child.pid), "/T", "/F"],
+        { windowsHide: true },
+      );
+      let done = false;
+      const finish = (requested: boolean) => {
+        if (done) return;
+        done = true;
+        clearTimeout(killerTimeout);
+        resolve(requested);
+      };
+      const killerTimeout = setTimeout(() => {
+        killer.kill();
+        const fallback = child.kill(signal);
+        finish(fallback);
+      }, 750);
+      killer.on("error", () => finish(child.kill(signal)));
+      killer.on("close", (code) => {
+        if (code === 0) finish(true);
+        else finish(child.kill(signal));
+      });
+    });
   }
-  child.kill();
+  try {
+    process.kill(-child.pid, signal);
+    return true;
+  } catch {
+    return child.kill(signal);
+  }
 }

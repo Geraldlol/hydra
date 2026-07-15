@@ -12,6 +12,8 @@ dist/test/**
 .git/**
 .github/**
 .gitignore
+.nvmrc
+.vscode-test.*
 CLAUDE.md
 tsconfig.json
 package-lock.json

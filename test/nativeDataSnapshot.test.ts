@@ -4,6 +4,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, test } from "node:test";
 import {
+  collectNativeDataSnapshot,
+  MAX_NATIVE_CONFIG_BYTES,
+  MAX_NATIVE_JSON_BYTES,
   nativeDataSnapshotPath,
   redactedJson,
   renderNativeDataSnapshot,
@@ -176,5 +179,27 @@ describe("native data snapshot", () => {
     const file = nativeDataSnapshotPath(dir);
     await writeNativeDataSnapshot(file, "# Native Data\n");
     assert.equal(await fs.readFile(file, "utf8"), "# Native Data\n");
+  });
+
+  test("ignores oversized native config and JSON inputs", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-native-data-cap-"));
+    const codexHome = path.join(home, ".codex");
+    const claudeHome = path.join(home, ".claude");
+    await fs.mkdir(codexHome, { recursive: true });
+    await fs.mkdir(claudeHome, { recursive: true });
+    await fs.writeFile(
+      path.join(codexHome, "config.toml"),
+      `model = "must-not-load"\n# ${"x".repeat(MAX_NATIVE_CONFIG_BYTES)}`,
+      "utf8"
+    );
+    await fs.writeFile(
+      path.join(claudeHome, "settings.json"),
+      JSON.stringify({ enabledPlugins: { "must-not-load": true }, padding: "x".repeat(MAX_NATIVE_JSON_BYTES) }),
+      "utf8"
+    );
+
+    const snapshot = await collectNativeDataSnapshot(path.join(home, "workspace"), home);
+    assert.deepEqual(snapshot.codex.config, {});
+    assert.deepEqual(snapshot.claude.enabledPlugins, []);
   });
 });

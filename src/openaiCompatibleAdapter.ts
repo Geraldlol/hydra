@@ -1,18 +1,29 @@
 import type { AgentAdapter, AgentDefinition, InvocationContext, Invocation, AdapterRawOutput } from "./agentAdapter";
 import type { UsageTokens, ModelPrices } from "./usage";
-import { numberOr, DEFAULT_PRICES_BY_KIND } from "./usage";
+import { numberOr, DEFAULT_PRICES_BY_KIND, coerceModelPrices } from "./usage";
 import { expandWorkspaceValue } from "./cli";
+import { isSafeHttpHeaderName, isSafeHttpHeaderValue } from "./httpHeaders";
 
 export function openaiHeaders(def: AgentDefinition): Record<string, string> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   for (const [k, v] of Object.entries(def.headers ?? {})) {
     // Why: header values may reference ${env:NAME}; expand them here. "" root
     // is fine — expandWorkspaceValue only substitutes env for this path.
-    headers[k] = expandWorkspaceValue(v, "");
+    const expanded = expandWorkspaceValue(v, "");
+    if (!isSafeHttpHeaderName(k) || !isSafeHttpHeaderValue(expanded)) {
+      throw new Error(`Unsafe HTTP header configured for agent "${def.id}": ${k}`);
+    }
+    headers[k] = expanded;
   }
   if (def.apiKeyEnv) {
     const key = process.env[def.apiKeyEnv];
-    if (key) headers.Authorization = `Bearer ${key}`;
+    if (key) {
+      const authorization = `Bearer ${key}`;
+      if (!isSafeHttpHeaderValue(authorization)) {
+        throw new Error(`Environment variable ${def.apiKeyEnv} contains an invalid HTTP header value`);
+      }
+      headers.Authorization = authorization;
+    }
   }
   return headers;
 }
@@ -73,7 +84,7 @@ export const openaiCompatibleAdapter: AgentAdapter = {
     return parseOpenAiUsage(raw.stdout);
   },
   pricing(def: AgentDefinition): ModelPrices {
-    return def.pricing ?? DEFAULT_PRICES_BY_KIND["openai-compatible"];
+    return coerceModelPrices(def.pricing, DEFAULT_PRICES_BY_KIND["openai-compatible"]);
   },
   authority(def: AgentDefinition, _ctx: InvocationContext) {
     return {

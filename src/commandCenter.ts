@@ -76,6 +76,7 @@ export interface CommandCenterWikiUsageStatus {
 
 export interface CommandCenterInput {
   workspaceReady: boolean;
+  isWorkspaceTrusted?: boolean;
   canStop: boolean;
   canAcceptDefault: boolean;
   autoAdvanceActionableDefaults: boolean;
@@ -99,12 +100,14 @@ export function buildCommandCenterActions(input: CommandCenterInput): CommandCen
   if (!input.workspaceReady) {
     return [
       action("openWorkspaceFolder", "Open Folder", "Required", "Choose a project folder so Hydra can write .hydra state and run the native CLIs."),
-      action(
-        "toggleAutoAdvanceActionableDefaults",
-        input.autoAdvanceActionableDefaults ? "Turn Off Auto Accept Default" : "Turn On Auto Accept Default",
-        "Workflow",
-        "Toggle whether Hydra automatically runs unblocked Decision Packet defaults."
-      ),
+      ...(input.isWorkspaceTrusted === false ? [] : [
+        action(
+          "toggleAutoAdvanceActionableDefaults",
+          input.autoAdvanceActionableDefaults ? "Turn Off Auto-advance Safe Defaults" : "Turn On Auto-advance Safe Defaults",
+          "Workflow",
+          "Toggle whether Hydra automatically runs unblocked Decision Packet defaults."
+        ),
+      ]),
       action("runDoctor", "Run Doctor", "Diagnose", "Show setup checks for the current VS Code window."),
     ];
   }
@@ -168,25 +171,29 @@ export function buildCommandCenterActions(input: CommandCenterInput): CommandCen
     action("openSupportBundle", "Open Support Bundle", "Diagnostics", "Refresh and open Doctor, authority, terminal, queue, and recent-action diagnostics."),
     action("chooseModel", "Choose Model", "Settings", "Pick Codex or Claude model overrides."),
     action("chooseEffort", "Choose Thinking Level", "Settings", "Pick Codex reasoning or Claude effort overrides."),
-    action(
-      "toggleManyHeadsMode",
-      input.manyHeadsMode ? "Turn Off Many Heads Mode" : "Turn On Many Heads Mode",
-      input.manyHeadsMode ? `Many Heads on (${input.manyHeadsClaudeWorkerCount ?? 3} Claude workers)` : "Many Heads off",
-      "Toggle experimental parallel discussion fanout through local subscription-backed Claude workers."
-    ),
-    action(
-      "configureManyHeadsWorkers",
-      "Set Many Heads Worker Count",
-      `${input.manyHeadsClaudeWorkerCount ?? 3} Claude workers`,
-      "Choose how many local subscription-backed Claude workers launch in Many Heads parallel discussion."
-    ),
+    ...(input.isWorkspaceTrusted === false ? [] : [
+      action(
+        "toggleManyHeadsMode",
+        input.manyHeadsMode ? "Turn Off Claude Worker Fanout" : "Turn On Claude Worker Fanout",
+        input.manyHeadsMode ? `Claude Worker Fanout on (${input.manyHeadsClaudeWorkerCount ?? 3} workers)` : "Claude Worker Fanout off",
+        "Toggle experimental parallel discussion fanout through local subscription-backed Claude workers."
+      ),
+      action(
+        "configureManyHeadsWorkers",
+        "Set Claude Worker Fanout Count",
+        `${input.manyHeadsClaudeWorkerCount ?? 3} Claude workers`,
+        "Choose how many local subscription-backed Claude workers launch in parallel discussion. These are workers, not independent Hydra head identities."
+      ),
+    ]),
     action("testTelegram", "Send Test Telegram", "Settings", "Send a Telegram test ping using the configured bot token and chat id."),
-    action(
-      "toggleAutoAdvanceActionableDefaults",
-      input.autoAdvanceActionableDefaults ? "Turn Off Auto Accept Default" : "Turn On Auto Accept Default",
-      "Settings",
-      "Toggle whether Hydra automatically runs unblocked Decision Packet defaults."
-    ),
+    ...(input.isWorkspaceTrusted === false ? [] : [
+      action(
+        "toggleAutoAdvanceActionableDefaults",
+        input.autoAdvanceActionableDefaults ? "Turn Off Auto-advance Safe Defaults" : "Turn On Auto-advance Safe Defaults",
+        "Settings",
+        "Toggle whether Hydra automatically runs unblocked Decision Packet defaults."
+      ),
+    ]),
     action("changeCapabilityProfile", "Change Capability Profile", "Settings", "Pick safe, native, review, full-native, or custom CLI profiles."),
     action("captureNativeCapabilities", "Capture Native Capabilities", "Native CLIs", "Snapshot configured Codex and Claude version/help output into .hydra."),
     action("captureNativeDataSnapshot", "Capture Native Data Snapshot", "Native CLIs", "Snapshot redacted Codex/Claude config, plugin, model, state, and session metadata."),

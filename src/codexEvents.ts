@@ -14,6 +14,8 @@
 // flow through as `unknown` items so we don't drop new events the CLI adds
 // in future versions.
 
+import { mapBoundedNonEmptyLines } from "./fileQueue";
+
 // ---------- Top-level event grammar ----------
 
 export type ThreadEventType =
@@ -214,11 +216,15 @@ export type ThreadItem =
 
 // ---------- Parser ----------
 
+const MAX_CODEX_EVENT_LINE_CHARS = 1_000_000;
+const MAX_CODEX_STREAM_RECORDS = 20_000;
+
 // Returns null for empty lines, malformed JSON, or non-object payloads.
 // Returns the parsed event for any object with a recognized `type`. Unknown
 // `type` values still parse as a generic ThreadEvent so callers can preserve
 // forward-compatibility -- the `type` field will just not narrow.
 export function parseCodexEventLine(line: string): ThreadEvent | null {
+  if (line.length > MAX_CODEX_EVENT_LINE_CHARS) return null;
   const trimmed = line.trim();
   if (!trimmed) return null;
   let parsed: unknown;
@@ -472,10 +478,18 @@ function increment(counts: Record<string, number>, key: string): void {
 // and counts malformed lines as nulls so summarizeCodexEvents can report
 // `malformedJsonLines` honestly.
 export function parseCodexEventStream(stdout: string): Array<ThreadEvent | null> {
-  // Why: drop whitespace-only lines (CRLF remnants, blank-padded streams)
-  // BEFORE they reach the parser, so they don't surface as nulls and inflate
-  // `malformedJsonLines`. parseCodexEventLine trims internally anyway.
-  return stdout.split(/\r?\n/).filter((line) => line.trim().length > 0).map((line) => parseCodexEventLine(line));
+  // Preserve thread setup from the prefix and favor the newest suffix so a
+  // terminal turn.completed/turn.failed event survives intermediate floods.
+  return mapBoundedNonEmptyLines(
+    stdout,
+    parseCodexEventLine,
+    () => null,
+    {
+      maxRecords: MAX_CODEX_STREAM_RECORDS,
+      headRecords: 4_000,
+      maxLineChars: MAX_CODEX_EVENT_LINE_CHARS,
+    },
+  );
 }
 
 // Render a CodexThreadSummary into a stable, human-readable block. Used by

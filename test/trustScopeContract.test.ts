@@ -18,7 +18,15 @@ interface PackageJsonShape {
     configuration?: {
       properties?: Record<string, {
         scope?: string;
-        items?: { properties?: Record<string, { properties?: Record<string, unknown> }> };
+        type?: string;
+        default?: unknown;
+        minItems?: number;
+        uniqueItems?: boolean;
+        items?: {
+          type?: string;
+          pattern?: string;
+          properties?: Record<string, { properties?: Record<string, unknown> }>;
+        };
       }>;
     };
   };
@@ -89,6 +97,25 @@ describe("trust scope contract", () => {
     );
   });
 
+  test("discovers every boolean automatic-execution control and pins it to the trust boundary", () => {
+    const pkg = loadPackageJson();
+    const props = pkg.contributes?.configuration?.properties ?? {};
+    const restricted = new Set(pkg.capabilities?.untrustedWorkspaces?.restrictedConfigurations ?? []);
+    const doctor = new Set<string>(TRUST_SCOPED_SETTINGS);
+    const discovered = Object.entries(props).filter(([fullKey, prop]) => {
+      const shortKey = fullKey.replace(/^hydraRoom\./, "");
+      return prop.type === "boolean" && /^(?:auto|autopilot|prefer|manyHeadsMode)/.test(shortKey);
+    });
+
+    assert.ok(discovered.length >= 7, "automatic execution control discovery unexpectedly found too few settings");
+    for (const [fullKey, prop] of discovered) {
+      const shortKey = fullKey.slice("hydraRoom.".length);
+      assert.equal(prop.scope, "application", `${fullKey} can influence automatic native work and must be application-scoped`);
+      assert.equal(restricted.has(fullKey), true, `${fullKey} is missing from restrictedConfigurations`);
+      assert.equal(doctor.has(shortKey), true, `${fullKey} is missing from TRUST_SCOPED_SETTINGS`);
+    }
+  });
+
   test("capability profile settings are pinned as trust-scoped", () => {
     // Why: the six *Profile settings select Codex/Claude argv at dispatch
     // time. A `fullNative` value maps to Codex `--sandbox danger-full-access`
@@ -130,6 +157,23 @@ describe("trust scope contract", () => {
       (TRUST_SCOPED_SETTINGS as readonly string[]).includes("agents"),
       "agents must be trust-scoped — it defines a spawn command and an HTTP endpoint",
     );
+  });
+
+  test("hydraRoom.roomRoster is trust-scoped because it selects native dispatch targets", () => {
+    assert.ok(
+      (TRUST_SCOPED_SETTINGS as readonly string[]).includes("roomRoster"),
+      "roomRoster must be trust-scoped because it controls which configured agents Hydra dispatches",
+    );
+  });
+
+  test("hydraRoom.roomRoster schema preserves the safe two-head default", () => {
+    const pkg = loadPackageJson();
+    const roster = pkg.contributes?.configuration?.properties?.["hydraRoom.roomRoster"];
+    assert.deepEqual(roster?.default, ["codex", "claude"]);
+    assert.equal(roster?.minItems, 2);
+    assert.equal(roster?.uniqueItems, true);
+    assert.equal(roster?.items?.type, "string");
+    assert.match(roster?.items?.pattern ?? "", /A-Za-z0-9/);
   });
 
   test("hydraRoom.agents item schema declares pricing so a valid AgentDefinition doesn't squiggle", () => {

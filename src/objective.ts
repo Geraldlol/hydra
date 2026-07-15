@@ -1,8 +1,8 @@
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { atomicWriteFile, ensureFile } from "./fileQueue";
+import { atomicWriteFile, ensureFile, readFileHead } from "./fileQueue";
 
 const OBJECTIVE_HEADER = "# Hydra Room Objective";
+export const MAX_OBJECTIVE_FILE_BYTES = 64 * 1024;
 
 export async function ensureObjectiveFile(filePath: string): Promise<void> {
   await ensureFile(filePath, `${OBJECTIVE_HEADER}\n\n`);
@@ -10,7 +10,11 @@ export async function ensureObjectiveFile(filePath: string): Promise<void> {
 
 export async function readObjective(filePath: string): Promise<string> {
   try {
-    return parseObjective(await fs.readFile(filePath, "utf8"));
+    const bounded = await readFileHead(filePath, MAX_OBJECTIVE_FILE_BYTES);
+    const objective = parseObjective(bounded.text);
+    return bounded.truncated
+      ? `${objective}${objective ? "\n\n" : ""}[Objective truncated at ${MAX_OBJECTIVE_FILE_BYTES} bytes]`
+      : objective;
   } catch {
     return "";
   }

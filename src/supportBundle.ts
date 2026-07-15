@@ -1,4 +1,3 @@
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AuthorityClassification } from "./authority";
 import type { CapabilityProfile } from "./capabilityProfiles";
@@ -10,9 +9,11 @@ import type { Phase } from "./prompts";
 import type { NativeActionReceipt } from "./nativeActions";
 import type { NativeDataSnapshot } from "./nativeDataSnapshot";
 import type { TerminalSession } from "./sessionState";
+import { atomicWriteFile } from "./fileQueue";
 import type { VerificationResult } from "./verification";
 import { verificationPassed, verificationSummary } from "./verification";
 import type { WorkQueueItem } from "./workQueue";
+import { displayNameFor } from "./agentRegistry";
 
 export interface SupportBundleMessage {
   role: "user" | AgentId | "system";
@@ -87,8 +88,7 @@ export function supportBundlePath(workspaceRoot: string): string {
 }
 
 export async function writeSupportBundle(filePath: string, markdown: string): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, markdown, "utf8");
+  await atomicWriteFile(filePath, markdown);
 }
 
 export function renderSupportBundle(input: SupportBundleInput): string {
@@ -351,10 +351,9 @@ function renderMessages(messages: SupportBundleMessage[]): string[] {
 }
 
 function labelAgent(value: AgentId | "user" | "system"): string {
-  if (value === "codex") return "Codex";
-  if (value === "claude") return "Claude";
   if (value === "user") return "You";
-  return "System";
+  if (value === "system") return "System";
+  return displayNameFor(value);
 }
 
 function singleLine(value: string): string {

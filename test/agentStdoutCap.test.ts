@@ -12,8 +12,8 @@ import { summarizeCodexEvents } from "../src/codexEvents";
 describe("appendBoundedStream", () => {
   test("accepts chunks below the cap unchanged", () => {
     const state: BoundedStreamState = { text: "", truncated: false };
-    appendBoundedStream(state, "hello ", 1024, "[trunc]");
-    appendBoundedStream(state, "world", 1024, "[trunc]");
+    assert.equal(appendBoundedStream(state, "hello ", 1024, "[trunc]"), "hello ");
+    assert.equal(appendBoundedStream(state, "world", 1024, "[trunc]"), "world");
     assert.equal(state.truncated, false);
     assert.equal(state.text, "hello world");
   });
@@ -39,7 +39,7 @@ describe("appendBoundedStream", () => {
 
   test("drops subsequent chunks once truncated", () => {
     const state: BoundedStreamState = { text: "abc", truncated: true };
-    appendBoundedStream(state, "MORE", 1024, "[trunc]");
+    assert.equal(appendBoundedStream(state, "MORE", 1024, "[trunc]"), "");
     assert.equal(state.text, "abc");
     assert.equal(state.truncated, true);
   });

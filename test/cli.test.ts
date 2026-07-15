@@ -178,6 +178,27 @@ describe("Hydra CLI bridge", () => {
     assert.equal(await resolveAgentCommand("codex", command), command);
   });
 
+  test("fails closed when a bare native command is not on the effective PATH", async () => {
+    const env = process.platform === "win32" ? { Path: "", PATHEXT: ".EXE;.CMD" } : { PATH: "" };
+    await assert.rejects(
+      resolveAgentCommand("custom-head", "hydra-definitely-missing-command", env),
+      /could not resolve native CLI/i,
+    );
+  });
+
+  test("resolves bare native commands against the child environment", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-effective-path-"));
+    const command = "hydra-effective-command";
+    const executable = path.join(root, process.platform === "win32" ? `${command}.cmd` : command);
+    await fs.writeFile(executable, process.platform === "win32" ? "@echo off\r\n" : "#!/bin/sh\n", "utf8");
+    if (process.platform !== "win32") await fs.chmod(executable, 0o755);
+
+    const env = process.platform === "win32"
+      ? { Path: root, PATHEXT: ".CMD" }
+      : { PATH: root };
+    assert.equal(await resolveAgentCommand("custom-head", command, env), await fs.realpath(executable));
+  });
+
   test("discovers Windows Codex fallbacks outside PATH", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-cli-"));
     const home = path.join(root, "home");

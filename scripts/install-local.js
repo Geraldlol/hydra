@@ -1,12 +1,12 @@
-const cp = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
+const { findOnPath, spawnCommandSync } = require("./platform-command");
 
 const extensionPath = path.resolve(__dirname, "..");
 const skipPackage = process.argv.includes("--skip-package");
 
 if (!skipPackage) {
-  runPowerShell(`& ${psQuote(resolvePnpmCommand())} run package`);
+  runCommand(resolvePnpmCommand(), ["run", "package"]);
 }
 
 const vsixPath = newestVsix(extensionPath);
@@ -17,12 +17,13 @@ if (!vsixPath) {
 
 const codeCmd = resolveCodeCommand();
 const installArgs = [
-  optionalDirArg("--user-data-dir", process.env.HYDRA_VSCODE_USER_DATA_DIR),
-  optionalDirArg("--extensions-dir", process.env.HYDRA_VSCODE_EXTENSIONS_DIR),
-  `--install-extension ${psQuote(vsixPath)}`,
+  ...optionalDirArgs("--user-data-dir", process.env.HYDRA_VSCODE_USER_DATA_DIR),
+  ...optionalDirArgs("--extensions-dir", process.env.HYDRA_VSCODE_EXTENSIONS_DIR),
+  "--install-extension",
+  vsixPath,
   "--force",
-].filter(Boolean);
-runPowerShell(`& ${psQuote(codeCmd)} ${installArgs.join(" ")}`);
+];
+runCommand(codeCmd, installArgs);
 console.log(`Installed ${path.basename(vsixPath)} into VS Code.`);
 
 function newestVsix(root) {
@@ -36,12 +37,12 @@ function newestVsix(root) {
     .sort((a, b) => b.mtimeMs - a.mtimeMs)[0]?.filePath || "";
 }
 
-function runPowerShell(command) {
-  const result = cp.spawnSync(
-    "powershell.exe",
-    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
-    { cwd: extensionPath, stdio: "inherit", windowsHide: false }
-  );
+function runCommand(command, args) {
+  const result = spawnCommandSync(command, args, {
+    cwd: extensionPath,
+    stdio: "inherit",
+    windowsHide: false,
+  });
   if (result.error) {
     console.error(result.error.message);
     process.exit(1);
@@ -51,21 +52,17 @@ function runPowerShell(command) {
   }
 }
 
-function psQuote(value) {
-  return `'${value.replace(/'/g, "''")}'`;
-}
-
-function optionalDirArg(flag, dirPath) {
-  if (!dirPath) return "";
+function optionalDirArgs(flag, dirPath) {
+  if (!dirPath) return [];
   fs.mkdirSync(dirPath, { recursive: true });
-  return `${flag} ${psQuote(path.resolve(dirPath))}`;
+  return [flag, path.resolve(dirPath)];
 }
 
 function resolveCodeCommand() {
   const fromEnv = process.env.VSCODE_CLI || process.env.CODE_CMD;
-  if (fromEnv && fs.existsSync(fromEnv)) return fromEnv;
+  if (fromEnv && fs.existsSync(fromEnv)) return path.resolve(fromEnv);
 
-  const fromPath = firstWhere(process.platform === "win32" ? "code.cmd" : "code");
+  const fromPath = findOnPath(process.platform === "win32" ? "code.cmd" : "code");
   if (fromPath) return fromPath;
 
   const localAppData = process.env.LOCALAPPDATA || "";
@@ -73,14 +70,25 @@ function resolveCodeCommand() {
     ? [
         "C:\\Program Files\\Microsoft VS Code\\bin\\code.cmd",
         "C:\\Program Files\\Microsoft VS Code Insiders\\bin\\code-insiders.cmd",
-        path.join(localAppData, "Programs", "Microsoft VS Code", "bin", "code.cmd"),
-        path.join(localAppData, "Programs", "Microsoft VS Code Insiders", "bin", "code-insiders.cmd"),
+        ...(localAppData
+          ? [
+              path.join(localAppData, "Programs", "Microsoft VS Code", "bin", "code.cmd"),
+              path.join(localAppData, "Programs", "Microsoft VS Code Insiders", "bin", "code-insiders.cmd"),
+            ]
+          : []),
       ]
-    : ["/usr/local/bin/code", "/opt/visual-studio-code/bin/code"];
+    : [
+        "/usr/local/bin/code",
+        "/usr/bin/code",
+        "/opt/visual-studio-code/bin/code",
+        "/snap/bin/code",
+        "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
+        "/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/bin/code-insiders",
+      ];
 
   const found = candidates.find((candidate) => candidate && fs.existsSync(candidate));
   if (!found) {
-    console.error("Could not find the VS Code CLI. Set VSCODE_CLI to code.cmd or run this from a shell where code is on PATH.");
+    console.error("Could not find the VS Code CLI. Set VSCODE_CLI to its executable path or run this from a shell where code is on PATH.");
     process.exit(1);
   }
   return found;
@@ -90,16 +98,9 @@ function resolvePnpmCommand() {
   // Why: the repo uses pnpm via Corepack (see packageManager in package.json).
   // Shelling out to npm here would defeat the version pin and break on machines
   // that only have pnpm via Corepack with no global npm install.
-  const fromPath = firstWhere(process.platform === "win32" ? "pnpm.cmd" : "pnpm");
+  const fromPath = findOnPath(process.platform === "win32" ? "pnpm.cmd" : "pnpm");
   if (fromPath) return fromPath;
 
   console.error("Could not find pnpm. Enable Corepack (`corepack enable`) or install pnpm globally, or run with --skip-package to reuse an existing .vsix.");
   process.exit(1);
-}
-
-function firstWhere(command) {
-  const lookup = process.platform === "win32" ? "where.exe" : "which";
-  const result = cp.spawnSync(lookup, [command], { encoding: "utf8", windowsHide: true });
-  if (result.status !== 0) return "";
-  return result.stdout.split(/\r?\n/).map((line) => line.trim()).find(Boolean) || "";
 }

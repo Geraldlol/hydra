@@ -5,7 +5,10 @@ const fsp = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 
-const repoRoot = path.resolve(__dirname, "..", "..", "..");
+// scripts/ is a direct child of the repository root. Keep probe artifacts and
+// every agent cwd scoped to this checkout -- walking three levels up would
+// target the user's home hierarchy instead.
+const repoRoot = path.resolve(__dirname, "..");
 const hydraDir = path.join(repoRoot, ".hydra", "native-contract-probe");
 const runId = new Date().toISOString().replace(/[:.]/g, "-");
 const outDir = path.join(hydraDir, runId);

@@ -1,13 +1,15 @@
 import * as cp from "node:child_process";
 import * as crypto from "node:crypto";
+import { constants as fsConstants, watch as watchFileSystem } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as vscode from "vscode";
-import { runAgent, AgentSpawn, RunResult } from "./agents";
+import { runAgent, AgentSpawn, RunResult, MAX_AGENT_STDOUT_BYTES } from "./agents";
 import { parseGitStatusEntries, type WorkspaceChange } from "./gitStatus";
+import { resolveGitExecutable, workspaceGitExecutionAllowed } from "./gitExecutable";
 import { State, Event, AgentId, transition, isInFlight, shouldRunParallelDiscussion, pickReviewers, DEFAULT_ROSTER } from "./phases";
 import { Phase, buildPrompt, APPROVED_SENTINEL_RE, SOFT_APPROVAL_RE } from "./prompts";
-import { adapterForKind, displayNameFor, getAgentDefinition, isBuiltinAgentId, listAgentDefinitions } from "./agentRegistry";
+import { adapterForKind, displayNameFor, getAgentDefinition, isBuiltinAgentId, listAgentDefinitions, reloadAgentDefinitions } from "./agentRegistry";
 import type { AdapterRawOutput, Invocation } from "./agentAdapter";
 import { runHttpAgent } from "./httpTransport";
 import {
@@ -16,6 +18,7 @@ import {
   buildPromptContextWindow,
   ensureGitignore,
   ensureTranscriptFile,
+  isAgentMessageRole,
   readTranscript,
   TranscriptContextWindow,
   TranscriptMessage,
@@ -25,6 +28,7 @@ import {
   profileForPhase,
   applySpawnEnvironment,
   buildAgentSpawn,
+  effectiveSpawnEnvironment,
   expandRequestFileSpawn,
   hasRequestFilePlaceholders,
   mergeNativeEnv,
@@ -108,12 +112,22 @@ import {
 } from "./doctor";
 import { EditorContextAttachment, truncateEditorContext } from "./editorContext";
 import { appendHydraEvent, createHydraEvent, ensureHydraEventsFile, hydraEventsPath, readHydraEvents, type HydraEventKind } from "./events";
-import { ensureFile, readJsonlGuarded, serializePerFile } from "./fileQueue";
+import { appendFileSafely, ensureFile, readJsonlGuarded, serializePerFile } from "./fileQueue";
 import { detectNativeReplyLeak, formatNativeReplyLeakError } from "./nativeReplyGuard";
 import { ensureObjectiveFile, objectiveAsContext, readObjective, writeObjective } from "./objective";
-import { TerminalBridge } from "./terminalBridge";
+import { TerminalBridge, type TerminalBridgeRunResult } from "./terminalBridge";
 import { buildDirectTerminalPokePrompt } from "./terminalPoke";
-import { buildTerminalPromptFile, terminalProtocolPaths } from "./terminalProtocol";
+import { buildTerminalPromptFile, terminalProtocolStoragePaths } from "./terminalProtocol";
+import {
+  cleanupPrivateArtifacts,
+  createPrivateArtifact,
+  preparePrivateArtifactRoot,
+  readPrivateArtifactUtf8,
+  redactPrivateArtifactArgs,
+  redactPrivateArtifactText,
+  sweepPrivateArtifacts,
+  type PrivateArtifactBoundary,
+} from "./privateArtifacts";
 import type { TerminalSession } from "./sessionState";
 import {
   appendPromptEnvelope,
@@ -141,15 +155,16 @@ import {
   appendUsageRecord,
   boundUsageRecords,
   buildUsageRecord,
-  claudeAutomationSpendThisMonth,
   coerceModelPrices,
   DEFAULT_PRICES,
+  loadClaudeAutomationSpendThisMonth,
   loadUsageRecords,
   parseCodexTextTokens,
   resolveModelPrices,
   seatDefinitionPrices,
   summarizeUsage,
   UNKNOWN_AGENT_PRICES,
+  usageCalendarMonthKey,
   usageCutoffIso,
   usageFromClaudeSummary,
   usageFromCodexSummary,
@@ -161,11 +176,85 @@ import {
   loadCodexModelsSnapshot,
   type CodexModelsSnapshot,
 } from "./codexModels";
+import {
+  aggregateScoreboard,
+  listActiveScoreEvidence,
+  listPendingScoreClaims,
+  type CorrectnessOutcome,
+  type ScoreboardAggregate,
+  type ScoreboardEvent,
+  type VerdictSourceStrength,
+} from "./scoreboard";
+import {
+  appendScoreboardEvents,
+  ensureScoreboardLedger,
+  loadScoreboardEvents,
+  privateScoreboardPath,
+  writeScoreEvidenceMirror,
+  writeScoreboardMirror,
+} from "./scoreboardStore";
+import {
+  aggregateDuels,
+  createDuelAdmission,
+  createDuelChallenge,
+  createDuelCommitment,
+  createDuelReveal,
+  DUEL_AGENT_RATING_POLICY,
+  DUEL_FULL_ACCESS_POLICY_ID,
+  hashDuelSharedEvidencePacket,
+  initialEmptyDuelAggregate,
+  parseDuelAgentCommitmentResponse,
+  DuelAcceptanceRejectedError,
+  type DuelAgentCallReceipt,
+  type DuelAgentCommitmentResponse,
+  type DuelAggregate,
+  type DuelEvent,
+  type DuelOutcome,
+  type DuelParticipantCapabilityLock,
+  type DuelRevealPayload,
+  type DuelView,
+} from "./duels";
+import {
+  appendDuelEvents,
+  ensureDuelLedger,
+  loadDuelEvents,
+  privateDuelLedgerPath,
+  writeDuelMirror,
+} from "./duelStore";
+import {
+  deleteDuelCommitmentSecrets,
+  duelCommitmentIndexPath,
+  ensureDuelCommitmentIndex,
+  loadDuelCommitmentSecret,
+  storeDuelCommitmentSecret,
+  sweepDuelCommitmentSecrets,
+} from "./duelSecrets";
+import { renderDuelMotivationContext } from "./duelMotivation";
+import {
+  captureDuelWorkspaceFingerprint,
+  watchDuelWorkspaceMutations,
+  type DuelWorkspaceMutationMonitor,
+} from "./duelWorkspaceGuard";
+import {
+  buildAgentDuelEvidencePacket,
+  hashAgentDuelSource,
+  parseAgentDuelIntent,
+  stripAgentDuelChallengeControlLines,
+  type AgentDuelIntent,
+} from "./duelIntent";
+import {
+  buildDuelCommitmentPrompt,
+  duelCapabilityLockSha256,
+  duelCommitmentFullAccessArgs,
+  duelInvocationSha256,
+  duelResponseSha256,
+} from "./duelCommitment";
 import { chooseEffortInteractively } from "./effortChooser";
 import { chooseModelInteractively, refreshCodexModelCatalog, type ModelChooserDeps } from "./modelChooser";
 import { effectivePhasedNumberSetting, summarizePhasedSetting } from "./phasedSetting";
 import {
   agentTimeoutMs,
+  agentInitiatedDuels,
   attachmentMaxBytes,
   attachmentPreviewMaxChars,
   attachmentTotalMaxBytes,
@@ -184,6 +273,7 @@ import {
   editorContextMaxChars,
   preferTerminalBridgeOnStart,
   promptBodyRetentionDays,
+  roomRoster,
   manyHeadsMode,
   manyHeadsClaudeWorkerCount,
   sessionCostCapUsd,
@@ -314,6 +404,11 @@ interface PromptTranscriptWindowStats {
 // Why: skip the per-append mkdir(recursive) syscall on the agent-call trace
 // once its parent .hydra/ dir is known to exist. First write still creates it.
 const ensuredAgentCallDirs = new Set<string>();
+const ONE_SHOT_ARTIFACT_RETENTION_MS = 24 * 60 * 60 * 1000;
+const DUEL_COMMITMENT_HEAD_TIMEOUT_MS = 180_000;
+const DUEL_TERMINAL_LATE_SECRET_SWEEP_DELAY_MS = DUEL_COMMITMENT_HEAD_TIMEOUT_MS + 5_000;
+const MAX_AGENT_DUEL_AUTOMATION_ATTEMPTS = 3;
+const AGENT_DUEL_AUTOMATION_RETRY_DELAYS_MS = [5_000, 30_000] as const;
 
 // Keep only the well-formed (finite, non-negative) price fields the user
 // actually supplied so the override stays partial — resolveModelPrices fills
@@ -388,13 +483,42 @@ interface NativeActionPick extends vscode.QuickPickItem {
 
 interface PreparedOneShotSpawn {
   spawn: AgentSpawn;
+  /** Redacted labels only; safe for durable traces and failure cards. */
   promptPath?: string;
   replyPath?: string;
   logPath?: string;
+  privateArtifacts?: {
+    boundary: PrivateArtifactBoundary;
+    promptPath: string;
+    replyPath: string;
+    logPath: string;
+  };
   outputMode: "plain" | "claudeStreamJson" | "codexJson";
 }
 
+interface PendingAgentDuelContext {
+  readonly opponentId: AgentId;
+  readonly opponentMessageId: string;
+  readonly opponentMessageTimestamp: string;
+  readonly opponentMessageText: string;
+  readonly latestUserMessage?: string;
+}
+
+interface PendingAgentDuelRequest {
+  readonly challengerId: AgentId;
+  readonly sourceTraceId: string;
+  readonly sourceMessageTimestamp: string;
+  readonly sourceMessageText: string;
+  readonly context: PendingAgentDuelContext;
+  readonly intent: AgentDuelIntent;
+}
+
 type HttpInvocation = Extract<Invocation, { transport: "http" }>;
+
+interface DuelHeadCommitmentCapture {
+  readonly response: DuelAgentCommitmentResponse;
+  readonly receipt: DuelAgentCallReceipt;
+}
 
 // One turn leg's dispatch plan: either a fully-prepared native spawn (the
 // existing one-shot/terminal-bridge path) or an http invocation destined for
@@ -457,6 +581,9 @@ export { formatTelegramInboundPrompt };
 export class HydraRoomPanel {
   private static readonly viewType = "hydraRoom.panel";
   private static instance: HydraRoomPanel | undefined;
+  // Extension-host scoped: closing/reopening the webview must not clear a
+  // process-termination failure. Only reloading VS Code resets this latch.
+  private static unconfirmedNativeTerminationForHost = false;
   private static statusBarUpdater: ((snapshot: HydraStatusBarSnapshot) => void) | undefined;
 
   private readonly context: vscode.ExtensionContext;
@@ -496,15 +623,42 @@ export class HydraRoomPanel {
   private wikiContextUri!: vscode.Uri;
   private supportBundleUri!: vscode.Uri;
   private telegramInboundStateUri!: vscode.Uri;
+  private scoreEventsUri!: vscode.Uri;
+  private scoreboardMirrorUri!: vscode.Uri;
+  private scoreEvidenceMirrorUri!: vscode.Uri;
+  private duelEventsUri!: vscode.Uri;
+  private duelMirrorUri!: vscode.Uri;
+  private duelCommitmentIndexUri!: vscode.Uri;
   private objective = "";
   private workspaceInstructions = "";
-  private workspaceInstructionsByAgent: Record<AgentId, string> = { codex: "", claude: "" };
+  private workspaceInstructionsByAgent: Record<AgentId, string> = {};
   private decisions: DecisionPacket[] = [];
   private acceptedDefaultDecisionTimestamp: string | undefined;
   private verifications: VerificationResult[] = [];
   private nativeActions: NativeActionReceipt[] = [];
   private workQueueDispositions: WorkQueueDisposition[] = [];
   private latestDoctorReport: DoctorReport | undefined;
+  private scoreboard: ScoreboardAggregate = { eventCount: 0, standings: [], overallStandings: [] };
+  private scoreboardError: string | undefined;
+  private scoreboardMirrorError: string | undefined;
+  private duels: DuelAggregate = initialEmptyDuelAggregate();
+  private duelError: string | undefined;
+  private duelMirrorError: string | undefined;
+  private duelRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+  private duelCommitmentAbort: AbortController | undefined;
+  private readonly pendingAgentDuelContexts = new Map<string, PendingAgentDuelContext>();
+  private readonly pendingAgentTraceIds = new Map<string, string>();
+  private readonly agentDuelAdmissionQueue: PendingAgentDuelRequest[] = [];
+  private readonly agentDuelAutomationQueue: string[] = [];
+  private readonly agentDuelAutomationAttempts = new Map<string, number>();
+  private readonly agentDuelAutomationRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private agentDuelAutomationRunning = false;
+  private drainingAgentDuelAutomation = false;
+  private agentDuelAdmissionRunning = false;
+  private drainingAgentDuelAdmissions = false;
+  private duelSecretSweepTimer: ReturnType<typeof setTimeout> | undefined;
+  private duelSecretSweepAtMs: number | undefined;
+  private duelSecretCleanupWarningShown = false;
   private queuedUserMessages: QueuedUserMessage[] = [];
   private pendingAttachments: PendingRoomAttachment[] = [];
   private drainingQueuedUserMessages = false;
@@ -512,6 +666,18 @@ export class HydraRoomPanel {
   private autopilotRunning = false;
   private autopilotSummary = "Not run";
   private terminalPokeInFlight = false;
+  private terminalBridgeDispatchInFlight = 0;
+  // Session-only overrides used by the smoke test. Persistent user toggles are
+  // application-scoped and never written into a workspace settings file.
+  private manyHeadsModeOverride: boolean | undefined;
+  private autoAdvanceActionableDefaultsOverride: boolean | undefined;
+  private get unconfirmedNativeTermination(): boolean {
+    return HydraRoomPanel.unconfirmedNativeTerminationForHost;
+  }
+
+  private set unconfirmedNativeTermination(value: boolean) {
+    HydraRoomPanel.unconfirmedNativeTerminationForHost = value;
+  }
   private workspaceRoot!: string;
   private workspaceReady = false;
   private currentAbort: AbortController | undefined;
@@ -533,8 +699,13 @@ export class HydraRoomPanel {
   // over-cap warning fires once so warn mode does not spam every Claude turn.
   private claudeAuthStatus: ClaudeAuthStatus | undefined;
   private claudeAuthStatusPromise: Promise<ClaudeAuthStatus | undefined> | undefined;
+  // The credit guard must retain the complete UTC-month total even though the
+  // UI/session replay below is intentionally tail/row bounded. It is seeded by
+  // a bounded-memory full-ledger stream and then folded forward per call.
+  private claudeCreditMonthKey = "";
+  private claudeCreditMonthSpendUsd = 0;
   // Pre-dispatch estimate for Claude calls currently in flight. This is not a
-  // billing ledger; usageRecords remain authoritative once each call completes.
+  // billing ledger; claudeCreditMonthSpendUsd is authoritative once each call completes.
   private claudeCreditReservedUsd = 0;
   private claudeCreditWarned = false;
   private codexModelsUri!: vscode.Uri;
@@ -546,13 +717,12 @@ export class HydraRoomPanel {
   // sessionId field initializer has run); its deps read panel state through
   // closures so the lazily-set .hydra paths resolve at call time.
   private readonly telegram: TelegramController;
-  private agentStatuses: Record<AgentId, AgentStatus> = {
-    codex: { state: "idle", detail: "Idle" },
-    claude: { state: "idle", detail: "Idle" },
-  };
+  private agentStatuses: Record<AgentId, AgentStatus> = {};
   private gitAvailable = false;
   private workspaceChanges: WorkspaceChange[] = [];
   private workspaceChangesRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+  private autopilotStartTimer: ReturnType<typeof setTimeout> | undefined;
+  private disposed = false;
   private readonly initPromise: Promise<void>;
 
   static open(context: vscode.ExtensionContext): HydraRoomPanel {
@@ -584,6 +754,11 @@ export class HydraRoomPanel {
 
   ready(): Promise<void> {
     return this.initPromise;
+  }
+
+  async availableHeads(): Promise<Array<{ id: AgentId; displayName: string }>> {
+    await this.ready();
+    return this.roster().map((id) => ({ id, displayName: displayNameFor(id) }));
   }
 
   private hydraHeadAssets(): HydraHeadAssets {
@@ -632,19 +807,57 @@ export class HydraRoomPanel {
         if (e.affectsConfiguration("hydraRoom.telegram")) {
           void this.telegram.restartInboundPolling();
         }
+        if (e.affectsConfiguration("hydraRoom.agents") || e.affectsConfiguration("hydraRoom.roomRoster")) {
+          if (e.affectsConfiguration("hydraRoom.agents")) reloadAgentDefinitions();
+          for (const agent of this.roster()) {
+            this.agentStatuses[agent] ??= { state: "idle", detail: "Idle" };
+          }
+          this.postState();
+        }
+        if (e.affectsConfiguration("hydraRoom.agentInitiatedDuels")) {
+          this.postState();
+          if (agentInitiatedDuels()) {
+            this.requeueOutstandingAgentDuels();
+            queueMicrotask(() => void this.drainAgentDuelAdmissions());
+            queueMicrotask(() => void this.drainAgentDuelAutomation());
+          }
+        }
       })
     );
     this.initPromise = this.initialize();
   }
 
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    if (this.terminalBridgeDispatchInFlight > 0) {
+      // Terminal.dispose() has no descendant-exit acknowledgement. Preserve
+      // the fail-closed latch even if the user closes and reopens the panel.
+      this.unconfirmedNativeTermination = true;
+    }
     HydraRoomPanel.instance = undefined;
     if (this.workspaceChangesRefreshTimer) {
       clearTimeout(this.workspaceChangesRefreshTimer);
       this.workspaceChangesRefreshTimer = undefined;
     }
+    if (this.duelRefreshTimer) {
+      clearTimeout(this.duelRefreshTimer);
+      this.duelRefreshTimer = undefined;
+    }
+    if (this.duelSecretSweepTimer) {
+      clearTimeout(this.duelSecretSweepTimer);
+      this.duelSecretSweepTimer = undefined;
+      this.duelSecretSweepAtMs = undefined;
+    }
+    for (const timer of this.agentDuelAutomationRetryTimers.values()) clearTimeout(timer);
+    this.agentDuelAutomationRetryTimers.clear();
+    if (this.autopilotStartTimer) {
+      clearTimeout(this.autopilotStartTimer);
+      this.autopilotStartTimer = undefined;
+    }
     this.currentAbort?.abort();
     this.wikiMaintenanceAbort?.abort();
+    this.duelCommitmentAbort?.abort();
     this.telegram.dispose();
     // TerminalBridge is constructed inside initialize() so it isn't in the
     // disposables array. Dispose explicitly to close cached terminals
@@ -670,7 +883,7 @@ export class HydraRoomPanel {
     this.workspaceReady = true;
     this.workspaceRoot = workspaceRoot;
     await this.migrateLegacyAgentTimeoutDefaults();
-    this.terminalBridge = this.createTerminalBridge();
+    if (this.disposed) return;
     this.transcriptUri = this.resolveTranscriptUri();
     this.objectiveUri = vscode.Uri.file(path.join(this.workspaceRoot, ".hydra", "objective.md"));
     this.decisionsUri = vscode.Uri.file(path.join(this.workspaceRoot, ".hydra", "decisions.jsonl"));
@@ -688,6 +901,12 @@ export class HydraRoomPanel {
     this.wikiContextUri = vscode.Uri.file(hydraWikiContextPath(this.workspaceRoot));
     this.supportBundleUri = vscode.Uri.file(supportBundlePath(this.workspaceRoot));
     this.telegramInboundStateUri = vscode.Uri.file(path.join(this.workspaceRoot, ".hydra", "telegram-inbox-state.json"));
+    this.scoreEventsUri = vscode.Uri.file(privateScoreboardPath(this.workspacePrivateStorageRoot()));
+    this.scoreboardMirrorUri = vscode.Uri.file(path.join(this.workspaceRoot, ".hydra", "scoreboard.md"));
+    this.scoreEvidenceMirrorUri = vscode.Uri.file(path.join(this.workspaceRoot, ".hydra", "score-evidence.md"));
+    this.duelEventsUri = vscode.Uri.file(privateDuelLedgerPath(this.workspacePrivateStorageRoot()));
+    this.duelMirrorUri = vscode.Uri.file(path.join(this.workspaceRoot, ".hydra", "duels.md"));
+    this.duelCommitmentIndexUri = vscode.Uri.file(duelCommitmentIndexPath(this.workspacePrivateStorageRoot()));
     await ensureGitignore(this.workspaceRoot);
     await ensureTranscriptFile(this.transcriptUri.fsPath);
     await ensureObjectiveFile(this.objectiveUri.fsPath);
@@ -699,6 +918,41 @@ export class HydraRoomPanel {
     await ensureManyHeadsSmokeFile(this.manyHeadsSmokeUri.fsPath);
     await ensureJsonlFile(this.usageUri.fsPath);
     await ensureFile(this.telegramInboundStateUri.fsPath, "{\"seenIds\":[]}\n");
+    await ensureScoreboardLedger(this.scoreEventsUri.fsPath);
+    try {
+      this.scoreboard = aggregateScoreboard(await loadScoreboardEvents(this.scoreEventsUri.fsPath));
+      this.scoreboardError = undefined;
+    } catch {
+      // The private append-only ledger is authoritative. Never substitute a
+      // partial tail or overwrite it after a validation failure: an incomplete
+      // replay could crown the wrong head.
+      this.scoreboard = { eventCount: 0, standings: [], overallStandings: [] };
+      this.scoreboardError = "Private standings ledger failed validation; no scores were loaded.";
+    }
+    if (!this.scoreboardError) await this.refreshScoreboardMirror();
+    await ensureDuelLedger(this.duelEventsUri.fsPath);
+    try {
+      this.duels = aggregateDuels(await loadDuelEvents(this.duelEventsUri.fsPath));
+      this.duelError = undefined;
+    } catch {
+      // Never replay a partial duel history: it could expose a one-sided seal
+      // or award the wrong domain rating.
+      this.duels = initialEmptyDuelAggregate();
+      this.duelError = "Private duel ledger failed validation; challenges and ratings were not loaded.";
+    }
+    if (!this.duelError) await this.refreshDuelMirror();
+    try {
+      await ensureDuelCommitmentIndex(this.duelCommitmentIndexUri.fsPath);
+      if (!this.duelError) await this.sweepDuelCommitmentSecretCleanup();
+    } catch {
+      this.duelSecretCleanupWarningShown = true;
+      await vscode.window.showWarningMessage("Hydra could not initialize sealed-answer cleanup. Formal duels remain fail-closed until the private commitment index is available.");
+      if (!this.disposed) this.scheduleDuelCommitmentSecretSweep(Date.now() + 60_000);
+    }
+    this.startDuelLedgerWatcher();
+    const usageNow = new Date();
+    this.claudeCreditMonthKey = usageCalendarMonthKey(usageNow);
+    this.claudeCreditMonthSpendUsd = await loadClaudeAutomationSpendThisMonth(this.usageUri.fsPath, usageNow);
     // Why: usage.jsonl keeps full durable history, but the in-memory replay is
     // bounded (last 30 days OR last K rows, window >= the 7-day weekly cutoff)
     // so a long-lived workspace doesn't grow this array without limit.
@@ -709,16 +963,23 @@ export class HydraRoomPanel {
     await ensureWorkQueueStateFile(this.workQueueUri.fsPath);
     this.objective = await readObjective(this.objectiveUri.fsPath);
     this.workspaceInstructions = await readWorkspaceInstructions(this.workspaceRoot, 0);
-    this.workspaceInstructionsByAgent = {
-      codex: await readWorkspaceInstructions(this.workspaceRoot, 0, undefined, { agent: "codex" }),
-      claude: await readWorkspaceInstructions(this.workspaceRoot, 0, undefined, { agent: "claude" }),
-    };
+    this.workspaceInstructionsByAgent = Object.fromEntries(await Promise.all(
+      this.roster().map(async (agent) => [
+        agent,
+        await readWorkspaceInstructions(this.workspaceRoot, 0, undefined, { agent }),
+      ] as const),
+    ));
+    for (const agent of this.roster()) this.agentStatuses[agent] = { state: "idle", detail: "Idle" };
     this.decisions = await readDecisions(this.decisionsUri.fsPath);
     this.verifications = await readVerifications(this.verificationUri.fsPath);
     this.nativeActions = await readNativeActions(this.nativeActionsUri.fsPath);
     this.workQueueDispositions = await readWorkQueueDispositions(this.workQueueUri.fsPath);
-    this.gitAvailable = await isGitWorkspace(this.workspaceRoot);
+    // `git status` can execute repository-configured helpers such as
+    // core.fsmonitor. Never probe or watch Git until Workspace Trust is granted.
+    this.gitAvailable = workspaceGitExecutionAllowed() && await isGitWorkspace(this.workspaceRoot);
     await this.refreshWorkspaceChanges();
+    if (this.disposed) return;
+    this.terminalBridge = this.createTerminalBridge();
     if (this.gitAvailable) {
       const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(this.workspaceRoot, "**/*"));
       const schedule = (uri: vscode.Uri) => {
@@ -737,11 +998,28 @@ export class HydraRoomPanel {
       );
     }
     const existing = await readTranscript(this.transcriptUri.fsPath);
+    if (this.disposed) return;
     this.setMessages(existing.map((m, i) => ({ ...m, id: `prev-${i}` })));
+    for (const duel of this.duels.activeDuels) {
+      if (
+        duel.createdBy === "hydra-runtime"
+        && (duel.status === "awaiting_commitments" || duel.status === "awaiting_reveal")
+        && !this.agentDuelAutomationQueue.includes(duel.duelId)
+      ) {
+        this.agentDuelAutomationQueue.push(duel.duelId);
+      }
+    }
+    if (this.unconfirmedNativeTermination) {
+      this.appendSystemMessageToUi(this.unconfirmedTerminationMessage());
+    }
     this.postState();
+    if (this.agentDuelAutomationQueue.length > 0) queueMicrotask(() => void this.drainAgentDuelAutomation());
     this.telegram.startInboundPolling();
     if (autopilotOnStart()) {
-      setTimeout(() => void this.runAutopilotStart(), 0);
+      this.autopilotStartTimer = setTimeout(() => {
+        this.autopilotStartTimer = undefined;
+        if (!this.disposed) void this.runAutopilotStart();
+      }, 0);
     }
   }
 
@@ -753,6 +1031,11 @@ export class HydraRoomPanel {
     options: { telegramChatId?: string; consumePendingAttachments?: boolean } = {}
   ): Promise<void> {
     await this.ready();
+    if (this.unconfirmedNativeTermination) {
+      this.appendSystemMessageToUi(this.unconfirmedTerminationMessage());
+      this.postState();
+      return;
+    }
     const prepared = this.prepareUserMessageWithAttachments(text, !!options.consumePendingAttachments);
     if (!prepared.displayText) return;
     if (!this.workspaceReady) {
@@ -760,11 +1043,18 @@ export class HydraRoomPanel {
       this.postState();
       return;
     }
-    const selectedOpener = normalizeAgentId(opener, this.getFirstSpeaker());
+    const selectedOpener = normalizeAgentId(opener, this.getFirstSpeaker(), this.roster());
     if (this.terminalPokeInFlight) {
       const queued = this.appendUserMessageToUi(prepared.displayText);
       this.queuedUserMessages.push({ ...prepared, opener: selectedOpener, timestamp: queued.timestamp, telegramChatId: options.telegramChatId });
       await this.appendSystemMessage("Hydra queued your message until the native terminal action finishes.");
+      this.postState();
+      return;
+    }
+    if (this.agentDuelAdmissionRunning || this.agentDuelAutomationRunning || this.duelCommitmentAbort) {
+      const queued = this.appendUserMessageToUi(prepared.displayText);
+      this.queuedUserMessages.push({ ...prepared, opener: selectedOpener, timestamp: queued.timestamp, telegramChatId: options.telegramChatId });
+      await this.appendSystemMessage("Hydra queued your message until autonomous duel admission or sealed commitments finish.");
       this.postState();
       return;
     }
@@ -788,9 +1078,8 @@ export class HydraRoomPanel {
   // sendUserMessage, but report the pre-turn transcript index (so the auto-reply
   // can window only this turn's output) and whether the user pressed Stop while
   // the turn was running (so the controller can skip the reply instead of
-  // replying about a cancelled turn). When the message is queued behind active
-  // work it returns cancelled=false; the controller then sends the "queued" ack,
-  // and the eventual reply is sent later from drainQueuedUserMessages.
+  // replying about a cancelled turn). Busy/non-sendable rooms defer the durable
+  // inbox record for a later poll instead of acknowledging an in-memory queue.
   private async sendInboundUserMessage(
     text: string,
     opener: AgentId,
@@ -798,9 +1087,35 @@ export class HydraRoomPanel {
   ): Promise<TelegramInboundTurnOutcome> {
     await this.ready();
     const beforeReplyAt = this.messages.length;
+    // Telegram inbox acknowledgement happens only after this method reports a
+    // completed/cancelled durable turn. Do not put remote input into the
+    // in-memory queue: a window crash would otherwise lose already-acked work.
+    if (
+      !this.workspaceReady ||
+      this.unconfirmedNativeTermination ||
+      this.terminalPokeInFlight ||
+      this.agentDuelAdmissionRunning ||
+      this.agentDuelAutomationRunning ||
+      !!this.duelCommitmentAbort ||
+      isInFlight(this.state) ||
+      !isSendable(this.state)
+    ) {
+      return { beforeReplyAt, cancelled: false, deferred: true };
+    }
+    const prepared = this.prepareUserMessageWithAttachments(text, false);
+    if (!prepared.displayText) return { beforeReplyAt, cancelled: false, deferred: true };
+    const selectedOpener = normalizeAgentId(opener, this.getFirstSpeaker(), this.roster());
+    if (!this.autoAdvanceInProgress) this.autoAdvanceSendInstructionCount = 0;
     const stopCountBefore = this.stopRequestCount;
-    await this.sendUserMessage(text, opener, { telegramChatId: options.telegramChatId });
-    return { beforeReplyAt, cancelled: this.stopRequestCount !== stopCountBefore };
+    // Call the reserving turn primitive directly. Going back through
+    // sendUserMessage would await ready() a second time, allowing a local send
+    // to win the gap and demote this durable remote item into an in-memory
+    // queue that the controller would then incorrectly acknowledge.
+    await this.startUserMessageTurn(prepared.displayText, prepared.promptText, selectedOpener, {
+      alreadyAppended: false,
+    });
+    void options.telegramChatId;
+    return { beforeReplyAt, cancelled: this.stopRequestCount !== stopCountBefore, deferred: false };
   }
 
   private async startUserMessageTurn(
@@ -809,15 +1124,36 @@ export class HydraRoomPanel {
     selectedOpener: AgentId,
     options: { alreadyAppended: boolean; timestamp?: string }
   ): Promise<void> {
+    if (this.unconfirmedNativeTermination) {
+      this.appendSystemMessageToUi(this.unconfirmedTerminationMessage());
+      this.postState();
+      return;
+    }
     const parallel = shouldRunParallelDiscussion(promptText, discussionMode());
     // Transition state synchronously BEFORE any await. A second concurrent
     // sendUserMessage hitting after this.ready() but during appendUserMessage
     // would otherwise pass the guard above and orphan the first turn's
     // currentAbort. Now the second call sees an in-flight discussion and bails at
     // isSendable.
-    this.applyEvent({ type: "userSent", opener: selectedOpener, parallel });
+    const previousState = this.state;
+    const roster = this.roster();
+    this.applyEvent({
+      type: "userSent",
+      opener: selectedOpener,
+      parallel,
+      reactor: pickReviewers(selectedOpener, roster)[0] ?? selectedOpener,
+      parallelAgents: parallel ? roster : undefined,
+    });
     let timestamp = options.timestamp;
-    if (!options.alreadyAppended) timestamp = (await this.appendUserMessage(displayText)).timestamp;
+    if (!options.alreadyAppended) {
+      try {
+        timestamp = (await this.appendUserMessage(displayText)).timestamp;
+      } catch (err) {
+        this.applyEvent({ type: "reservationFailed", restore: previousState });
+        this.postState();
+        throw err;
+      }
+    }
     if (parallel) {
       await this.runParallelDiscussionTurn(promptText, displayText, timestamp);
     } else {
@@ -833,11 +1169,14 @@ export class HydraRoomPanel {
     // reflected in the in-flight guards below, so abort it unconditionally
     // (a no-op when nothing is running) before the early return.
     this.wikiMaintenanceAbort?.abort();
+    this.duelCommitmentAbort?.abort();
     if (
       !isInFlight(this.state) &&
       !this.terminalPokeInFlight &&
       !this.verificationRunning &&
-      !this.autopilotRunning
+      !this.autopilotRunning &&
+      !this.agentDuelAutomationRunning &&
+      !this.duelCommitmentAbort
     ) {
       return;
     }
@@ -852,11 +1191,31 @@ export class HydraRoomPanel {
   async assignBuilder(builder: AgentId): Promise<void> {
     await this.ready();
     if (!this.workspaceReady) return;
+    if (!this.isActiveAgent(builder)) {
+      await this.appendSystemMessage(`Builder unavailable: ${displayNameFor(builder)} is not currently seated in this room.`);
+      this.postState();
+      return;
+    }
+    if (this.unconfirmedNativeTermination) {
+      this.appendSystemMessageToUi(this.unconfirmedTerminationMessage());
+      this.postState();
+      return;
+    }
     if (this.state.name !== "AwaitingUser") return;
-    await this.appendSystemMessage(
-      `${displayNameFor(builder)} assigned as builder. This is explicit user build authority; previous survey or planning defaults no longer block implementation.`
-    );
+    // Reserve the build synchronously. A double-click (or duplicate webview
+    // message) must not pass the AwaitingUser guard twice while the transcript
+    // append below is pending.
+    const previousState = this.state;
     this.applyEvent({ type: "assignBuilder", builder });
+    try {
+      await this.appendSystemMessage(
+        `${displayNameFor(builder)} assigned as builder. This is explicit user build authority; previous survey or planning defaults no longer block implementation.`
+      );
+    } catch (err) {
+      this.applyEvent({ type: "reservationFailed", restore: previousState });
+      this.postState();
+      throw err;
+    }
     await this.runBuildPhase(builder);
     await this.drainQueuedUserMessages();
   }
@@ -864,12 +1223,24 @@ export class HydraRoomPanel {
   async assignParallelBuilders(): Promise<void> {
     await this.ready();
     if (!this.workspaceReady) return;
+    if (this.unconfirmedNativeTermination) {
+      this.appendSystemMessageToUi(this.unconfirmedTerminationMessage());
+      this.postState();
+      return;
+    }
     if (this.state.name !== "AwaitingUser") return;
-    const agents: AgentId[] = ["codex", "claude"];
-    await this.appendSystemMessage(
-      "Codex and Claude assigned as parallel room builders. Hydra will dispatch both Build workers at once with the same room objective and transcript context."
-    );
+    const agents = this.roster();
+    const previousState = this.state;
     this.applyEvent({ type: "assignBuilders", agents });
+    try {
+      await this.appendSystemMessage(
+        `${agents.map(displayNameFor).join(" + ")} assigned as parallel room builders. Hydra will dispatch all ${agents.length} Build workers with the same room objective and transcript context.`
+      );
+    } catch (err) {
+      this.applyEvent({ type: "reservationFailed", restore: previousState });
+      this.postState();
+      throw err;
+    }
     await this.runParallelBuildPhase(agents);
     await this.drainQueuedUserMessages();
   }
@@ -877,6 +1248,11 @@ export class HydraRoomPanel {
   async requestReview(): Promise<void> {
     await this.ready();
     if (!this.workspaceReady) return;
+    if (this.unconfirmedNativeTermination) {
+      this.appendSystemMessageToUi(this.unconfirmedTerminationMessage());
+      this.postState();
+      return;
+    }
     if (this.state.name !== "BuildDone" && this.state.name !== "ParallelBuildDone") return;
     if (!this.gitAvailable) {
       await this.appendSystemMessage(
@@ -892,7 +1268,7 @@ export class HydraRoomPanel {
     } else {
       reviewer = pickReviewers(this.state.builder, this.roster())[0] ?? this.state.builder;
     }
-    this.applyEvent({ type: "requestReview" });
+    this.applyEvent({ type: "requestReview", reviewers: parallelAgents ?? (reviewer ? [reviewer] : undefined) });
     if (parallelAgents) {
       await this.runParallelReviewPhase(parallelAgents);
     } else if (reviewer) {
@@ -908,47 +1284,55 @@ export class HydraRoomPanel {
   }
 
   private async runVerificationInternal(reason: "manual" | "afterBuild"): Promise<VerificationResult | undefined> {
+    if (this.unconfirmedNativeTermination) {
+      this.appendSystemMessageToUi(this.unconfirmedTerminationMessage());
+      this.postState();
+      return undefined;
+    }
     if (isInFlight(this.state) || this.verificationRunning) {
       await this.appendSystemMessage("Verification is paused because Hydra is already running work.");
       this.postState();
       return undefined;
     }
 
-    const cfg = vscode.workspace.getConfiguration("hydraRoom");
-    const resolution = await resolveVerificationCommand({
-      configured: cfg.get<string>("verifyCommand", ""),
-      isWorkspaceTrusted: vscode.workspace.isTrusted,
-      workspaceRoot: this.workspaceRoot,
-    });
-    if (resolution.kind === "refusedUntrustedInference") {
-      await this.appendSystemMessage(
-        "Verification unavailable: this workspace is not trusted, so Hydra will not run inferred package.json scripts. Set hydraRoom.verifyCommand in User or Machine Settings to opt in, or grant Workspace Trust."
-      );
-      this.postState();
-      return undefined;
-    }
-    if (resolution.kind === "missing") {
-      await this.appendSystemMessage(
-        "Verification unavailable: set `hydraRoom.verifyCommand` or add a package.json script named `check`, `test`, or `lint`."
-      );
-      this.postState();
-      return undefined;
-    }
-    const command = resolution.command;
-
-    const ctrl = new AbortController();
-    this.currentAbort = ctrl;
+    // Reserve before resolving an inferred command. Two rapid invocations
+    // must not both pass the guard while package.json is being read.
     this.verificationRunning = true;
     this.postState();
-    await this.recordEvent("verificationStarted", `${reason === "afterBuild" ? "Auto-verification" : "Verification"} started`, {
-      command,
-      reason,
-    });
-    await this.appendSystemMessage(
-      `${reason === "afterBuild" ? "Hydra auto-verification started after build" : "Hydra verification started"}:\n${command}`
-    );
+    let ctrl: AbortController | undefined;
     let verification: VerificationResult | undefined;
     try {
+      const cfg = vscode.workspace.getConfiguration("hydraRoom");
+      const resolution = await resolveVerificationCommand({
+        configured: cfg.get<string>("verifyCommand", ""),
+        isWorkspaceTrusted: vscode.workspace.isTrusted,
+        workspaceRoot: this.workspaceRoot,
+      });
+      if (resolution.kind === "refusedUntrustedInference") {
+        await this.appendSystemMessage(
+          "Verification unavailable: this workspace is not trusted, so Hydra will not run inferred package.json scripts. Set hydraRoom.verifyCommand in User or Machine Settings to opt in, or grant Workspace Trust."
+        );
+        this.postState();
+        return undefined;
+      }
+      if (resolution.kind === "missing") {
+        await this.appendSystemMessage(
+          "Verification unavailable: set `hydraRoom.verifyCommand` or add a package.json script named `check`, `test`, or `lint`."
+        );
+        this.postState();
+        return undefined;
+      }
+      const command = resolution.command;
+
+      ctrl = new AbortController();
+      this.currentAbort = ctrl;
+      await this.recordEvent("verificationStarted", `${reason === "afterBuild" ? "Auto-verification" : "Verification"} started`, {
+        command,
+        reason,
+      });
+      await this.appendSystemMessage(
+        `${reason === "afterBuild" ? "Hydra auto-verification started after build" : "Hydra verification started"}:\n${command}`
+      );
       const result = await runVerificationCommand({
         cwd: this.workspaceRoot,
         command,
@@ -956,7 +1340,14 @@ export class HydraRoomPanel {
         maxOutputChars: verificationMaxOutputChars(),
         signal: ctrl.signal,
       });
-      if (result.cancelled) {
+      if (this.latchUnconfirmedNativeTermination(result, "verification")) {
+        verification = result;
+        this.verifications.push(result);
+        await appendVerification(this.verificationUri.fsPath, result);
+        await this.appendSystemMessage(
+          `${this.unconfirmedTerminationMessage()}${result.stderr ? `\n\n${result.stderr}` : ""}`
+        );
+      } else if (result.cancelled) {
         await this.appendSystemMessage("Hydra verification cancelled by user.");
       } else {
         // Anchor the verification to the git HEAD that was tested. A
@@ -985,12 +1376,12 @@ export class HydraRoomPanel {
           durationMs: result.durationMs,
         });
       }
+      return verification;
     } finally {
       this.verificationRunning = false;
-      if (this.currentAbort === ctrl) this.currentAbort = undefined;
+      if (ctrl && this.currentAbort === ctrl) this.currentAbort = undefined;
       this.postState();
     }
-    return verification;
   }
 
   async acceptDefaultDecision(): Promise<void> {
@@ -998,6 +1389,14 @@ export class HydraRoomPanel {
     if (!this.workspaceReady || isInFlight(this.state)) return;
     const action = this.currentDecisionAction();
     if (action.kind === "none") return;
+
+    if (action.kind === "assignBuilder" && action.builder && !this.isActiveAgent(action.builder)) {
+      await this.appendSystemMessage(
+        `Default decision kept for history but not executed: ${displayNameFor(action.builder)} is no longer a registered, seated head.`,
+      );
+      this.postState();
+      return;
+    }
 
     this.acceptedDefaultDecisionTimestamp = action.sourceTimestamp;
     this.postState();
@@ -1023,19 +1422,16 @@ export class HydraRoomPanel {
 
   async toggleAutoAdvanceActionableDefaults(): Promise<void> {
     await this.ready();
-    const resource = this.workspaceReady ? vscode.Uri.file(this.workspaceRoot) : undefined;
-    const cfg = vscode.workspace.getConfiguration("hydraRoom", resource);
-    const current = cfg.get<boolean>("autoAdvanceActionableDefaults", true);
-    const inspected = cfg.inspect<boolean>("autoAdvanceActionableDefaults");
-    const target = inspected?.workspaceFolderValue !== undefined
-      ? vscode.ConfigurationTarget.WorkspaceFolder
-      : inspected?.workspaceValue !== undefined
-        ? vscode.ConfigurationTarget.Workspace
-        : vscode.ConfigurationTarget.Global;
-
-    await cfg.update("autoAdvanceActionableDefaults", !current, target);
+    if (vscode.workspace.isTrusted !== true) {
+      await this.appendSystemMessage("Auto-advance safe defaults stays off until this workspace is trusted.");
+      this.postState();
+      return;
+    }
+    const cfg = vscode.workspace.getConfiguration("hydraRoom");
+    const current = autoAdvanceActionableDefaults();
+    await cfg.update("autoAdvanceActionableDefaults", !current, vscode.ConfigurationTarget.Global);
     await this.appendSystemMessage(
-      `Auto Accept Default is now ${!current ? "on" : "off"} (${configurationTargetLabel(target)} setting).`
+      `Auto-advance safe defaults is now ${!current ? "on" : "off"} (User setting).`
     );
     this.postState();
   }
@@ -1047,10 +1443,9 @@ export class HydraRoomPanel {
     const previousState = this.state;
     this.applyEvent({ type: "handBack" });
     if (previousState.name === "ParallelReviewDone") {
-      await this.runParallelBuildPhase([...previousState.agents]);
+      await this.runParallelBuildPhase([...previousState.builders]);
     } else {
-      const builder: AgentId = previousState.reviewer === "codex" ? "claude" : "codex";
-      await this.runBuildPhase(builder);
+      await this.runBuildPhase(previousState.builder);
     }
     await this.drainQueuedUserMessages();
   }
@@ -1063,13 +1458,16 @@ export class HydraRoomPanel {
         this.queuedUserMessages.length > 0 &&
         this.workspaceReady &&
         !this.terminalPokeInFlight &&
+        !this.agentDuelAdmissionRunning &&
+        !this.agentDuelAutomationRunning &&
+        !this.duelCommitmentAbort &&
         !isInFlight(this.state) &&
         isSendable(this.state)
       ) {
         const next = this.queuedUserMessages.shift();
         if (!next) break;
         const beforeReplyAt = this.messages.length;
-        await appendMessage(this.transcriptUri.fsPath, {
+        await this.persistTranscriptMessage({
           role: "user",
           text: next.displayText,
           timestamp: next.timestamp,
@@ -1103,7 +1501,10 @@ export class HydraRoomPanel {
       isInFlight(this.state) ||
       this.terminalPokeInFlight ||
       this.verificationRunning ||
-      this.autopilotRunning
+      this.autopilotRunning ||
+      this.agentDuelAdmissionRunning ||
+      this.agentDuelAutomationRunning ||
+      !!this.duelCommitmentAbort
     ) {
       vscode.window.showWarningMessage("Hydra can archive the room after the current work finishes or is stopped.");
       return;
@@ -1114,12 +1515,14 @@ export class HydraRoomPanel {
     this.setMessages([]);
     this.state = { name: "AwaitingUser" };
     this.suggestedBuilder = undefined;
-    this.setAgentStatus("codex", "idle", "Idle");
-    this.setAgentStatus("claude", "idle", "Idle");
+    for (const agent of this.roster()) this.setAgentStatus(agent, "idle", "Idle");
 
     const archiveLabel = path.relative(this.workspaceRoot, result.archivePath).replace(/\\/g, "/");
+    const archivedSummary = result.archivedMessages === undefined
+      ? "room history"
+      : `${result.archivedMessages} room message${result.archivedMessages === 1 ? "" : "s"}`;
     await this.appendSystemMessage(
-      `Archived ${result.archivedMessages} room message${result.archivedMessages === 1 ? "" : "s"} to \`${archiveLabel}\`. Room window cleared.`
+      `Archived ${archivedSummary} to \`${archiveLabel}\`. Room window cleared.`
     );
     try {
       await this.appendSystemMessage(await this.runWorkspaceStateCleanup());
@@ -1151,6 +1554,1653 @@ export class HydraRoomPanel {
     if (!this.workspaceReady) return;
     const doc = await vscode.workspace.openTextDocument(this.verificationUri);
     await vscode.window.showTextDocument(doc, vscode.ViewColumn.Active);
+  }
+
+  async openStandings(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    try {
+      this.scoreboard = aggregateScoreboard(await loadScoreboardEvents(this.scoreEventsUri.fsPath));
+      this.scoreboardError = undefined;
+    } catch {
+      this.scoreboardError = "Private standings ledger failed validation; no scores were loaded.";
+      this.postState();
+      await vscode.window.showErrorMessage(this.scoreboardError);
+      return;
+    }
+    if (!(await this.refreshScoreboardMirror())) {
+      this.postState();
+      await vscode.window.showErrorMessage(this.scoreboardMirrorError ?? "Hydra could not refresh the standings mirror.");
+      return;
+    }
+    this.postState();
+    const doc = await vscode.workspace.openTextDocument(this.scoreboardMirrorUri);
+    await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+  }
+
+  async openScoreEvidence(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    let events: ScoreboardEvent[];
+    try {
+      events = await loadScoreboardEvents(this.scoreEventsUri.fsPath);
+      this.scoreboard = aggregateScoreboard(events);
+      this.scoreboardError = undefined;
+    } catch {
+      this.scoreboardError = "Private standings ledger failed validation; evidence cannot be reviewed safely.";
+      this.postState();
+      await vscode.window.showErrorMessage(this.scoreboardError);
+      return;
+    }
+    try {
+      await writeScoreEvidenceMirror(this.scoreEvidenceMirrorUri.fsPath, events, displayNameFor);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      await vscode.window.showErrorMessage(`Hydra could not render the score evidence report: ${detail}`);
+      return;
+    }
+    this.postState();
+    const doc = await vscode.workspace.openTextDocument(this.scoreEvidenceMirrorUri);
+    await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+  }
+
+  private async refreshScoreboardMirror(): Promise<boolean> {
+    try {
+      await writeScoreboardMirror(this.scoreboardMirrorUri.fsPath, this.scoreboard, displayNameFor);
+      this.scoreboardMirrorError = undefined;
+      return true;
+    } catch {
+      // The private ledger remains authoritative. A disposable workspace
+      // mirror failure must never hide valid scores or imply that an append
+      // failed (which could cause the user to record the verdict twice).
+      this.scoreboardMirrorError = "Standings are valid, but Hydra could not refresh `.hydra/scoreboard.md`.";
+      return false;
+    }
+  }
+
+  async recordScoreVerdict(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    if (this.scoreboardError) {
+      await vscode.window.showErrorMessage(this.scoreboardError);
+      return;
+    }
+
+    const claimant = await vscode.window.showQuickPick(
+      this.roster().map((agentId) => ({ label: displayNameFor(agentId), description: agentId, agentId })),
+      { title: "Hydra Standings: Select Claimant", placeHolder: "Which head made the claim?", ignoreFocusOut: true },
+    );
+    if (!claimant) return;
+
+    const domainPick = await vscode.window.showQuickPick(
+      [
+        { label: "Runtime", value: "runtime", description: "Behavior, debugging, and implementation correctness" },
+        { label: "Architecture", value: "architecture", description: "System design and tradeoff predictions" },
+        { label: "Security", value: "security", description: "Threats, controls, and safety claims" },
+        { label: "UX", value: "ux", description: "Usability and interface claims" },
+        { label: "Requirements", value: "requirements", description: "Interpretation of the user's intent" },
+        { label: "Research", value: "research", description: "Externally verifiable factual claims" },
+        { label: "Custom…", value: "custom", description: "Enter another lowercase domain slug" },
+      ],
+      { title: "Hydra Standings: Domain", placeHolder: "What kind of claim was this?", ignoreFocusOut: true },
+    );
+    if (!domainPick) return;
+    let domain = domainPick.value;
+    if (domain === "custom") {
+      const custom = await vscode.window.showInputBox({
+        title: "Hydra Standings: Custom Domain",
+        prompt: "Use a lowercase slug, for example database or product-strategy.",
+        ignoreFocusOut: true,
+        validateInput: (value) => /^[a-z][a-z0-9-]{0,31}$/.test(value.trim())
+          ? undefined
+          : "Use 1-32 lowercase letters, digits, or hyphens; start with a letter.",
+      });
+      if (custom === undefined) return;
+      domain = custom.trim();
+    }
+
+    const outcomePick = await vscode.window.showQuickPick(
+      [
+        { label: "Correct", value: "correct" as CorrectnessOutcome, description: "The material claim held up" },
+        { label: "Partially correct", value: "partial" as CorrectnessOutcome, description: "Useful core, but materially incomplete" },
+        { label: "Incorrect", value: "incorrect" as CorrectnessOutcome, description: "The material claim failed" },
+        { label: "Unresolved", value: "unresolved" as CorrectnessOutcome, description: "Not enough evidence yet; no score" },
+        { label: "Void", value: "void" as CorrectnessOutcome, description: "Not falsifiable or invalid comparison; no score" },
+      ],
+      { title: "Hydra Standings: Outcome", placeHolder: "What did the evidence show?", ignoreFocusOut: true },
+    );
+    if (!outcomePick) return;
+
+    const latestVerification = this.latestVerification();
+    const deterministicEvidence = latestVerification && verificationPassed(latestVerification)
+      ? latestVerification
+      : undefined;
+    const evidenceSources: Array<{ label: string; value: VerdictSourceStrength; description: string }> = [];
+    if (deterministicEvidence && outcomePick.value === "correct") {
+      evidenceSources.push({
+        label: "Exact latest passing verification",
+        value: "deterministic",
+        description: `Creates a fixed claim for ${deterministicEvidence.command} at ${deterministicEvidence.timestamp}`,
+      });
+    }
+    evidenceSources.push(
+      { label: "Human adjudication", value: "human", description: "Your explicit review of the evidence" },
+      { label: "Peer assessment (advisory)", value: "peer", description: "Recorded for discussion; contributes zero score" },
+    );
+    const sourcePick = await vscode.window.showQuickPick(
+      evidenceSources,
+      { title: "Hydra Standings: Evidence Source", placeHolder: "Who or what established the outcome?", ignoreFocusOut: true },
+    );
+    if (!sourcePick) return;
+
+    let statement: string;
+    if (sourcePick.value === "deterministic" && deterministicEvidence) {
+      statement = `Hydra verification passed at ${deterministicEvidence.timestamp} for Git ${deterministicEvidence.headSha ?? "unrecorded HEAD"}: ${deterministicEvidence.command}`.slice(0, 2_000);
+    } else {
+      const enteredStatement = await vscode.window.showInputBox({
+        title: "Hydra Standings: Claim",
+        prompt: "Record the falsifiable claim being judged.",
+        ignoreFocusOut: true,
+        validateInput: (value) => value.trim().length === 0
+          ? "A claim is required."
+          : value.trim().length > 2_000
+            ? "Keep the claim at 2,000 characters or fewer."
+            : undefined,
+      });
+      if (enteredStatement === undefined) return;
+      statement = enteredStatement.trim();
+    }
+
+    let adjudicatorId = sourcePick.value === "deterministic" ? "verification" : "local-user";
+    if (sourcePick.value === "peer") {
+      const peer = await vscode.window.showQuickPick(
+        this.roster()
+          .filter((agentId) => agentId !== claimant.agentId)
+          .map((agentId) => ({ label: displayNameFor(agentId), description: agentId, agentId })),
+        { title: "Hydra Standings: Peer", placeHolder: "Which other head made the advisory assessment?", ignoreFocusOut: true },
+      );
+      if (!peer) return;
+      adjudicatorId = peer.agentId;
+    }
+
+    const rationale = await vscode.window.showInputBox({
+      title: "Hydra Standings: Evidence Note",
+      prompt: "Record why the cited evidence establishes this outcome.",
+      ignoreFocusOut: true,
+      validateInput: (value) => value.trim().length === 0
+        ? "An evidence note is required."
+        : value.trim().length > 2_000
+          ? "Keep the note at 2,000 characters or fewer."
+          : undefined,
+    });
+    if (rationale === undefined) return;
+
+    const now = new Date().toISOString();
+    const evidenceRef = sourcePick.value === "deterministic" && deterministicEvidence
+      ? `verification:${deterministicEvidence.timestamp}:${deterministicEvidence.headSha ?? "no-head"}:${crypto.createHash("sha256").update(`${deterministicEvidence.command}\0${deterministicEvidence.stdout}\0${deterministicEvidence.stderr}`).digest("hex")}`
+      : sourcePick.value === "human"
+        ? `human:local-user:${now}`
+        : `peer:${adjudicatorId}:${now}`;
+    const latestUserMessage = [...this.messages].reverse().find((message) => message.role === "user");
+    const roundId = `round-${(latestUserMessage?.timestamp ?? now).replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 96)}`;
+    const claimId = `claim-${crypto.randomUUID()}`;
+    const verdictId = `verdict-${crypto.randomUUID()}`;
+    const events: ScoreboardEvent[] = [
+      {
+        type: "claimRegistered",
+        eventId: `event-${crypto.randomUUID()}`,
+        occurredAt: now,
+        claimId,
+        roundId,
+        agentId: claimant.agentId,
+        domain,
+        statement,
+        confidence: null,
+      },
+      {
+        type: "verdictRecorded",
+        eventId: `event-${crypto.randomUUID()}`,
+        occurredAt: now,
+        verdictId,
+        claimId,
+        outcome: outcomePick.value,
+        source: sourcePick.value,
+        adjudicatorId,
+        evidenceRef,
+        rationale: rationale.trim(),
+      },
+    ];
+
+    try {
+      this.scoreboard = await appendScoreboardEvents(this.scoreEventsUri.fsPath, events);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      await vscode.window.showErrorMessage(`Hydra could not record the verdict: ${detail}`);
+      return;
+    }
+    const mirrorOk = await this.refreshScoreboardMirror();
+    this.postState();
+    const mirrorNote = mirrorOk ? "" : " The verdict is safely recorded, but the Markdown mirror needs repair.";
+    await vscode.window.showInformationMessage(
+      `Recorded ${outcomePick.label.toLowerCase()} for ${displayNameFor(claimant.agentId)} in ${domain}${sourcePick.value === "peer" ? " (advisory only)" : ""}.${mirrorNote}`,
+      "Open Standings",
+    ).then((choice) => choice === "Open Standings" ? this.openStandings() : undefined);
+  }
+
+  async reverseScoreVerdict(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    let events: ScoreboardEvent[];
+    try {
+      events = await loadScoreboardEvents(this.scoreEventsUri.fsPath);
+      this.scoreboardError = undefined;
+    } catch {
+      this.scoreboardError = "Private standings ledger failed validation; no verdict can be reversed safely.";
+      this.postState();
+      await vscode.window.showErrorMessage(this.scoreboardError);
+      return;
+    }
+
+    const active = listActiveScoreEvidence(events);
+    if (active.length === 0) {
+      await vscode.window.showInformationMessage("Hydra has no active score verdicts to reverse.");
+      return;
+    }
+    const selected = await vscode.window.showQuickPick(
+      active.map(({ claim, verdict }) => ({
+        label: `${displayNameFor(claim.agentId)} · ${verdict.outcome}`,
+        description: `${claim.domain} · ${new Date(verdict.occurredAt).toLocaleString()}`,
+        detail: claim.statement.length > 180 ? `${claim.statement.slice(0, 177)}…` : claim.statement,
+        verdictId: verdict.verdictId,
+      })),
+      {
+        title: "Hydra Standings: Reverse Verdict",
+        placeHolder: "Select the active verdict whose evidence or adjudication was wrong",
+        matchOnDescription: true,
+        matchOnDetail: true,
+        ignoreFocusOut: true,
+      },
+    );
+    if (!selected) return;
+
+    const reason = await vscode.window.showInputBox({
+      title: "Hydra Standings: Reversal Reason",
+      prompt: "Explain why this verdict should no longer affect the standings. The reversal is append-only and auditable.",
+      ignoreFocusOut: true,
+      validateInput: (value) => value.trim().length === 0
+        ? "A reversal reason is required."
+        : value.trim().length > 2_000
+          ? "Keep the reason at 2,000 characters or fewer."
+          : undefined,
+    });
+    if (reason === undefined) return;
+
+    try {
+      this.scoreboard = await appendScoreboardEvents(this.scoreEventsUri.fsPath, [{
+        type: "verdictReversed",
+        eventId: `event-${crypto.randomUUID()}`,
+        occurredAt: new Date().toISOString(),
+        targetVerdictId: selected.verdictId,
+        reversedBy: "local-user",
+        reason: reason.trim(),
+      }]);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      await vscode.window.showErrorMessage(`Hydra could not reverse the verdict: ${detail}`);
+      return;
+    }
+    const mirrorOk = await this.refreshScoreboardMirror();
+    this.postState();
+    const mirrorNote = mirrorOk ? "" : " The reversal is safely recorded, but the Markdown mirror needs repair.";
+    await vscode.window.showInformationMessage(
+      `Verdict reversed. Its claim is now pending and no longer affects the standings.${mirrorNote}`,
+      "Adjudicate Pending",
+      "Review Evidence",
+    ).then((choice) => choice === "Adjudicate Pending"
+      ? this.adjudicatePendingScoreClaim()
+      : choice === "Review Evidence"
+        ? this.openScoreEvidence()
+        : undefined);
+  }
+
+  async adjudicatePendingScoreClaim(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    let events: ScoreboardEvent[];
+    try {
+      events = await loadScoreboardEvents(this.scoreEventsUri.fsPath);
+      this.scoreboardError = undefined;
+    } catch {
+      this.scoreboardError = "Private standings ledger failed validation; pending claims cannot be adjudicated safely.";
+      this.postState();
+      await vscode.window.showErrorMessage(this.scoreboardError);
+      return;
+    }
+
+    const pending = listPendingScoreClaims(events);
+    if (pending.length === 0) {
+      await vscode.window.showInformationMessage("Hydra has no pending score claims.");
+      return;
+    }
+    const selected = await vscode.window.showQuickPick(
+      pending.map((claim) => ({
+        label: displayNameFor(claim.agentId),
+        description: `${claim.domain} · ${new Date(claim.occurredAt).toLocaleString()}`,
+        detail: claim.statement.length > 180 ? `${claim.statement.slice(0, 177)}…` : claim.statement,
+        claim,
+      })),
+      {
+        title: "Hydra Standings: Adjudicate Pending Claim",
+        placeHolder: "Select a claim whose previous verdict was reversed",
+        matchOnDescription: true,
+        matchOnDetail: true,
+        ignoreFocusOut: true,
+      },
+    );
+    if (!selected) return;
+
+    const outcomePick = await vscode.window.showQuickPick(
+      [
+        { label: "Correct", value: "correct" as CorrectnessOutcome },
+        { label: "Partially correct", value: "partial" as CorrectnessOutcome },
+        { label: "Incorrect", value: "incorrect" as CorrectnessOutcome },
+        { label: "Unresolved", value: "unresolved" as CorrectnessOutcome },
+        { label: "Void", value: "void" as CorrectnessOutcome },
+      ],
+      { title: "Hydra Standings: Replacement Outcome", placeHolder: "What does the corrected evidence show?", ignoreFocusOut: true },
+    );
+    if (!outcomePick) return;
+
+    const sourcePick = await vscode.window.showQuickPick(
+      [
+        { label: "Human adjudication", value: "human" as VerdictSourceStrength, description: "Your explicit review of the corrected evidence" },
+        { label: "Peer assessment (advisory)", value: "peer" as VerdictSourceStrength, description: "Visible for discussion; contributes zero score" },
+      ],
+      { title: "Hydra Standings: Replacement Evidence", placeHolder: "Who established the corrected outcome?", ignoreFocusOut: true },
+    );
+    if (!sourcePick) return;
+
+    let adjudicatorId = "local-user";
+    if (sourcePick.value === "peer") {
+      const peer = await vscode.window.showQuickPick(
+        this.roster()
+          .filter((agentId) => agentId !== selected.claim.agentId)
+          .map((agentId) => ({ label: displayNameFor(agentId), description: agentId, agentId })),
+        { title: "Hydra Standings: Replacement Peer", placeHolder: "Which other head supplied the advisory correction?", ignoreFocusOut: true },
+      );
+      if (!peer) return;
+      adjudicatorId = peer.agentId;
+    }
+
+    const rationale = await vscode.window.showInputBox({
+      title: "Hydra Standings: Corrected Evidence Note",
+      prompt: "Explain why the replacement outcome follows from the corrected evidence.",
+      ignoreFocusOut: true,
+      validateInput: (value) => value.trim().length === 0
+        ? "A corrected evidence note is required."
+        : value.trim().length > 2_000
+          ? "Keep the note at 2,000 characters or fewer."
+          : undefined,
+    });
+    if (rationale === undefined) return;
+
+    const now = new Date().toISOString();
+    try {
+      this.scoreboard = await appendScoreboardEvents(this.scoreEventsUri.fsPath, [{
+        type: "verdictRecorded",
+        eventId: `event-${crypto.randomUUID()}`,
+        occurredAt: now,
+        verdictId: `verdict-${crypto.randomUUID()}`,
+        claimId: selected.claim.claimId,
+        outcome: outcomePick.value,
+        source: sourcePick.value,
+        adjudicatorId,
+        evidenceRef: sourcePick.value === "human"
+          ? `human:local-user:${now}`
+          : `peer:${adjudicatorId}:${now}`,
+        rationale: rationale.trim(),
+      }]);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      await vscode.window.showErrorMessage(`Hydra could not adjudicate the pending claim: ${detail}`);
+      return;
+    }
+    const mirrorOk = await this.refreshScoreboardMirror();
+    this.postState();
+    const mirrorNote = mirrorOk ? "" : " The replacement is safely recorded, but the Markdown mirror needs repair.";
+    await vscode.window.showInformationMessage(
+      `Replacement verdict recorded for ${displayNameFor(selected.claim.agentId)}${sourcePick.value === "peer" ? " (advisory only)" : ""}.${mirrorNote}`,
+      "Review Evidence",
+    ).then((choice) => choice === "Review Evidence" ? this.openScoreEvidence() : undefined);
+  }
+
+  async openDuelsPanel(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    try {
+      this.duels = aggregateDuels(await loadDuelEvents(this.duelEventsUri.fsPath));
+      this.duelError = undefined;
+    } catch {
+      this.duels = initialEmptyDuelAggregate();
+      this.duelError = "Private duel ledger failed validation; formal duels and ratings were not loaded.";
+      this.postState();
+      await vscode.window.showErrorMessage(this.duelError);
+      return;
+    }
+    this.panel.reveal(vscode.ViewColumn.Beside, true);
+    this.postState();
+    await this.panel.webview.postMessage({ type: "openPanel", panel: "duels" });
+  }
+
+  async openDuelAudit(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    let events: DuelEvent[];
+    try {
+      events = await loadDuelEvents(this.duelEventsUri.fsPath);
+      this.duels = aggregateDuels(events);
+      this.duelError = undefined;
+    } catch {
+      this.duels = initialEmptyDuelAggregate();
+      this.duelError = "Private duel ledger failed validation; the duel audit cannot be rendered safely.";
+      this.postState();
+      await vscode.window.showErrorMessage(this.duelError);
+      return;
+    }
+    if (!(await this.refreshDuelMirror(events))) {
+      this.postState();
+      await vscode.window.showErrorMessage(this.duelMirrorError ?? "Hydra could not refresh the duel audit mirror.");
+      return;
+    }
+    this.postState();
+    const doc = await vscode.workspace.openTextDocument(this.duelMirrorUri);
+    await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+  }
+
+  private async refreshDuelMirror(events?: readonly DuelEvent[]): Promise<boolean> {
+    try {
+      const source = events ?? await loadDuelEvents(this.duelEventsUri.fsPath);
+      await writeDuelMirror(this.duelMirrorUri.fsPath, source, displayNameFor);
+      this.duelMirrorError = undefined;
+      return true;
+    } catch {
+      // The append-only private ledger is authoritative. The workspace mirror
+      // is disposable and a mirror error must not encourage a duplicate event.
+      this.duelMirrorError = "Duels are valid, but Hydra could not refresh `.hydra/duels.md`.";
+      return false;
+    }
+  }
+
+  private async admitAgentInitiatedDuel(request: PendingAgentDuelRequest): Promise<void> {
+    const challenger = request.challengerId;
+    const challenged = request.context.opponentId;
+    const reject = async (reason: string): Promise<void> => {
+      const detail = `${displayNameFor(challenger)} challenge rejected: ${reason} No duel or Elo change occurred.`;
+      await this.appendSystemMessage(detail);
+      await this.recordEvent("diagnostic", detail, {
+        challenger,
+        challenged,
+        sourceMessageSha256: hashAgentDuelSource(request.sourceMessageText),
+        protocol: "agent-intent-v1",
+      });
+    };
+
+    if (!agentInitiatedDuels()) {
+      await reject("agent-initiated duels are paused in Hydra settings.");
+      return;
+    }
+    if (!vscode.workspace.isTrusted) {
+      await reject("the workspace is not trusted, so autonomous full-native calls are disabled.");
+      return;
+    }
+    const roster = this.roster();
+    if (!roster.includes(challenger) || !roster.includes(challenged) || challenger === challenged) {
+      await reject("the Hydra-bound challenger/opponent pair is not a valid seated pair.");
+      return;
+    }
+    if (!this.supportsFullAccessRatedDuel(challenger) || !this.supportsFullAccessRatedDuel(challenged)) {
+      await reject("both heads must support Hydra's equal full-native rated profile; no exhibition fallback was created.");
+      return;
+    }
+    const missingConsent = [challenger, challenged].filter((agent) =>
+      !this.context.workspaceState.get<boolean>(fullNativeConsentKey(agent), false)
+    );
+    if (missingConsent.length > 0) {
+      await reject(
+        `persistent full-native consent is required for ${missingConsent.map(displayNameFor).join(", ")}; Hydra will not open a background consent prompt.`,
+      );
+      return;
+    }
+    if (this.sessionCostCapExceeded()) {
+      await reject("the session cost cap has been reached.");
+      return;
+    }
+    if (this.duelError) {
+      await reject("the private duel ledger is unavailable or invalid.");
+      return;
+    }
+
+    let packet: string;
+    try {
+      packet = buildAgentDuelEvidencePacket({
+        challengerId: challenger,
+        challengedId: challenged,
+        sourceReplyTimestamp: request.sourceMessageTimestamp,
+        disputedMessageTimestamp: request.context.opponentMessageTimestamp,
+        disputedMessage: request.context.opponentMessageText,
+        latestUserMessage: request.context.latestUserMessage,
+        intent: request.intent,
+      });
+    } catch (error) {
+      await reject(error instanceof Error ? error.message : String(error));
+      return;
+    }
+
+    const occurredAt = new Date().toISOString();
+    const duelId = `duel-${crypto.randomUUID()}`;
+    const makeChallenge = (
+      workspaceFingerprintSha256: string,
+      capabilityLocks: readonly [DuelParticipantCapabilityLock, DuelParticipantCapabilityLock],
+    ): DuelEvent & { type: "duelChallenged" } => createDuelChallenge({
+        eventId: `event-${duelId}-challenge`,
+        occurredAt,
+        duelId,
+        challengerId: challenger,
+        challengedId: challenged,
+        domain: request.intent.domain,
+        proposition: request.intent.proposition,
+        evidenceContract: request.intent.evidenceContract,
+        sharedEvidencePacket: packet,
+        adjudicatorType: "human",
+        adjudicatorId: "local-user",
+        createdBy: "hydra-runtime",
+        initiation: {
+          protocol: "agent-intent-v1",
+          agentId: challenger,
+          sourceTraceId: request.sourceTraceId,
+          sourceMessageTimestamp: request.sourceMessageTimestamp,
+          sourceMessageSha256: hashAgentDuelSource(request.sourceMessageText),
+          disputedMessageTimestamp: request.context.opponentMessageTimestamp,
+          workspaceFingerprintSha256,
+          capabilityLocks,
+        },
+      });
+
+    // Reject cheap policy conflicts before executable resolution or workspace
+    // hashing. The final locked replay below repeats this check under append.
+    try {
+      const events = await loadDuelEvents(this.duelEventsUri.fsPath);
+      const placeholderLocks = [challenger, challenged].map((agent): DuelParticipantCapabilityLock => ({
+        agentId: agent,
+        agentKind: getAgentDefinition(agent)?.kind ?? "unknown",
+        profileSha256: "0".repeat(64),
+      })) as [DuelParticipantCapabilityLock, DuelParticipantCapabilityLock];
+      const provisional = makeChallenge("0".repeat(64), placeholderLocks);
+      createDuelAdmission([...events, provisional], {
+        eventId: `event-${duelId}-policy-check`,
+        occurredAt,
+        duelId,
+      });
+    } catch (error) {
+      const reason = error instanceof DuelAcceptanceRejectedError
+        ? `Hydra policy blocked it (${error.reasons.join(", ")}).`
+        : error instanceof Error ? error.message : String(error);
+      await reject(reason);
+      return;
+    }
+
+    let capabilityLocks: [DuelParticipantCapabilityLock, DuelParticipantCapabilityLock];
+    try {
+      capabilityLocks = await Promise.all([
+        this.captureFullAccessDuelHeadLock(challenger),
+        this.captureFullAccessDuelHeadLock(challenged),
+      ]);
+    } catch (error) {
+      await reject(`the equal full-native preflight failed (${error instanceof Error ? error.message : String(error)}).`);
+      return;
+    }
+    let workspaceFingerprintSha256: string;
+    try {
+      workspaceFingerprintSha256 = (await captureDuelWorkspaceFingerprint(this.workspaceRoot)).sha256;
+    } catch (error) {
+      await reject(`Hydra could not lock one safe shared workspace state (${error instanceof Error ? error.message : String(error)}).`);
+      return;
+    }
+    const challenge = makeChallenge(workspaceFingerprintSha256, capabilityLocks);
+
+    try {
+      const events = await loadDuelEvents(this.duelEventsUri.fsPath);
+      const admission = createDuelAdmission([...events, challenge], {
+        eventId: `event-${crypto.randomUUID()}`,
+        occurredAt: new Date().toISOString(),
+        duelId,
+      });
+      // One logical append means a concurrent cooldown winner cannot leave an
+      // orphan challenge if this admission loses the cross-process race.
+      this.duels = await appendDuelEvents(this.duelEventsUri.fsPath, [challenge, admission]);
+      this.duelError = undefined;
+    } catch (error) {
+      const reason = error instanceof DuelAcceptanceRejectedError
+        ? `Hydra policy blocked it (${error.reasons.join(", ")}).`
+        : error instanceof Error
+          ? error.message
+          : String(error);
+      await reject(reason);
+      return;
+    }
+
+    await this.refreshDuelMirror();
+    await this.appendSystemMessage(
+      `${displayNameFor(challenger)} initiated a rated ${request.intent.domain} duel against ${displayNameFor(challenged)}. Hydra admitted it by policy and queued both equal full-native sealed commitments. Proposition: ${request.intent.proposition}`,
+    );
+    await this.recordEvent("diagnostic", "Hydra admitted an agent-initiated formal duel.", {
+      duelId,
+      challenger,
+      challenged,
+      protocol: "agent-intent-v1",
+    });
+    this.enqueueAgentDuelAutomation(duelId);
+    this.postState();
+  }
+
+  private enqueueAgentDuelAutomation(duelId: string): void {
+    if (!this.agentDuelAutomationQueue.includes(duelId)) this.agentDuelAutomationQueue.push(duelId);
+    this.postState();
+    queueMicrotask(() => void this.drainAgentDuelAutomation());
+  }
+
+  private enqueueAgentDuelAdmission(request: PendingAgentDuelRequest): void {
+    this.agentDuelAdmissionQueue.push(request);
+    this.postState();
+    queueMicrotask(() => void this.drainAgentDuelAdmissions());
+  }
+
+  /**
+   * Admission fingerprints a shared evidence state, so it must never race a
+   * closer/build/review turn. Reactor and closer intents are collected during
+   * finalization, then processed only after the room returns fully idle.
+   */
+  private async drainAgentDuelAdmissions(): Promise<void> {
+    if (this.drainingAgentDuelAdmissions || this.disposed) return;
+    if (
+      !agentInitiatedDuels()
+      || !this.workspaceReady
+      || this.currentAbort
+      || isInFlight(this.state)
+      || this.terminalPokeInFlight
+      || this.verificationRunning
+      || this.autopilotRunning
+      || this.agentDuelAutomationRunning
+      || this.duelCommitmentAbort
+      || this.queuedUserMessages.length > 0
+    ) {
+      return;
+    }
+    this.drainingAgentDuelAdmissions = true;
+    try {
+      while (
+        agentInitiatedDuels()
+        && this.agentDuelAdmissionQueue.length > 0
+        && !this.currentAbort
+        && !isInFlight(this.state)
+        && this.queuedUserMessages.length === 0
+      ) {
+        const request = this.agentDuelAdmissionQueue.shift();
+        if (!request) break;
+        this.agentDuelAdmissionRunning = true;
+        this.postState();
+        try {
+          await this.admitAgentInitiatedDuel(request);
+        } catch (error) {
+          const detail = boundedRuntimeDuelReason(error instanceof Error ? error.message : String(error));
+          await this.appendSystemMessage(`Hydra could not process the agent's duel request: ${detail} No duel or Elo change occurred.`);
+        } finally {
+          this.agentDuelAdmissionRunning = false;
+          this.postState();
+        }
+      }
+    } finally {
+      this.drainingAgentDuelAdmissions = false;
+      this.postState();
+      if (this.agentDuelAutomationQueue.length > 0) queueMicrotask(() => void this.drainAgentDuelAutomation());
+      if (this.queuedUserMessages.length > 0) void this.drainQueuedUserMessages();
+    }
+  }
+
+  private async drainAgentDuelAutomation(): Promise<void> {
+    if (this.drainingAgentDuelAutomation || this.disposed) return;
+    if (
+      !agentInitiatedDuels()
+      || !this.workspaceReady
+      || this.agentDuelAdmissionRunning
+      || this.drainingAgentDuelAdmissions
+      || this.unconfirmedNativeTermination
+      || this.terminalPokeInFlight
+      || isInFlight(this.state)
+      || this.queuedUserMessages.length > 0
+      || this.verificationRunning
+      || this.autopilotRunning
+      || this.duelCommitmentAbort
+    ) {
+      return;
+    }
+    this.drainingAgentDuelAutomation = true;
+    try {
+      while (
+        agentInitiatedDuels()
+        && this.agentDuelAutomationQueue.length > 0
+        && this.queuedUserMessages.length === 0
+        && !isInFlight(this.state)
+      ) {
+        const duelId = this.agentDuelAutomationQueue.shift();
+        if (!duelId) break;
+        this.agentDuelAutomationRunning = true;
+        this.postState();
+        try {
+          await this.runAgentDuelAutomation(duelId);
+          this.agentDuelAutomationAttempts.delete(duelId);
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          await this.scheduleAgentDuelAutomationRetry(duelId, detail);
+        } finally {
+          this.agentDuelAutomationRunning = false;
+          this.postState();
+        }
+      }
+    } finally {
+      this.drainingAgentDuelAutomation = false;
+      this.postState();
+      if (this.queuedUserMessages.length > 0) void this.drainQueuedUserMessages();
+    }
+  }
+
+  private async scheduleAgentDuelAutomationRetry(duelId: string, detail: string): Promise<void> {
+    const attempt = (this.agentDuelAutomationAttempts.get(duelId) ?? 0) + 1;
+    this.agentDuelAutomationAttempts.set(duelId, attempt);
+    const safeDetail = boundedRuntimeDuelReason(detail);
+    if (attempt >= MAX_AGENT_DUEL_AUTOMATION_ATTEMPTS) {
+      await this.appendSystemMessage(
+        `Agent-initiated duel ${duelId} paused after ${attempt} automatic commitment attempts: ${safeDetail} No exhibition or manual answer was substituted. Fix the native head/profile, then re-enable agent challenges or reload Hydra to resume; cancellation remains available and Elo is unchanged.`,
+      );
+      return;
+    }
+    const delayMs = AGENT_DUEL_AUTOMATION_RETRY_DELAYS_MS[Math.min(
+      attempt - 1,
+      AGENT_DUEL_AUTOMATION_RETRY_DELAYS_MS.length - 1,
+    )]!;
+    await this.appendSystemMessage(
+      `Agent-initiated duel ${duelId} commitment attempt ${attempt} failed: ${safeDetail} Hydra will retry automatically in ${Math.round(delayMs / 1_000)} seconds; no fallback answer or Elo change occurred.`,
+    );
+    const existing = this.agentDuelAutomationRetryTimers.get(duelId);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      this.agentDuelAutomationRetryTimers.delete(duelId);
+      if (!this.disposed) this.enqueueAgentDuelAutomation(duelId);
+    }, delayMs);
+    timer.unref();
+    this.agentDuelAutomationRetryTimers.set(duelId, timer);
+  }
+
+  private requeueOutstandingAgentDuels(): void {
+    for (const timer of this.agentDuelAutomationRetryTimers.values()) clearTimeout(timer);
+    this.agentDuelAutomationRetryTimers.clear();
+    this.agentDuelAutomationAttempts.clear();
+    for (const duel of this.duels.activeDuels) {
+      if (
+        duel.createdBy === "hydra-runtime"
+        && (duel.status === "awaiting_commitments" || duel.status === "awaiting_reveal")
+        && !this.agentDuelAutomationQueue.includes(duel.duelId)
+      ) {
+        this.agentDuelAutomationQueue.push(duel.duelId);
+      }
+    }
+    this.postState();
+  }
+
+  private async runAgentDuelAutomation(duelId: string): Promise<void> {
+    let events = await loadDuelEvents(this.duelEventsUri.fsPath);
+    let duel = aggregateDuels(events).activeDuels.find((candidate) => candidate.duelId === duelId);
+    if (!duel || duel.createdBy !== "hydra-runtime") return;
+    let mutationMonitor: DuelWorkspaceMutationMonitor;
+    try {
+      mutationMonitor = watchDuelWorkspaceMutations(this.workspaceRoot);
+    } catch (error) {
+      await this.cancelAgentDuelForIntegrity(
+        duel,
+        `Hydra could not start the live workspace mutation monitor: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return;
+    }
+    try {
+    const workspaceFingerprintSha256 = duel.initiation?.workspaceFingerprintSha256;
+    if (!workspaceFingerprintSha256) {
+      await this.cancelAgentDuelForIntegrity(duel, "The agent challenge has no durable admission workspace fingerprint.");
+      return;
+    }
+    if (!(await this.ensureAgentDuelWorkspaceIntegrity(duel, "before either commitment", mutationMonitor))) return;
+
+    if (duel.status === "awaiting_commitments") {
+      const sealed = new Set(events.flatMap((event) =>
+        event.type === "duelCommitmentSealed" && event.duelId === duelId ? [event.participantId] : []
+      ));
+      for (const participant of [duel.challengerId, duel.challengedId]) {
+        if (sealed.has(participant)) continue;
+        const capabilityLock = duel.initiation?.capabilityLocks.find((lock) => lock.agentId === participant);
+        if (!capabilityLock) {
+          await this.cancelAgentDuelForIntegrity(duel, `No admission capability lock exists for ${displayNameFor(participant)}.`);
+          return;
+        }
+        if (!(await this.sealDuelCommitment(
+          duel,
+          participant,
+          false,
+          workspaceFingerprintSha256,
+          capabilityLock.profileSha256,
+        ))) {
+          throw new Error(`${displayNameFor(participant)} did not produce a durable sealed commitment.`);
+        }
+        if (!(await this.ensureAgentDuelWorkspaceIntegrity(
+          duel,
+          `after ${displayNameFor(participant)} committed`,
+          mutationMonitor,
+        ))) return;
+        events = await loadDuelEvents(this.duelEventsUri.fsPath);
+        duel = aggregateDuels(events).activeDuels.find((candidate) => candidate.duelId === duelId);
+        if (!duel) return;
+      }
+    }
+
+    if (duel.status === "awaiting_reveal") {
+      if (!(await this.revealDuelCommitmentsIfReady(duelId, false))) {
+        throw new Error("Hydra could not verify the paired commitment reveal.");
+      }
+    }
+    const ready = this.duels.activeDuels.find((candidate) => candidate.duelId === duelId);
+    if (ready?.status === "awaiting_adjudication") {
+      await this.appendSystemMessage(
+        `${displayNameFor(ready.challengerId)} vs ${displayNameFor(ready.challengedId)} is fully revealed and awaiting your independent evidence judgment.`,
+      );
+    }
+    } finally {
+      mutationMonitor.close();
+    }
+  }
+
+  private async ensureAgentDuelWorkspaceIntegrity(
+    duel: DuelView,
+    stage: string,
+    mutationMonitor?: DuelWorkspaceMutationMonitor,
+  ): Promise<boolean> {
+    const expected = duel.initiation?.workspaceFingerprintSha256;
+    if (!expected) {
+      await this.cancelAgentDuelForIntegrity(duel, `No admission workspace fingerprint was available ${stage}.`);
+      return false;
+    }
+    try {
+      if (mutationMonitor) {
+        await mutationMonitor.settle();
+        if (mutationMonitor.changed) {
+          const detail = mutationMonitor.error
+            ?? `workspace activity was observed at ${mutationMonitor.changedPaths.join(", ") || "an unknown path"}`;
+          await this.cancelAgentDuelForIntegrity(
+            duel,
+            `The shared workspace changed ${stage}; ${detail}. Hydra refused to compare different evidence.`,
+          );
+          return false;
+        }
+      }
+      const current = await captureDuelWorkspaceFingerprint(this.workspaceRoot);
+      if (current.sha256 === expected) return true;
+      await this.cancelAgentDuelForIntegrity(
+        duel,
+        `The shared Git workspace changed ${stage}; Hydra refused to let the other head evaluate different evidence.`,
+      );
+    } catch (error) {
+      await this.cancelAgentDuelForIntegrity(
+        duel,
+        `Hydra could not verify the shared Git workspace ${stage}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    return false;
+  }
+
+  private async cancelAgentDuelForIntegrity(duel: DuelView, reason: string): Promise<void> {
+    const safeReason = boundedRuntimeDuelReason(reason);
+    const events = await loadDuelEvents(this.duelEventsUri.fsPath);
+    const current = aggregateDuels(events).activeDuels.find((candidate) => candidate.duelId === duel.duelId);
+    if (!current) return;
+    const cancellation: DuelEvent = {
+      type: "duelCancelled",
+      eventId: `event-${crypto.randomUUID()}`,
+      occurredAt: new Date().toISOString(),
+      duelId: duel.duelId,
+      cancelledBy: "hydra-runtime",
+      reason: safeReason,
+    };
+    this.duels = await appendDuelEvents(this.duelEventsUri.fsPath, [cancellation]);
+    this.duelError = undefined;
+    const secretRefs = events.flatMap((event) =>
+      event.type === "duelCommitmentSealed" && event.duelId === duel.duelId
+        ? [{ participantId: event.participantId, commitmentId: event.commitmentId }]
+        : []
+    );
+    if (secretRefs.length > 0) {
+      await deleteDuelCommitmentSecrets(
+        this.context.secrets,
+        this.duelCommitmentIndexUri.fsPath,
+        duel.duelId,
+        secretRefs,
+      ).catch(() => this.scheduleDuelCommitmentSecretSweep(Date.now() + 60_000));
+    }
+    await this.refreshDuelMirror();
+    await this.appendSystemMessage(`Hydra cancelled ${duel.duelId} for duel-integrity protection: ${safeReason} Elo is unchanged.`);
+    await this.recordEvent("diagnostic", "Hydra cancelled an agent-initiated duel for workspace-integrity protection.", {
+      duelId: duel.duelId,
+      reason: safeReason,
+    });
+    this.postState();
+  }
+
+  private startDuelLedgerWatcher(): void {
+    try {
+      const watcher = watchFileSystem(this.duelEventsUri.fsPath, { persistent: false }, () => {
+        if (this.disposed) return;
+        if (this.duelRefreshTimer) clearTimeout(this.duelRefreshTimer);
+        this.duelRefreshTimer = setTimeout(() => {
+          this.duelRefreshTimer = undefined;
+          void this.refreshDuelsFromLedgerWatcher();
+        }, 300);
+      });
+      // Watch failure must not crash the extension host. Normal panel actions
+      // still refresh synchronously; only cross-window freshness is lost.
+      watcher.on("error", () => watcher.close());
+      this.disposables.push({ dispose: () => watcher.close() });
+    } catch {
+      // Some remote/custom filesystems cannot be watched. Duel commands remain
+      // usable and every command still performs a full replay before acting.
+    }
+  }
+
+  private async refreshDuelsFromLedgerWatcher(): Promise<void> {
+    if (this.disposed) return;
+    try {
+      const events = await loadDuelEvents(this.duelEventsUri.fsPath);
+      this.duels = aggregateDuels(events);
+      this.duelError = undefined;
+      await this.sweepDuelCommitmentSecretCleanup(events);
+    } catch {
+      // Fail closed instead of keeping a stale crown after another process
+      // writes malformed or referentially invalid history.
+      this.duels = initialEmptyDuelAggregate();
+      this.duelError = "Private duel ledger failed validation; cross-window ratings were hidden.";
+    }
+    this.postState();
+  }
+
+  private async sweepDuelCommitmentSecretCleanup(events?: readonly DuelEvent[]): Promise<void> {
+    if (this.disposed || !this.workspaceReady) return;
+    if (this.duelSecretSweepTimer) {
+      clearTimeout(this.duelSecretSweepTimer);
+      this.duelSecretSweepTimer = undefined;
+      this.duelSecretSweepAtMs = undefined;
+    }
+    try {
+      const source = events ?? await loadDuelEvents(this.duelEventsUri.fsPath);
+      const result = await sweepDuelCommitmentSecrets(
+        this.context.secrets,
+        this.duelCommitmentIndexUri.fsPath,
+        source,
+      );
+      if (this.disposed) return;
+      if (result.failed === 0) this.duelSecretCleanupWarningShown = false;
+      if (result.failed > 0 && !this.duelSecretCleanupWarningShown) {
+        this.duelSecretCleanupWarningShown = true;
+        await vscode.window.showWarningMessage("Hydra could not remove every terminal sealed-answer copy. Cleanup is indexed and will retry automatically.");
+      }
+      const retryAt = result.failed > 0
+        ? Date.now() + 60_000
+        : result.nextSweepAt === undefined
+          ? undefined
+          : Date.parse(result.nextSweepAt);
+      if (retryAt !== undefined && Number.isFinite(retryAt)) this.scheduleDuelCommitmentSecretSweep(retryAt);
+    } catch {
+      if (!this.duelSecretCleanupWarningShown) {
+        this.duelSecretCleanupWarningShown = true;
+        await vscode.window.showWarningMessage("Hydra could not reconcile the private sealed-answer index. No cleanup decision was made from partial state; Hydra will retry automatically.");
+      }
+      if (!this.disposed) this.scheduleDuelCommitmentSecretSweep(Date.now() + 60_000);
+    }
+  }
+
+  private scheduleDuelCommitmentSecretSweep(atMs: number): void {
+    if (this.disposed) return;
+    if (this.duelSecretSweepTimer && this.duelSecretSweepAtMs !== undefined && this.duelSecretSweepAtMs <= atMs) return;
+    if (this.duelSecretSweepTimer) clearTimeout(this.duelSecretSweepTimer);
+    this.duelSecretSweepAtMs = atMs;
+    const delayMs = Math.max(1_000, Math.min(2_147_000_000, atMs - Date.now()));
+    this.duelSecretSweepTimer = setTimeout(() => {
+      this.duelSecretSweepTimer = undefined;
+      this.duelSecretSweepAtMs = undefined;
+      void this.sweepDuelCommitmentSecretCleanup();
+    }, delayMs);
+    this.duelSecretSweepTimer.unref();
+  }
+
+  async advanceDuel(duelId = ""): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    let events: DuelEvent[];
+    try {
+      events = await loadDuelEvents(this.duelEventsUri.fsPath);
+      this.duels = aggregateDuels(events);
+      this.duelError = undefined;
+    } catch {
+      this.duels = initialEmptyDuelAggregate();
+      this.duelError = "Private duel ledger failed validation; no duel can advance safely.";
+      this.postState();
+      await vscode.window.showErrorMessage(this.duelError);
+      return;
+    }
+    if (this.duels.activeDuels.length === 0) {
+      await vscode.window.showInformationMessage("Hydra has no active formal duel to advance.");
+      return;
+    }
+
+    let duel = duelId ? this.duels.activeDuels.find((candidate) => candidate.duelId === duelId) : undefined;
+    if (duelId && !duel) {
+      await vscode.window.showWarningMessage("That duel is no longer active. Refresh the Formal Duels panel.");
+      return;
+    }
+    if (!duel) {
+      const selected = await vscode.window.showQuickPick(
+        this.duels.activeDuels.map((candidate) => ({
+          label: `${displayNameFor(candidate.challengerId)} vs ${displayNameFor(candidate.challengedId)}`,
+          description: `${candidate.domain} - ${candidate.status.replace(/_/g, " ")}`,
+          detail: candidate.proposition,
+          duel: candidate,
+        })),
+        { title: "Hydra Duels: Advance", placeHolder: "Select an active formal duel", matchOnDescription: true, matchOnDetail: true, ignoreFocusOut: true },
+      );
+      if (!selected) return;
+      duel = selected.duel;
+    }
+
+    switch (duel.status) {
+      case "awaiting_acceptance": {
+        const action = await vscode.window.showWarningMessage(
+          "This legacy operator-created challenge cannot enter the ladder. Hydra now admits only challenges initiated by a head during discussion.",
+          "Decline Legacy Challenge",
+        );
+        if (action !== "Decline Legacy Challenge") return;
+        const reason = await vscode.window.showInputBox({
+          title: "Hydra Duels: Close Legacy Challenge",
+          prompt: "Record why this obsolete operator-created challenge is being closed. No Elo changes.",
+          ignoreFocusOut: true,
+          validateInput: (value) => value.trim().length === 0
+            ? "A reason is required."
+            : value.trim().length > 2_000
+              ? "Keep the reason at 2,000 characters or fewer."
+              : undefined,
+        });
+        if (reason === undefined) return;
+        const declined: DuelEvent = {
+          type: "duelDeclined",
+          eventId: `event-${crypto.randomUUID()}`,
+          occurredAt: new Date().toISOString(),
+          duelId: duel.duelId,
+          declinedBy: duel.challengedId,
+          recordedBy: "local-user",
+          reason: `Legacy operator-created challenge closed: ${reason.trim()}`,
+        };
+        await this.appendDuelEventFromUi(declined, "close the legacy formal duel");
+        return;
+      }
+      case "awaiting_commitments": {
+        if (
+          duel.createdBy !== "hydra-runtime"
+          || duel.ratingPolicy !== DUEL_AGENT_RATING_POLICY
+          || !duel.rated
+        ) {
+          await vscode.window.showErrorMessage(
+            "Hydra preserves this legacy duel for audit but will not advance a human-created or pre-v3 match. Cancel it and let the heads initiate any future rated challenge during discussion.",
+          );
+          return;
+        }
+        this.enqueueAgentDuelAutomation(duel.duelId);
+        await vscode.window.showInformationMessage("Hydra queued the remaining agent-initiated duel commitments. No operator-authored answer will be accepted.");
+        return;
+      }
+      case "awaiting_reveal":
+        if (duel.createdBy !== "hydra-runtime" || duel.ratingPolicy !== DUEL_AGENT_RATING_POLICY) {
+          await vscode.window.showErrorMessage("Hydra will not reveal or advance a human-created legacy duel. Cancel it; future rated challenges must originate from a head.");
+          return;
+        }
+        await this.revealDuelCommitmentsIfReady(duel.duelId);
+        return;
+      case "awaiting_adjudication":
+        if (duel.createdBy !== "hydra-runtime" || duel.ratingPolicy !== DUEL_AGENT_RATING_POLICY) {
+          await vscode.window.showErrorMessage("Hydra preserves this human-created legacy result for audit but excludes it from the current agent-initiated ladder.");
+          return;
+        }
+        await this.adjudicateDuel(duel);
+        return;
+      default:
+        return;
+    }
+  }
+
+  private async sealDuelCommitment(
+    duel: DuelView,
+    participant: AgentId,
+    interactive: boolean,
+    workspaceFingerprintSha256?: string,
+    capabilityLockSha256?: string,
+  ): Promise<boolean> {
+    const reportError = async (message: string): Promise<void> => {
+      if (interactive) await vscode.window.showErrorMessage(message);
+      else await this.appendSystemMessage(message);
+    };
+    if (!duel.rated) {
+      await reportError("Hydra refused to seal an unranked or exhibition commitment.");
+      return false;
+    }
+    if (this.duelCommitmentAbort) {
+      if (interactive) await vscode.window.showInformationMessage("Another head is already generating a sealed duel commitment.");
+      return false;
+    }
+
+    const commitmentId = `commitment-${crypto.randomUUID()}`;
+    const controller = new AbortController();
+    this.duelCommitmentAbort = controller;
+    this.postState();
+    let captured: DuelHeadCommitmentCapture;
+    try {
+      if (interactive) {
+        captured = await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: `${displayNameFor(participant)} is independently evaluating the rated full-access duel`,
+            cancellable: true,
+          },
+          async (_progress, token) => {
+            const cancellation = token.onCancellationRequested(() => controller.abort());
+            try {
+              return await this.runDuelCommitmentHead(
+                duel,
+                participant,
+                commitmentId,
+                controller.signal,
+                true,
+                workspaceFingerprintSha256,
+                capabilityLockSha256,
+              );
+            } finally {
+              cancellation.dispose();
+            }
+          },
+        );
+      } else {
+        captured = await this.runDuelCommitmentHead(
+          duel,
+          participant,
+          commitmentId,
+          controller.signal,
+          false,
+          workspaceFingerprintSha256,
+          capabilityLockSha256,
+        );
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      await reportError(
+        `${displayNameFor(participant)} could not produce a Hydra-bound full-access commitment: ${detail} Hydra did not substitute a manual or unranked answer.`,
+      );
+      return false;
+    } finally {
+      if (this.duelCommitmentAbort === controller) this.duelCommitmentAbort = undefined;
+      this.postState();
+    }
+
+    const captureRef = `agent-call:${captured.receipt.traceId}`;
+    const created = createDuelCommitment({
+      eventId: `event-${crypto.randomUUID()}`,
+      occurredAt: new Date().toISOString(),
+      duelId: duel.duelId,
+      commitmentId,
+      participantId: participant,
+      captureType: "agent-call",
+      captureRef,
+      agentReceipt: captured.receipt,
+      answer: captured.response.answer,
+      confidence: captured.response.confidence,
+    });
+    try {
+      await this.appendRequiredDuelReceipt({
+        id: captured.receipt.traceId,
+        event: "duelCommitmentBound",
+        kind: "duelCommitment",
+        sensitive: true,
+        timestamp: new Date().toISOString(),
+        agent: participant,
+        agentKind: captured.receipt.agentKind,
+        transport: captured.receipt.transport,
+        duelId: duel.duelId,
+        commitmentId,
+        commitmentHash: created.event.commitmentHash,
+        promptSha256: captured.receipt.promptSha256,
+        sharedEvidenceSha256: captured.receipt.sharedEvidenceSha256,
+        invocationSha256: captured.receipt.invocationSha256,
+        workspaceFingerprintSha256: captured.receipt.workspaceFingerprintSha256,
+        capabilityLockSha256: captured.receipt.capabilityLockSha256,
+      });
+    } catch {
+      await reportError("Hydra could not durably bind the head execution receipt, so it refused to seal the rated answer.");
+      return false;
+    }
+
+    try {
+      // Store the preimage first. The public ledger receives only its hash;
+      // no one-sided answer is ever written to the room or duel mirror.
+      await storeDuelCommitmentSecret(
+        this.context.secrets,
+        this.duelCommitmentIndexUri.fsPath,
+        duel.duelId,
+        created.payload,
+      );
+      this.duels = await appendDuelEvents(this.duelEventsUri.fsPath, [created.event]);
+    } catch (error) {
+      let sealIsDurable = false;
+      try {
+        sealIsDurable = (await loadDuelEvents(this.duelEventsUri.fsPath)).some((event) => event.eventId === created.event.eventId);
+      } catch {
+        // Preserve the secret on an unreadable ledger: deleting it could make a
+        // successfully appended seal permanently unrevealable.
+        sealIsDurable = true;
+      }
+      if (!sealIsDurable) {
+        await deleteDuelCommitmentSecrets(this.context.secrets, this.duelCommitmentIndexUri.fsPath, duel.duelId, [{
+          participantId: participant,
+          commitmentId: created.payload.commitmentId,
+        }]).catch(() => this.scheduleDuelCommitmentSecretSweep(Date.now() + 60_000));
+      }
+      const detail = error instanceof Error ? error.message : String(error);
+      await reportError(`Hydra could not seal the commitment: ${detail}`);
+      return false;
+    }
+    this.duelError = undefined;
+    await this.refreshDuelMirror();
+    this.postState();
+    return true;
+  }
+
+  async cancelDuel(duelId = ""): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    let events: DuelEvent[];
+    try {
+      events = await loadDuelEvents(this.duelEventsUri.fsPath);
+      this.duels = aggregateDuels(events);
+      this.duelError = undefined;
+    } catch {
+      this.duelError = "Private duel ledger failed validation; no duel can be cancelled safely.";
+      this.postState();
+      await vscode.window.showErrorMessage(this.duelError);
+      return;
+    }
+    const cancellable = this.duels.activeDuels.filter((duel) => duel.status !== "awaiting_acceptance");
+    let duel = duelId ? cancellable.find((candidate) => candidate.duelId === duelId) : undefined;
+    if (duelId && !duel) {
+      await vscode.window.showWarningMessage("That duel is no longer cancellable. Pending challenges should be declined instead.");
+      return;
+    }
+    if (!duel) {
+      if (cancellable.length === 0) {
+        await vscode.window.showInformationMessage("Hydra has no accepted unresolved duel to cancel.");
+        return;
+      }
+      const selected = await vscode.window.showQuickPick(
+        cancellable.map((candidate) => ({
+          label: `${displayNameFor(candidate.challengerId)} vs ${displayNameFor(candidate.challengedId)}`,
+          description: `${candidate.domain} - ${candidate.status.replace(/_/g, " ")}`,
+          detail: candidate.proposition,
+          duel: candidate,
+        })),
+        { title: "Hydra Duels: Cancel", placeHolder: "Select an accepted unresolved duel", matchOnDescription: true, matchOnDetail: true, ignoreFocusOut: true },
+      );
+      if (!selected) return;
+      duel = selected.duel;
+    }
+    const reason = await vscode.window.showInputBox({
+      title: "Hydra Duels: Cancellation Reason",
+      prompt: "Explain why this accepted duel cannot finish. Cancellation changes no Elo and remains auditable.",
+      ignoreFocusOut: true,
+      validateInput: (value) => value.trim().length === 0
+        ? "A cancellation reason is required."
+        : value.trim().length > 2_000
+          ? "Keep the reason at 2,000 characters or fewer."
+          : undefined,
+    });
+    if (reason === undefined) return;
+    const cancelled: DuelEvent = {
+      type: "duelCancelled",
+      eventId: `event-${crypto.randomUUID()}`,
+      occurredAt: new Date().toISOString(),
+      duelId: duel.duelId,
+      cancelledBy: "local-user",
+      reason: reason.trim(),
+    };
+    if (!(await this.appendDuelEventFromUi(cancelled, "cancel the formal duel"))) return;
+
+    let cleanupEvents = events;
+    let cleanupWarning = false;
+    try {
+      // Reload after the terminal event becomes durable. Another window may have
+      // sealed a commitment while the cancellation dialog was open; the append
+      // lock orders that seal before this cancellation, so the authoritative
+      // replay now contains every secret reference that must be removed.
+      cleanupEvents = await loadDuelEvents(this.duelEventsUri.fsPath);
+    } catch {
+      cleanupWarning = true;
+      this.scheduleDuelCommitmentSecretSweep(Date.now() + 60_000);
+    }
+    const secretRefs = cleanupEvents.flatMap((event) =>
+      event.type === "duelCommitmentSealed" && event.duelId === duel!.duelId
+        ? [{ participantId: event.participantId, commitmentId: event.commitmentId }]
+        : []
+    );
+    try {
+      await deleteDuelCommitmentSecrets(this.context.secrets, this.duelCommitmentIndexUri.fsPath, duel.duelId, secretRefs);
+    } catch {
+      cleanupWarning = true;
+    }
+    if (cleanupWarning) {
+      await vscode.window.showWarningMessage("The duel was cancelled safely, but Hydra could not verify removal of every local sealed-answer copy.");
+    }
+    // A different VS Code window may still be finishing a commitment call
+    // that began before cancellation. Reconcile once its hard timeout has
+    // elapsed; if the record is still inside orphan grace, the sweep schedules
+    // the exact follow-up itself.
+    this.scheduleDuelCommitmentSecretSweep(Date.now() + DUEL_TERMINAL_LATE_SECRET_SWEEP_DELAY_MS);
+    await vscode.window.showInformationMessage("Formal duel cancelled. No Elo changed.");
+  }
+
+  async correctDuelResult(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    let events: DuelEvent[];
+    try {
+      events = await loadDuelEvents(this.duelEventsUri.fsPath);
+      this.duels = aggregateDuels(events);
+      this.duelError = undefined;
+    } catch {
+      this.duelError = "Private duel ledger failed validation; no result can be corrected safely.";
+      this.postState();
+      await vscode.window.showErrorMessage(this.duelError);
+      return;
+    }
+    const resolved = this.duels.recentDuels.filter((duel) => duel.status === "resolved" && duel.resolution);
+    if (resolved.length === 0) {
+      await vscode.window.showInformationMessage("Hydra has no active formal duel result to correct.");
+      return;
+    }
+    const selected = await vscode.window.showQuickPick(
+      resolved.map((duel) => ({
+        label: `${displayNameFor(duel.challengerId)} vs ${displayNameFor(duel.challengedId)}`,
+        description: `${duel.domain} - ${duel.resolution!.outcome}`,
+        detail: duel.proposition,
+        duel,
+      })),
+      { title: "Hydra Duels: Correct Result", placeHolder: "Select the ruling to reverse", matchOnDescription: true, matchOnDetail: true, ignoreFocusOut: true },
+    );
+    if (!selected) return;
+    const reason = await vscode.window.showInputBox({
+      title: "Hydra Duels: Correction Reason",
+      prompt: "Explain why this ruling must stop affecting Elo. History remains append-only.",
+      ignoreFocusOut: true,
+      validateInput: (value) => value.trim().length === 0
+        ? "A correction reason is required."
+        : value.trim().length > 2_000
+          ? "Keep the reason at 2,000 characters or fewer."
+          : undefined,
+    });
+    if (reason === undefined) return;
+    const reversal: DuelEvent = {
+      type: "duelResolutionReversed",
+      eventId: `event-${crypto.randomUUID()}`,
+      occurredAt: new Date().toISOString(),
+      duelId: selected.duel.duelId,
+      targetResolutionId: selected.duel.resolution!.resolutionId,
+      reversedBy: "local-user",
+      reason: reason.trim(),
+    };
+    if (!(await this.appendDuelEventFromUi(reversal, "correct the duel result"))) return;
+    const choice = await vscode.window.showInformationMessage(
+      "Duel result reversed. Its Elo effect was removed by full replay.",
+      "Record Replacement",
+    );
+    if (choice === "Record Replacement") await this.advanceDuel(selected.duel.duelId);
+  }
+
+  private async appendDuelEventFromUi(event: DuelEvent, operation: string): Promise<boolean> {
+    try {
+      this.duels = await appendDuelEvents(this.duelEventsUri.fsPath, [event]);
+      this.duelError = undefined;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      await vscode.window.showErrorMessage(`Hydra could not ${operation}: ${detail}`);
+      return false;
+    }
+    await this.refreshDuelMirror();
+    this.postState();
+    return true;
+  }
+
+  private async revealDuelCommitmentsIfReady(duelId: string, interactive = true): Promise<boolean> {
+    const reportError = async (message: string): Promise<void> => {
+      if (interactive) await vscode.window.showErrorMessage(message);
+      else await this.appendSystemMessage(message);
+    };
+    let events: DuelEvent[];
+    let duel: DuelView | undefined;
+    try {
+      events = await loadDuelEvents(this.duelEventsUri.fsPath);
+      const aggregate = aggregateDuels(events);
+      duel = aggregate.activeDuels.find((candidate) => candidate.duelId === duelId);
+      this.duels = aggregate;
+    } catch {
+      this.duelError = "Private duel ledger failed validation; commitments cannot be revealed safely.";
+      this.postState();
+      await reportError(this.duelError);
+      return false;
+    }
+    if (!duel || duel.status !== "awaiting_reveal") return false;
+
+    const participantIds = [duel.challengerId, duel.challengedId] as const;
+    const locatedSealRefs = participantIds.flatMap((participantId) => {
+      const seal = events.find((event): event is Extract<DuelEvent, { type: "duelCommitmentSealed" }> =>
+        event.type === "duelCommitmentSealed"
+        && event.duelId === duelId
+        && event.participantId === participantId
+      );
+      return seal ? [{ participantId, commitmentId: seal.commitmentId }] : [];
+    });
+    if (locatedSealRefs.length !== 2) {
+      await reportError("Hydra refused the reveal because the validated duel is missing a durable participant seal.");
+      return false;
+    }
+    const sealRefs = locatedSealRefs as [
+      { participantId: string; commitmentId: string },
+      { participantId: string; commitmentId: string },
+    ];
+    let payloads: [DuelRevealPayload, DuelRevealPayload];
+    try {
+      const challenger = await loadDuelCommitmentSecret(
+        this.context.secrets,
+        duelId,
+        sealRefs[0].participantId,
+        sealRefs[0].commitmentId,
+      );
+      const challenged = await loadDuelCommitmentSecret(
+        this.context.secrets,
+        duelId,
+        sealRefs[1].participantId,
+        sealRefs[1].commitmentId,
+      );
+      if (!challenger || !challenged) throw new Error("A sealed commitment preimage is unavailable.");
+      payloads = [challenger, challenged];
+    } catch {
+      if (!interactive) {
+        await reportError("Hydra cannot verify both sealed commitment preimages. The duel remains pending for recovery; Elo is unchanged.");
+        return false;
+      }
+      const choice = await vscode.window.showWarningMessage(
+        "Hydra cannot verify both sealed commitment preimages. Keep the duel pending for recovery, or cancel it without changing Elo.",
+        { modal: true },
+        "Keep Pending",
+        "Cancel Duel",
+      );
+      if (choice === "Cancel Duel") {
+        const reason = await vscode.window.showInputBox({
+          title: "Hydra Duels: Cancellation Reason",
+          value: "A sealed commitment could not be recovered or verified.",
+          ignoreFocusOut: true,
+          validateInput: (value) => value.trim().length === 0
+            ? "A cancellation reason is required."
+            : value.trim().length > 2_000
+              ? "Keep the reason at 2,000 characters or fewer."
+              : undefined,
+        });
+        if (reason !== undefined) {
+          const cancelled: DuelEvent = {
+            type: "duelCancelled",
+            eventId: `event-${crypto.randomUUID()}`,
+            occurredAt: new Date().toISOString(),
+            duelId,
+            cancelledBy: "local-user",
+            reason: reason.trim(),
+          };
+          if (await this.appendDuelEventFromUi(cancelled, "cancel the unrecoverable duel")) {
+            await deleteDuelCommitmentSecrets(
+              this.context.secrets,
+              this.duelCommitmentIndexUri.fsPath,
+              duelId,
+              sealRefs,
+            ).catch(() => this.scheduleDuelCommitmentSecretSweep(Date.now() + 60_000));
+            this.scheduleDuelCommitmentSecretSweep(Date.now() + DUEL_TERMINAL_LATE_SECRET_SWEEP_DELAY_MS);
+          }
+        }
+      }
+      return false;
+    }
+
+    let reveal;
+    try {
+      reveal = createDuelReveal(events, {
+        eventId: `event-${crypto.randomUUID()}`,
+        occurredAt: new Date().toISOString(),
+        duelId,
+        payloads,
+        recordedBy: duel.createdBy === "hydra-runtime" ? "hydra-runtime" : "local-user",
+      });
+      this.duels = await appendDuelEvents(this.duelEventsUri.fsPath, [reveal]);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      await reportError(`Hydra could not verify and reveal the paired commitments: ${detail}`);
+      return false;
+    }
+    // Delete only after the single paired reveal is durably appended.
+    await deleteDuelCommitmentSecrets(
+      this.context.secrets,
+      this.duelCommitmentIndexUri.fsPath,
+      duelId,
+      sealRefs,
+    ).catch(async () => {
+      this.scheduleDuelCommitmentSecretSweep(Date.now() + 60_000);
+      if (interactive) await vscode.window.showWarningMessage("Both commitments were revealed safely, but Hydra could not remove their local secret copies.");
+      else await this.appendSystemMessage("Both commitments were revealed safely, but Hydra could not remove their local secret copies; cleanup will retry.");
+    });
+    this.scheduleDuelCommitmentSecretSweep(Date.now() + DUEL_TERMINAL_LATE_SECRET_SWEEP_DELAY_MS);
+    this.duelError = undefined;
+    await this.refreshDuelMirror();
+    this.postState();
+    if (interactive) await vscode.window.showInformationMessage("Both commitments verified and revealed together. The locked evidence contract can now be adjudicated.");
+    return true;
+  }
+
+  private async adjudicateDuel(duel: DuelView): Promise<void> {
+    if (!duel.commitments || duel.commitments.length !== 2) {
+      await vscode.window.showErrorMessage("Hydra refused adjudication because both commitments are not publicly revealed together.");
+      return;
+    }
+    if (duel.adjudicatorType !== "human") {
+      await vscode.window.showWarningMessage(
+        "This legacy duel requests an automated deterministic adjudicator, but v1 has no machine-readable outcome mapping. Hydra will not let a human-selected winner borrow an unrelated verification receipt; cancel it and let the heads initiate any future human-adjudicated challenge during discussion.",
+      );
+      return;
+    }
+    const [challenger, challenged] = duel.commitments;
+    const outcome = await vscode.window.showQuickPick(
+      [
+        { label: `${displayNameFor(duel.challengerId)} wins`, value: "challengerWin" as DuelOutcome, description: challenger.answer },
+        { label: `${displayNameFor(duel.challengedId)} wins`, value: "challengedWin" as DuelOutcome, description: challenged.answer },
+        { label: "Tie", value: "tie" as DuelOutcome, description: "Rated draw with exactly zero Elo delta" },
+        { label: "Unresolved", value: "unresolved" as DuelOutcome, description: "Evidence cannot settle the proposition; no Elo change" },
+        { label: "Void", value: "void" as DuelOutcome, description: "Invalid or unfalsifiable comparison; no Elo change" },
+      ],
+      {
+        title: "Hydra Duels: Apply Locked Evidence Contract",
+        placeHolder: duel.evidenceContract,
+        matchOnDescription: true,
+        ignoreFocusOut: true,
+      },
+    );
+    if (!outcome) return;
+
+    const evidenceRef = await vscode.window.showInputBox({
+      title: "Hydra Duels: Durable Ruling Evidence",
+      prompt: "Cite the evidence that satisfies the locked contract: a workspace-relative artifact, HTTPS URL, command/receipt ID, or other durable reference.",
+      placeHolder: ".hydra/verification.jsonl#receipt-id or https://…",
+      ignoreFocusOut: true,
+      validateInput: (value) => value.trim().length === 0
+        ? "A durable evidence reference is required."
+        : value.trim().length > 512
+          ? "Keep the evidence reference at 512 characters or fewer."
+          : /^human:local-user:\d{4}-\d{2}-\d{2}t/i.test(value.trim())
+            ? "A timestamp alone is not evidence; cite the artifact, URL, command, or receipt that settles the contract."
+            : undefined,
+    });
+    if (evidenceRef === undefined) return;
+    const rationale = await vscode.window.showInputBox({
+      title: "Hydra Duels: Ruling Rationale",
+      prompt: `Explain how the locked contract supports ${outcome.label}.`,
+      ignoreFocusOut: true,
+      validateInput: (value) => value.trim().length === 0
+        ? "A rationale is required."
+        : value.trim().length > 2_000
+          ? "Keep the rationale at 2,000 characters or fewer."
+          : undefined,
+    });
+    if (rationale === undefined) return;
+    const resolved: DuelEvent = {
+      type: "duelResolved",
+      eventId: `event-${crypto.randomUUID()}`,
+      occurredAt: new Date().toISOString(),
+      duelId: duel.duelId,
+      resolutionId: `resolution-${crypto.randomUUID()}`,
+      outcome: outcome.value,
+      adjudicatorType: duel.adjudicatorType,
+      adjudicatorId: duel.adjudicatorId,
+      evidenceRef: evidenceRef.trim(),
+      rationale: rationale.trim(),
+      recordedBy: "local-user",
+    };
+    if (!(await this.appendDuelEventFromUi(resolved, "record the duel result"))) return;
+    const refreshed = this.duels.recentDuels.find((candidate) => candidate.duelId === duel.duelId);
+    const deltas = Object.entries(refreshed?.resolution?.ratingDeltas ?? {});
+    const ratingNote = !duel.rated || deltas.length === 0
+      ? " No Elo changed."
+      : ` ${deltas.map(([agentId, delta]) => `${displayNameFor(agentId)} ${delta >= 0 ? "+" : ""}${delta} Elo`).join(", ")}.`;
+    await vscode.window.showInformationMessage(`Formal duel resolved: ${outcome.label}.${ratingNote}`);
   }
 
   async openNativeActions(): Promise<void> {
@@ -1318,6 +3368,11 @@ export class HydraRoomPanel {
   async captureNativeCapabilities(): Promise<void> {
     await this.ready();
     if (!this.workspaceReady) return;
+    if (this.unconfirmedNativeTermination) {
+      this.appendSystemMessageToUi(this.unconfirmedTerminationMessage());
+      this.postState();
+      return;
+    }
     if (isInFlight(this.state) || this.terminalPokeInFlight) return;
     const ctrl = new AbortController();
     this.currentAbort = ctrl;
@@ -1350,6 +3405,10 @@ export class HydraRoomPanel {
           const started = Date.now();
           const spawn = await this.buildNativeCommandSpawn(agent, probe.args);
           const result = await runAgent(spawn, "", 30000, () => {}, ctrl.signal);
+          if (this.latchUnconfirmedNativeTermination(result, `${agent} capability probe`, agent)) {
+            await this.appendSystemMessage(this.unconfirmedTerminationMessage());
+            return;
+          }
           probes.push({
             agent,
             label: probe.label,
@@ -1402,6 +3461,11 @@ export class HydraRoomPanel {
 
   async refreshCodexModels(): Promise<void> {
     await this.ready();
+    if (this.unconfirmedNativeTermination) {
+      this.appendSystemMessageToUi(this.unconfirmedTerminationMessage());
+      this.postState();
+      return;
+    }
     await refreshCodexModelCatalog(this.modelChooserDeps());
   }
 
@@ -1438,14 +3502,19 @@ export class HydraRoomPanel {
   async toggleManyHeadsMode(): Promise<void> {
     await this.ready();
     if (!this.workspaceReady) return;
+    if (vscode.workspace.isTrusted !== true) {
+      await this.appendSystemMessage("Claude Worker Fanout stays off until this workspace is trusted.");
+      this.postState();
+      return;
+    }
     const next = !manyHeadsMode();
     await vscode.workspace
       .getConfiguration("hydraRoom")
-      .update("manyHeadsMode", next, vscode.ConfigurationTarget.Workspace);
+      .update("manyHeadsMode", next, vscode.ConfigurationTarget.Global);
     await this.appendSystemMessage(
       next
-        ? `Many Heads Mode enabled for this workspace. Parallel discussion will launch ${manyHeadsClaudeWorkerCount()} local Claude workers through the subscription-backed runtime.`
-        : "Many Heads Mode disabled for this workspace."
+        ? `Claude Worker Fanout enabled for this workspace. Parallel discussion will launch ${manyHeadsClaudeWorkerCount()} local subscription-backed Claude workers; they are not independent Hydra head identities.`
+        : "Claude Worker Fanout disabled for this workspace."
     );
     this.postState();
   }
@@ -1459,12 +3528,12 @@ export class HydraRoomPanel {
       return {
         label: `${value}`,
         description: value === current ? "current" : undefined,
-        detail: `${value} local subscription-backed Claude worker${value === 1 ? "" : "s"} in Many Heads parallel discussion`,
+        detail: `${value} local subscription-backed Claude worker${value === 1 ? "" : "s"} in parallel discussion`,
         value,
       };
     });
     const pick = await vscode.window.showQuickPick(choices, {
-      title: "Many Heads Claude Workers",
+      title: "Claude Worker Fanout",
       placeHolder: "Choose local Claude worker fanout (1-8)",
       ignoreFocusOut: true,
     });
@@ -1472,34 +3541,38 @@ export class HydraRoomPanel {
     await vscode.workspace
       .getConfiguration("hydraRoom")
       .update("manyHeadsClaudeWorkerCount", pick.value, vscode.ConfigurationTarget.Global);
-    await this.appendSystemMessage(`Many Heads Claude worker count set to ${pick.value}.`);
+    await this.appendSystemMessage(`Claude Worker Fanout count set to ${pick.value}.`);
     this.postState();
   }
 
   async runManyHeadsSmokeTest(): Promise<void> {
     await this.ready();
     if (!this.workspaceReady) return;
+    if (vscode.workspace.isTrusted !== true) {
+      await this.appendSystemMessage("Claude Worker Fanout smoke test requires a trusted workspace.");
+      this.postState();
+      return;
+    }
     if (isInFlight(this.state) || this.terminalPokeInFlight || this.verificationRunning || this.autopilotRunning) {
-      await this.appendSystemMessage("Many Heads smoke test skipped because Hydra is already running work.");
+      await this.appendSystemMessage("Claude Worker Fanout smoke test skipped because Hydra is already running work.");
       this.postState();
       return;
     }
     if (!isSendable(this.state)) {
-      await this.appendSystemMessage(`Many Heads smoke test skipped because the room is not in a sendable state: ${this.state.name}.`);
+      await this.appendSystemMessage(`Claude Worker Fanout smoke test skipped because the room is not in a sendable state: ${this.state.name}.`);
       this.postState();
       return;
     }
 
     const prompt = [
-      "Codex and Claude, run a Hydra Many Heads smoke test.",
+      "Codex and Claude, run a Hydra Claude Worker Fanout smoke test.",
       "Do not edit files or run long commands.",
-      "Codex: inspect only the Many Heads live-channel pointers in your prompt and reply with SMOKE_CODEX_OK plus any live-channel evidence you can see.",
+      "Codex: inspect only the Claude worker fanout live-channel pointers in your prompt and reply with SMOKE_CODEX_OK plus any live-channel evidence you can see.",
       "Claude workers: each of you should use one Task/subagent call if available with the instruction `Return SMOKE_TASK_OK only.` Then reply with SMOKE_CLAUDE_OK.",
       "Keep all replies under 8 lines and include no Decision Packet.",
     ].join(" ");
-    const cfg = vscode.workspace.getConfiguration("hydraRoom");
-    const previousManyHeadsWorkspaceValue = cfg.inspect<boolean>("manyHeadsMode")?.workspaceValue;
-    const previousAutoAdvanceWorkspaceValue = cfg.inspect<boolean>("autoAdvanceActionableDefaults")?.workspaceValue;
+    const previousManyHeadsOverride = this.manyHeadsModeOverride;
+    const previousAutoAdvanceOverride = this.autoAdvanceActionableDefaultsOverride;
     const previousTransport = this.transportMode();
     const expectedClaudeWorkers = manyHeadsClaudeWorkerCount();
     const startedAt = new Date().toISOString();
@@ -1507,9 +3580,9 @@ export class HydraRoomPanel {
     let turnError: string | undefined;
 
     await this.appendSystemMessage(
-      `Hydra Many Heads smoke test started. Temporarily enabling Many Heads Mode with ${expectedClaudeWorkers} Claude worker(s); report will be written to \`.hydra/many-heads-smoke.jsonl\`.`
+      `Hydra Claude Worker Fanout smoke test started with ${expectedClaudeWorkers} Claude worker(s); report will be written to \`.hydra/many-heads-smoke.jsonl\`.`
     );
-    await this.recordEvent("commandInvoked", "Hydra Many Heads smoke test started.", {
+    await this.recordEvent("commandInvoked", "Hydra Claude Worker Fanout smoke test started.", {
       expectedClaudeWorkers,
       previousTransport,
     });
@@ -1519,18 +3592,18 @@ export class HydraRoomPanel {
         this.transport = "oneShot";
         this.terminalBridge?.dispose();
         this.terminalBridge = undefined;
-        await this.appendSystemMessage("Many Heads smoke test switched this room to safe one-shot transport; Many Heads worker fanout does not run through terminal bridge.");
+        await this.appendSystemMessage("Claude Worker Fanout smoke test switched this room to safe one-shot transport; worker fanout does not run through terminal bridge.");
       }
-      await cfg.update("manyHeadsMode", true, vscode.ConfigurationTarget.Workspace);
-      await cfg.update("autoAdvanceActionableDefaults", false, vscode.ConfigurationTarget.Workspace);
+      this.manyHeadsModeOverride = true;
+      this.autoAdvanceActionableDefaultsOverride = false;
       this.postState();
       await this.sendUserMessage(prompt, "codex");
     } catch (err) {
       turnError = err instanceof Error ? err.message : String(err);
-      await this.appendSystemMessage(`Many Heads smoke test turn failed before report collection: ${turnError}`);
+      await this.appendSystemMessage(`Claude Worker Fanout smoke test turn failed before report collection: ${turnError}`);
     } finally {
-      await cfg.update("manyHeadsMode", previousManyHeadsWorkspaceValue, vscode.ConfigurationTarget.Workspace);
-      await cfg.update("autoAdvanceActionableDefaults", previousAutoAdvanceWorkspaceValue, vscode.ConfigurationTarget.Workspace);
+      this.manyHeadsModeOverride = previousManyHeadsOverride;
+      this.autoAdvanceActionableDefaultsOverride = previousAutoAdvanceOverride;
       this.postState();
     }
 
@@ -1562,7 +3635,7 @@ export class HydraRoomPanel {
         turnError ? `Turn error: ${turnError}` : "",
       ].filter(Boolean).join("\n")
     );
-    await this.recordEvent(report.passed ? "commandInvoked" : "error", `Hydra Many Heads smoke test ${report.passed ? "passed" : "failed"}.`, {
+    await this.recordEvent(report.passed ? "commandInvoked" : "error", `Hydra Claude Worker Fanout smoke test ${report.passed ? "passed" : "failed"}.`, {
       expectedClaudeWorkers,
       claudeStarts: report.observed.claudeStarts,
       liveFiles: report.observed.liveFiles,
@@ -1571,9 +3644,9 @@ export class HydraRoomPanel {
       passed: report.passed,
     });
     if (report.passed) {
-      vscode.window.showInformationMessage("Hydra Many Heads smoke test passed.");
+      vscode.window.showInformationMessage("Hydra Claude Worker Fanout smoke test passed.");
     } else {
-      vscode.window.showWarningMessage("Hydra Many Heads smoke test failed. See .hydra/many-heads-smoke.jsonl.");
+      vscode.window.showWarningMessage("Hydra Claude Worker Fanout smoke test failed. See .hydra/many-heads-smoke.jsonl.");
     }
     this.postState();
   }
@@ -1588,6 +3661,13 @@ export class HydraRoomPanel {
       },
       appendSystemMessage: (text) => this.appendSystemMessage(text),
       postState: () => this.postState(),
+      onUnconfirmedTermination: () => {
+        this.latchUnconfirmedNativeTermination(
+          { terminationFailed: true },
+          "Codex model discovery",
+          "codex"
+        );
+      },
     };
   }
 
@@ -1679,9 +3759,10 @@ export class HydraRoomPanel {
     }
     const actions = buildCommandCenterActions({
       workspaceReady: this.workspaceReady,
+      isWorkspaceTrusted: vscode.workspace.isTrusted === true,
       canStop: isInFlight(this.state) || this.terminalPokeInFlight || this.verificationRunning || this.autopilotRunning,
       canAcceptDefault: this.workspaceReady && !isInFlight(this.state) && !this.terminalPokeInFlight && this.currentDecisionAction().kind !== "none",
-      autoAdvanceActionableDefaults: autoAdvanceActionableDefaults(),
+      autoAdvanceActionableDefaults: this.effectiveAutoAdvanceActionableDefaults(),
       canAssignBuilder: this.workspaceReady && this.state.name === "AwaitingUser",
       canRequestReview: this.workspaceReady && (this.state.name === "BuildDone" || this.state.name === "ParallelBuildDone") && this.gitAvailable,
       canHandBack: this.workspaceReady && (this.state.name === "ReviewDone" || this.state.name === "ParallelReviewDone") && !this.state.approved,
@@ -1693,7 +3774,7 @@ export class HydraRoomPanel {
       transport: this.transportMode(),
       workQueueCount: this.workspaceReady ? this.currentWorkQueue().length : 0,
       nativeActionsCount: this.nativeActions.length,
-      manyHeadsMode: manyHeadsMode(),
+      manyHeadsMode: this.effectiveManyHeadsMode(),
       manyHeadsClaudeWorkerCount: manyHeadsClaudeWorkerCount(),
       wikiStatus,
     });
@@ -1937,21 +4018,20 @@ export class HydraRoomPanel {
         continue;
       }
       try {
-        const stats = await fs.stat(uri.fsPath);
-        if (Number.isFinite(maxTotalBytes) && maxTotalBytes >= 0 && pendingTotalBytes + stats.size > maxTotalBytes) {
-          failed.push(`${this.attachmentSourceLabel(uri)} would exceed the ${formatBytes(maxTotalBytes)} total attachment limit.`);
-          continue;
-        }
-        added.push(await prepareRoomAttachment({
+        const remainingTotalBytes = Math.max(0, maxTotalBytes - pendingTotalBytes);
+        const attachment = await prepareRoomAttachment({
           id: `${turnId}-${added.length}`,
           sourcePath: uri.fsPath,
           sourceLabel: this.attachmentSourceLabel(uri),
           attachmentDir,
           relativeAttachmentDir: relativeDir,
           previewMaxChars: attachmentPreviewMaxChars(),
-          maxBytes: maxFileBytes,
-        }));
-        pendingTotalBytes += stats.size;
+          // Enforce both limits from the same verified source handle used for
+          // the copy. A path-based pre-stat can become stale before copy.
+          maxBytes: Math.min(maxFileBytes, remainingTotalBytes),
+        });
+        added.push(attachment);
+        pendingTotalBytes += attachment.sizeBytes;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         failed.push(message);
@@ -2007,6 +4087,11 @@ export class HydraRoomPanel {
   async openNativeTerminals(): Promise<void> {
     await this.ready();
     if (!this.workspaceReady) return;
+    if (this.unconfirmedNativeTermination) {
+      this.appendSystemMessageToUi(this.unconfirmedTerminationMessage());
+      this.postState();
+      return;
+    }
     await this.terminalBridge?.openAll();
     vscode.window.showInformationMessage("Hydra native terminals opened.");
     this.postState();
@@ -2023,6 +4108,16 @@ export class HydraRoomPanel {
   async runNativeCliCommand(agent: AgentId, argsLine: string): Promise<void> {
     await this.ready();
     if (!this.workspaceReady) return;
+    if (!this.isActiveAgent(agent)) {
+      await this.appendSystemMessage(`Native command unavailable: ${displayNameFor(agent)} is not currently seated in this room.`);
+      this.postState();
+      return;
+    }
+    if (this.unconfirmedNativeTermination) {
+      this.appendSystemMessageToUi(this.unconfirmedTerminationMessage());
+      this.postState();
+      return;
+    }
     if (isInFlight(this.state) || this.terminalPokeInFlight) return;
     const rawArgs = splitNativeArgs(argsLine.trim());
     if (rawArgs.length === 0) return;
@@ -2069,6 +4164,16 @@ export class HydraRoomPanel {
   async sendRawTerminalLine(agent: AgentId, line: string): Promise<void> {
     await this.ready();
     if (!this.workspaceReady) return;
+    if (!this.isActiveAgent(agent)) {
+      await this.appendSystemMessage(`Raw terminal send unavailable: ${displayNameFor(agent)} is not currently seated in this room.`);
+      this.postState();
+      return;
+    }
+    if (this.unconfirmedNativeTermination) {
+      this.appendSystemMessageToUi(this.unconfirmedTerminationMessage());
+      this.postState();
+      return;
+    }
     if (isInFlight(this.state) || this.terminalPokeInFlight) return;
     const trimmed = line.trim();
     if (!trimmed) return;
@@ -2109,46 +4214,56 @@ export class HydraRoomPanel {
   ): Promise<void> {
     await this.ready();
     if (!this.workspaceReady) return;
+    if (this.unconfirmedNativeTermination) {
+      this.appendSystemMessageToUi(this.unconfirmedTerminationMessage());
+      this.postState();
+      return;
+    }
     if (isInFlight(this.state) || this.terminalPokeInFlight) return;
-    const targetAgents = uniqueAgents(agents);
+    const targetAgents = uniqueAgents(agents).filter((agent) => this.isActiveAgent(agent));
     if (targetAgents.length === 0) return;
-    const pokeOptions = normalizePokeOptions(options);
-    const editorContext = pokeOptions.includeEditorContext ? this.activeEditorContext() : undefined;
-    if (pokeOptions.includeEditorContext && !editorContext) {
-      await this.appendSystemMessage("No active editor context is available. Open a file or select text, then try the native terminal poke again.");
-      this.postState();
-      return;
-    }
-    let workspaceDiff: string | undefined;
-    if (pokeOptions.includeWorkspaceDiff) {
-      if (!this.gitAvailable) {
-        await this.appendSystemMessage("Working-tree poke unavailable: workspace is not a git repository.");
-        this.postState();
-        return;
-      }
-      const diff = await captureGitDiff(this.workspaceRoot, diffMaxLines());
-      if (diff === null) {
-        await this.appendSystemMessage("Working-tree poke unavailable: git diff failed.");
-        this.postState();
-        return;
-      }
-      workspaceDiff = diff.trim() || "[git working tree clean]";
-    }
-    const instruction = text.trim() || defaultPokeInstruction(editorContext, workspaceDiff);
-    if (!instruction) return;
-    if (!this.terminalBridge) {
-      await this.appendSystemMessage(TERMINAL_BRIDGE_NOT_READY);
-      this.postState();
-      return;
-    }
-
-    const actionId = `na-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
-    const promptEnvelopeIds: string[] = [];
-    let status: NativeActionStatus = "failed";
-    const ctrl = new AbortController();
-    this.currentAbort = ctrl;
+    // Reserve before diff/editor preflight, both of which can await. Otherwise
+    // two rapid pokes can pass the guard and dispatch overlapping terminal work.
     this.terminalPokeInFlight = true;
+    this.postState();
+    let ctrl: AbortController | undefined;
     try {
+      const pokeOptions = normalizePokeOptions(options);
+      const editorContext = pokeOptions.includeEditorContext ? this.activeEditorContext() : undefined;
+      if (pokeOptions.includeEditorContext && !editorContext) {
+        await this.appendSystemMessage("No active editor context is available. Open a file or select text, then try the native terminal poke again.");
+        this.postState();
+        return;
+      }
+      let workspaceDiff: string | undefined;
+      if (pokeOptions.includeWorkspaceDiff) {
+        if (!this.gitAvailable) {
+          await this.appendSystemMessage("Working-tree poke unavailable: workspace is not a git repository.");
+          this.postState();
+          return;
+        }
+        const diff = await captureGitDiff(this.workspaceRoot, diffMaxLines());
+        if (diff === null) {
+          await this.appendSystemMessage("Working-tree poke unavailable: git diff failed.");
+          this.postState();
+          return;
+        }
+        workspaceDiff = diff.trim() || "[git working tree clean]";
+      }
+      const instruction = text.trim() || defaultPokeInstruction(editorContext, workspaceDiff);
+      if (!instruction) return;
+      if (!this.terminalBridge) {
+        await this.appendSystemMessage(TERMINAL_BRIDGE_NOT_READY);
+        this.postState();
+        return;
+      }
+
+      const actionId = `na-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
+      const promptEnvelopeIds: string[] = [];
+      let status: NativeActionStatus = "failed";
+      ctrl = new AbortController();
+      this.currentAbort = ctrl;
+      try {
       // Why: targetAgents is non-empty here — pokeNativeTerminals returns early
       // above when uniqueAgents() yields length 0, so [0] is always defined.
       const firstAgent = targetAgents[0]!;
@@ -2183,20 +4298,23 @@ export class HydraRoomPanel {
         : results.some(({ result }) => didAgentFail(result))
           ? "failed"
           : "completed";
+      } finally {
+        await this.recordNativeAction({
+          id: actionId,
+          agents: targetAgents,
+          instruction,
+          includeEditorContext: !!pokeOptions.includeEditorContext,
+          includeWorkspaceDiff: !!pokeOptions.includeWorkspaceDiff,
+          editorContext,
+          workspaceDiff,
+          promptEnvelopeIds,
+          status,
+        });
+        if (this.currentAbort === ctrl) this.currentAbort = undefined;
+      }
     } finally {
-      await this.recordNativeAction({
-        id: actionId,
-        agents: targetAgents,
-        instruction,
-        includeEditorContext: !!pokeOptions.includeEditorContext,
-        includeWorkspaceDiff: !!pokeOptions.includeWorkspaceDiff,
-        editorContext,
-        workspaceDiff,
-        promptEnvelopeIds,
-        status,
-      });
       this.terminalPokeInFlight = false;
-      this.currentAbort = undefined;
+      if (ctrl && this.currentAbort === ctrl) this.currentAbort = undefined;
       this.postState();
       await this.drainQueuedUserMessages();
     }
@@ -2384,6 +4502,11 @@ export class HydraRoomPanel {
   async useTerminalBridge(): Promise<void> {
     await this.ready();
     if (!this.workspaceReady) return;
+    if (this.unconfirmedNativeTermination) {
+      this.appendSystemMessageToUi(this.unconfirmedTerminationMessage());
+      this.postState();
+      return;
+    }
     this.terminalBridge ??= this.createTerminalBridge();
     if (this.transportMode() === "terminalBridge") {
       await this.terminalBridge?.openAll();
@@ -2403,6 +4526,11 @@ export class HydraRoomPanel {
   async runTerminalBridgeSelfTest(): Promise<void> {
     await this.ready();
     if (!this.workspaceReady) return;
+    if (this.unconfirmedNativeTermination) {
+      this.appendSystemMessageToUi(this.unconfirmedTerminationMessage());
+      this.postState();
+      return;
+    }
     if (!this.terminalBridge) {
       await this.appendSystemMessage(TERMINAL_BRIDGE_NOT_READY);
       this.transport = "oneShot";
@@ -2411,15 +4539,16 @@ export class HydraRoomPanel {
     }
     await this.terminalBridge.openAll();
     const result = await this.terminalBridge.selfTest(terminalBridgeTimeoutMs());
+    this.latchUnconfirmedNativeTermination(result, "terminal bridge self-test", "codex");
     if (!result.ok) this.transport = "oneShot";
     await this.appendSystemMessage(
       [
         result.message,
-        `Log: ${result.logPath}`,
-        `Reply: ${result.replyPath}`,
+        `Log: [private extension storage]/${path.basename(result.logPath)}`,
+        `Reply: [private extension storage]/${path.basename(result.replyPath)}`,
         `Checks: logBomFree=${result.checks.logBomFree}, replyStartsWithJsonObject=${result.checks.replyStartsWithJsonObject}, outputNotDuplicated=${result.checks.outputNotDuplicated}, replyParsed=${result.checks.replyParsed}`,
         result.ok
-          ? "Future agent calls will be injected into visible native terminals and read from `.hydra/replies/*.json`."
+          ? "Future agent calls will be injected into visible native terminals; replies stay in VS Code's private extension storage."
           : "Hydra switched back to Safe One-Shot transport.",
       ].join("\n")
     );
@@ -2494,6 +4623,11 @@ export class HydraRoomPanel {
   async useOneShotTransport(): Promise<void> {
     await this.ready();
     if (!this.workspaceReady) return;
+    if (this.terminalBridgeDispatchInFlight > 0) {
+      await this.appendSystemMessage("Safe one-shot switching is paused until the active terminal-bridge call finishes or is stopped.");
+      this.postState();
+      return;
+    }
     if (this.transportMode() === "oneShot") {
       vscode.window.showInformationMessage("Hydra is already using safe one-shot transport.");
       this.postState();
@@ -2615,6 +4749,7 @@ export class HydraRoomPanel {
     if (!this.workspaceReady) return;
     this.currentAbort?.abort();
     this.wikiMaintenanceAbort?.abort();
+    this.duelCommitmentAbort?.abort();
     let changed = false;
     for (const message of this.messages) {
       if (!message.pending) continue;
@@ -2624,7 +4759,7 @@ export class HydraRoomPanel {
       message.activity = undefined;
       if (message.text.length > 0 && !message.text.endsWith("\n")) message.text += "\n";
       message.text += "[cancelled by Hydra reset]";
-      await appendMessage(this.transcriptUri.fsPath, {
+      await this.persistTranscriptMessage({
         role: message.role,
         text: message.text,
         timestamp: message.timestamp,
@@ -2635,8 +4770,7 @@ export class HydraRoomPanel {
     this.currentAbort = undefined;
     this.queuedUserMessages = [];
     if (isInFlight(this.state)) this.applyEvent({ type: "stop" });
-    this.setAgentStatus("codex", "idle", "Idle");
-    this.setAgentStatus("claude", "idle", "Idle");
+    for (const agent of this.roster()) this.setAgentStatus(agent, "idle", "Idle");
     await this.appendSystemMessage(
       changed
         ? "Hydra reset the stuck turn. Pending agent bubbles were marked cancelled and control returned to you."
@@ -2692,6 +4826,12 @@ export class HydraRoomPanel {
         this.currentAbort = undefined;
         this.postState();
       }
+      if (this.agentDuelAdmissionQueue.length > 0) {
+        queueMicrotask(() => void this.drainAgentDuelAdmissions());
+      }
+      if (this.agentDuelAutomationQueue.length > 0) {
+        queueMicrotask(() => void this.drainAgentDuelAutomation());
+      }
     }
   }
 
@@ -2739,6 +4879,7 @@ export class HydraRoomPanel {
       this.pendingPromptTranscriptWindows.set(openerId, openerContext.transcriptWindow);
       this.postState();
 
+      const openerMessageId = openerId;
       const openerResult = await this.callAgent(opener, "opener", openerEnvelope.renderedPrompt, openerId, ctrl.signal);
       openerId = undefined; // callAgent finalized the pending bubble.
 
@@ -2770,6 +4911,7 @@ export class HydraRoomPanel {
       });
       await this.persistPromptEnvelope(reactorEnvelope);
       reactorId = this.openPendingMessage(reactor, "reactor");
+      this.bindPendingAgentDuelContext(reactorId, opener, openerMessageId);
       this.pendingPromptTranscriptWindows.set(reactorId, reactorContext.transcriptWindow);
       this.postState();
 
@@ -2818,6 +4960,7 @@ export class HydraRoomPanel {
       });
       await this.persistPromptEnvelope(closerEnvelope);
       closerId = this.openPendingMessage(opener, "closer");
+      this.bindPendingAgentDuelContext(closerId, reactor, reactorMessageId);
       this.pendingPromptTranscriptWindows.set(closerId, closerContext.transcriptWindow);
       this.postState();
 
@@ -2874,7 +5017,8 @@ export class HydraRoomPanel {
         }
       });
       const workers = buildParallelDiscussionWorkers({
-        manyHeads: manyHeadsMode(),
+        roster: this.roster(),
+        manyHeads: this.effectiveManyHeadsMode(),
         transport: this.transportMode(),
         claudeWorkerCount: manyHeadsClaudeWorkerCount(),
         makeTraceId,
@@ -2952,7 +5096,7 @@ export class HydraRoomPanel {
       // Snapshot the transcript BEFORE opening the pending bubble, otherwise the
       // builder's own empty entry would appear at the tail of its prompt context.
       const buildContext = this.buildPromptContextSnapshot("build", undefined, builder);
-      const otherAgent: AgentId = builder === "codex" ? "claude" : "codex";
+      const otherAgent = pickReviewers(builder, this.roster())[0] ?? builder;
       const buildEnvelope = await this.buildPromptEnvelope({
         agent: builder,
         otherAgent,
@@ -3260,7 +5404,10 @@ export class HydraRoomPanel {
     const startedAt = Date.now();
     const promptSha256 = sha256(prompt);
     let spawn = this.buildSpawn(agent, phase);
-    spawn = { ...spawn, command: await resolveAgentCommand(agent, spawn.command) };
+    spawn = {
+      ...spawn,
+      command: await resolveAgentCommand(agent, spawn.command, effectiveSpawnEnvironment(spawn)),
+    };
     const consent = await this.ensureFullNativeConsent(agent, phase, spawn.args);
     if (!consent.allowed) {
       await this.appendAgentCallTrace({
@@ -3302,6 +5449,300 @@ export class HydraRoomPanel {
     return { text: normalized.stdout, result: normalized };
   }
 
+  private async runDuelCommitmentHead(
+    duel: DuelView,
+    participantId: AgentId,
+    commitmentId: string,
+    signal: AbortSignal,
+    allowConsentPrompt = true,
+    workspaceFingerprintSha256?: string,
+    capabilityLockSha256?: string,
+  ): Promise<DuelHeadCommitmentCapture> {
+    if (this.unconfirmedNativeTermination) {
+      throw new Error(this.unconfirmedTerminationMessage());
+    }
+    if (this.sessionCostCapExceeded()) {
+      throw new Error("The session cost cap has been reached; Hydra will not spend another head call on this duel.");
+    }
+    const definition = getAgentDefinition(participantId);
+    if (!definition) throw new Error(`Head "${participantId}" is not registered.`);
+    if (duel.ratingPolicy === DUEL_AGENT_RATING_POLICY && !workspaceFingerprintSha256) {
+      throw new Error("Agent-initiated commitments require the workspace fingerprint locked at admission.");
+    }
+    if (duel.ratingPolicy === DUEL_AGENT_RATING_POLICY && !capabilityLockSha256) {
+      throw new Error("Agent-initiated commitments require the participant capability lock captured at admission.");
+    }
+
+    const phase: Phase = "review";
+    const sharedEvidencePacket = duel.sharedEvidencePacket;
+    if (!sharedEvidencePacket) {
+      throw new Error("Legacy packetless duels cannot run under the rated full-access protocol.");
+    }
+    const prompt = buildDuelCommitmentPrompt({
+      duelId: duel.duelId,
+      commitmentId,
+      participantId,
+      participantName: displayNameFor(participantId),
+      domain: duel.domain,
+      proposition: duel.proposition,
+      evidenceContract: duel.evidenceContract,
+      sharedEvidencePacket,
+      rankingMotivation: renderDuelMotivationContext(participantId, this.duels.ratings, displayNameFor),
+    });
+    const traceId = `${makeTraceId(participantId, phase)}-duel-commitment`;
+    const startedAtMs = Date.now();
+    const startedAt = new Date(startedAtMs).toISOString();
+    const promptSha256 = sha256(prompt);
+    const invocation = this.buildDuelCommitmentInvocation(participantId, prompt);
+      let invocationSha256 = duelInvocationSha256(invocation);
+      if (!allowConsentPrompt && !this.context.workspaceState.get<boolean>(fullNativeConsentKey(participantId), false)) {
+        throw new Error("Persistent full-native consent is required before Hydra can run an autonomous duel commitment.");
+      }
+      const consent = allowConsentPrompt
+        ? await this.ensureFullNativeConsent(
+            participantId,
+            phase,
+            invocation.transport === "spawn" ? invocation.args : [],
+          )
+        : { allowed: true };
+      if (!consent.allowed) throw new Error(consent.message ?? "Native head execution was not approved.");
+
+      let releaseClaudeCreditReservation: (() => void) | undefined;
+      if (definition.kind === "claude") {
+        releaseClaudeCreditReservation = this.reserveClaudeCreditEstimate(claudeAgentEstimatedRunCostUsd());
+        let guard: ClaudeAutomationGuardResult | undefined;
+        try {
+          guard = await this.evaluateClaudeCreditGuard(signal, false);
+        } catch (error) {
+          releaseClaudeCreditReservation();
+          releaseClaudeCreditReservation = undefined;
+          throw error;
+        }
+        if (guard?.decision === "block") {
+          releaseClaudeCreditReservation();
+          releaseClaudeCreditReservation = undefined;
+          throw new Error(`Hydra blocked the Claude duel call to protect the Agent SDK credit pool: ${guard.reason}`);
+        }
+        if (guard?.decision === "warn" && !this.claudeCreditWarned) {
+          this.claudeCreditWarned = true;
+          await this.appendSystemMessage(`Hydra Claude automation credit warning: ${guard.reason}`);
+        }
+      }
+
+      let result: RunResult;
+      let transport: "oneShot" | "http";
+      try {
+        if (invocation.transport === "http") {
+          transport = "http";
+          result = await this.runHeadlessDuelHttpAgent(
+            participantId,
+            phase,
+            invocation,
+            prompt,
+            DUEL_COMMITMENT_HEAD_TIMEOUT_MS,
+            signal,
+            traceId,
+            startedAtMs,
+          );
+        } else {
+          transport = "oneShot";
+          let spawn = this.applyConfiguredSpawnEnvironment(participantId, {
+            command: invocation.command,
+            args: invocation.args,
+            cwd: this.workspaceRoot,
+            stdin: invocation.stdin ?? "",
+          });
+          spawn = {
+            ...spawn,
+            command: await resolveAgentCommand(participantId, spawn.command, effectiveSpawnEnvironment(spawn)),
+          };
+          const actualCapabilityLock = this.capabilityLockForSpawn(participantId, spawn);
+          if (capabilityLockSha256 && actualCapabilityLock.profileSha256 !== capabilityLockSha256) {
+            throw new Error("The participant's effective native command, model, arguments, working directory, or environment changed after duel admission.");
+          }
+          const prepared = await this.prepareOneShotRequestFiles(participantId, phase, spawn, prompt);
+          // Fingerprint the command Hydra will actually execute, after structured
+          // output flags and private request-file expansions have been applied.
+          invocationSha256 = duelInvocationSha256({
+            transport: "spawn",
+            command: prepared.spawn.command,
+            args: prepared.spawn.args,
+            stdin: prepared.spawn.stdin,
+          }, {
+            cwd: prepared.spawn.cwd,
+            env: effectiveSpawnEnvironment(prepared.spawn),
+          });
+          result = await this.runOneShotPipeline(
+            participantId,
+            phase,
+            prepared,
+            prompt,
+            DUEL_COMMITMENT_HEAD_TIMEOUT_MS,
+            signal,
+            traceId,
+            startedAtMs,
+            { traceKind: "duelCommitment", captureLiveChannel: false, sensitive: true },
+          );
+        }
+      } finally {
+        releaseClaudeCreditReservation?.();
+      }
+
+      if (didAgentFail(result)) {
+        throw new Error(
+          result.cancelled
+            ? "The participant head call was cancelled."
+            : result.timedOut
+              ? "The participant head call timed out."
+              : `The participant head exited unsuccessfully (${result.exitCode ?? "no exit code"}).`,
+        );
+      }
+      const response = parseDuelAgentCommitmentResponse(result.stdout, {
+        duelId: duel.duelId,
+        participantId,
+        commitmentId,
+      });
+      return {
+        response,
+        receipt: {
+          traceId,
+          agentId: participantId,
+          agentKind: definition.kind,
+          ...((modelForPhase(participantId, phase) || definition.model)
+            ? { model: modelForPhase(participantId, phase) || definition.model }
+            : {}),
+          transport,
+          startedAt,
+          completedAt: new Date().toISOString(),
+          promptSha256,
+          sharedEvidenceSha256: hashDuelSharedEvidencePacket(sharedEvidencePacket),
+          capabilityPolicy: DUEL_FULL_ACCESS_POLICY_ID,
+          responseSha256: duelResponseSha256(response),
+          invocationSha256,
+          ...(workspaceFingerprintSha256 ? { workspaceFingerprintSha256 } : {}),
+          ...(capabilityLockSha256 ? { capabilityLockSha256 } : {}),
+        },
+      };
+  }
+
+  private async runHeadlessDuelHttpAgent(
+    agent: AgentId,
+    phase: Phase,
+    invocation: HttpInvocation,
+    prompt: string,
+    timeout: number,
+    signal: AbortSignal,
+    traceId: string,
+    startedAt: number,
+  ): Promise<RunResult> {
+    await this.appendAgentCallTrace({
+      id: traceId,
+      event: "started",
+      kind: "duelCommitment",
+      sensitive: true,
+      timestamp: new Date(startedAt).toISOString(),
+      agent,
+      phase,
+      transport: "http",
+      command: invocation.url,
+      args: [],
+      envKeys: [],
+      timeoutMs: timeout,
+      promptChars: prompt.length,
+      promptSha256: sha256(prompt),
+      outputMode: "openaiJson",
+    });
+    let normalized: RunResult;
+    let raw: AdapterRawOutput | undefined;
+    try {
+      const result = await runHttpAgent(invocation, { timeoutMs: timeout, signal });
+      const definition = getAgentDefinition(agent);
+      const adapter = definition ? adapterForKind(definition.kind) : undefined;
+      raw = { stdout: result.rawBody, stderr: result.stderr, exitCode: result.exitCode, outputMode: "openaiJson" };
+      const replyText = adapter && result.exitCode === 0 ? adapter.parseReply(raw) : result.stdout;
+      normalized = { ...result, stdout: replyText };
+      if (!result.cancelled && !result.timedOut) {
+        const tokens = adapter?.parseUsage(raw);
+        if (tokens) {
+          await this.recordUsage({ agent, phase, requestId: traceId, model: definition?.model, source: "unknown", tokens });
+        }
+      }
+    } catch (error) {
+      normalized = agentCallFailureResult(error instanceof Error ? error.message : String(error));
+    }
+    const completed = completedAgentCallTrace(traceId, agent, phase, "http", startedAt, normalized);
+    delete completed.stderrPreview;
+    await this.appendAgentCallTrace({ ...completed, kind: "duelCommitment", sensitive: true });
+    return normalized;
+  }
+
+  private buildDuelCommitmentInvocation(agent: AgentId, prompt: string): Invocation {
+    const phase: Phase = "review";
+    const definition = getAgentDefinition(agent);
+    if (!definition) throw new Error(`Head "${agent}" is not registered.`);
+    const adapter = adapterForKind(definition.kind);
+    const configuredInvocation = this.buildInvocationFor(agent, phase, prompt);
+    if (configuredInvocation.transport !== "spawn") {
+      throw new Error(`Head "${agent}" is not configured for a native full-tool spawn.`);
+    }
+    const fullAccessArgs = duelCommitmentFullAccessArgs(definition.kind, configuredInvocation.args);
+    if (fullAccessArgs) {
+      return adapter.buildInvocation(definition, {
+        phase,
+        workspaceRoot: this.workspaceRoot,
+        prompt,
+        command: configuredInvocation.command,
+        rawArgs: fullAccessArgs,
+      });
+    }
+    throw new Error(
+      `Head "${agent}" has no Hydra full-access rated duel profile. Hydra will not create an unequal or unranked fallback.`,
+    );
+  }
+
+  private supportsFullAccessRatedDuel(agent: AgentId): boolean {
+    const definition = getAgentDefinition(agent);
+    return !!definition && duelCommitmentFullAccessArgs(definition.kind) !== undefined;
+  }
+
+  private async captureFullAccessDuelHeadLock(agent: AgentId): Promise<DuelParticipantCapabilityLock> {
+    const invocation = this.buildDuelCommitmentInvocation(agent, "{}");
+    if (invocation.transport !== "spawn") {
+      throw new Error(`${displayNameFor(agent)} is not configured for a native full-tool spawn.`);
+    }
+    let spawn = this.applyConfiguredSpawnEnvironment(agent, {
+      command: invocation.command,
+      args: invocation.args,
+      cwd: this.workspaceRoot,
+      stdin: invocation.stdin ?? "",
+    });
+    spawn = {
+      ...spawn,
+      command: await resolveAgentCommand(agent, spawn.command, effectiveSpawnEnvironment(spawn)),
+    };
+    return this.capabilityLockForSpawn(agent, spawn);
+  }
+
+  private capabilityLockForSpawn(agent: AgentId, spawn: AgentSpawn): DuelParticipantCapabilityLock {
+    const definition = getAgentDefinition(agent);
+    if (!definition) throw new Error(`Head "${agent}" is not registered.`);
+    return {
+      agentId: agent,
+      agentKind: definition.kind,
+      profileSha256: duelCapabilityLockSha256({
+        agentId: agent,
+        agentKind: definition.kind,
+        ...(modelForPhase(agent, "review") || definition.model
+          ? { model: modelForPhase(agent, "review") || definition.model }
+          : {}),
+        command: spawn.command,
+        args: spawn.args,
+        cwd: spawn.cwd,
+        env: effectiveSpawnEnvironment(spawn),
+      }),
+    };
+  }
+
   // Shared one-shot agent-transport body for both the room turn path
   // (runAgentTransport) and the headless wiki path (runWikiWrapupAgent). opts
   // toggles the optional, room-only hooks: onChunk streams live stdout into the
@@ -3318,95 +5759,125 @@ export class HydraRoomPanel {
     traceId: string,
     startedAt: number,
     opts: {
-      traceKind?: "wikiWrapup";
+      traceKind?: "wikiWrapup" | "duelCommitment";
+      captureLiveChannel?: boolean;
+      sensitive?: boolean;
       onChunk?: (chunk: string) => void;
       onReplaceText?: (text: string) => void;
       onLiveChannelEvent?: (event: LiveChannelEvent) => void;
       recordFailureCard?: (result: RunResult) => void;
     } = {}
   ): Promise<RunResult> {
-    const { traceKind, onChunk, onReplaceText, onLiveChannelEvent, recordFailureCard } = opts;
+    const { traceKind, captureLiveChannel = true, sensitive = false, onChunk, onReplaceText, onLiveChannelEvent, recordFailureCard } = opts;
     const spawn = prepared.spawn;
     const promptSha256 = sha256(prompt);
-    await this.appendAgentCallTrace({
-      id: traceId,
-      event: "started",
-      ...(traceKind ? { kind: traceKind } : {}),
-      timestamp: new Date(startedAt).toISOString(),
-      agent,
-      phase,
-      transport: "oneShot",
-      cwd: spawn.cwd,
-      command: spawn.command,
-      args: spawn.args,
-      envKeys: Object.keys(spawn.env ?? {}).sort(),
-      timeoutMs: timeout,
-      promptChars: prompt.length,
-      promptSha256,
-      requestFiles: requestFileTrace(prepared),
-      outputMode: prepared.outputMode,
-    });
-    // claudeStreamJson/codexJson stdout is typed JSONL, not displayable text -
-    // extract assistant-text increments and stream those to the webview while
-    // the call runs. The normalized result still replaces the streamed text at
-    // completion via onReplaceText, so live text is cosmetic-only.
-    const liveText = createLiveTextExtractor(prepared.outputMode);
-    // Why: the shared live channel is opt-in (Many Heads Mode). Off by default
-    // it writes nothing, so ordinary turns don't accumulate .hydra/live files.
-    const liveChannel = manyHeadsMode()
-      ? createLiveChannelWriter({
-          workspaceRoot: this.workspaceRoot,
-          requestId: traceId,
+    const privatePaths = prepared.privateArtifacts
+      ? [
+          prepared.privateArtifacts.promptPath,
+          prepared.privateArtifacts.replyPath,
+          prepared.privateArtifacts.logPath,
+        ]
+      : [];
+    try {
+      await this.appendAgentCallTrace({
+        id: traceId,
+        event: "started",
+        ...(traceKind ? { kind: traceKind } : {}),
+        timestamp: new Date(startedAt).toISOString(),
+        agent,
+        phase,
+        transport: "oneShot",
+        cwd: spawn.cwd,
+        command: spawn.command,
+        args: redactPrivateArtifactArgs(spawn.args, privatePaths),
+        envKeys: Object.keys(spawn.env ?? {}).sort(),
+        timeoutMs: timeout,
+        promptChars: prompt.length,
+        promptSha256,
+        requestFiles: requestFileTrace(prepared),
+        outputMode: prepared.outputMode,
+      });
+      // claudeStreamJson/codexJson stdout is typed JSONL, not displayable text -
+      // extract assistant-text increments and stream those to the webview while
+      // the call runs. The normalized result still replaces the streamed text at
+      // completion via onReplaceText, so live text is cosmetic-only.
+      const liveText = createLiveTextExtractor(prepared.outputMode);
+      // Why: the shared live channel is opt-in (Many Heads Mode). Off by default
+      // it writes nothing, so ordinary turns don't accumulate .hydra/live files.
+      const liveChannel = captureLiveChannel && !sensitive && this.effectiveManyHeadsMode()
+        ? createLiveChannelWriter({
+            workspaceRoot: this.workspaceRoot,
+            requestId: traceId,
+            agent,
+            phase,
+            outputMode: prepared.outputMode,
+            onEvent: onLiveChannelEvent,
+          })
+        : undefined;
+      const result = await runAgent(spawn, prompt, timeout, (rawChunk) => {
+        const chunk = redactPrivateArtifactText(rawChunk, privatePaths);
+        liveChannel?.push(chunk);
+        const text = liveText ? liveText.push(chunk) : chunk;
+        if (text) onChunk?.(text);
+      }, signal);
+      await liveChannel?.flush();
+      const normalized = await this.normalizeOneShotResult(prepared, result);
+      this.latchUnconfirmedNativeTermination(normalized, `${agent} ${phase}`, agent);
+      const traceStdout = redactPrivateArtifactText(result.stdout, privatePaths);
+      // Stream summaries intentionally include final assistant text for normal
+      // room diagnostics. A sealed duel answer must not reach the workspace
+      // before paired reveal, so sensitive calls omit the summary entirely.
+      if (!sensitive && prepared.outputMode === "claudeStreamJson") {
+        const summary = summarizeClaudeEvents(parseClaudeEventStream(traceStdout));
+        if ((phase === "reactor" || phase === "closer") && summary.lastAssistantText) {
+          summary.lastAssistantText = stripAgentDuelChallengeControlLines(summary.lastAssistantText);
+        }
+        await this.appendAgentCallTrace({
+          id: traceId,
+          event: "streamSummary",
+          ...(traceKind ? { kind: traceKind } : {}),
+          timestamp: new Date().toISOString(),
           agent,
           phase,
-          outputMode: prepared.outputMode,
-          onEvent: onLiveChannelEvent,
-        })
-      : undefined;
-    const result = await runAgent(spawn, prompt, timeout, (chunk) => {
-      liveChannel?.push(chunk);
-      const text = liveText ? liveText.push(chunk) : chunk;
-      if (text) onChunk?.(text);
-    }, signal);
-    await liveChannel?.flush();
-    const normalized = await this.normalizeOneShotResult(prepared, result);
-    if (prepared.outputMode === "claudeStreamJson") {
-      await this.appendAgentCallTrace({
-        id: traceId,
-        event: "streamSummary",
-        ...(traceKind ? { kind: traceKind } : {}),
-        timestamp: new Date().toISOString(),
-        agent,
-        phase,
-        transport: "oneShot",
-        summary: summarizeClaudeEvents(parseClaudeEventStream(result.stdout)),
-      });
-    } else if (prepared.outputMode === "codexJson") {
-      await this.appendAgentCallTrace({
-        id: traceId,
-        event: "streamSummary",
-        ...(traceKind ? { kind: traceKind } : {}),
-        timestamp: new Date().toISOString(),
-        agent,
-        phase,
-        transport: "oneShot",
-        summary: summarizeCodexEvents(parseCodexEventStream(result.stdout)),
-      });
+          transport: "oneShot",
+          summary,
+        });
+      } else if (!sensitive && prepared.outputMode === "codexJson") {
+        const summary = summarizeCodexEvents(parseCodexEventStream(traceStdout));
+        if ((phase === "reactor" || phase === "closer") && summary.lastAgentMessage) {
+          summary.lastAgentMessage = stripAgentDuelChallengeControlLines(summary.lastAgentMessage);
+        }
+        await this.appendAgentCallTrace({
+          id: traceId,
+          event: "streamSummary",
+          ...(traceKind ? { kind: traceKind } : {}),
+          timestamp: new Date().toISOString(),
+          agent,
+          phase,
+          transport: "oneShot",
+          summary,
+        });
+      }
+      if (onReplaceText && normalized.stdout !== result.stdout) {
+        onReplaceText(normalized.stdout);
+      }
+      recordFailureCard?.(normalized);
+      const completedTrace = completedAgentCallTrace(traceId, agent, phase, "oneShot", startedAt, normalized);
+      if (sensitive) delete completedTrace.stderrPreview;
+      await this.appendAgentCallTrace(traceKind ? { ...completedTrace, kind: traceKind } : completedTrace);
+      // Why: usage must parse the RAW stdout. normalizeOneShotResult swaps in
+      // the --output-last-message reply text for plain Codex, which drops the
+      // trailing "tokens used" footer and silently disabled Codex usage rows.
+      await this.extractAndRecordUsage({ agent, phase, requestId: traceId, result, outputMode: prepared.outputMode });
+      return normalized;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(redactPrivateArtifactText(message, privatePaths));
+    } finally {
+      if (prepared.privateArtifacts) {
+        await cleanupPrivateArtifacts(privatePaths, prepared.privateArtifacts.boundary);
+      }
     }
-    if (onReplaceText && normalized.stdout !== result.stdout) {
-      onReplaceText(normalized.stdout);
-    }
-    recordFailureCard?.(normalized);
-    await this.appendAgentCallTrace(
-      traceKind
-        ? { ...completedAgentCallTrace(traceId, agent, phase, "oneShot", startedAt, normalized), kind: traceKind }
-        : completedAgentCallTrace(traceId, agent, phase, "oneShot", startedAt, normalized)
-    );
-    // Why: usage must parse the RAW stdout. normalizeOneShotResult swaps in
-    // the --output-last-message reply text for plain Codex, which drops the
-    // trailing "tokens used" footer and silently disabled Codex usage rows.
-    await this.extractAndRecordUsage({ agent, phase, requestId: traceId, result, outputMode: prepared.outputMode });
-    return normalized;
   }
 
   // Sibling of runOneShotPipeline for http-transport heads (openai-compatible):
@@ -3505,7 +5976,7 @@ export class HydraRoomPanel {
   }
 
   private async autoAdvanceActionableDefault(source: string): Promise<void> {
-    if (!autoAdvanceActionableDefaults()) return;
+    if (!this.effectiveAutoAdvanceActionableDefaults()) return;
     if (!this.workspaceReady || isInFlight(this.state) || this.terminalPokeInFlight || this.verificationRunning) return;
     const latest = this.decisions[this.decisions.length - 1];
     if (!decisionHasNoUserBlockers(latest)) return;
@@ -3533,6 +6004,12 @@ export class HydraRoomPanel {
 
     const action = this.currentDecisionAction();
     if (action.kind === "assignBuilder" && action.builder && this.state.name === "AwaitingUser") {
+      if (!this.isActiveAgent(action.builder)) {
+        await this.appendSystemMessage(
+          `Hydra auto-advance paused: ${displayNameFor(action.builder)} is not currently registered and seated, so the historical default cannot dispatch it.`,
+        );
+        return;
+      }
       this.autoAdvanceSendInstructionCount = 0;
       this.acceptedDefaultDecisionTimestamp = action.sourceTimestamp;
       await this.appendSystemMessage(
@@ -3607,7 +6084,7 @@ export class HydraRoomPanel {
           m.pending = false;
           m.error = true;
           m.text = "[git diff failed; cannot review]";
-          await appendMessage(this.transcriptUri.fsPath, {
+          await this.persistTranscriptMessage({
             role: m.role, text: m.text, timestamp: m.timestamp, phase: m.phase, error: true,
           });
         }
@@ -3618,7 +6095,7 @@ export class HydraRoomPanel {
         this.postState();
         return;
       }
-      const otherAgent: AgentId = reviewer === "codex" ? "claude" : "codex";
+      const otherAgent = pickReviewers(reviewer, this.roster())[0] ?? reviewer;
       // Capture current HEAD so the review prompt can flag verification
       // records made against a different commit than what's now being reviewed.
       const currentHead = this.gitAvailable ? await captureGitHead(this.workspaceRoot) : undefined;
@@ -3700,6 +6177,20 @@ export class HydraRoomPanel {
 
   // ---------------- agent call helper ----------------
 
+  private async finishBlockedAgentCall(messageId: string): Promise<{ text: string; result: RunResult }> {
+    const result: RunResult = {
+      stdout: "",
+      stderr: this.unconfirmedTerminationMessage(),
+      exitCode: null,
+      timedOut: false,
+      cancelled: false,
+      terminationFailed: true,
+    };
+    await this.finalizePendingMessage(messageId, result);
+    const finalized = this.messagesById.get(messageId);
+    return { text: finalized?.text ?? "", result };
+  }
+
   private async callAgent(
     agent: AgentId,
     phase: Phase,
@@ -3710,12 +6201,17 @@ export class HydraRoomPanel {
     traceIdOverride?: string,
     manyHeadsDispatch = false
   ): Promise<{ text: string; result: RunResult }> {
+    if (this.unconfirmedNativeTermination) {
+      return this.finishBlockedAgentCall(messageId);
+    }
+    const boundTraceId = traceIdOverride ?? makeTraceId(agent, phase);
+    this.pendingAgentTraceIds.set(messageId, boundTraceId);
     let releaseClaudeCreditReservation: (() => void) | undefined;
     // Claude Agent SDK credit guard: evaluate BEFORE any spawn (timeout/pending
     // activity, consent, transport) so a `block` decision prevents
     // subscription-credit spend instead of only stopping auto-advance after the
     // spend already happened. Only Claude dispatch draws from that pool.
-    if (agent === "claude") {
+    if (getAgentDefinition(agent)?.kind === "claude") {
       const projectedDispatchUsd = claudeAgentEstimatedRunCostUsd();
       releaseClaudeCreditReservation = this.reserveClaudeCreditEstimate(projectedDispatchUsd);
       let guard: ClaudeAutomationGuardResult | undefined;
@@ -3729,7 +6225,7 @@ export class HydraRoomPanel {
       if (guard?.decision === "block") {
         releaseClaudeCreditReservation();
         releaseClaudeCreditReservation = undefined;
-        const traceId = traceIdOverride ?? makeTraceId(agent, phase);
+        const traceId = boundTraceId;
         await this.appendAgentCallTrace({
           id: traceId,
           event: "claudeCreditGuardBlocked",
@@ -3754,6 +6250,10 @@ export class HydraRoomPanel {
         await this.appendSystemMessage(`Hydra Claude automation credit warning: ${guard.reason}`);
       }
     }
+    if (this.unconfirmedNativeTermination) {
+      releaseClaudeCreditReservation?.();
+      return this.finishBlockedAgentCall(messageId);
+    }
     const timeout = agentTimeoutMs(phase);
     const activity = this.startPendingActivity(messageId, agent, phase, timeout);
     let dispatch: AgentDispatchPlan;
@@ -3773,12 +6273,15 @@ export class HydraRoomPanel {
           cwd: this.workspaceRoot,
           stdin: inv.stdin ?? "",
         });
-        spawn = { ...spawn, command: await resolveAgentCommand(agent, spawn.command) };
+        spawn = {
+          ...spawn,
+          command: await resolveAgentCommand(agent, spawn.command, effectiveSpawnEnvironment(spawn)),
+        };
         dispatch = { transport: "spawn", spawn };
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      const traceId = makeTraceId(agent, phase);
+      const traceId = boundTraceId;
       const startedAt = Date.now();
       await this.appendAgentCallTrace({
         id: traceId,
@@ -3855,8 +6358,8 @@ export class HydraRoomPanel {
     try {
       const result =
         dispatch.transport === "http"
-          ? await this.runHttpPipeline(agent, phase, dispatch.invocation, prompt, messageId, timeout, signal, traceIdOverride, activity.markOutput)
-          : await this.runAgentTransport(agent, phase, dispatch.spawn, prompt, messageId, timeout, signal, forceTerminalBridge, traceIdOverride, activity.markOutput);
+          ? await this.runHttpPipeline(agent, phase, dispatch.invocation, prompt, messageId, timeout, signal, boundTraceId, activity.markOutput)
+          : await this.runAgentTransport(agent, phase, dispatch.spawn, prompt, messageId, timeout, signal, forceTerminalBridge, boundTraceId, activity.markOutput);
       await this.finalizePendingMessage(messageId, result);
       const finalized = this.messagesById.get(messageId);
       return { text: finalized?.text ?? "", result };
@@ -3970,22 +6473,35 @@ export class HydraRoomPanel {
               this.panel.webview.postMessage({ type: "chunk", messageId, text });
             }
           : undefined;
-        const result = await this.terminalBridge.callAgent(
-          agent,
-          phase,
-          terminalPrepared.spawn,
-          prompt,
-          timeout,
-          signal,
-          onLiveChunk
-        );
+        let result: TerminalBridgeRunResult;
+        this.terminalBridgeDispatchInFlight += 1;
+        try {
+          result = await this.terminalBridge.callAgent(
+            agent,
+            phase,
+            terminalPrepared.spawn,
+            prompt,
+            timeout,
+            signal,
+            onLiveChunk
+          );
+        } finally {
+          this.terminalBridgeDispatchInFlight = Math.max(0, this.terminalBridgeDispatchInFlight - 1);
+        }
         const normalized = await this.normalizeTerminalBridgeResult(terminalPrepared.outputMode, result);
+        this.latchUnconfirmedNativeTermination(normalized, `${agent} ${phase} terminal bridge`, agent);
         const m = this.messagesById.get(messageId);
-        if (m && normalized.stdout) {
+        if (m) {
           if (terminalPrepared.outputMode === "plain") {
-            m.text += normalized.stdout;
-            this.panel.webview.postMessage({ type: "chunk", messageId, text: normalized.stdout });
+            if (normalized.stdout) {
+              m.text += normalized.stdout;
+              this.panel.webview.postMessage({ type: "chunk", messageId, text: normalized.stdout });
+            }
           } else {
+            // Structured live text is cosmetic and unauthenticated. Always
+            // replace it, including with an empty guarded result, so an HMAC
+            // failure/timeout cannot leave unverified streamed text in the
+            // persisted transcript.
             m.text = normalized.stdout;
             this.panel.webview.postMessage({ type: "replaceMessageText", messageId, text: normalized.stdout });
           }
@@ -4062,16 +6578,17 @@ export class HydraRoomPanel {
     spawn: AgentSpawn,
     prompt: string
   ): Promise<PreparedOneShotSpawn> {
-    const codexJson = agent === "codex" && shouldUseCodexJson(spawn);
+    const agentKind = getAgentDefinition(agent)?.kind;
+    const codexJson = agentKind === "codex" && shouldUseCodexJson(spawn);
     // codexJson supersedes codexCaptureLastMessage: the --json stream
     // already carries the final agent_message item, so the extra
     // --output-last-message file is redundant when codexJson is on.
-    const codexLastMessage = agent === "codex" && !codexJson && shouldCaptureCodexLastMessage(spawn);
-    const claudeStreamJson = agent === "claude" && shouldUseClaudeStreamJson(spawn);
+    const codexLastMessage = agentKind === "codex" && !codexJson && shouldCaptureCodexLastMessage(spawn);
+    const claudeStreamJson = agentKind === "claude" && shouldUseClaudeStreamJson(spawn);
     const needsRequestFiles =
       hasRequestFilePlaceholders(spawn) ||
       codexLastMessage ||
-      (agent === "claude" && shouldCreateClaudeRequestFiles(spawn));
+      (agentKind === "claude" && shouldCreateClaudeRequestFiles(spawn));
     if (!needsRequestFiles) {
       let preparedSpawn = spawn;
       if (claudeStreamJson) preparedSpawn = withClaudeStreamJsonArgs(preparedSpawn);
@@ -4082,39 +6599,62 @@ export class HydraRoomPanel {
         outputMode,
       };
     }
+    const artifactRoot = this.oneShotArtifactRoot();
+    const boundary = await this.prepareOneShotArtifactBoundary(artifactRoot);
+    await sweepPrivateArtifacts(
+      boundary,
+      ["prompts", "replies", "logs"],
+      ONE_SHOT_ARTIFACT_RETENTION_MS
+    );
+
     const requestId = `${Date.now()}-${crypto.randomUUID()}`;
-    const paths = terminalProtocolPaths(this.workspaceRoot, requestId, agent, phase);
-    await fs.mkdir(path.dirname(paths.promptPath), { recursive: true });
-    await fs.mkdir(path.dirname(paths.replyPath), { recursive: true });
-    await fs.mkdir(path.dirname(paths.logPath), { recursive: true });
-    await fs.writeFile(paths.promptPath, buildTerminalPromptFile(agent, phase, prompt, paths.replyPath), "utf8");
-    await fs.writeFile(paths.logPath, "", "utf8");
-    let preparedSpawn = expandRequestFileSpawn(spawn, {
-      hydraPromptFile: paths.promptPath,
-      hydraReplyFile: paths.replyPath,
-      hydraLogFile: paths.logPath,
-    });
-    if (codexLastMessage) preparedSpawn = withCodexLastMessageArgs(preparedSpawn, paths.replyPath);
-    if (codexJson) preparedSpawn = withCodexJsonArgs(preparedSpawn);
-    if (claudeStreamJson) preparedSpawn = withClaudeStreamJsonArgs(preparedSpawn, paths.logPath);
-    const outputMode = claudeStreamJson ? "claudeStreamJson" : codexJson ? "codexJson" : "plain";
-    return {
-      spawn: preparedSpawn,
-      promptPath: paths.promptPath,
-      replyPath: paths.replyPath,
-      logPath: paths.logPath,
-      outputMode,
-    };
+    const paths = terminalProtocolStoragePaths(artifactRoot, requestId, agent, phase);
+    const artifactPaths = [paths.promptPath, paths.replyPath, paths.logPath];
+    try {
+      await createPrivateArtifact(
+        paths.promptPath,
+        buildTerminalPromptFile(agent, phase, prompt, paths.replyPath),
+        boundary
+      );
+      await createPrivateArtifact(paths.logPath, "", boundary);
+      let preparedSpawn = expandRequestFileSpawn(spawn, {
+        hydraPromptFile: paths.promptPath,
+        hydraReplyFile: paths.replyPath,
+        hydraLogFile: paths.logPath,
+      });
+      if (codexLastMessage) preparedSpawn = withCodexLastMessageArgs(preparedSpawn, paths.replyPath);
+      if (codexJson) preparedSpawn = withCodexJsonArgs(preparedSpawn);
+      if (claudeStreamJson) preparedSpawn = withClaudeStreamJsonArgs(preparedSpawn, paths.logPath);
+      const outputMode = claudeStreamJson ? "claudeStreamJson" : codexJson ? "codexJson" : "plain";
+      return {
+        spawn: preparedSpawn,
+        promptPath: `[private extension storage]/${path.basename(paths.promptPath)}`,
+        replyPath: `[private extension storage]/${path.basename(paths.replyPath)}`,
+        logPath: `[private extension storage]/${path.basename(paths.logPath)}`,
+        privateArtifacts: {
+          boundary,
+          promptPath: paths.promptPath,
+          replyPath: paths.replyPath,
+          logPath: paths.logPath,
+        },
+        outputMode,
+      };
+    } catch (err) {
+      await cleanupPrivateArtifacts(artifactPaths, boundary);
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(redactPrivateArtifactText(message, artifactPaths));
+    }
   }
 
   private prepareTerminalBridgeSpawn(
     agent: AgentId,
     spawn: AgentSpawn
   ): { spawn: AgentSpawn; outputMode: "plain" | "claudeStreamJson" | "codexJson" } {
-    if (agent === "claude" && shouldUseClaudeStreamJson(spawn)) {
+    const agentKind = getAgentDefinition(agent)?.kind;
+    if (agentKind === "claude" && shouldUseClaudeStreamJson(spawn)) {
       return { spawn: withClaudeStreamJsonArgs(spawn), outputMode: "claudeStreamJson" };
     }
-    if (agent === "codex" && spawn.args.includes("exec")) {
+    if (agentKind === "codex" && spawn.args.includes("exec")) {
       // Why: users may prefix global codex flags (e.g. `--config sandbox_mode=...`)
       // before `exec`. The previous `args[0] === "exec"` check missed those argv
       // shapes, so the terminal bridge fell back to plain output and re-leaked the
@@ -4137,21 +6677,36 @@ export class HydraRoomPanel {
     } else if (prepared.outputMode === "codexJson") {
       stdout = roomTextFromCodexJson(result.stdout);
     }
-    if (prepared.replyPath) {
+    if (prepared.privateArtifacts) {
       try {
-        const replyText = (await fs.readFile(prepared.replyPath, "utf8")).trimEnd();
+        const replyText = (
+          await readPrivateArtifactUtf8(
+            prepared.privateArtifacts.replyPath,
+            prepared.privateArtifacts.boundary,
+            MAX_AGENT_STDOUT_BYTES
+          )
+        ).trimEnd();
         if (replyText.trim()) stdout = replyText;
       } catch {
         // Older CLIs and failed runs may not produce a native reply file.
       }
     }
+    const privatePaths = prepared.privateArtifacts
+      ? [
+          prepared.privateArtifacts.promptPath,
+          prepared.privateArtifacts.replyPath,
+          prepared.privateArtifacts.logPath,
+        ]
+      : [];
+    stdout = redactPrivateArtifactText(stdout, privatePaths);
+    result = { ...result, stderr: redactPrivateArtifactText(result.stderr, privatePaths) };
     return guardNativeReply({ ...result, stdout });
   }
 
   private async normalizeTerminalBridgeResult(
     outputMode: "plain" | "claudeStreamJson" | "codexJson",
-    result: RunResult & { promptPath?: string; logPath?: string; replyPath?: string }
-  ): Promise<RunResult & { promptPath?: string; logPath?: string; replyPath?: string }> {
+    result: RunResult & { promptPath?: string; logPath?: string; replyPath?: string; verifiedLog?: string }
+  ): Promise<RunResult & { promptPath?: string; logPath?: string; replyPath?: string; verifiedLog?: string }> {
     let stdout = result.stdout;
     const raw = await this.terminalBridgeRawOutput(result);
     if (outputMode === "claudeStreamJson") {
@@ -4162,24 +6717,29 @@ export class HydraRoomPanel {
     return guardNativeReply({ ...result, stdout });
   }
 
-  private async terminalBridgeUsageResult(result: RunResult & { logPath?: string }): Promise<RunResult> {
+  private async terminalBridgeUsageResult(result: RunResult & { logPath?: string; verifiedLog?: string }): Promise<RunResult> {
     return { ...result, stdout: await this.terminalBridgeRawOutput(result) };
   }
 
-  private async terminalBridgeRawOutput(result: RunResult & { logPath?: string }): Promise<string> {
-    if (!result.logPath) return result.stdout;
-    try {
-      const raw = await fs.readFile(result.logPath, "utf8");
-      return raw || result.stdout;
-    } catch {
-      // Terminal logs are best-effort diagnostics; fall back to the parsed reply.
-      return result.stdout;
-    }
+  private async terminalBridgeRawOutput(result: RunResult & { logPath?: string; verifiedLog?: string }): Promise<string> {
+    if (result.verifiedLog !== undefined) return result.verifiedLog || result.stdout;
+    // Never re-read a mutable path after reply authentication. Legacy results
+    // without an HMAC-bound snapshot fall back to their validated reply text.
+    return result.stdout;
   }
 
-  // SP3 reads this from configuration; SP1 pins the built-in two-head roster.
   private roster(): AgentId[] {
-    return [...DEFAULT_ROSTER];
+    const known = new Set(listAgentDefinitions().map((definition) => definition.id));
+    const seated = roomRoster().filter((agent) => known.has(agent));
+    if (seated.length >= 2) return seated;
+    const fallback = DEFAULT_ROSTER.filter((agent) => known.has(agent));
+    return fallback.length >= 2
+      ? [...fallback]
+      : listAgentDefinitions().slice(0, 2).map((definition) => definition.id);
+  }
+
+  private isActiveAgent(agent: AgentId): boolean {
+    return this.roster().includes(agent) && !!getAgentDefinition(agent);
   }
 
   private buildInvocationFor(agent: AgentId, phase: Phase, prompt: string): Invocation {
@@ -4269,7 +6829,10 @@ export class HydraRoomPanel {
       )
     );
     try {
-      return { ...spawn, command: await resolveAgentCommand(agent, spawn.command) };
+      return {
+        ...spawn,
+        command: await resolveAgentCommand(agent, spawn.command, effectiveSpawnEnvironment(spawn)),
+      };
     } catch {
       return spawn;
     }
@@ -4283,7 +6846,7 @@ export class HydraRoomPanel {
         const spawn = this.buildSpawn(agent, phase);
         let command = spawn.command;
         try {
-          command = await resolveAgentCommand(agent, spawn.command);
+          command = await resolveAgentCommand(agent, spawn.command, effectiveSpawnEnvironment(spawn));
         } catch {
           // The bundle should remain useful when a native binary is missing:
           // Doctor reports the failure, while this section records intent.
@@ -4331,13 +6894,14 @@ export class HydraRoomPanel {
         input.diff,
         input.verification,
       ]),
+      allowAgentDuelChallenge: agentInitiatedDuels(),
     });
     const spawn = this.buildSpawn(input.agent, input.phase);
     const authority = classifyAgentAuthority(input.agent, input.phase, spawn.args);
     const profile = describeCapabilityProfile(input.agent, input.phase, spawn.args, authority);
     let command = spawn.command;
     try {
-      command = await resolveAgentCommand(input.agent, spawn.command);
+      command = await resolveAgentCommand(input.agent, spawn.command, effectiveSpawnEnvironment(spawn));
     } catch {
       // Preview should still work even when the CLI is missing; Doctor owns
       // command repair and the actual call path surfaces spawn failures.
@@ -4401,7 +6965,7 @@ export class HydraRoomPanel {
     const profile = describeCapabilityProfile(agent, phase, spawn.args, authority);
     let command = spawn.command;
     try {
-      command = await resolveAgentCommand(agent, spawn.command);
+      command = await resolveAgentCommand(agent, spawn.command, effectiveSpawnEnvironment(spawn));
     } catch {
       // The actual terminal call owns command failure; the envelope should
       // still show the user's intended native CLI endpoint.
@@ -4445,7 +7009,7 @@ export class HydraRoomPanel {
           await fs.mkdir(path.dirname(filePath), { recursive: true });
           ensuredAgentCallDirs.add(filePath);
         }
-        await fs.appendFile(filePath, `${JSON.stringify(record)}\n`, "utf8");
+        await appendFileSafely(filePath, `${JSON.stringify(record)}\n`);
       });
     } catch {
       // Flight recording is diagnostic metadata. Never fail the user's agent
@@ -4503,6 +7067,7 @@ export class HydraRoomPanel {
     const record = buildUsageRecord({
       sessionId: this.sessionId,
       agent: input.agent,
+      agentKind: getAgentDefinition(input.agent)?.kind,
       phase: input.phase,
       requestId: input.requestId,
       model: input.model,
@@ -4518,6 +7083,12 @@ export class HydraRoomPanel {
       // Usage tracking is best-effort. A write failure must not break a turn.
     }
     this.usageRecords.push(record);
+    if (record.agent === "claude" || record.agentKind === "claude") {
+      const recordDate = new Date(record.timestamp);
+      if (Number.isFinite(recordDate.getTime()) && usageCalendarMonthKey(recordDate) === this.claudeCreditMonthKey) {
+        this.claudeCreditMonthSpendUsd = Math.round((this.claudeCreditMonthSpendUsd + Math.max(0, record.costUsd || 0)) * 10_000) / 10_000;
+      }
+    }
     // Why: the new record always belongs to this.sessionId, so fold it into the
     // session total incrementally instead of re-scanning the whole array. The
     // weekly window is time-bounded (records age out as `now` advances), so it
@@ -4542,8 +7113,9 @@ export class HydraRoomPanel {
   }): Promise<void> {
     if (args.result.cancelled || args.result.timedOut) return;
     const { agent, phase, requestId, result, outputMode } = args;
+    const agentKind = getAgentDefinition(agent)?.kind;
     const model = modelForPhase(agent, phase) || undefined;
-    if (agent === "claude" && outputMode === "claudeStreamJson") {
+    if (agentKind === "claude" && outputMode === "claudeStreamJson") {
       const summary = summarizeClaudeEvents(parseClaudeEventStream(result.stdout));
       const tokens = usageFromClaudeSummary(summary.usage);
       if (tokens) {
@@ -4551,7 +7123,7 @@ export class HydraRoomPanel {
         return;
       }
     }
-    if (agent === "codex" && outputMode === "codexJson") {
+    if (agentKind === "codex" && outputMode === "codexJson") {
       const summary = summarizeCodexEvents(parseCodexEventStream(result.stdout));
       const tokens = usageFromCodexSummary(summary.usage);
       if (tokens) {
@@ -4559,7 +7131,7 @@ export class HydraRoomPanel {
         return;
       }
     }
-    if (agent === "codex") {
+    if (agentKind === "codex") {
       // Why: `codex exec` prints the "tokens used" footer to STDERR (stdout
       // carries only the agent reply); parsing stdout alone never matched, so
       // plain Codex turns recorded no usage row. Terminal-bridge merges the raw
@@ -4587,7 +7159,7 @@ export class HydraRoomPanel {
   private async buildNextPromptPreviewEnvelope(draftText: string, opener: AgentId): Promise<PromptEnvelope> {
     const draftWithAttachments = this.prepareUserMessageWithAttachments(draftText, false);
     if (this.state.name === "BuildDone" && this.gitAvailable) {
-      const reviewer: AgentId = this.state.builder === "codex" ? "claude" : "codex";
+      const reviewer = pickReviewers(this.state.builder, this.roster())[0] ?? this.state.builder;
       const diff = await captureGitDiff(this.workspaceRoot, diffMaxLines());
       return await this.buildPromptEnvelope({
         agent: reviewer,
@@ -4601,18 +7173,20 @@ export class HydraRoomPanel {
 
     if (this.state.name === "ParallelBuildDone" && this.gitAvailable) {
       const diff = await captureGitDiff(this.workspaceRoot, diffMaxLines());
+      const reviewer = this.state.agents[0] ?? this.getFirstSpeaker();
+      const otherAgent = this.state.agents.find((agent) => agent !== reviewer) ?? reviewer;
       return await this.buildPromptEnvelope({
-        agent: "codex",
-        otherAgent: "claude",
+        agent: reviewer,
+        otherAgent,
         phase: "review",
-        transcript: this.buildPromptContext("review", undefined, "codex"),
+        transcript: this.buildPromptContext("review", undefined, reviewer),
         diff: diff ?? "[git diff failed; preview cannot include diff]",
         verification: verificationAsReviewContext(this.latestVerification()),
       });
     }
 
     if (this.state.name === "ReviewDone" && !this.state.approved && !draftText.trim()) {
-      const builder: AgentId = this.state.reviewer === "codex" ? "claude" : "codex";
+      const builder = this.state.builder;
       return await this.buildPromptEnvelope({
         agent: builder,
         otherAgent: this.state.reviewer,
@@ -4622,15 +7196,17 @@ export class HydraRoomPanel {
     }
 
     if (this.state.name === "ParallelReviewDone" && !this.state.approved && !draftText.trim()) {
+      const builder = this.state.builders[0] ?? this.getFirstSpeaker();
+      const otherAgent = this.state.builders.find((agent) => agent !== builder) ?? builder;
       return await this.buildPromptEnvelope({
-        agent: "codex",
-        otherAgent: "claude",
+        agent: builder,
+        otherAgent,
         phase: "build",
-        transcript: this.buildPromptContext("build", undefined, "codex"),
+        transcript: this.buildPromptContext("build", undefined, builder),
       });
     }
 
-    const selectedOpener = normalizeAgentId(opener, this.getFirstSpeaker());
+    const selectedOpener = normalizeAgentId(opener, this.getFirstSpeaker(), this.roster());
     const reactor = pickReviewers(selectedOpener, this.roster())[0] ?? selectedOpener;
     const trimmed = draftWithAttachments.promptText.trim();
     const previewMessages = trimmed
@@ -4701,10 +7277,9 @@ export class HydraRoomPanel {
   }
 
   private currentAuthoritySummaries(): Record<AgentId, AgentAuthoritySummary> {
-    return {
-      codex: this.authoritySummaryForAgent("codex"),
-      claude: this.authoritySummaryForAgent("claude"),
-    };
+    return Object.fromEntries(
+      this.roster().map((agent) => [agent, this.authoritySummaryForAgent(agent)]),
+    );
   }
 
   private authoritySummaryForAgent(agent: AgentId): AgentAuthoritySummary {
@@ -4812,24 +7387,33 @@ export class HydraRoomPanel {
     const cfg = vscode.workspace.getConfiguration("hydraRoom");
     const codexCommand = cfg.get<string>("codexCommand", "codex") || "codex";
     const claudeCommand = cfg.get<string>("claudeCommand", "claude") || "claude";
-    const [codexResolvedRaw, claudeResolvedRaw] = await Promise.all([
-      resolveAgentCommand("codex", codexCommand),
-      resolveAgentCommand("claude", claudeCommand),
-    ]);
-    // resolveAgentCommand echoes the bare name back when nothing was found.
-    // The doctor contract is "undefined when not found", so collapse the
-    // bare-name-echo case to undefined here instead of letting commandCheck
-    // re-derive it.
-    const collapseUnresolved = (configured: string, resolved: string): string | undefined => {
-      if (!resolved) return undefined;
-      if (resolved === configured && !resolved.includes("/") && !resolved.includes("\\")) return undefined;
-      return resolved;
+    const codexSpawn = this.applyConfiguredSpawnEnvironment("codex", {
+      command: codexCommand,
+      args: [],
+      cwd: this.workspaceRoot,
+    });
+    const claudeSpawn = this.applyConfiguredSpawnEnvironment("claude", {
+      command: claudeCommand,
+      args: [],
+      cwd: this.workspaceRoot,
+    });
+    const resolveForDoctor = async (agent: AgentId, spawn: AgentSpawn): Promise<string | undefined> => {
+      try {
+        return await resolveAgentCommand(agent, spawn.command, effectiveSpawnEnvironment(spawn));
+      } catch {
+        return undefined;
+      }
     };
-    const codexResolvedCommand = collapseUnresolved(codexCommand, codexResolvedRaw);
-    const claudeResolvedCommand = collapseUnresolved(claudeCommand, claudeResolvedRaw);
-    const bridgeResult = includeTerminalBridge && this.terminalBridge
+    const [codexResolvedCommand, claudeResolvedCommand] = await Promise.all([
+      resolveForDoctor("codex", codexSpawn),
+      resolveForDoctor("claude", claudeSpawn),
+    ]);
+    const bridgeResult = includeTerminalBridge && !this.unconfirmedNativeTermination && this.terminalBridge
       ? await this.terminalBridge.selfTest(terminalBridgeTimeoutMs())
       : undefined;
+    if (bridgeResult) {
+      this.latchUnconfirmedNativeTermination(bridgeResult, "Doctor terminal bridge self-test", "codex");
+    }
     const argsValidation = collectArgsValidation(cfg);
     const report = await runHydraDoctor({
       workspaceRoot: this.workspaceRoot,
@@ -4859,6 +7443,16 @@ export class HydraRoomPanel {
 
   private transportMode(): "oneShot" | "terminalBridge" {
     return this.transport;
+  }
+
+  private effectiveManyHeadsMode(): boolean {
+    if (vscode.workspace.isTrusted !== true) return false;
+    return this.manyHeadsModeOverride ?? manyHeadsMode();
+  }
+
+  private effectiveAutoAdvanceActionableDefaults(): boolean {
+    if (vscode.workspace.isTrusted !== true) return false;
+    return this.autoAdvanceActionableDefaultsOverride ?? autoAdvanceActionableDefaults();
   }
 
   private async migrateLegacyAgentTimeoutDefaults(): Promise<void> {
@@ -4908,6 +7502,10 @@ export class HydraRoomPanel {
       try {
         const spawn = await this.buildNativeCommandSpawn("claude", [...CLAUDE_AUTH_STATUS_PROBE_ARGS]);
         const result = await runAgent(spawn, "", 30000, () => {}, signal);
+        if (this.latchUnconfirmedNativeTermination(result, "Claude auth-status probe", "claude")) {
+          this.claudeAuthStatus = undefined;
+          return undefined;
+        }
         // Some CLI builds print status to stdout, others to stderr; try both.
         this.claudeAuthStatus = parseClaudeAuthStatus(result.stdout) ?? parseClaudeAuthStatus(result.stderr);
       } catch {
@@ -4944,7 +7542,7 @@ export class HydraRoomPanel {
     const mode = claudeAutomationCreditGuard();
     if (mode === "off") return undefined;
     const status = (await this.ensureClaudeAuthStatus(signal)) ?? { isApiKey: false, isSubscription: false };
-    const monthSpendUsd = claudeAutomationSpendThisMonth(this.usageRecords);
+    const monthSpendUsd = await this.currentClaudeCreditMonthSpend();
     return evaluateClaudeAutomationGuard({
       mode,
       capUsd: claudeAgentCreditCapUsd(),
@@ -4953,6 +7551,18 @@ export class HydraRoomPanel {
       status,
       manyHeads,
     });
+  }
+
+  private async currentClaudeCreditMonthSpend(now = new Date()): Promise<number> {
+    const monthKey = usageCalendarMonthKey(now);
+    if (monthKey === this.claudeCreditMonthKey) return this.claudeCreditMonthSpendUsd;
+    // A room may stay open across a UTC month boundary. Re-seed from the full
+    // ledger before its first dispatch in the new month, then resume the
+    // incremental fold. Reset the one-shot warning for the new credit period.
+    this.claudeCreditMonthSpendUsd = await loadClaudeAutomationSpendThisMonth(this.usageUri.fsPath, now);
+    this.claudeCreditMonthKey = monthKey;
+    this.claudeCreditWarned = false;
+    return this.claudeCreditMonthSpendUsd;
   }
 
   private buildPromptContext(
@@ -5034,6 +7644,11 @@ export class HydraRoomPanel {
     });
     if (wikiContext) {
       sections.push("", wikiContext.markdown);
+    }
+    if (agent && use === "room" && agentInitiatedDuels()) {
+      // Ratings are a visible motivation signal only. No decision, phase,
+      // authority, or builder-selection path reads this block.
+      sections.push("", renderDuelMotivationContext(agent, this.duels.ratings, displayNameFor));
     }
     const transcriptCap = use === "terminalPoke" ? 0 : this.promptTranscriptMaxChars(phase);
     const transcriptWindow = buildPromptContextWindow(
@@ -5125,6 +7740,52 @@ export class HydraRoomPanel {
     this.messagesById.set(msg.id, msg);
   }
 
+  /** Persist one room message and mirror an automatic transcript rotation in
+   * the live panel. Reloading the new active file avoids assuming that another
+   * window or a manual edit left disk records aligned with the UI prefix. */
+  private async persistTranscriptMessage(message: TranscriptMessage): Promise<void> {
+    const archived = await appendMessage(this.transcriptUri.fsPath, message);
+    if (!archived) return;
+
+    const previous = [...this.messages];
+    const candidates = new Map<string, UiMessage[]>();
+    for (const item of previous) {
+      if (item.pending) continue;
+      const key = transcriptMessageIdentity(item);
+      const matches = candidates.get(key) ?? [];
+      matches.push(item);
+      candidates.set(key, matches);
+    }
+    const active = await readTranscript(this.transcriptUri.fsPath);
+    const restored = active.map((item, index): UiMessage => {
+      const matches = candidates.get(transcriptMessageIdentity(item));
+      const existing = matches?.shift();
+      return existing ?? { ...item, id: `active-${Date.now()}-${index}` };
+    });
+    const pending = previous.filter((item) => item.pending);
+    for (const item of pending) {
+      const itemTime = Date.parse(item.timestamp);
+      const insertAt = restored.findIndex((activeItem) => {
+        const activeTime = Date.parse(activeItem.timestamp);
+        return Number.isFinite(itemTime) && Number.isFinite(activeTime) && activeTime > itemTime;
+      });
+      if (insertAt >= 0) restored.splice(insertAt, 0, item);
+      else restored.push(item);
+    }
+    this.setMessages(restored);
+    this.lastWikiWrapupSourceKey = undefined;
+    this.lastWikiRefreshTranscriptBucket = 0;
+    const archiveDetail = archived.archivedMessages === undefined
+      ? "Hydra auto-archived transcript history; the exact message count exceeded the bounded read window."
+      : `Hydra auto-archived ${archived.archivedMessages} transcript message(s).`;
+    await this.recordEvent("diagnostic", archiveDetail, {
+      archiveFile: path.basename(archived.archivePath),
+      archivedBytes: archived.archivedBytes,
+      ...(archived.archivedMessages === undefined ? {} : { archivedMessages: archived.archivedMessages }),
+    });
+    this.postState();
+  }
+
   private async readManyHeadsSmokeLiveFiles(agentCalls: readonly ManyHeadsSmokeAgentCall[]): Promise<ManyHeadsSmokeLiveFile[]> {
     const started = agentCalls.filter((call) =>
       call.event === "started" &&
@@ -5176,10 +7837,7 @@ export class HydraRoomPanel {
     const id = `m-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
     const msg: UiMessage = {
       id,
-      // Why: MessageRole is a closed union unrelated to the now-widened AgentId;
-      // codex/claude (the only ids in use today) narrow through unchanged, and
-      // any future custom agent id displays as a system message.
-      role: role === "codex" || role === "claude" ? role : "system",
+      role,
       text: "",
       timestamp: new Date().toISOString(),
       phase,
@@ -5188,6 +7846,29 @@ export class HydraRoomPanel {
     this.pushMessage(msg);
     this.setAgentStatus(role, "running", `${phase} running`);
     return id;
+  }
+
+  private bindPendingAgentDuelContext(messageId: string, opponentId: AgentId, opponentMessageId: string): void {
+    const opponentMessage = this.messagesById.get(opponentMessageId);
+    if (
+      !opponentMessage
+      || opponentMessage.role !== opponentId
+      || opponentMessage.pending
+      || opponentMessage.error
+      || opponentMessage.cancelled
+    ) {
+      return;
+    }
+    const latestUserMessage = [...this.messages]
+      .reverse()
+      .find((message) => message.role === "user" && Date.parse(message.timestamp) <= Date.parse(opponentMessage.timestamp));
+    this.pendingAgentDuelContexts.set(messageId, {
+      opponentId,
+      opponentMessageId,
+      opponentMessageTimestamp: opponentMessage.timestamp,
+      opponentMessageText: opponentMessage.text,
+      ...(latestUserMessage ? { latestUserMessage: latestUserMessage.text } : {}),
+    });
   }
 
   private startPendingActivity(
@@ -5225,6 +7906,10 @@ export class HydraRoomPanel {
   private async finalizePendingMessage(messageId: string, result: RunResult): Promise<void> {
     const m = this.messagesById.get(messageId);
     if (!m) return;
+    const duelContext = this.pendingAgentDuelContexts.get(messageId);
+    this.pendingAgentDuelContexts.delete(messageId);
+    const sourceTraceId = this.pendingAgentTraceIds.get(messageId);
+    this.pendingAgentTraceIds.delete(messageId);
     if (!m.pending && m.cancelled) {
       this.pendingPromptTranscriptWindows.delete(messageId);
       return;
@@ -5236,7 +7921,12 @@ export class HydraRoomPanel {
     if (runFailure) m.runFailure = runFailure;
     const timedOutDiscussion =
       result.timedOut && (m.phase === "opener" || m.phase === "reactor" || m.phase === "closer" || m.phase === "parallel");
-    if (result.cancelled || timedOutDiscussion) {
+    if (result.terminationFailed) {
+      m.error = true;
+      if (m.text.length > 0 && !m.text.endsWith("\n")) m.text += "\n";
+      m.text += `[process termination unconfirmed]\n${this.unconfirmedTerminationMessage()}`;
+      if (result.stderr && !m.text.includes(result.stderr)) m.text += `\n${result.stderr}`;
+    } else if (result.cancelled || timedOutDiscussion) {
       m.cancelled = true;
       if (m.text.length > 0 && !m.text.endsWith("\n")) m.text += "\n";
       m.text += result.cancelled
@@ -5252,8 +7942,43 @@ export class HydraRoomPanel {
       const code = result.exitCode === null ? "spawn-failed" : String(result.exitCode);
       m.text += `\n[exit ${code}]${result.stderr ? "\n" + result.stderr : ""}`;
     }
+    let agentDuelRequest: PendingAgentDuelRequest | undefined;
+    let agentDuelProtocolError: string | undefined;
+    if (
+      duelContext
+      && isAgentMessageRole(m.role)
+      && (m.phase === "reactor" || m.phase === "closer")
+      && !m.error
+      && !m.cancelled
+    ) {
+      const rawAgentReplyText = m.text;
+      const parsed = parseAgentDuelIntent(m.text, duelContext.opponentId);
+      if (parsed.kind !== "none") {
+        m.text = parsed.cleanedText;
+        this.panel.webview.postMessage({ type: "replaceMessageText", messageId, text: m.text });
+      }
+      if (parsed.kind === "invalid") {
+        agentDuelProtocolError = parsed.error;
+      } else if (parsed.kind === "challenge") {
+        if (!sourceTraceId) {
+          agentDuelProtocolError = "Hydra could not bind the challenge to its originating agent-call trace.";
+        } else {
+          agentDuelRequest = {
+            challengerId: m.role,
+            sourceTraceId,
+            sourceMessageTimestamp: m.timestamp,
+            // Bind admission to the exact head output including its stripped
+            // machine control line. The completed trace stores the same raw
+            // stdout digest while the visible transcript remains clean.
+            sourceMessageText: rawAgentReplyText,
+            context: duelContext,
+            intent: parsed.intent,
+          };
+        }
+      }
+    }
     if (m.text.trim() === "") m.text = "[no output]";
-    if (m.role === "codex" || m.role === "claude") {
+    if (isAgentMessageRole(m.role)) {
       this.setAgentStatus(
         m.role,
         m.error || m.cancelled ? "error" : "replied",
@@ -5262,7 +7987,7 @@ export class HydraRoomPanel {
     }
     await this.captureDecisionPacket(m);
     await this.refreshWorkspaceChanges();
-    await appendMessage(this.transcriptUri.fsPath, {
+    await this.persistTranscriptMessage({
       role: m.role,
       text: m.text,
       timestamp: m.timestamp,
@@ -5272,6 +7997,13 @@ export class HydraRoomPanel {
     });
     await this.recordWikiUsageTelemetry(m, promptTranscriptWindow);
     this.pendingPromptTranscriptWindows.delete(messageId);
+    if (agentDuelProtocolError) {
+      await this.appendSystemMessage(
+        `${displayNameFor(m.role as AgentId)} duel request rejected: ${agentDuelProtocolError} No duel or Elo change occurred.`,
+      );
+    } else if (agentDuelRequest) {
+      this.enqueueAgentDuelAdmission(agentDuelRequest);
+    }
   }
 
   private async recordWikiUsageTelemetry(
@@ -5279,7 +8011,7 @@ export class HydraRoomPanel {
     promptTranscriptWindow?: PromptTranscriptWindowStats
   ): Promise<void> {
     if (!this.workspaceReady) return;
-    if (message.role !== "codex" && message.role !== "claude") return;
+    if (!isAgentMessageRole(message.role)) return;
     if (message.error || message.cancelled) return;
     const wikiContext = readHydraWikiPromptContext(this.workspaceRoot, wikiContextMaxChars(), {
       includeLog: wikiPromptIncludeLog(),
@@ -5315,7 +8047,7 @@ export class HydraRoomPanel {
   }
 
   private async captureDecisionPacket(message: UiMessage): Promise<void> {
-    if (message.role !== "codex" && message.role !== "claude") return;
+    if (!isAgentMessageRole(message.role)) return;
     if (message.error || message.cancelled) return;
     const packet = parseDecisionPacket(message.text, {
       agent: message.role,
@@ -5464,7 +8196,7 @@ export class HydraRoomPanel {
   }
 
   private appendUserMessageToUi(text: string): UiMessage {
-    const id = `u-${Date.now()}`;
+    const id = `u-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
     const msg: UiMessage = {
       id,
       role: "user",
@@ -5477,17 +8209,23 @@ export class HydraRoomPanel {
 
   private async appendUserMessage(text: string): Promise<UiMessage> {
     const msg = this.appendUserMessageToUi(text);
-    await appendMessage(this.transcriptUri.fsPath, {
-      role: "user",
-      text,
-      timestamp: msg.timestamp,
-    });
+    try {
+      await this.persistTranscriptMessage({
+        role: "user",
+        text,
+        timestamp: msg.timestamp,
+      });
+    } catch (err) {
+      this.setMessages(this.messages.filter((candidate) => candidate !== msg));
+      this.postState();
+      throw err;
+    }
     this.postState();
     return msg;
   }
 
   private appendSystemMessageToUi(text: string): UiMessage {
-    const id = `s-${Date.now()}`;
+    const id = `s-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
     const msg: UiMessage = {
       id,
       role: "system",
@@ -5500,10 +8238,27 @@ export class HydraRoomPanel {
 
   private async appendSystemMessage(text: string): Promise<void> {
     const msg = this.appendSystemMessageToUi(text);
-    await appendMessage(this.transcriptUri.fsPath, {
-      role: "system",
-      text,
-      timestamp: msg.timestamp,
+    try {
+      await this.persistTranscriptMessage({
+        role: "system",
+        text,
+        timestamp: msg.timestamp,
+      });
+    } catch (err) {
+      this.setMessages(this.messages.filter((candidate) => candidate !== msg));
+      this.postState();
+      throw err;
+    }
+  }
+
+  private async appendRequiredDuelReceipt(record: Record<string, unknown>): Promise<void> {
+    const filePath = this.agentCallsUri.fsPath;
+    await serializePerFile(filePath, async () => {
+      if (!ensuredAgentCallDirs.has(filePath)) {
+        await fs.mkdir(path.dirname(filePath), { recursive: true });
+        ensuredAgentCallDirs.add(filePath);
+      }
+      await appendFileSafely(filePath, `${JSON.stringify(record)}\n`);
     });
   }
 
@@ -5537,7 +8292,7 @@ export class HydraRoomPanel {
           this.postState();
           break;
         case "send":
-          await this.sendUserMessage(msg.text, normalizeAgentId(msg.opener, this.getFirstSpeaker()), { consumePendingAttachments: true });
+          await this.sendUserMessage(msg.text, normalizeAgentId(msg.opener, this.getFirstSpeaker(), this.roster()), { consumePendingAttachments: true });
           break;
         case "attachFiles":
           await this.attachFiles();
@@ -5558,7 +8313,7 @@ export class HydraRoomPanel {
           await this.stop();
           break;
         case "assignBuilder":
-          await this.assignBuilder(msg.builder);
+          await this.assignBuilder(normalizeAgentId(msg.builder, this.getFirstSpeaker(), this.roster()));
           break;
         case "assignParallelBuilders":
           await this.assignParallelBuilders();
@@ -5618,7 +8373,7 @@ export class HydraRoomPanel {
           await this.showCommandCenter();
           break;
         case "previewNextPrompt":
-          await this.previewNextPrompt(msg.text ?? "", normalizeAgentId(msg.opener, this.getFirstSpeaker()));
+          await this.previewNextPrompt(msg.text ?? "", normalizeAgentId(msg.opener, this.getFirstSpeaker(), this.roster()));
           break;
         case "openLastPrompt":
           await this.openLastPrompt();
@@ -5644,6 +8399,36 @@ export class HydraRoomPanel {
         case "openDecisions":
           await this.openDecisions();
           break;
+        case "openStandings":
+          await this.openStandings();
+          break;
+        case "openScoreEvidence":
+          await this.openScoreEvidence();
+          break;
+        case "recordScoreVerdict":
+          await this.recordScoreVerdict();
+          break;
+        case "reverseScoreVerdict":
+          await this.reverseScoreVerdict();
+          break;
+        case "adjudicatePendingScoreClaim":
+          await this.adjudicatePendingScoreClaim();
+          break;
+        case "openDuels":
+          await this.openDuelsPanel();
+          break;
+        case "advanceDuel":
+          await this.advanceDuel(String(msg.duelId ?? ""));
+          break;
+        case "cancelDuel":
+          await this.cancelDuel(String(msg.duelId ?? ""));
+          break;
+        case "openDuelAudit":
+          await this.openDuelAudit();
+          break;
+        case "correctDuelResult":
+          await this.correctDuelResult();
+          break;
         case "chooseModelOrEffort":
           await this.chooseModelOrEffort();
           break;
@@ -5667,7 +8452,7 @@ export class HydraRoomPanel {
           break;
         case "pokeNativeTerminal":
           await this.pokeNativeTerminal(
-            normalizeAgentId(msg.agent, this.getFirstSpeaker()),
+            normalizeAgentId(msg.agent, this.getFirstSpeaker(), this.roster()),
             msg.text ?? "",
             {
               includeEditorContext: !!msg.includeEditorContext,
@@ -5677,13 +8462,13 @@ export class HydraRoomPanel {
           break;
         case "runNativeCommand":
           await this.runNativeCliCommand(
-            normalizeAgentId(msg.agent, this.getFirstSpeaker()),
+            normalizeAgentId(msg.agent, this.getFirstSpeaker(), this.roster()),
             msg.text ?? ""
           );
           break;
         case "sendRawTerminalLine":
           await this.sendRawTerminalLine(
-            normalizeAgentId(msg.agent, this.getFirstSpeaker()),
+            normalizeAgentId(msg.agent, this.getFirstSpeaker(), this.roster()),
             msg.text ?? ""
           );
           break;
@@ -5770,13 +8555,20 @@ export class HydraRoomPanel {
   }
 
   private postState(): void {
+    if (this.disposed) return;
     const workQueue = this.workspaceReady ? this.currentWorkQueue() : [];
+    const automationReady = this.workspaceReady && !this.unconfirmedNativeTermination;
+    const duelCommitmentBusy = this.agentDuelAutomationRunning || !!this.duelCommitmentAbort;
+    const duelAutomationBusy = this.agentDuelAdmissionRunning || duelCommitmentBusy;
     const canStop =
       isInFlight(this.state) ||
       this.terminalPokeInFlight ||
       this.verificationRunning ||
-      this.autopilotRunning;
-    const authoritySummaries = this.workspaceReady ? this.currentAuthoritySummaries() : unavailableAuthoritySummaries();
+      this.autopilotRunning ||
+      duelCommitmentBusy;
+    const authoritySummaries = this.workspaceReady
+      ? this.currentAuthoritySummaries()
+      : unavailableAuthoritySummaries(this.roster());
     HydraRoomPanel.statusBarUpdater?.({
       workspaceReady: this.workspaceReady,
       phaseLabel: phaseLabel(this.state),
@@ -5797,18 +8589,19 @@ export class HydraRoomPanel {
         messages: this.messages,
         phaseLabel: phaseLabel(this.state),
         isIdle: this.state.name === "Idle",
-        canSend: this.workspaceReady && !this.terminalPokeInFlight && (isSendable(this.state) || isInFlight(this.state)),
+        canSend: automationReady && !this.terminalPokeInFlight && (isSendable(this.state) || isInFlight(this.state)),
         canStop,
+        unconfirmedNativeTermination: this.unconfirmedNativeTermination,
         queuedUserMessageCount: this.queuedUserMessages.length,
-        canPokeNativeTerminals: this.workspaceReady && !isInFlight(this.state) && !this.terminalPokeInFlight,
+        canPokeNativeTerminals: automationReady && !isInFlight(this.state) && !this.terminalPokeInFlight && !duelAutomationBusy,
         canClearNativeActions: this.workspaceReady && !this.terminalPokeInFlight,
-        canAssignBuilder: this.workspaceReady && this.state.name === "AwaitingUser",
-        canRequestReview: this.workspaceReady && (this.state.name === "BuildDone" || this.state.name === "ParallelBuildDone") && this.gitAvailable,
-        canRunVerification: this.workspaceReady && !isInFlight(this.state) && !this.terminalPokeInFlight && !this.verificationRunning,
+        canAssignBuilder: automationReady && this.state.name === "AwaitingUser",
+        canRequestReview: automationReady && (this.state.name === "BuildDone" || this.state.name === "ParallelBuildDone") && this.gitAvailable,
+        canRunVerification: automationReady && !isInFlight(this.state) && !this.terminalPokeInFlight && !this.verificationRunning && !duelAutomationBusy,
         canRunWikiWrapup: this.canRunManualWikiWrapup(),
-        canPreviewPrompt: this.workspaceReady && !isInFlight(this.state) && !this.terminalPokeInFlight,
-        canArchiveRoom: this.workspaceReady && !canStop,
-        canAttachFiles: this.workspaceReady && !isInFlight(this.state) && !this.terminalPokeInFlight,
+        canPreviewPrompt: automationReady && !isInFlight(this.state) && !this.terminalPokeInFlight && !duelAutomationBusy,
+        canArchiveRoom: this.workspaceReady && !canStop && !duelAutomationBusy,
+        canAttachFiles: automationReady && !isInFlight(this.state) && !this.terminalPokeInFlight,
         pendingAttachments: this.pendingAttachments.map((attachment) => ({
           id: attachment.id,
           name: attachment.name,
@@ -5817,13 +8610,16 @@ export class HydraRoomPanel {
           binary: attachment.binary,
           previewChars: attachment.previewText?.length ?? 0,
         })),
-        canHandBack: this.workspaceReady && (this.state.name === "ReviewDone" || this.state.name === "ParallelReviewDone") && !this.state.approved,
+        canHandBack: automationReady && (this.state.name === "ReviewDone" || this.state.name === "ParallelReviewDone") && !this.state.approved,
         canOpenFolder: !this.workspaceReady,
         suggestedBuilder: this.state.name === "AwaitingUser" ? this.suggestedBuilder : undefined,
         firstSpeaker: this.getFirstSpeaker(),
         transport: this.transportMode(),
         objective: this.objective,
-        roster: listAgentDefinitions().map(({ id, displayName, colorIndex }) => ({ id, displayName, colorIndex })),
+        roster: this.roster().map((id) => {
+          const definition = getAgentDefinition(id);
+          return { id, displayName: definition?.displayName ?? id, colorIndex: definition?.colorIndex };
+        }),
         agentStatuses: this.agentStatuses,
         authoritySummaries,
         terminalSessions: this.terminalBridge?.getSessions() ?? [],
@@ -5843,7 +8639,7 @@ export class HydraRoomPanel {
           codex: this.effortSummaryForRail("codex"),
         },
         manyHeads: {
-          enabled: manyHeadsMode(),
+          enabled: this.effectiveManyHeadsMode(),
           claudeWorkerCount: manyHeadsClaudeWorkerCount(),
         },
         latestDecision,
@@ -5851,9 +8647,31 @@ export class HydraRoomPanel {
         latestDecisionRisky: latestDecisionAccepted ? { risky: false, reasons: [] } : detectRiskySignals(latestDecision),
         recentDecisions: this.decisions.slice(-5).reverse(),
         decisionsCount: this.decisions.length,
+        standings: {
+          eventCount: this.scoreboard.eventCount,
+          error: this.scoreboardError,
+          mirrorError: this.scoreboardMirrorError,
+          overall: this.scoreboard.overallStandings,
+          byDomain: this.scoreboard.standings,
+        },
+        duels: {
+          agentInitiatedEnabled: agentInitiatedDuels(),
+          automationRunning: this.agentDuelAdmissionRunning || this.agentDuelAutomationRunning,
+          automationQueued: this.agentDuelAdmissionQueue.length + this.agentDuelAutomationQueue.length,
+          eventCount: this.duels.eventCount,
+          error: this.duelError,
+          mirrorError: this.duelMirrorError,
+          activeTotal: this.duels.activeDuels.length,
+          ratingsTotal: this.duels.ratings.length,
+          recentTotal: this.duels.recentDuels.length,
+          ratedDuelCount: Math.floor(this.duels.ratings.reduce((total, rating) => total + rating.ratedMatches, 0) / 2),
+          active: this.duels.activeDuels.slice(0, 50),
+          ratings: this.duels.ratings.slice(0, 200),
+          recent: this.duels.recentDuels.slice(0, 20),
+        },
         decisionAction: this.currentDecisionAction(),
-        canAcceptDefault: this.workspaceReady && !isInFlight(this.state) && !this.terminalPokeInFlight && this.currentDecisionAction().kind !== "none",
-        autoAdvanceActionableDefaults: autoAdvanceActionableDefaults(),
+        canAcceptDefault: automationReady && !isInFlight(this.state) && !this.terminalPokeInFlight && this.currentDecisionAction().kind !== "none",
+        autoAdvanceActionableDefaults: this.effectiveAutoAdvanceActionableDefaults(),
         latestVerification: this.latestVerification(),
         verificationSummary: verificationSummary(this.latestVerification()),
         verificationRunning: this.verificationRunning,
@@ -5886,7 +8704,7 @@ export class HydraRoomPanel {
   }
 
   private canRunManualWikiWrapup(): boolean {
-    if (!this.workspaceReady || isInFlight(this.state) || this.terminalPokeInFlight || this.verificationRunning || this.autopilotRunning || this.wikiWrapupInFlight) {
+    if (!this.workspaceReady || this.unconfirmedNativeTermination || isInFlight(this.state) || this.terminalPokeInFlight || this.verificationRunning || this.autopilotRunning || this.wikiWrapupInFlight) {
       return false;
     }
     return !!hydraWikiWrapupSourceFromMessages(this.messages, wikiWrapupMaxSourceChars());
@@ -5930,20 +8748,82 @@ export class HydraRoomPanel {
   }
 
   private getFirstSpeaker(): AgentId {
+    const roster = this.roster();
     const configured = vscode.workspace
       .getConfiguration("hydraRoom")
       .get<string>("firstSpeaker", "codex");
-    return normalizeAgentId(configured, "codex");
+    return normalizeAgentId(configured, roster[0] ?? "codex", roster);
+  }
+
+  private oneShotArtifactRoot(): string {
+    return path.join(this.workspacePrivateStorageRoot(), "one-shot");
+  }
+
+  private workspacePrivateStorageRoot(): string {
+    return this.context.storageUri?.fsPath ?? path.join(
+      this.context.globalStorageUri.fsPath,
+      "workspaces",
+      crypto.createHash("sha256").update(this.workspaceRoot).digest("hex").slice(0, 24),
+    );
+  }
+
+  private latchUnconfirmedNativeTermination(
+    result: { terminationFailed?: boolean },
+    context: string,
+    agent?: AgentId
+  ): boolean {
+    if (!result.terminationFailed) return false;
+    if (!this.unconfirmedNativeTermination) {
+      this.unconfirmedNativeTermination = true;
+      if (agent) this.setAgentStatus(agent, "error", "Process termination unconfirmed");
+      void this.recordEvent(
+        "error",
+        `Native process termination was not confirmed during ${context}; Hydra automation is blocked until VS Code restarts.`
+      );
+    }
+    this.postState();
+    return true;
+  }
+
+  private unconfirmedTerminationMessage(): string {
+    return "Hydra blocked new automation because a previous native process did not confirm that it exited. Restart VS Code before continuing.";
+  }
+
+  private async prepareOneShotArtifactBoundary(artifactRoot: string): Promise<PrivateArtifactBoundary> {
+    try {
+      return await preparePrivateArtifactRoot(
+        this.workspaceRoot,
+        artifactRoot,
+        ["prompts", "replies", "logs"]
+      );
+    } catch {
+      // This message can be copied into .hydra/agent-calls.jsonl and a failure
+      // card. Do not include an ExtensionContext storage path in it.
+      throw new Error("Hydra could not prepare private one-shot request storage.");
+    }
   }
 
   private createTerminalBridge(): TerminalBridge {
+    const workspaceStorageRoot = this.workspacePrivateStorageRoot();
     return new TerminalBridge(this.workspaceRoot, {
+      artifactRoot: path.join(workspaceStorageRoot, "terminal-bridge"),
       onSessionUpdate: () => this.postState(),
     });
   }
 }
 
 // ---------------- pure helpers ----------------
+
+function transcriptMessageIdentity(message: Pick<UiMessage, "role" | "text" | "timestamp" | "phase" | "error" | "cancelled">): string {
+  return JSON.stringify([
+    message.role,
+    message.text,
+    message.timestamp,
+    message.phase ?? null,
+    !!message.error,
+    !!message.cancelled,
+  ]);
+}
 
 function isSendable(state: State): boolean {
   // Quiescent states (nothing in flight, no agent owes a reply) accept
@@ -5967,14 +8847,14 @@ function phaseLabel(state: State): string {
     case "Opener": return `Discussion - ${displayNameFor(state.opener)} opening`;
     case "Reactor": return `Discussion - ${displayNameFor(state.reactor)} reacting`;
     case "Closer": return `Discussion - ${displayNameFor(state.opener)} closing`;
-    case "ParallelDiscussion": return "Discussion - Codex and Claude running in parallel";
+    case "ParallelDiscussion": return `Discussion - ${state.agents.map(displayNameFor).join(" + ")} running in parallel`;
     case "AwaitingUser": return "Awaiting your reply";
     case "Build": return `Build — ${displayNameFor(state.builder)} is editing`;
-    case "ParallelBuild": return "Build — Codex and Claude editing in parallel";
+    case "ParallelBuild": return `Build — ${state.agents.map(displayNameFor).join(" + ")} editing in parallel`;
     case "BuildDone": return `Build done — request review`;
     case "ParallelBuildDone": return "Parallel build done — request review";
     case "Review": return `Review — ${displayNameFor(state.reviewer)} is reading the diff`;
-    case "ParallelReview": return "Review — Codex and Claude reading the diff";
+    case "ParallelReview": return `Review — ${state.agents.map(displayNameFor).join(" + ")} reading the diff`;
     case "ParallelReviewDone":
       return state.approved
         ? "Parallel review approved â€” you can push when ready"
@@ -5986,14 +8866,8 @@ function phaseLabel(state: State): string {
   }
 }
 
-function configurationTargetLabel(target: vscode.ConfigurationTarget): string {
-  if (target === vscode.ConfigurationTarget.WorkspaceFolder) return "workspace-folder";
-  if (target === vscode.ConfigurationTarget.Workspace) return "workspace";
-  return "user";
-}
-
-function normalizeAgentId(value: unknown, fallback: AgentId): AgentId {
-  return value === "codex" || value === "claude" ? value : fallback;
+function normalizeAgentId(value: unknown, fallback: AgentId, allowed: ReadonlyArray<AgentId> = DEFAULT_ROSTER): AgentId {
+  return typeof value === "string" && allowed.includes(value) ? value : fallback;
 }
 
 async function ensureJsonlFile(filePath: string): Promise<void> {
@@ -6009,8 +8883,8 @@ function appendManyHeadsLiveChannelContext(transcript: string, workspaceRoot: st
   return [
     transcript,
     "",
-    "--- Many Heads live channel ---",
-    "Many Heads Mode is on. Claude parallel structured streams are mirrored to these files while the Claude workers run:",
+    "--- Claude Worker Fanout live channel ---",
+    "Claude Worker Fanout is on. Parallel structured streams are mirrored to these files while the Claude workers run:",
     ...claudeLivePaths,
     "You may inspect or tail those files with your normal tools during this parallel turn. They may not exist yet when you start; retry briefly instead of treating that as a failure.",
   ].join("\n");
@@ -6051,8 +8925,10 @@ function completedAgentCallTrace(
     exitCode: result.exitCode,
     timedOut: result.timedOut,
     cancelled: result.cancelled,
+    terminationFailed: result.terminationFailed ?? false,
     timeoutMs: result.timeoutMs,
     stdoutChars: result.stdout.length,
+    stdoutSha256: sha256(result.stdout),
     stderrChars: result.stderr.length,
     stderrPreview: result.stderr ? truncateForTrace(result.stderr, 1200) : undefined,
   };
@@ -6060,6 +8936,12 @@ function completedAgentCallTrace(
 
 function truncateForTrace(value: string, maxChars: number): string {
   return value.length <= maxChars ? value : `${value.slice(0, maxChars)}\n[truncated ${value.length - maxChars} chars]`;
+}
+
+function boundedRuntimeDuelReason(value: string): string {
+  const normalized = value.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!normalized) return "Hydra's duel-integrity policy stopped the autonomous comparison.";
+  return normalized.length <= 1_900 ? normalized : `${normalized.slice(0, 1_899).trimEnd()}…`;
 }
 
 function uniqueAgents(agents: AgentId[]): AgentId[] {
@@ -6143,7 +9025,7 @@ function defaultPokeInstruction(
 }
 
 function didAgentFail(result: RunResult): boolean {
-  return result.cancelled || result.timedOut || result.exitCode !== 0;
+  return !!result.terminationFailed || result.cancelled || result.timedOut || result.exitCode !== 0;
 }
 
 function agentCallFailureResult(message: string): RunResult {
@@ -6232,9 +9114,9 @@ function formatTerminalBridgeHealth(sessions: TerminalSession[]): string {
       `Command: ${session.currentCommand ?? "none"}`,
       `Phase: ${session.currentPhase ?? "none"}`,
       `Last activity: ${session.lastActivityAt ?? "none"}`,
-      `Prompt: ${session.lastPromptPath ?? "none"}`,
-      `Reply: ${session.lastReplyPath ?? "none"}`,
-      `Log: ${session.lastLogPath ?? "none"}`,
+      `Prompt: ${session.lastPromptPath ? `[private extension storage]/${path.basename(session.lastPromptPath)}` : "none"}`,
+      `Reply: ${session.lastReplyPath ? `[private extension storage]/${path.basename(session.lastReplyPath)}` : "none"}`,
+      `Log: ${session.lastLogPath ? `[private extension storage]/${path.basename(session.lastLogPath)}` : "none"}`,
       `Error: ${session.lastError ?? "none"}`
     );
   }
@@ -6272,11 +9154,8 @@ function formatEffectiveAuthority(summaries: Record<AgentId, AgentAuthoritySumma
   return lines.join("\n");
 }
 
-function unavailableAuthoritySummaries(): Record<AgentId, AgentAuthoritySummary> {
-  return {
-    codex: unavailableAuthoritySummary("codex"),
-    claude: unavailableAuthoritySummary("claude"),
-  };
+function unavailableAuthoritySummaries(roster: ReadonlyArray<AgentId> = DEFAULT_ROSTER): Record<AgentId, AgentAuthoritySummary> {
+  return Object.fromEntries(roster.map((agent) => [agent, unavailableAuthoritySummary(agent)]));
 }
 
 function unavailableAuthoritySummary(agent: AgentId): AgentAuthoritySummary {
@@ -6331,7 +9210,7 @@ function inferDevelopmentWorkspaceRoot(context: vscode.ExtensionContext): string
 }
 
 async function captureGitDiff(cwd: string, maxLines: number): Promise<string | null> {
-  const tracked = await runGit(cwd, ["diff", "--no-ext-diff", "--no-color", "HEAD"]);
+  const tracked = await runGit(cwd, ["diff", "--no-ext-diff", "--no-textconv", "--no-color", "HEAD"]);
   if (!tracked || tracked.code !== 0) return null;
 
   const untracked = await runGit(cwd, ["ls-files", "--others", "--exclude-standard"]);
@@ -6342,7 +9221,7 @@ async function captureGitDiff(cwd: string, maxLines: number): Promise<string | n
   const files = untracked.out.split(/\r?\n/).filter((line) => line.length > 0);
   for (const file of files) {
     if (lines.length >= maxLines) break;
-    const diff = await synthesizeUntrackedFileDiff(cwd, file);
+    const diff = await synthesizeUntrackedFileDiff(cwd, file, maxLines - lines.length);
     appendLimitedLines(lines, diff, maxLines);
   }
   return lines.join("\n");
@@ -6358,42 +9237,120 @@ async function captureGitStatusChanges(cwd: string): Promise<WorkspaceChange[] |
 }
 
 async function runGit(cwd: string, args: string[]): Promise<{ code: number | null; out: string } | null> {
+  // Defense in depth for every panel Git caller. Repository-local config can
+  // turn nominally read-only commands into native execution (core.fsmonitor,
+  // textconv, external diff), so trust must be checked immediately before the
+  // executable is resolved/spawned rather than only during panel startup.
+  if (!workspaceGitExecutionAllowed()) return null;
+  const gitExecutable = await resolveGitExecutable(cwd);
+  if (!gitExecutable) return null;
   return new Promise((resolve) => {
-    const child = cp.spawn("git", args, { cwd, windowsHide: true });
+    const child = cp.spawn(gitExecutable, args, { cwd, windowsHide: true });
     let out = "";
+    let truncated = false;
     let settled = false;
+    const timer = setTimeout(() => {
+      child.kill();
+      finish(null);
+    }, 30_000);
     const finish = (value: { code: number | null; out: string } | null) => {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
       resolve(value);
     };
-    child.stdout.on("data", (b: Buffer) => (out += b.toString("utf8")));
+    child.stdout.on("data", (b: Buffer) => {
+      if (truncated) return;
+      const chunk = b.toString("utf8");
+      const remaining = MAX_GIT_OUTPUT_CHARS - out.length;
+      if (chunk.length <= remaining) {
+        out += chunk;
+        return;
+      }
+      out += `${chunk.slice(0, Math.max(0, remaining))}\n[... git output truncated ...]\n`;
+      truncated = true;
+    });
+    // Always drain stderr. Leaving the pipe unread can block Git once its
+    // kernel buffer fills, even though Hydra does not surface this stream.
+    child.stderr?.resume();
     child.on("error", () => finish(null));
     child.on("close", (code) => finish({ code, out }));
   });
 }
 
-async function synthesizeUntrackedFileDiff(cwd: string, relativeFile: string): Promise<string> {
+const MAX_GIT_OUTPUT_CHARS = 8 * 1024 * 1024;
+const MAX_UNTRACKED_FILE_BYTES = 2 * 1024 * 1024;
+
+export async function synthesizeUntrackedFileDiff(
+  cwd: string,
+  relativeFile: string,
+  remainingLines = 2_000,
+): Promise<string> {
   const gitPath = relativeFile.replace(/\\/g, "/");
-  const absolute = path.join(cwd, relativeFile);
-  let buffer: Buffer;
+  const logicalWorkspaceRoot = path.resolve(cwd);
+  const workspaceRoot = await fs.realpath(logicalWorkspaceRoot).catch(() => logicalWorkspaceRoot);
+  const absolute = path.resolve(logicalWorkspaceRoot, relativeFile);
+  if (!isPathInsideRoot(absolute, logicalWorkspaceRoot)) {
+    return omittedUntrackedDiff(gitPath, "path escapes the workspace");
+  }
+
+  let handle: fs.FileHandle | undefined;
   try {
-    buffer = await fs.readFile(absolute);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return `diff --git a/${gitPath} b/${gitPath}\nnew file mode 100644\n--- /dev/null\n+++ b/${gitPath}\n@@\n+[Hydra could not read untracked file: ${message}]`;
-  }
+    const before = await fs.lstat(absolute);
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1) {
+      return omittedUntrackedDiff(gitPath, "links and non-regular files are not read");
+    }
+    const realFile = await fs.realpath(absolute);
+    if (!isPathInsideRoot(realFile, workspaceRoot)) {
+      return omittedUntrackedDiff(gitPath, "resolved path escapes the workspace");
+    }
 
-  if (buffer.includes(0)) {
-    return `diff --git a/${gitPath} b/${gitPath}\nnew file mode 100644\n--- /dev/null\n+++ b/${gitPath}\n@@\n+[Binary untracked file omitted from Hydra review prompt]`;
-  }
+    handle = await fs.open(absolute, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    const opened = await handle.stat();
+    if (
+      !opened.isFile() ||
+      opened.nlink !== 1 ||
+      opened.dev !== before.dev ||
+      opened.ino !== before.ino
+    ) {
+      return omittedUntrackedDiff(gitPath, "file changed while it was being inspected");
+    }
+    const currentRealFile = await fs.realpath(absolute);
+    if (!isPathInsideRoot(currentRealFile, workspaceRoot) || currentRealFile !== realFile) {
+      return omittedUntrackedDiff(gitPath, "file changed or escaped while it was being inspected");
+    }
+    const maxBytes = Math.min(
+      MAX_UNTRACKED_FILE_BYTES,
+      Math.max(64 * 1024, Math.max(1, remainingLines) * 4_096),
+    );
+    const readBuffer = Buffer.alloc(maxBytes + 1);
+    const { bytesRead } = await handle.read(readBuffer, 0, readBuffer.length, 0);
+    const truncated = bytesRead > maxBytes;
+    const buffer = readBuffer.subarray(0, Math.min(bytesRead, maxBytes));
 
-  const body = buffer
-    .toString("utf8")
-    .split(/\r?\n/)
-    .map((line) => `+${line}`)
-    .join("\n");
-  return `diff --git a/${gitPath} b/${gitPath}\nnew file mode 100644\n--- /dev/null\n+++ b/${gitPath}\n@@\n${body}`;
+    if (buffer.includes(0)) {
+      return omittedUntrackedDiff(gitPath, "binary file omitted from review prompt");
+    }
+
+    const text = `${buffer.toString("utf8")}${truncated ? "\n[... untracked file truncated ...]" : ""}`;
+    const body = text.split(/\r?\n/).map((line) => `+${line}`).join("\n");
+    return `diff --git a/${gitPath} b/${gitPath}\nnew file mode 100644\n--- /dev/null\n+++ b/${gitPath}\n@@\n${body}`;
+  } catch {
+    return omittedUntrackedDiff(gitPath, "file could not be read safely");
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+function omittedUntrackedDiff(gitPath: string, reason: string): string {
+  return `diff --git a/${gitPath} b/${gitPath}\nnew file mode 100644\n--- /dev/null\n+++ b/${gitPath}\n@@\n+[Hydra omitted untracked file: ${reason}]`;
+}
+
+function isPathInsideRoot(candidate: string, root: string): boolean {
+  const normalizedCandidate = process.platform === "win32" ? candidate.toLowerCase() : candidate;
+  const normalizedRoot = process.platform === "win32" ? root.toLowerCase() : root;
+  const relative = path.relative(normalizedRoot, normalizedCandidate);
+  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
 function appendLimitedLines(target: string[], text: string, maxLines: number): void {
@@ -6407,8 +9364,11 @@ function appendLimitedLines(target: string[], text: string, maxLines: number): v
 }
 
 async function isGitWorkspace(cwd: string): Promise<boolean> {
+  if (!workspaceGitExecutionAllowed()) return false;
+  const gitExecutable = await resolveGitExecutable(cwd);
+  if (!gitExecutable) return false;
   return new Promise<boolean>((resolve) => {
-    const child = cp.spawn("git", ["rev-parse", "--is-inside-work-tree"], { cwd, windowsHide: true });
+    const child = cp.spawn(gitExecutable, ["rev-parse", "--is-inside-work-tree"], { cwd, windowsHide: true });
     let settled = false;
     child.on("error", () => { if (!settled) { settled = true; resolve(false); } });
     child.on("close", (code) => { if (!settled) { settled = true; resolve(code === 0); } });

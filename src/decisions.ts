@@ -1,9 +1,8 @@
-import * as fs from "node:fs/promises";
-import * as path from "node:path";
-import { ensureFile, readJsonlGuarded, serializePerFile } from "./fileQueue";
+import { appendFileSafely, ensureFile, readJsonlGuarded, serializePerFile } from "./fileQueue";
 import type { AgentId } from "./phases";
 import type { Phase } from "./prompts";
 import { displayNameFor } from "./agentRegistry";
+import { isValidAgentId } from "./agentValidation";
 
 export interface DecisionPacket {
   timestamp: string;
@@ -61,8 +60,7 @@ export async function ensureDecisionsFile(filePath: string): Promise<void> {
 
 export async function appendDecision(filePath: string, packet: DecisionPacket): Promise<void> {
   await serializePerFile(filePath, async () => {
-    await fs.mkdir(path.dirname(filePath), { recursive: true });
-    await fs.appendFile(filePath, `${JSON.stringify(packet)}\n`, "utf8");
+    await appendFileSafely(filePath, `${JSON.stringify(packet)}\n`);
   });
 }
 
@@ -243,7 +241,7 @@ function isDecisionPacket(value: unknown): value is DecisionPacket {
   if (!value || typeof value !== "object") return false;
   const packet = value as Partial<DecisionPacket>;
   return (
-    (packet.agent === "codex" || packet.agent === "claude") &&
+    isValidAgentId(packet.agent) &&
     typeof packet.timestamp === "string" &&
     typeof packet.sourceMessageTimestamp === "string" &&
     typeof packet.recommendation === "string" &&

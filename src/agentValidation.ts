@@ -1,6 +1,8 @@
 import type { AgentDefinition, AgentKind } from "./agentAdapter";
 import { isAgentKind } from "./agentAdapter";
-import { assignColorIndexes } from "./agentRegistry";
+import { assignColorIndexes } from "./agentColors";
+import { validateConfiguredHeaders } from "./httpHeaders";
+import type { ModelPrices } from "./usage";
 
 /** POSIX env-var identifier — an apiKeyEnv must be a NAME, never a key value. */
 export function isEnvVarName(value: string): boolean {
@@ -99,6 +101,32 @@ export function baseUrlAllowed(baseUrl: string): { ok: true } | { ok: false; mes
 }
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+const RESERVED_AGENT_IDS = new Set(["user", "system"]);
+
+export function isValidAgentId(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length <= 64
+    && ID_RE.test(value)
+    && !RESERVED_AGENT_IDS.has(value.toLowerCase());
+}
+const PRICE_KEYS = ["inputPerMTok", "outputPerMTok", "cacheReadPerMTok", "cacheCreatePerMTok"] as const;
+
+function validateConfiguredPricing(raw: unknown): { pricing?: Partial<ModelPrices>; error?: string } {
+  if (raw === undefined) return {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { error: "pricing must be an object" };
+  }
+  const pricing: Partial<ModelPrices> = {};
+  const allowed = new Set<string>(PRICE_KEYS);
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!allowed.has(key)) return { error: `pricing contains unknown field "${key}"` };
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+      return { error: `pricing.${key} must be a finite non-negative number` };
+    }
+    pricing[key as keyof ModelPrices] = value;
+  }
+  return { pricing };
+}
 
 // Every string field that could carry an inlined secret. baseUrl is checked
 // separately (it legitimately contains a host). apiKeyEnv is a NAME.
@@ -131,14 +159,35 @@ export function validateAgentDefinition(
     const label = (id || "definition").slice(0, 12);
     return { error: `agent "${label}" appears to inline a secret ("${secret.slice(0, 12)}…"); reference it via apiKeyEnv / \${env:NAME} instead` };
   }
-  if (!ID_RE.test(id)) return { error: `agent id "${String(d.id)}" must match ${ID_RE} (letters, digits, -, _)` };
+  const reservedId = RESERVED_AGENT_IDS.has(id.toLowerCase());
+  if (!isValidAgentId(id)) {
+    return {
+      error: reservedId
+        ? `agent id "${id}" is reserved for transcript roles`
+        : `agent id "${String(d.id)}" must be 1-64 characters matching ${ID_RE} (letters, digits, -, _)`,
+    };
+  }
   if (takenIds.has(id)) return { error: `duplicate agent id "${id}"` };
   const kind = typeof d.kind === "string" ? d.kind : "";
   if (!isAgentKind(kind)) return { error: `agent "${id}" has unknown kind "${kind}"` };
   const displayName = typeof d.displayName === "string" && d.displayName.trim() ? d.displayName.trim() : id;
 
+  if (d.colorIndex !== undefined && (
+    typeof d.colorIndex !== "number" || !Number.isInteger(d.colorIndex) || d.colorIndex < 1 || d.colorIndex > 8
+  )) {
+    return { error: `agent "${id}" colorIndex must be an integer from 1 through 8` };
+  }
+
   if (d.apiKeyEnv !== undefined && (typeof d.apiKeyEnv !== "string" || !isEnvVarName(d.apiKeyEnv))) {
     return { error: `agent "${id}" apiKeyEnv must be an environment-variable NAME (e.g. OPENAI_API_KEY), not a key value` };
+  }
+  const configuredHeaders = validateConfiguredHeaders(d.headers);
+  if (configuredHeaders.error) {
+    return { error: `agent "${id}" ${configuredHeaders.error}` };
+  }
+  const configuredPricing = validateConfiguredPricing(d.pricing);
+  if (configuredPricing.error) {
+    return { error: `agent "${id}" ${configuredPricing.error}` };
   }
   if (kind === "openai-compatible") {
     if (typeof d.baseUrl !== "string" || !d.baseUrl.trim()) return { error: `openai-compatible agent "${id}" requires a baseUrl` };
@@ -157,13 +206,13 @@ export function validateAgentDefinition(
   if (typeof d.colorIndex === "number") def.colorIndex = d.colorIndex;
   if (typeof d.baseUrl === "string") def.baseUrl = d.baseUrl.trim();
   if (typeof d.apiKeyEnv === "string") def.apiKeyEnv = d.apiKeyEnv;
-  if (d.headers && typeof d.headers === "object") def.headers = { ...(d.headers as Record<string, string>) };
+  if (configuredHeaders.headers) def.headers = configuredHeaders.headers;
   if (typeof d.command === "string") def.command = d.command;
   if (Array.isArray(d.argsTemplate)) def.argsTemplate = d.argsTemplate as string[];
   if (d.defaultAuthority === "read-only" || d.defaultAuthority === "workspace-write" || d.defaultAuthority === "full-native") {
     def.defaultAuthority = d.defaultAuthority;
   }
-  if (d.pricing && typeof d.pricing === "object") def.pricing = d.pricing as AgentDefinition["pricing"];
+  if (configuredPricing.pricing) def.pricing = configuredPricing.pricing;
   return { def };
 }
 

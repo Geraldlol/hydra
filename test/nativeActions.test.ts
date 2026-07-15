@@ -7,6 +7,7 @@ import {
   appendNativeAction,
   collectNativeSessionHints,
   ensureNativeActionsFile,
+  MAX_NATIVE_SESSION_JSON_BYTES,
   nativeActionsPath,
   nativeActionSummary,
   readNativeActions,
@@ -162,6 +163,55 @@ describe("native action receipts", () => {
       ["claude", "claude-live-session", "claude-match"],
     ]);
     assert.equal(hints.find((hint) => hint.agent === "claude")?.pathLabel, "111.json");
+  });
+
+  test("reloads receipts for historical custom heads", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-native-custom-"));
+    const file = path.join(dir, "native-actions.jsonl");
+    const receipt: NativeActionReceipt = {
+      id: "action-custom",
+      timestamp: "2026-07-14T12:00:00.000Z",
+      agents: ["gemini-reviewer"],
+      instruction: "Review the result",
+      includeEditorContext: false,
+      includeWorkspaceDiff: false,
+      promptEnvelopeIds: [],
+      status: "completed",
+    };
+    await fs.writeFile(file, `${JSON.stringify(receipt)}\n`, "utf8");
+    assert.deepEqual(await readNativeActions(file), [receipt]);
+  });
+
+  test("bounds the Codex session-index tail and skips a torn final row", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-native-session-tail-"));
+    const codexDir = path.join(home, ".codex");
+    await fs.mkdir(codexDir, { recursive: true });
+    await fs.writeFile(path.join(codexDir, "session_index.jsonl"), [
+      JSON.stringify({ id: "bulky-old", padding: "x".repeat(300 * 1024) }),
+      JSON.stringify({ id: "recent-1", updated_at: "2026-07-01T00:00:00.000Z" }),
+      JSON.stringify({ id: "recent-2", updated_at: "2026-07-02T00:00:00.000Z" }),
+      JSON.stringify({ id: "recent-3", updated_at: "2026-07-03T00:00:00.000Z" }),
+      JSON.stringify({ id: "recent-4", updated_at: "2026-07-04T00:00:00.000Z" }),
+      '{"id":"torn"',
+    ].join("\n"), "utf8");
+
+    const hints = await collectNativeSessionHints(path.join("C:", "repo"), ["codex"], home);
+
+    assert.deepEqual(hints.map((hint) => hint.sessionId), ["recent-2", "recent-3", "recent-4"]);
+  });
+
+  test("skips an oversized Claude live-session JSON file", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-native-session-json-cap-"));
+    const sessionsDir = path.join(home, ".claude", "sessions");
+    await fs.mkdir(sessionsDir, { recursive: true });
+    await fs.writeFile(path.join(sessionsDir, "huge.json"), JSON.stringify({
+      sessionId: "must-not-load",
+      cwd: path.join("C:", "repo"),
+      padding: "x".repeat(MAX_NATIVE_SESSION_JSON_BYTES),
+    }), "utf8");
+
+    const hints = await collectNativeSessionHints(path.join("C:", "repo"), ["claude"], home);
+    assert.deepEqual(hints, []);
   });
 });
 

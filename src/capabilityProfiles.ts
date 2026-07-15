@@ -73,8 +73,8 @@ const PRESETS: Record<ConfigurableCapabilityProfileId, CapabilityProfilePreset> 
   },
   fullNative: {
     id: "fullNative",
-    label: "Full Native",
-    detail: "Full native CLI authority with sandbox bypass or equivalent permissions.",
+    label: "Full Native - Equal Maximum Access",
+    detail: "Equal maximum Hydra authority for workspace, shell, network, browser/search, MCP, plugins, apps, and configured native tools. Native tool names and implementations can still differ by CLI.",
     expectedAuthority: "fullNative",
     warningLevel: "fullNative",
     readsStdin: true,
@@ -164,8 +164,8 @@ export function describeCapabilityProfile(
   if (authority.level === "fullNative") {
     return {
       id: "fullNative",
-      label: "Full Native",
-      detail: `${agent} is running with full native CLI authority.`,
+      label: PRESETS.fullNative.label,
+      detail: `${agent} is running with equal maximum Hydra authority. Native tool names and implementations can still differ by CLI.`,
       expectedAuthority: "fullNative",
       warningLevel: "fullNative",
       readsStdin: readsStdin(args),
@@ -265,7 +265,7 @@ function codexArgsForProfile(profile: ConfigurableCapabilityProfileId): string[]
     case "nativeReview":
       return ["review", "--uncommitted", "-"];
     case "fullNative":
-      return ["exec", "--sandbox", "danger-full-access", "--color", "never", "--cd", "${workspaceFolder}", "--skip-git-repo-check", "-"];
+      return ["exec", "--sandbox", "danger-full-access", "-c", 'web_search="live"', "--color", "never", "--cd", "${workspaceFolder}", "--skip-git-repo-check", "-"];
     case "custom":
       return undefined;
   }

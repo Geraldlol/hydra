@@ -58,6 +58,23 @@ describe("parseClaudeEventStream", () => {
     assert.equal(events[1]?.type, "user");
     assert.equal(events[2], null);
   });
+
+  test("bounds record floods while preserving prefix setup and terminal result", () => {
+    const events = parseClaudeEventStream([
+      '{"type":"system","subtype":"init","session_id":"s1"}',
+      ...Array.from({ length: 20_100 }, () => '{"type":"keep_alive"}'),
+      '{"type":"result","subtype":"success","result":"final"}',
+    ].join("\n"));
+    assert.equal(events.length, 20_000);
+    assert.equal(events[0]?.type, "system");
+    assert.equal(events.at(-1)?.type, "result");
+  });
+
+  test("skips newline-dense padding without losing the final event", () => {
+    const events = parseClaudeEventStream("\n".repeat(250_000) + '{"type":"result","subtype":"success"}');
+    assert.equal(events.length, 1);
+    assert.equal(events[0]?.type, "result");
+  });
 });
 
 describe("summarizeClaudeEvents", () => {

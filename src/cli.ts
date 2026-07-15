@@ -1,9 +1,8 @@
-import * as cp from "node:child_process";
-import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentSpawn } from "./agents";
 import { classifyAgentAuthority } from "./authority";
+import { findExecutableOnPath } from "./executablePath";
 import type { AgentId } from "./phases";
 import type { Phase } from "./prompts";
 
@@ -73,6 +72,13 @@ export function applySpawnEnvironment(
       ...expandedEnv,
     },
   };
+}
+
+export function effectiveSpawnEnvironment(
+  spawn: Pick<AgentSpawn, "env">,
+  base: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  return { ...base, ...(spawn.env ?? {}) };
 }
 
 export function mergeNativeEnv(
@@ -176,14 +182,22 @@ function expandRequestFileValue(value: string, files: RequestFilePlaceholders): 
     .replace(/\$\{hydraLogFile\}/g, files.hydraLogFile);
 }
 
-export async function resolveAgentCommand(agent: AgentId, command: string): Promise<string> {
+export async function resolveAgentCommand(
+  agent: AgentId,
+  command: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<string> {
   if (hasPathSeparator(command) || path.isAbsolute(command)) return command;
-  const found = await findOnPath(command);
+  const found = await findExecutableOnPath(command, { env });
   if (found) return found;
   const fallback = shouldUseKnownAgentFallback(agent, command)
-    ? await findKnownAgentExecutable(agent)
+    ? await findKnownAgentExecutable(agent, env)
     : undefined;
-  return fallback ?? command;
+  if (fallback) return fallback;
+  throw new Error(
+    `Hydra could not resolve native CLI '${command}' to an absolute executable. ` +
+    "Install it on PATH or set the Hydra command setting to a full path."
+  );
 }
 
 export function shouldUseKnownAgentFallback(agent: AgentId, command: string): boolean {
@@ -261,51 +275,11 @@ function hasPathSeparator(command: string): boolean {
   return command.includes("/") || command.includes("\\");
 }
 
-async function findOnPath(command: string): Promise<string | undefined> {
-  return new Promise((resolve) => {
-    const lookup = process.platform === "win32" ? "where.exe" : "which";
-    const child = cp.spawn(lookup, [command], { windowsHide: true });
-    let out = "";
-    child.stdout.on("data", (chunk: Buffer) => (out += chunk.toString("utf8")));
-    child.on("error", () => resolve(undefined));
-    child.on("close", (code) => {
-      if (code !== 0) return resolve(undefined);
-      const candidates = out.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-      resolve(spawnablePathCandidate(candidates));
-    });
-  });
-}
-
-function spawnablePathCandidate(candidates: string[]): string | undefined {
-  if (process.platform !== "win32") return candidates.find(Boolean);
-  const executableExtensions = new Set([".exe", ".cmd", ".bat", ".com"]);
-  const direct = candidates.find((candidate) => executableExtensions.has(path.extname(candidate).toLowerCase()));
-  if (direct) return direct;
-  const pathext = (process.env.PATHEXT || ".COM;.EXE;.BAT;.CMD")
-    .split(";")
-    .map((ext) => ext.trim().toLowerCase())
-    .filter(Boolean);
-  for (const candidate of candidates) {
-    if (path.extname(candidate)) continue;
-    for (const ext of pathext) {
-      const withExt = `${candidate}${ext}`;
-      if (fsSyncExists(withExt)) return withExt;
-    }
-  }
-  return candidates.find(Boolean);
-}
-
-function fsSyncExists(candidate: string): boolean {
-  try {
-    fsSync.accessSync(candidate);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function findKnownAgentExecutable(agent: AgentId): Promise<string | undefined> {
-  return firstExisting(await knownAgentExecutableCandidates(agent));
+async function findKnownAgentExecutable(
+  agent: AgentId,
+  env: NodeJS.ProcessEnv,
+): Promise<string | undefined> {
+  return firstExisting(await knownAgentExecutableCandidates(agent, env));
 }
 
 async function vscodeExtensionCodexCandidates(extensionRoot: string): Promise<string[]> {

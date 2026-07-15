@@ -53,7 +53,7 @@ The extension code, user settings, and the workspace folder are *semi-trusted*; 
 ### Transport layer (two modes)
 
 1. **One-shot** (`src/agents.ts:runAgent`) — `cp.spawn` the CLI with argv, pipe the prompt to stdin, collect stdout/stderr. Default and stable.
-2. **Terminal bridge** (`src/terminalBridge.ts`) — writes a PowerShell dispatch script to `.hydra/dispatch/<id>.ps1` and runs it inside a visible VS Code Terminal. The CLI's reply lands in `.hydra/replies/<id>.json`; Hydra polls for it. Used when the user wants to see live agent output in a real shell.
+2. **Terminal bridge** (`src/terminalBridge.ts`) — writes integrity-checked launchers and request files beneath VS Code's per-workspace extension storage and runs them inside a visible VS Code Terminal. Replies, logs, and session snapshots stay outside the project tree. Used when the user wants to see live agent output in a real shell.
 
 Both transports route through `panel.ts:runAgentTransport`, which decides based on `this.transportMode()`. Per-agent CLI flag injection (`--output-last-message`, `--json`, `--output-format stream-json`, `--model`, `--effort`, etc.) lives in three free-function modules — **never re-inline these flag-injection helpers in panel.ts**:
 
@@ -63,7 +63,7 @@ Both transports route through `panel.ts:runAgentTransport`, which decides based 
 
 ### .hydra/ workspace state
 
-Every per-workspace artifact lives under `.hydra/` (gitignored). Key files include: `transcript.md`, `decisions.jsonl`, `verification.jsonl`, `native-actions.jsonl`, `events.jsonl`, `agent-calls.jsonl`, `usage.jsonl`, `work-queue.jsonl` (dismiss/snooze state), `objective.md`, `session-brief.md`, `support-bundle.md`, `native-capabilities.md`, `native-data-snapshot.md`, `telegram-inbound.json` (inbound poll offset), plus subdirectories: `prompts/` (including the durable `prompts/index.jsonl` prompt-envelope log), `replies/`, `logs/`, `dispatch/`, and `sessions/` for terminal-bridge artifacts; `attachments/<turn>/` for copied room attachments; `archive/` for cleared rooms; and `wiki/` (`schema.md`, `context.md`, `index.md`, `log.md`, and immutable `raw/turns/` snapshots) for the compiled project memory. `src/fileQueue.ts` is the single source for all .hydra reads/writes — see below.
+Durable, project-visible state lives under `.hydra/` (gitignored). Key files include: `transcript.md`, `decisions.jsonl`, `verification.jsonl`, `native-actions.jsonl`, `events.jsonl`, `agent-calls.jsonl`, `usage.jsonl`, `work-queue.jsonl` (dismiss/snooze state), `objective.md`, `session-brief.md`, `support-bundle.md`, `native-capabilities.md`, `native-data-snapshot.md`, `telegram-inbound.json` (inbound poll offset), plus subdirectories: `prompts/` (including the durable `prompts/index.jsonl` prompt-envelope log), `attachments/<turn>/`, `archive/`, and `wiki/`. Ephemeral terminal-bridge `prompts/`, `replies/`, `logs/`, `dispatch/`, and `sessions/` live beneath `ExtensionContext.storageUri/terminal-bridge`, never in the workspace. `src/fileQueue.ts` is the single source for durable .hydra reads/writes — see below.
 
 ### Webview
 
@@ -89,7 +89,9 @@ Webview *structure* is pinned by `test/webviewContract.test.ts` and `test/webvie
 | Need | Helper | Module |
 |---|---|---|
 | Per-file write mutex (no interleaving JSONL appends) | `serializePerFile(filePath, work)` | `src/fileQueue.ts` |
-| Read JSONL with type guard | `readJsonlGuarded(filePath, guard, { limit? })` | `src/fileQueue.ts` |
+| Read a bounded JSONL tail with type guard | `readJsonlGuarded(filePath, guard, { limit?, maxBytes? })` | `src/fileQueue.ts` |
+| Read a capped file head/tail | `readFileHead(...)` / `readFileTail(...)` | `src/fileQueue.ts` |
+| Stream-compaction into an atomic replacement | `rewriteFileLinesAtomically(...)` | `src/fileQueue.ts` |
 | Create-if-missing artifact file | `ensureFile(filePath, defaultContent?)` | `src/fileQueue.ts` |
 | Crash-safe write (tmp + rename) | `atomicWriteFile(filePath, content)` | `src/fileQueue.ts` |
 | Spawn a Windows `.cmd`/`.bat` via cmd.exe wrap | `spawnViaCmdShim(command, args, opts)` | `src/agents.ts` |
@@ -103,7 +105,7 @@ Several test files have `*SourceContract*` or similar names that source-grep the
 These were locked in by the security audit in commits `cc977f9`, `40cf52a`, `4f7321b`, `5c72dc1`:
 
 1. **`scope: "application"` settings** — `package.json` marks every setting that flows into a spawn, exec args, env, PATH, terminal startup, verify command, transcript path, webhook URL, or Telegram credential as `scope: "application"`. New settings of that kind MUST get the same treatment, AND must be added to `capabilities.untrustedWorkspaces.restrictedConfigurations` so VS Code Workspace Trust enforces it for users who haven't migrated. Doctor's `TRUST_SCOPED_SETTINGS` in `src/doctor.ts` must stay in sync — a test asserts this.
-2. **Env-var key validation** — `src/terminalProtocol.ts:environmentStatements` rejects keys that aren't POSIX identifiers (`/^[A-Za-z_][A-Za-z0-9_]*$/`). A malicious workspace-supplied key like `FOO; iex 'evil'` would otherwise inject PowerShell into the generated dispatch script. Regression test in `test/terminalProtocol.test.ts`.
+2. **Terminal environment isolation** — terminal-bridge environment overrides are supplied through VS Code's terminal creation options and must never be serialized into dispatch scripts. Launchers and prompt files carry SHA-256 integrity checks; Windows batch arguments containing `%NAME%`/`!NAME!` expansion syntax are refused. Regression tests live in `test/terminalProtocol.test.ts` and `test/terminalBridge.test.ts`.
 3. **HTTPS-only handoff webhook** — `panel.ts:fireWebhookForDecision` requires `https://`. `http://` is refused with a user-visible system message.
 4. **Redaction regex** — `src/nativeDataSnapshot.ts:isSensitiveKey` matches token/password/secret/private-key/ssh-key/passphrase/signature/cookie variants. The snapshot file is workspace-local and only generated on explicit user action, but the regex should grow if new MCP servers or plugins introduce new credential field names.
 5. **Permissive agent defaults are intentional** — Codex discussion/build defaults to `--sandbox workspace-write` + `network_access=true`; Claude defaults to `--permission-mode acceptEdits`. The user explicitly accepted this trade-off (see `## Security` section in README). Mitigations are documented there: Workspace Trust + the `safeDiscussion` capability profile. **Do not "fix" these defaults to be safer without an explicit user ask** — the productivity cost is real and was the deciding factor.

@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
   ensureObjectiveFile,
+  MAX_OBJECTIVE_FILE_BYTES,
   objectiveAsContext,
   parseObjective,
   readObjective,
@@ -63,5 +64,17 @@ describe("room objective", () => {
     await writeObjective(file, firstPass);
     const thirdPass = await fs.readFile(file, "utf8");
     assert.equal(thirdPass, firstPass);
+  });
+
+  test("bounds a corrupt oversized objective and marks the returned context", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-objective-cap-"));
+    const file = path.join(dir, ".hydra", "objective.md");
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, `${"x".repeat(MAX_OBJECTIVE_FILE_BYTES + 1024)}\nlate`, "utf8");
+
+    const objective = await readObjective(file);
+    assert.match(objective, /\[Objective truncated at \d+ bytes\]$/);
+    assert.doesNotMatch(objective, /late/);
+    assert.ok(Buffer.byteLength(objective, "utf8") < MAX_OBJECTIVE_FILE_BYTES + 100);
   });
 });

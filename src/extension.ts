@@ -1,6 +1,5 @@
 import * as vscode from "vscode";
 import { HydraRoomPanel } from "./panel";
-import { AgentId } from "./phases";
 import { renderHydraStatusBar, type HydraStatusBarSnapshot } from "./statusBar";
 
 // Command-palette callbacks have no built-in error surface in VS Code:
@@ -94,11 +93,11 @@ export function activate(context: vscode.ExtensionContext): void {
       "hydraRoom.assignBuilder",
       withErrorReporting(async () => {
         const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
+        const heads = await panel.availableHeads();
         const pick = await vscode.window.showQuickPick(
           [
-            { label: "Codex", value: "codex" as AgentId },
-            { label: "Claude", value: "claude" as AgentId },
-            { label: "Codex + Claude", value: "parallel" as const },
+            ...heads.map((head) => ({ label: head.displayName, description: head.id, value: head.id })),
+            { label: `All ${heads.length} seated heads`, value: "parallel" as const },
           ],
           { title: "Hydra: Assign Builder", placeHolder: "Who should implement?" }
         );
@@ -172,6 +171,10 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand(
       "hydraRoom.toggleAutoAdvanceActionableDefaults",
       withErrorReporting(async () => {
+        if (vscode.workspace.isTrusted !== true) {
+          await vscode.window.showWarningMessage("Hydra auto-advance stays off until this workspace is trusted.");
+          return;
+        }
         const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
         await panel.toggleAutoAdvanceActionableDefaults();
       })
@@ -501,8 +504,82 @@ export function activate(context: vscode.ExtensionContext): void {
       })
     ),
     vscode.commands.registerCommand(
+      "hydraRoom.openStandings",
+      withErrorReporting(async () => {
+        const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
+        await panel.openStandings();
+      })
+    ),
+    vscode.commands.registerCommand(
+      "hydraRoom.openScoreEvidence",
+      withErrorReporting(async () => {
+        const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
+        await panel.openScoreEvidence();
+      })
+    ),
+    vscode.commands.registerCommand(
+      "hydraRoom.recordScoreVerdict",
+      withErrorReporting(async () => {
+        const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
+        await panel.recordScoreVerdict();
+      })
+    ),
+    vscode.commands.registerCommand(
+      "hydraRoom.reverseScoreVerdict",
+      withErrorReporting(async () => {
+        const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
+        await panel.reverseScoreVerdict();
+      })
+    ),
+    vscode.commands.registerCommand(
+      "hydraRoom.adjudicatePendingScoreClaim",
+      withErrorReporting(async () => {
+        const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
+        await panel.adjudicatePendingScoreClaim();
+      })
+    ),
+    vscode.commands.registerCommand(
+      "hydraRoom.openDuels",
+      withErrorReporting(async () => {
+        const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
+        await panel.openDuelsPanel();
+      })
+    ),
+    vscode.commands.registerCommand(
+      "hydraRoom.advanceDuel",
+      withErrorReporting(async () => {
+        const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
+        await panel.advanceDuel();
+      })
+    ),
+    vscode.commands.registerCommand(
+      "hydraRoom.cancelDuel",
+      withErrorReporting(async () => {
+        const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
+        await panel.cancelDuel();
+      })
+    ),
+    vscode.commands.registerCommand(
+      "hydraRoom.openDuelAudit",
+      withErrorReporting(async () => {
+        const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
+        await panel.openDuelAudit();
+      })
+    ),
+    vscode.commands.registerCommand(
+      "hydraRoom.correctDuelResult",
+      withErrorReporting(async () => {
+        const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
+        await panel.correctDuelResult();
+      })
+    ),
+    vscode.commands.registerCommand(
       "hydraRoom.runManyHeadsSmokeTest",
       withErrorReporting(async () => {
+        if (vscode.workspace.isTrusted !== true) {
+          await vscode.window.showWarningMessage("Hydra Claude Worker Fanout requires a trusted workspace.");
+          return;
+        }
         const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
         await panel.runManyHeadsSmokeTest();
       })

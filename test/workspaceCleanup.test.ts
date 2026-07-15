@@ -1,5 +1,6 @@
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
+import fsPromises = require("node:fs/promises");
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, test } from "node:test";
@@ -97,6 +98,152 @@ describe("workspace cleanup", () => {
     assert.equal(replies!.deletedFiles, 0);
     assert.ok(replies!.failedDeletes >= 1, "expected symlinked target to be refused");
   });
+
+  test("refuses cleanup when the .hydra parent is linked outside the workspace", async (t) => {
+    const ws = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-cleanup-linked-parent-ws-"));
+    const outsideHydra = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-cleanup-linked-parent-target-"));
+    const planted = await writeDiagnostic(
+      outsideHydra,
+      "replies/user-file.txt",
+      "important user data",
+      new Date("2026-05-01T00:00:00.000Z")
+    );
+
+    try {
+      await fs.symlink(outsideHydra, path.join(ws, ".hydra"), directoryLinkType());
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "EPERM") {
+        t.skip("host cannot create directory links");
+        return;
+      }
+      throw err;
+    }
+
+    const summary = await pruneDiagnosticArtifacts(ws, {
+      retentionDays: 7,
+      now: new Date("2026-05-22T00:00:00.000Z"),
+    });
+
+    assert.equal(await fs.readFile(planted, "utf8"), "important user data");
+    assert.equal(summary.deletedFiles, 0);
+    assert.ok(summary.failedDeletes >= 1, "expected linked .hydra parent to be refused");
+  });
+
+  test("refuses linked directories encountered during recursive cleanup", async (t) => {
+    const ws = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-cleanup-linked-child-ws-"));
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-cleanup-linked-child-target-"));
+    const planted = await writeDiagnostic(
+      outside,
+      "user-file.txt",
+      "important user data",
+      new Date("2026-05-01T00:00:00.000Z")
+    );
+    const attachments = path.join(ws, ".hydra", "attachments");
+    await fs.mkdir(attachments, { recursive: true });
+    try {
+      await fs.symlink(outside, path.join(attachments, "turn-linked"), directoryLinkType());
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "EPERM") {
+        t.skip("host cannot create directory links");
+        return;
+      }
+      throw err;
+    }
+
+    const summary = await pruneDiagnosticArtifacts(ws, {
+      retentionDays: 7,
+      now: new Date("2026-05-22T00:00:00.000Z"),
+    });
+
+    assert.equal(await fs.readFile(planted, "utf8"), "important user data");
+    const attachmentsSummary = summary.targets.find((target) => target.relativeDir.endsWith("attachments"));
+    assert.ok(attachmentsSummary);
+    assert.equal(attachmentsSummary!.deletedFiles, 0);
+    assert.ok(attachmentsSummary!.failedDeletes >= 1, "expected linked recursive child to be refused");
+  });
+
+  test("refuses stale diagnostic files with additional hard links", async (t) => {
+    const ws = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-cleanup-hardlink-ws-"));
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-cleanup-hardlink-target-"));
+    const planted = await writeDiagnostic(
+      outside,
+      "user-file.txt",
+      "important user data",
+      new Date("2026-05-01T00:00:00.000Z")
+    );
+    const linked = path.join(ws, ".hydra", "logs", "old.log");
+    await fs.mkdir(path.dirname(linked), { recursive: true });
+    try {
+      await fs.link(planted, linked);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "EPERM" || code === "EXDEV" || code === "ENOTSUP") {
+        t.skip(`host cannot create a hard link (${code})`);
+        return;
+      }
+      throw err;
+    }
+
+    const summary = await pruneDiagnosticArtifacts(ws, {
+      retentionDays: 7,
+      now: new Date("2026-05-22T00:00:00.000Z"),
+    });
+
+    assert.equal(await fs.readFile(planted, "utf8"), "important user data");
+    assert.equal(await fs.readFile(linked, "utf8"), "important user data");
+    const logs = summary.targets.find((target) => target.relativeDir.endsWith("logs"));
+    assert.ok(logs);
+    assert.equal(logs!.deletedFiles, 0);
+    assert.ok(logs!.failedDeletes >= 1, "expected multiply-linked file to be refused");
+  });
+
+  test("revalidates a diagnostic parent replaced between inspection and file open", async (t) => {
+    const ws = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-cleanup-parent-race-ws-"));
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-cleanup-parent-race-target-"));
+    const old = new Date("2026-05-01T00:00:00.000Z");
+    const replies = path.join(ws, ".hydra", "replies");
+    const candidate = await writeDiagnostic(ws, ".hydra/replies/old.json", "workspace data", old);
+    const planted = await writeDiagnostic(outside, "old.json", "important user data", old);
+    const savedReplies = path.join(ws, ".hydra", "replies-before-swap");
+
+    // Probing first keeps the mocked open deterministic on Windows hosts where
+    // directory link creation may require Developer Mode or extra privilege.
+    const probe = path.join(ws, "link-probe");
+    try {
+      await fs.symlink(outside, probe, directoryLinkType());
+      await fs.unlink(probe);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "EPERM") {
+        t.skip("host cannot create directory links");
+        return;
+      }
+      throw err;
+    }
+
+    const originalOpen = fsPromises.open;
+    let swapped = false;
+    t.mock.method(fsPromises, "open", (async (filePath, flags, mode) => {
+      if (!swapped && sameTestPath(String(filePath), candidate)) {
+        await fs.rename(replies, savedReplies);
+        await fs.symlink(outside, replies, directoryLinkType());
+        swapped = true;
+      }
+      return originalOpen(filePath, flags, mode);
+    }) as typeof fsPromises.open);
+
+    const summary = await pruneDiagnosticArtifacts(ws, {
+      retentionDays: 7,
+      now: new Date("2026-05-22T00:00:00.000Z"),
+    });
+
+    assert.equal(swapped, true, "expected the test to replace the parent during cleanup");
+    assert.equal(await fs.readFile(planted, "utf8"), "important user data");
+    assert.equal(await fs.readFile(path.join(savedReplies, "old.json"), "utf8"), "workspace data");
+    const repliesSummary = summary.targets.find((target) => target.relativeDir.endsWith("replies"));
+    assert.ok(repliesSummary);
+    assert.equal(repliesSummary!.deletedFiles, 0);
+    assert.ok(repliesSummary!.failedDeletes >= 1, "expected replaced parent to fail closed");
+  });
 });
 
 async function writeDiagnostic(root: string, relativePath: string, body: string, mtime: Date): Promise<string> {
@@ -105,4 +252,16 @@ async function writeDiagnostic(root: string, relativePath: string, body: string,
   await fs.writeFile(filePath, body, "utf8");
   await fs.utimes(filePath, mtime, mtime);
   return filePath;
+}
+
+function directoryLinkType(): "dir" | "junction" {
+  return process.platform === "win32" ? "junction" : "dir";
+}
+
+function sameTestPath(left: string, right: string): boolean {
+  const resolvedLeft = path.resolve(left);
+  const resolvedRight = path.resolve(right);
+  return process.platform === "win32"
+    ? resolvedLeft.toLowerCase() === resolvedRight.toLowerCase()
+    : resolvedLeft === resolvedRight;
 }

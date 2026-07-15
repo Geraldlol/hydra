@@ -12,6 +12,7 @@ import {
   parseTerminalReply,
   quotePowerShell,
   terminalProtocolPaths,
+  terminalProtocolStoragePaths,
 } from "../src/terminalProtocol";
 
 describe("terminal bridge protocol", () => {
@@ -28,6 +29,22 @@ describe("terminal bridge protocol", () => {
     assert.equal(paths.replyPath, path.join("C:\\repo", ".hydra", "replies", "turn-1-codex-opener.json"));
     assert.equal(paths.logPath, path.join("C:\\repo", ".hydra", "logs", "turn-1-codex-opener.log"));
     assert.equal(paths.dispatchPath, path.join("C:\\repo", ".hydra", "dispatch", "turn-1-codex-opener.ps1"));
+    assert.equal(paths.lastMessagePath, path.join("C:\\repo", ".hydra", "replies", "turn-1-codex-opener.last.txt"));
+  });
+
+  test("builds terminal bridge paths directly under extension storage", () => {
+    const storage = path.join("C:\\vscode-data", "workspaceStorage", "abc", "terminal-bridge");
+    const paths = terminalProtocolStoragePaths(storage, "turn:1", "claude", "review");
+    assert.equal(paths.promptPath, path.join(storage, "prompts", "turn-1-claude-review.md"));
+    assert.equal(paths.replyPath, path.join(storage, "replies", "turn-1-claude-review.json"));
+    assert.doesNotMatch(paths.promptPath, /[\\/]\.hydra[\\/]/);
+  });
+
+  test("sanitizes every dynamic protocol filename segment", () => {
+    const storage = path.join("C:\\vscode-data", "terminal-bridge");
+    const paths = terminalProtocolStoragePaths(storage, "../../request", "../custom" as never, "opener");
+    assert.equal(path.dirname(paths.promptPath), path.join(storage, "prompts"));
+    assert.doesNotMatch(path.basename(paths.promptPath), /[\\/]/);
   });
 
   test("quotes PowerShell literals", () => {
@@ -43,7 +60,8 @@ describe("terminal bridge protocol", () => {
       },
       "C:\\repo\\.hydra\\prompts\\p.md",
       "C:\\repo\\.hydra\\replies\\r.json",
-      "C:\\repo\\.hydra\\logs\\r.log"
+      "C:\\repo\\.hydra\\logs\\r.log",
+      "abc123"
     );
     assert.match(out, /\$__hydraCommandName = 'codex'/);
     assert.match(out, /openai\.chatgpt-\*\\bin\\windows-x86_64\\codex\.exe/);
@@ -53,18 +71,26 @@ describe("terminal bridge protocol", () => {
     assert.match(out, /\[System\.IO\.Directory\]::CreateDirectory\(\$__hydraReplyDir\)/);
     assert.match(out, /\[System\.IO\.Directory\]::CreateDirectory\(\$__hydraLogDir\)/);
     assert.match(out, /\$__hydraLastMessage = \[System\.IO\.Path\]::ChangeExtension\(\$__hydraReply, '.last.txt'\)/);
-    assert.match(out, /Remove-Item -LiteralPath \$__hydraLastMessage -Force -ErrorAction SilentlyContinue/);
+    assert.match(out, /__HydraAssertRegularFile \$__hydraLastMessage/);
     assert.match(out, /\$__hydraUtf8NoBom = \[System\.Text\.UTF8Encoding\]::new\(\$false\)/);
     assert.match(out, /\$OutputEncoding = \$__hydraUtf8NoBom/);
     assert.match(out, /\[Console\]::OutputEncoding = \$__hydraUtf8NoBom/);
     assert.match(out, /function __HydraObjectText/);
     assert.match(out, /FullyQualifiedErrorId -eq 'NativeCommandError'/);
     assert.match(out, /WriteAllText\(\$__hydraLog, '', \$__hydraUtf8NoBom\)/);
-    assert.match(out, /AppendAllText\(\$__hydraLog, \$__hydraChunk/);
+    assert.match(out, /function __HydraCaptureChunk/);
+    assert.match(out, /\$__hydraOutputLimit = 16777216/);
+    assert.match(out, /__HydraCaptureChunk \$__hydraChunk/);
+    assert.doesNotMatch(out, /\$__hydraText \+= \$__hydraChunk/);
     assert.match(out, /Native output is tee'd to this terminal and the request log/);
     assert.match(out, /Write-Host -NoNewline \$__hydraChunk/);
     assert.match(out, /Reply captured/);
-    assert.match(out, /\$__hydraPromptText = \[System\.IO\.File\]::ReadAllText\(\$__hydraPrompt\)/);
+    assert.match(out, /\$__hydraPromptExpectedSha256 = 'abc123'/);
+    assert.match(out, /function __HydraSha256/);
+    assert.match(out, /function __HydraHmacSha256/);
+    assert.match(out, /function __HydraAssertRegularFile/);
+    assert.match(out, /terminal prompt integrity check failed/);
+    assert.match(out, /\$__hydraPromptText = \$__hydraUtf8NoBom\.GetString\(\$__hydraPromptBytes\)/);
     assert.match(out, /\$__hydraCommandLeaf = \[System\.IO\.Path\]::GetFileNameWithoutExtension\(\$__hydraCommand\)\.ToLowerInvariant\(\)/);
     assert.match(out, /\$__hydraList = \[System\.Collections\.Generic\.List\[string\]\]::new\(\)/);
     assert.match(out, /\$__hydraDashIndex = \$__hydraList\.LastIndexOf\('-'\)/);
@@ -76,10 +102,16 @@ describe("terminal bridge protocol", () => {
     assert.match(out, /\$__hydraChunk = __HydraObjectText \$_/);
     assert.match(out, /finally \{ \$ErrorActionPreference = \$__hydraOldErrorActionPreference \}/);
     assert.match(out, /\$__hydraLastMessageText = ''/);
-    assert.match(out, /ReadAllText\(\$__hydraLastMessage, \$__hydraUtf8NoBom\)\.TrimEnd\(\)/);
-    assert.match(out, /catch \{ \$__hydraText = \(__HydraObjectText \$_\)\.TrimEnd\(\); \[System\.IO\.File\]::AppendAllText\(\$__hydraLog, \$__hydraText/);
+    assert.match(out, /function __HydraReadBoundedUtf8File/);
+    assert.match(out, /\[Math\]::Min\(\[int64\]\$__hydraOutputLimit, \$__hydraStream\.Length\)/);
+    assert.match(out, /__HydraReadBoundedUtf8File \$__hydraLastMessage/);
+    assert.doesNotMatch(out, /ReadAllText\(\$__hydraLastMessage/);
+    assert.match(out, /catch \{ \$__hydraText = \(__HydraObjectText \$_\)\.TrimEnd\(\); __HydraCaptureChunk \$__hydraText/);
     assert.match(out, /Write-Host -NoNewline \$__hydraText/);
     assert.match(out, /ConvertTo-Json -Compress/);
+    assert.match(out, /\$__hydraPayload\.auth = __HydraHmacSha256/);
+    assert.match(out, /logSha256 = \$__hydraLogSha256/);
+    assert.doesNotMatch(out, /nonce = \(\$env:HYDRA_REPLY_NONCE\)/);
     assert.match(out, /WriteAllText\(\$__hydraReply, \$__hydraReplyJson, \$__hydraUtf8NoBom\)/);
     assert.doesNotMatch(out, /-Encoding UTF8/);
     assert.doesNotMatch(out, /\[System\.Text\.Encoding\]::UTF8/);
@@ -104,48 +136,28 @@ describe("terminal bridge protocol", () => {
     assert.doesNotMatch(out, /\$\{hydraReplyFile\}/);
   });
 
-  test("dispatch command applies spawn environment before native invocation", () => {
-    const out = buildPowerShellDispatchCommand(
-      {
-        command: "codex",
-        args: ["exec", "-"],
-        cwd: "C:\\repo",
-        env: { Path: "C:\\Tools;C:\\Windows", DOTNET_ROOT: "C:\\Users\\me\\.dotnet" },
-      },
-      "C:\\repo\\.hydra\\prompts\\p.md",
-      "C:\\repo\\.hydra\\replies\\r.json",
-      "C:\\repo\\.hydra\\logs\\r.log"
-    );
-    assert.match(out, /\$env:Path = 'C:\\Tools;C:\\Windows'/);
-    assert.match(out, /\$env:DOTNET_ROOT = 'C:\\Users\\me\\.dotnet'/);
-    assert.match(out, /\$env:DOTNET_ROOT = .*;\s*\$ErrorActionPreference = 'Stop'/);
-  });
-
-  test("dispatch command rejects malicious env-var names that would break out of the $env:KEY = '...' statement", () => {
+  test("dispatch command never serializes spawn environment values or keys", () => {
     const out = buildPowerShellDispatchCommand(
       {
         command: "codex",
         args: ["exec", "-"],
         cwd: "C:\\repo",
         env: {
+          Path: "C:\\Tools;C:\\Windows",
+          DOTNET_ROOT: "hydra-test-secret-value",
           GOOD_VAR: "ok",
           "BAD; iex 'Write-Host PWNED'; #": "x",
-          "1STARTS_WITH_DIGIT": "x",
-          "HAS-DASH": "x",
-          "": "x",
-          "HAS SPACE": "x",
         },
       },
       "C:\\repo\\.hydra\\prompts\\p.md",
       "C:\\repo\\.hydra\\replies\\r.json",
       "C:\\repo\\.hydra\\logs\\r.log"
     );
-    assert.match(out, /\$env:GOOD_VAR = 'ok'/);
-    assert.doesNotMatch(out, /iex/);
+    assert.doesNotMatch(out, /hydra-test-secret-value/);
+    assert.doesNotMatch(out, /C:\\\\Tools;C:\\\\Windows/);
+    assert.doesNotMatch(out, /\$env:DOTNET_ROOT/);
+    assert.doesNotMatch(out, /\$env:GOOD_VAR/);
     assert.doesNotMatch(out, /PWNED/);
-    assert.doesNotMatch(out, /\$env:1STARTS_WITH_DIGIT/);
-    assert.doesNotMatch(out, /HAS-DASH/);
-    assert.doesNotMatch(out, /HAS SPACE/);
   });
 
   test("dispatch command supports terminal bridge synthetic echo without external node", () => {
@@ -161,7 +173,7 @@ describe("terminal bridge protocol", () => {
     );
     assert.match(out, /__hydra_echo__/);
     assert.match(out, /Running terminal bridge synthetic echo/);
-    assert.match(out, /AppendAllText\(\$__hydraLog, \$__hydraText/);
+    assert.match(out, /__HydraCaptureChunk \$__hydraText/);
     assert.doesNotMatch(out, /process\.execPath/);
     assert.doesNotMatch(out, /Code\.exe/);
   });
@@ -179,7 +191,7 @@ describe("terminal bridge protocol", () => {
     );
     assert.match(out, /\$__hydraStructuredOutput = /);
     assert.match(out, /Structured native events are captured in the request log/);
-    assert.match(out, /AppendAllText\(\$__hydraLog, \$__hydraChunk/);
+    assert.match(out, /__HydraCaptureChunk \$__hydraChunk/);
     assert.match(out, /if \(-not \$__hydraStructuredOutput\) \{ Write-Host -NoNewline \$__hydraChunk \}/);
   });
 
@@ -212,14 +224,39 @@ describe("terminal bridge protocol", () => {
     assert.match(claude, /npm\\claude\.cmd/);
   });
 
+  test("dispatch command refuses cmd variable-expansion arguments", () => {
+    const out = buildPowerShellDispatchCommand(
+      {
+        command: "C:\\Tools\\codex.cmd",
+        args: ["exec", "--config", "%HYDRA_UNSAFE%", "!DELAYED!", "-"],
+        cwd: "C:\\repo",
+      },
+      "C:\\storage\\prompts\\p.md",
+      "C:\\storage\\replies\\r.json",
+      "C:\\storage\\logs\\r.log"
+    );
+    assert.match(out, /GetExtension\(\$__hydraCommand\)/);
+    assert.match(out, /%\[\^%\]\+%\|!\[\^!\]\+!/);
+    assert.match(out, /refused a Windows batch argument containing variable-expansion syntax/);
+  });
+
   test("dispatch invocation keeps terminal input short", () => {
     const out = buildPowerShellDispatchInvocation("C:\\repo\\.hydra\\dispatch\\turn-1-codex-opener.ps1");
     assert.equal(
       out,
-      "\r\n; try { Invoke-Expression (Get-Content -LiteralPath 'C:\\repo\\.hydra\\dispatch\\turn-1-codex-opener.ps1' -Raw) } finally { Remove-Item env:HYDRA_REPLY_NONCE -ErrorAction SilentlyContinue }"
+      "\r\n; Remove-Item env:HYDRA_REPLY_NONCE -ErrorAction SilentlyContinue; $__hydraReplyKey = ''; try { Invoke-Expression (Get-Content -LiteralPath 'C:\\repo\\.hydra\\dispatch\\turn-1-codex-opener.ps1' -Raw) } finally { $__hydraReplyKey = $null; Remove-Variable __hydraReplyKey -ErrorAction SilentlyContinue; Remove-Item env:HYDRA_REPLY_NONCE -ErrorAction SilentlyContinue }; $null = $null"
     );
     assert.doesNotMatch(out, /__HydraResolveCommand/);
     assert.doesNotMatch(out, /__hydraPrompt/);
+  });
+
+  test("dispatch invocation verifies launcher integrity before execution", () => {
+    const out = buildPowerShellDispatchInvocation("C:\\storage\\dispatch\\request.ps1", "nonce", "abc123");
+    assert.match(out, /ReadAllBytes\('C:\\storage\\dispatch\\request\.ps1'\)/);
+    assert.match(out, /SHA256\]::Create\(\)/);
+    assert.match(out, /-cne 'abc123'/);
+    assert.match(out, /terminal dispatch integrity check failed/);
+    assert.match(out, /UTF8Encoding\]::new\(\$false\)\.GetString/);
   });
 
   test("dispatch invocation begins with a statement separator so back-to-back sendText calls parse cleanly even if the previous newline is dropped", () => {
@@ -229,7 +266,7 @@ describe("terminal bridge protocol", () => {
     // result must still tokenize as two separate Invoke-Expression statements,
     // not a single call where the second IE is read as a positional arg.
     const concatenated = a + b;
-    assert.match(concatenated, /\}\r\n; try \{ Invoke-Expression /);
+    assert.match(concatenated, /\$null = \$null\r\n; Remove-Item env:HYDRA_REPLY_NONCE/);
   });
 
   test("prompt file contains original prompt and reply path", () => {
@@ -257,9 +294,15 @@ describe("terminal bridge protocol", () => {
   });
 
   test("parses terminal replies", () => {
-    assert.deepEqual(parseTerminalReply('{"text":"done"}'), { text: "done", error: undefined, nonce: undefined });
-    assert.deepEqual(parseTerminalReply('\uFEFF{"text":"done"}'), { text: "done", error: undefined, nonce: undefined });
-    assert.deepEqual(parseTerminalReply('{"text":"","error":"failed"}'), { text: "", error: "failed", nonce: undefined });
+    assert.deepEqual(parseTerminalReply('{"text":"done"}'), {
+      text: "done", error: undefined, nonce: undefined, auth: undefined, logSha256: undefined,
+    });
+    assert.deepEqual(parseTerminalReply('\uFEFF{"text":"done"}'), {
+      text: "done", error: undefined, nonce: undefined, auth: undefined, logSha256: undefined,
+    });
+    assert.deepEqual(parseTerminalReply('{"text":"","error":"failed"}'), {
+      text: "", error: "failed", nonce: undefined, auth: undefined, logSha256: undefined,
+    });
     assert.throws(() => parseTerminalReply("{}"), /must include/);
   });
 });

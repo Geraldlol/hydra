@@ -1,12 +1,14 @@
-import * as path from "node:path";
 import * as vscode from "vscode";
 import {
+  applySpawnEnvironment,
+  effectiveSpawnEnvironment,
   mergeNativeEnv,
   mergeNativePathPrepend,
   resolveAgentCommand,
 } from "./cli";
 import {
   runCodexDebugModels,
+  isCodexModelsTerminationError,
   saveCodexModelsSnapshot,
   type CodexModelInfo,
   type CodexModelsSnapshot,
@@ -26,6 +28,7 @@ export interface ModelChooserDeps {
   setCodexModelsSnapshot(snapshot: CodexModelsSnapshot): void;
   appendSystemMessage(text: string): Promise<void>;
   postState(): void;
+  onUnconfirmedTermination?(): void;
 }
 
 /**
@@ -36,24 +39,22 @@ export interface ModelChooserDeps {
 export async function refreshCodexModelCatalog(deps: ModelChooserDeps): Promise<void> {
   const cfg = vscode.workspace.getConfiguration("hydraRoom");
   const command = cfg.get<string>("codexCommand", "codex");
-  const resolved = await resolveAgentCommand("codex", command);
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    ...mergeNativeEnv(
+  const spawn = applySpawnEnvironment(
+    { command, args: [], cwd: deps.workspaceRoot },
+    deps.workspaceRoot,
+    mergeNativeEnv(
       cfg.get<Record<string, string>>("nativeEnv", {}),
       cfg.get<Record<string, string>>("codexNativeEnv", {}),
     ),
-  };
-  const pathExtra = mergeNativePathPrepend(
-    cfg.get<string[]>("nativePathPrepend", []),
-    cfg.get<string[]>("codexNativePathPrepend", []),
+    mergeNativePathPrepend(
+      cfg.get<string[]>("nativePathPrepend", []),
+      cfg.get<string[]>("codexNativePathPrepend", []),
+    ),
   );
-  if (pathExtra.length) {
-    const expanded = pathExtra.map((p) => p.replace(/\$\{workspaceFolder\}/g, deps.workspaceRoot));
-    env.PATH = `${expanded.join(path.delimiter)}${path.delimiter}${env.PATH ?? ""}`;
-  }
+  const env = effectiveSpawnEnvironment(spawn);
   await deps.appendSystemMessage("Refreshing Codex model catalog via `codex debug models`…");
   try {
+    const resolved = await resolveAgentCommand("codex", command, env);
     const models = await runCodexDebugModels(resolved, env);
     const snapshot: CodexModelsSnapshot = {
       fetchedAt: new Date().toISOString(),
@@ -66,6 +67,7 @@ export async function refreshCodexModelCatalog(deps: ModelChooserDeps): Promise<
       `Codex model catalog refreshed: ${listable.length} listable model${listable.length === 1 ? "" : "s"} cached at \`.hydra/codex-models.json\`. The chooser will use this list until you refresh again.`,
     );
   } catch (err) {
+    if (isCodexModelsTerminationError(err)) deps.onUnconfirmedTermination?.();
     const msg = err instanceof Error ? err.message : String(err);
     await deps.appendSystemMessage(
       `Codex model refresh failed: ${msg}. The chooser will keep using the built-in curated list.`,

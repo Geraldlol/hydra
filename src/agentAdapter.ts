@@ -22,7 +22,7 @@ export interface AgentDefinition {
   kind: AgentKind;
   colorIndex?: number;
   model?: string;
-  pricing?: ModelPrices;
+  pricing?: Partial<ModelPrices>;
   defaultAuthority?: "read-only" | "workspace-write" | "full-native";
   // openai-compatible (SP2):
   baseUrl?: string;

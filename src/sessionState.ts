@@ -95,19 +95,22 @@ export function updateTerminalSession(
   return next;
 }
 
-export function terminalSessionDir(workspaceRoot: string): string {
-  return path.join(workspaceRoot, ".hydra", "sessions");
+export function terminalSessionDir(storageRoot: string): string {
+  return path.join(storageRoot, "sessions");
 }
 
-export function terminalSessionPath(workspaceRoot: string, agent: AgentId): string {
-  return path.join(terminalSessionDir(workspaceRoot), `${agent}.session.json`);
+export function terminalSessionPath(storageRoot: string, agent: AgentId): string {
+  const safeAgent = agent.replace(/[^a-zA-Z0-9_.-]/g, "-");
+  return path.join(terminalSessionDir(storageRoot), `${safeAgent}.session.json`);
 }
 
-export async function writeTerminalSession(workspaceRoot: string, session: TerminalSession): Promise<void> {
+export async function writeTerminalSession(storageRoot: string, session: TerminalSession): Promise<void> {
+  const filePath = terminalSessionPath(storageRoot, session.agent);
   await atomicWriteFile(
-    terminalSessionPath(workspaceRoot, session.agent),
+    filePath,
     `${JSON.stringify(session, null, 2)}\n`
   );
+  await fs.chmod(filePath, 0o600).catch(() => undefined);
 }
 
 export function formatCommandForSession(command: string, args: string[]): string {

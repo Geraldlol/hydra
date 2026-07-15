@@ -1,4 +1,7 @@
 strictDepBuilds: true
+overrides:
+  diff: ^8.0.4
+  serialize-javascript: ^7.0.6
 allowBuilds:
   '@vscode/vsce-sign': false
   keytar: false

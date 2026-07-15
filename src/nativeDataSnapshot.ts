@@ -2,6 +2,11 @@ import * as fs from "node:fs/promises";
 import * as cp from "node:child_process";
 import * as os from "node:os";
 import * as path from "node:path";
+import { atomicWriteFile, readFileHead } from "./fileQueue";
+
+export const MAX_NATIVE_CONFIG_BYTES = 2 * 1024 * 1024;
+export const MAX_NATIVE_JSON_BYTES = 8 * 1024 * 1024;
+export const MAX_SQLITE_METADATA_BYTES = 512 * 1024;
 
 export interface NativeDataSnapshot {
   generatedAt: string;
@@ -93,8 +98,10 @@ export function nativeDataSnapshotPath(workspaceRoot: string): string {
   return path.join(workspaceRoot, ".hydra", "native-data-snapshot.md");
 }
 
-export async function collectNativeDataSnapshot(workspaceRoot: string): Promise<NativeDataSnapshot> {
-  const home = os.homedir();
+export async function collectNativeDataSnapshot(
+  workspaceRoot: string,
+  home = os.homedir()
+): Promise<NativeDataSnapshot> {
   const codexHome = path.join(home, ".codex");
   const claudeHome = path.join(home, ".claude");
   const codexConfig = parseTomlSummary(await readText(path.join(codexHome, "config.toml")));
@@ -137,8 +144,7 @@ export async function collectNativeDataSnapshot(workspaceRoot: string): Promise<
 }
 
 export async function writeNativeDataSnapshot(filePath: string, markdown: string): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, markdown, "utf8");
+  await atomicWriteFile(filePath, markdown);
 }
 
 export function renderNativeDataSnapshot(snapshot: NativeDataSnapshot): string {
@@ -297,7 +303,8 @@ function isSensitiveKey(key: string): boolean {
 
 async function readText(filePath: string): Promise<string> {
   try {
-    return await fs.readFile(filePath, "utf8");
+    const bounded = await readFileHead(filePath, MAX_NATIVE_CONFIG_BYTES);
+    return bounded.truncated ? "" : bounded.text;
   } catch {
     return "";
   }
@@ -305,7 +312,8 @@ async function readText(filePath: string): Promise<string> {
 
 async function readJson(filePath: string, fallback: unknown): Promise<unknown> {
   try {
-    return JSON.parse(await fs.readFile(filePath, "utf8"));
+    const bounded = await readFileHead(filePath, MAX_NATIVE_JSON_BYTES);
+    return bounded.truncated ? fallback : JSON.parse(bounded.text);
   } catch {
     return fallback;
   }
@@ -567,7 +575,12 @@ async function topLevelFiles(dir: string, extension: string): Promise<string[]> 
 }
 
 async function firstJsonLine(filePath: string): Promise<Record<string, unknown> | undefined> {
-  const text = await readText(filePath);
+  let text = "";
+  try {
+    text = (await readFileHead(filePath, 64 * 1024)).text;
+  } catch {
+    // Native CLI history is optional diagnostic input.
+  }
   const firstLine = text.split(/\r?\n/, 1)[0]?.trim();
   if (!firstLine) return undefined;
   try {
@@ -592,7 +605,12 @@ function stringValue(value: unknown): string | undefined {
 
 function execFile(command: string, args: string[]): Promise<string> {
   return new Promise((resolve) => {
-    cp.execFile(command, args, { windowsHide: true, timeout: 10000 }, (err, stdout) => {
+    cp.execFile(command, args, {
+      encoding: "utf8",
+      maxBuffer: MAX_SQLITE_METADATA_BYTES,
+      windowsHide: true,
+      timeout: 10000,
+    }, (err, stdout) => {
       resolve(err ? "" : stdout.trim());
     });
   });

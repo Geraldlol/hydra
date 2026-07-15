@@ -166,7 +166,7 @@ export function evaluateClaudeAutomationGuard(input: ClaudeAutomationGuardInput)
   }
   if (mode === "blockManyHeads") {
     return manyHeads
-      ? { decision: "block", reason: `${overReason} Blocking Many Heads fanout; single Claude turns still run.` }
+      ? { decision: "block", reason: `${overReason} Blocking Claude Worker Fanout; single Claude turns still run.` }
       : { decision: "warn", reason: overReason };
   }
   // mode === "warn"

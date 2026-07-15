@@ -1,6 +1,6 @@
 import type { AgentAdapter, AgentDefinition, InvocationContext, Invocation, AdapterRawOutput } from "./agentAdapter";
 import type { UsageTokens, ModelPrices } from "./usage";
-import { DEFAULT_PRICES_BY_KIND } from "./usage";
+import { DEFAULT_PRICES_BY_KIND, coerceModelPrices } from "./usage";
 import type { AuthorityLevel } from "./authority";
 import { expandWorkspaceArgs, expandRequestFileArgs, type RequestFilePlaceholders } from "./cli";
 
@@ -46,7 +46,7 @@ export const cliTemplateAdapter: AgentAdapter = {
     return undefined; // custom CLIs expose no standard usage; cost uses per-kind default @ 0 tokens
   },
   pricing(def: AgentDefinition): ModelPrices {
-    return def.pricing ?? DEFAULT_PRICES_BY_KIND["cli-template"];
+    return coerceModelPrices(def.pricing, DEFAULT_PRICES_BY_KIND["cli-template"]);
   },
   authority(def: AgentDefinition, _ctx: InvocationContext) {
     const level = AUTHORITY_LEVEL_BY_DEFAULT[def.defaultAuthority ?? "full-native"];

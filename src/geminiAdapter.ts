@@ -3,7 +3,7 @@ import type { UsageTokens, ModelPrices } from "./usage";
 import { buildAgentSpawn } from "./cli";
 import { insertBeforeStdinDash, withModelArgs } from "./agentArgs";
 import { classifyAgentAuthority } from "./authority";
-import { resolveModelPrices, DEFAULT_PRICES_BY_KIND } from "./usage";
+import { resolveModelPrices, DEFAULT_PRICES_BY_KIND, coerceModelPrices } from "./usage";
 
 export const geminiAdapter: AgentAdapter = {
   kind: "gemini",
@@ -44,7 +44,8 @@ export const geminiAdapter: AgentAdapter = {
     // entry directly), "gemini" has no DEFAULT_PRICES key, so resolveModelPrices'
     // default agentDefaults param would silently floor to the codex row. Pass
     // the gemini row from DEFAULT_PRICES_BY_KIND explicitly as the fallback.
-    return def.pricing ?? resolveModelPrices(def.id, def.model, {}, { gemini: DEFAULT_PRICES_BY_KIND.gemini });
+    const base = resolveModelPrices(def.id, def.model, {}, { gemini: DEFAULT_PRICES_BY_KIND.gemini });
+    return coerceModelPrices(def.pricing, base);
   },
   authority(def: AgentDefinition, ctx: InvocationContext) {
     return classifyAgentAuthority(def.id, ctx.phase, ctx.rawArgs);

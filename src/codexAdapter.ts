@@ -4,7 +4,7 @@ import { buildAgentSpawn } from "./cli";
 import { insertBeforeStdinDash, withModelArgs, withEffortArgs, isBuiltinAgentId } from "./agentArgs";
 import { withCodexSkipGitRepoCheckArgs } from "./codexTransport";
 import { classifyAgentAuthority } from "./authority";
-import { usageFromCodexSummary, resolveModelPrices, parseCodexTextTokens } from "./usage";
+import { usageFromCodexSummary, resolveModelPrices, parseCodexTextTokens, coerceModelPrices } from "./usage";
 
 export const codexAdapter: AgentAdapter = {
   kind: "codex",
@@ -40,7 +40,8 @@ export const codexAdapter: AgentAdapter = {
     return { inputTokens: total, outputTokens: 0, cacheReadTokens: 0, cacheCreateTokens: 0, reasoningTokens: 0 };
   },
   pricing(def: AgentDefinition): ModelPrices {
-    return def.pricing ?? resolveModelPrices(def.id, def.model, {});
+    const base = resolveModelPrices(def.id, def.model, {});
+    return coerceModelPrices(def.pricing, base);
   },
   authority(def: AgentDefinition, ctx: InvocationContext) {
     return classifyAgentAuthority(def.id, ctx.phase, ctx.rawArgs);

@@ -1,6 +1,5 @@
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { ensureFile, readJsonlGuarded, serializePerFile } from "./fileQueue";
+import { appendFileSafely, ensureFile, readJsonlGuarded, serializePerFile } from "./fileQueue";
 import type { WorkQueueItem } from "./workQueue";
 
 export type WorkQueueDispositionKind = "dismissed" | "snoozed";
@@ -22,8 +21,7 @@ export async function ensureWorkQueueStateFile(filePath: string): Promise<void> 
 
 export async function appendWorkQueueDisposition(filePath: string, disposition: WorkQueueDisposition): Promise<void> {
   await serializePerFile(filePath, async () => {
-    await fs.mkdir(path.dirname(filePath), { recursive: true });
-    await fs.appendFile(filePath, `${JSON.stringify(disposition)}\n`, "utf8");
+    await appendFileSafely(filePath, `${JSON.stringify(disposition)}\n`);
   });
 }
 

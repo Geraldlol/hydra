@@ -134,6 +134,56 @@ describe("http transport", () => {
     assert.equal(parsed.usage.prompt_tokens, 5);
   });
 
+  test("streams CRLF-delimited SSE events before the response closes", async () => {
+    const encoder = new TextEncoder();
+    const chunks: string[] = [];
+    let firstEventArrivedBeforeClose = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"Hel"}}]}\r\n\r\n'));
+        setTimeout(() => {
+          firstEventArrivedBeforeClose = chunks.join("") === "Hel";
+          controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"lo"}}]}\r\n\r\n'));
+          controller.close();
+        }, 0);
+      },
+    });
+    const fetchImpl = (async () => new Response(stream, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    })) as unknown as typeof fetch;
+
+    const res = await runHttpAgent(inv, {
+      timeoutMs: 5000,
+      signal: new AbortController().signal,
+      fetchImpl,
+      onChunk: (chunk) => chunks.push(chunk),
+    });
+
+    assert.equal(firstEventArrivedBeforeClose, true);
+    assert.equal(chunks.join(""), "Hello");
+    assert.equal(res.stdout, "Hello");
+  });
+
+  test("bounds live SSE chunks as tightly as the accumulated result", async () => {
+    const oversized = "x".repeat(MAX_AGENT_STDOUT_BYTES + 1024);
+    const fetchImpl = (async () => sseResponse([
+      `data: ${JSON.stringify({ choices: [{ delta: { content: oversized } }] })}\n\n`,
+    ])) as unknown as typeof fetch;
+    const chunks: string[] = [];
+
+    const res = await runHttpAgent(inv, {
+      timeoutMs: 5000,
+      signal: new AbortController().signal,
+      fetchImpl,
+      onChunk: (chunk) => chunks.push(chunk),
+    });
+
+    assert.match(res.stdout, /truncated/);
+    assert.equal(chunks.join(""), res.stdout);
+    assert.ok(chunks.join("").length <= MAX_AGENT_STDOUT_BYTES + 200);
+  });
+
   test("an oversized, undelimited SSE stream is bounded and stops reading early (no hang)", async () => {
     const totalChars = MAX_AGENT_STDOUT_BYTES + 8 * 1024 * 1024; // ~24MB, well past the cap
     const chunkSize = 1024 * 1024; // 1MB per read, no "data:" prefix and no "\n\n" ever
@@ -185,6 +235,47 @@ describe("http transport", () => {
     assert.equal(res.cancelled, true);
     assert.equal(res.timedOut, false);
     assert.equal(res.exitCode, null);
+  });
+
+  test("timeout while reading an HTTP error body is classified as a timeout", async () => {
+    const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          init?.signal?.addEventListener("abort", () => {
+            controller.error(new DOMException("Aborted", "AbortError"));
+          }, { once: true });
+        },
+      });
+      return new Response(stream, { status: 503, headers: { "content-type": "text/plain" } });
+    }) as unknown as typeof fetch;
+
+    const res = await runHttpAgent(inv, {
+      timeoutMs: 30,
+      signal: new AbortController().signal,
+      fetchImpl,
+    });
+
+    assert.equal(res.timedOut, true);
+    assert.equal(res.cancelled, false);
+    assert.equal(res.exitCode, null);
+  });
+
+  test("a throwing live consumer does not turn a successful response into a failure", async () => {
+    const fetchImpl = (async () => jsonResponse({
+      choices: [{ message: { content: "still succeeds" } }],
+    })) as unknown as typeof fetch;
+
+    const res = await runHttpAgent(inv, {
+      timeoutMs: 5000,
+      signal: new AbortController().signal,
+      fetchImpl,
+      onChunk: () => {
+        throw new Error("disposed webview");
+      },
+    });
+
+    assert.equal(res.exitCode, 0);
+    assert.equal(res.stdout, "still succeeds");
   });
 
   test("a network failure does not leak the Authorization header value", async () => {

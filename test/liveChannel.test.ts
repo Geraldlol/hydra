@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, test } from "node:test";
-import { createLiveChannelWriter, liveChannelPath } from "../src/liveChannel";
+import { createLiveChannelWriter, liveChannelPath, readTaskOutputFileForTests } from "../src/liveChannel";
 
 function tempRoot(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "hydra-live-channel-"));
@@ -207,6 +207,23 @@ describe("live channel writer", () => {
     assert.equal(payload.outputFileText, undefined);
   });
 
+  test("refuses a deterministic task-output replacement between lstat and open", async () => {
+    const root = tempRoot();
+    const target = path.join(root, "task-output.txt");
+    const oldPath = path.join(root, "task-output.old.txt");
+    const replacement = path.join(root, "replacement.txt");
+    fs.writeFileSync(target, "expected");
+    fs.writeFileSync(replacement, "must-not-be-read");
+
+    const payload = await readTaskOutputFileForTests(target, root, () => {
+      fs.renameSync(target, oldPath);
+      fs.renameSync(replacement, target);
+    });
+
+    assert.equal(payload.outputFileReadStatus, "blocked_path");
+    assert.equal(payload.outputFileText, undefined);
+  });
+
   test("writes only unseen Codex agent-message suffixes", async () => {
     const root = tempRoot();
     const writer = createLiveChannelWriter({
@@ -247,5 +264,27 @@ describe("live channel writer", () => {
 
     const records = readJsonl(liveChannelPath(root, "req", "claude"));
     assert.deepEqual(records.map((r) => r.kind), ["stream_truncated"]);
+  });
+
+  test("bounds newline-dense chunks without promise-per-line amplification and retains done", async () => {
+    const root = tempRoot();
+    const writer = createLiveChannelWriter({
+      workspaceRoot: root,
+      requestId: "dense",
+      agent: "claude",
+      phase: "opener",
+      outputMode: "claudeStreamJson",
+    });
+    assert.ok(writer);
+    writer.push("\n".repeat(100_000) + JSON.stringify({
+      type: "result",
+      subtype: "success",
+      stop_reason: "end_turn",
+    }) + "\n");
+    await writer.flush();
+
+    const records = readJsonl(liveChannelPath(root, "dense", "claude"));
+    assert.equal(records[0]!.kind, "stream_truncated");
+    assert.equal(records.at(-1)!.kind, "done");
   });
 });
