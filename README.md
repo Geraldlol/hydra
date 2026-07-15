@@ -1,35 +1,94 @@
-# Hydra
+<p align="center">
+  <img src="media/hydra-heads/guard.png" width="144" alt="Hydra guard head">
+</p>
 
-Hydra puts Codex and Claude Code in one room inside VS Code and has them work the same task together while you stay in control. You send one message, the two agents discuss a plan, one of them builds, the other reviews the diff, and you approve the steps that matter. It drives the Codex and Claude Code CLIs you already have installed, using your existing logins, and writes the whole session (transcript, plan, and every decision) to a `.hydra/` folder in your workspace.
+<h1 align="center">Hydra Agents</h1>
 
-<!-- Screenshots or a demo GIF go here. Capture the shots below, save them under media/screenshots/ as PNG or JPG (the Marketplace does not render SVG), then remove the comment markers around this block to publish. Small PNGs are bundled in the extension, so they show on the in-editor extension page as well as the web listing. A demo GIF can join or replace these later, saved as media/hydra-demo.gif (already kept out of the .vsix download).
+<p align="center"><strong>A local-first, multi-head AI collaboration room inside VS Code.</strong></p>
 
-![A room turn: Codex and Claude discussing the plan](media/screenshots/room-discussion.png)
+<p align="center">
+  <a href="https://marketplace.visualstudio.com/items?itemName=geraldlol.vscode-hydra-room">Install from the Visual Studio Marketplace</a>
+  &nbsp;·&nbsp; Preview 0.6.0
+  &nbsp;·&nbsp; <a href="CHANGELOG.md">Changelog</a>
+</p>
 
-![Review pass: one agent flags an issue in the other agent's diff](media/screenshots/review.png)
+Hydra seats multiple AI heads in one durable room, gives them a shared objective and transcript, and coordinates discussion, implementation, verification, and review while you remain the final authority. The default roster is Codex plus Claude Code; an experimental Gemini adapter and registered OpenAI-compatible or CLI-template heads can extend the room.
 
-![Per phase model picker and the live session cost meter](media/screenshots/model-and-cost.png)
--->
+Hydra drives the native CLIs you already installed, using their existing logins and configured integrations. Human-readable records such as transcripts, decisions, verification receipts, prompt envelopes, and derived competition audits live under `.hydra/`. Authoritative competition state, unrevealed duel commitments, and transient terminal-bridge state use VS Code or OS-private storage instead of trusting workspace-editable files.
 
-**Auto mode.** Every agent turn ends with a short decision packet: what it did, what it recommends next, any blockers, and a safe default action. Hydra can take that default and move the loop forward on its own, from discussion to build to verify to review and back again, running your test or build command after each build. It stops and asks you the moment a step looks risky, such as a push, a delete, or a deploy. That way it handles the routine middle of a task and only interrupts you for the decisions that actually need a person.
+<p align="center">
+  <a href="docs/images/hydra-room.png"><img src="docs/images/hydra-room.png" width="1200" alt="Hydra room with Codex, Claude, and Gemini discussing one shared objective"></a>
+</p>
+<p align="center"><em>A durable three-head room with shared context, per-head activity and authority, verification, decisions, and parallel builder controls.</em></p>
+
+## What's new in 0.6.0
+
+- **Durable N-head rooms** - `hydraRoom.roomRoster` now drives seated identities, discussion roles, all-head build/review handoffs, status rails, and per-head usage.
+- **Equal maximum native authority** - Codex and Claude default to the same consent-gated Full Native posture for Discussion, Build, and Review. Hydra does not intentionally weaken either head, while vendor tools and provider capabilities can still differ.
+- **Evidence scoreboard** - falsifiable claims can be resolved against deterministic verification or human evidence, producing conservative passive standings without granting operational authority.
+- **Agent-initiated rated duels** - a serial reactor or closer can challenge the head it just examined. Hydra either rejects the challenge under policy or runs sealed paired commitments followed by independent human adjudication. There is no human Create Duel action and no exhibition fallback.
+- **Domain Elo and competitive pressure** - every domain starts at 1000 Elo. Lower-ranked heads see the gap to #1; the Supreme Head is pressed to defend an established lead. Rank is motivational only and never changes permissions, approvals, builder assignment, speaking order, or safety policy.
+- **Current models and safer Telegram input** - the model chooser/cost catalog is refreshed, inbound sender names are sanitized, and an optional sender-ID allowlist can restrict who may drive a room remotely.
+
+The detailed trust model is documented in [ADR 001: runtime state boundaries](docs/architecture/001-runtime-state-boundaries.md) and [ADR 002: standings, duels, and authority](docs/architecture/002-passive-evidence-standings-and-duels.md).
+
+## How a room moves
+
+```text
+your objective -> discuss -> build -> verify -> review -> decision
+                       \-> agent challenge -> policy admission
+                           -> sealed answers -> paired reveal
+                           -> human adjudication -> domain Elo
+```
+
+Every agent turn ends with a compact Decision Packet: what happened, the recommended next step, blockers, and a safe default. With auto-advance enabled, Hydra moves routine work from discussion through build, verification, and review, but stops when a decision requires the user or the proposed default matches Hydra's risky-action checks.
 
 ## Quick start
 
-1. Open the Command Palette.
-2. Run `Hydra: Start`.
-3. Hydra checks the workspace, the native CLIs, and the terminal bridge.
-4. Type in the room.
+1. Install [Hydra Agents](https://marketplace.visualstudio.com/items?itemName=geraldlol.vscode-hydra-room).
+2. Install and authenticate the Codex and Claude Code CLIs for the default roster.
+3. Open a project folder in VS Code. Grant Workspace Trust only to code you trust.
+4. Open the Command Palette and run `Hydra: Start`.
+5. Hydra checks the workspace, native CLIs, and transport. Before each head's first Full Native call in a workspace, choose **Run once**, **Always for this workspace**, or **Cancel**. **Run once** authorizes only that call and prompts again next time; **Always** persists consent for that head in that workspace.
+6. Type the objective in the room. Use Command Center (`Ctrl+Alt+H`) whenever you are unsure what to do next.
 
 Do not type `Hydra` into PowerShell. Hydra is a VS Code command, not a terminal command.
 
 ## Requirements
 
-Hydra expects these CLIs on your `PATH` or in a known Windows install location:
+For the default room:
 
-- `codex`
-- `claude`
+- VS Code 1.120 or newer.
+- The `codex` and `claude` CLIs installed, authenticated, and available on `PATH` or in a known Windows install location.
 
-If VS Code cannot find a CLI, set `hydraRoom.codexCommand` or `hydraRoom.claudeCommand` to the full executable path.
+If VS Code cannot find a CLI, set `hydraRoom.codexCommand` or `hydraRoom.claudeCommand` to its absolute executable path.
+
+Gemini and custom heads are optional. The built-in Gemini adapter is experimental pending broader native CLI verification. Registered `openai-compatible` heads are locally read-only text endpoints; registered `cli-template` heads can declare `read-only`, `workspace-write`, or `full-native` authority.
+
+Node.js 22.13 or newer and pnpm 11.1.3 are required only for local extension development.
+
+## Configure more heads
+
+`hydraRoom.roomRoster` accepts at least two unique registered head IDs. The built-in IDs are `codex`, `claude`, and experimental `gemini`. Add local or hosted models through `hydraRoom.agents`, then seat them in the roster. Put these application-scoped settings in your **User** `settings.json`, not the workspace's `.vscode/settings.json`:
+
+```jsonc
+{
+  "hydraRoom.agents": [
+    {
+      "id": "local",
+      "displayName": "Local Model",
+      "kind": "openai-compatible",
+      "baseUrl": "http://127.0.0.1:11434/v1",
+      "model": "your-model"
+    }
+  ],
+  "hydraRoom.roomRoster": ["codex", "claude", "local"]
+}
+```
+
+Non-local OpenAI-compatible endpoints require HTTPS. Reference credentials by environment-variable name with `apiKeyEnv`; never inline API keys in settings. A remote endpoint receives the rendered prompt/transcript and returns text, but cannot edit the local workspace. Custom CLI heads use `argsTemplate`. Set `defaultAuthority` explicitly; if omitted, a CLI-template head defaults to `full-native` and requires consent before its first call in a workspace.
+
+In serial discussion, `hydraRoom.firstSpeaker` opens when that head is seated; otherwise Hydra falls back to the first roster entry. A reactor examines the opener and the opener may close. With the default `hydraRoom.discussionMode: "parallelOnBoth"`, explicit group wording dispatches every seated head independently; `"parallel"` always dispatches the roster together, while `"serial"` always keeps the serialized loop. `Hydra: Assign All Seated Builders` runs the entire roster in parallel; when Review is requested, the same roster reviews in parallel.
 
 ## Local Development
 
@@ -56,10 +115,12 @@ In the Extension Development Host, run `Hydra: Start`.
 ## Daily Commands
 
 - `Hydra: Start`
+- `Hydra: Open Room`
 - `Hydra: Send Message`
 - `Hydra: Assign Builder`
-- `Hydra: Assign Both Builders`
+- `Hydra: Assign All Seated Builders`
 - `Hydra: Run Verification`
+- `Hydra: Open Verification Log`
 - `Hydra: Request Review`
 - `Hydra: Preview Next Prompt`
 - `Hydra: Open Last Prompt`
@@ -117,6 +178,7 @@ Most users do not need these.
 
 - `Hydra: Advanced: Use Experimental Terminal Bridge`
 - `Hydra: Advanced: Run Terminal Bridge Self-Test`
+- `Hydra: Advanced: Run Claude Worker Fanout Smoke Test`
 - `Hydra: Advanced: Show Terminal Bridge Health`
 - `Hydra: Advanced: Use Safe One-Shot Transport`
 - `Hydra: Advanced: Open Native Terminals`
@@ -134,18 +196,18 @@ Hydra ships these default keybindings (macOS uses `Cmd` in place of `Ctrl`):
 - `Ctrl+Alt+A` — `Hydra: Accept Default Decision`
 - `Ctrl+Alt+X` — `Hydra: Stop Current Turn`
 - `Ctrl+Alt+T` — `Hydra: Insert Prompt Template` (replaces the composer text with a saved `hydraRoom.promptTemplates` entry)
-- `Ctrl+Alt+M` — `Hydra: Choose Model` (pick the per-phase Codex/Claude model live without editing settings)
-- `Ctrl+Alt+E` — `Hydra: Choose Thinking Level` (pick the per-phase reasoning/effort level live)
+- `Ctrl+Alt+M` — `Hydra: Choose Model` (pick a per-phase model live without editing settings)
+- `Ctrl+Alt+E` — `Hydra: Choose Thinking Level` (pick an available per-phase reasoning/effort level live)
 
 Rebind any of these from VS Code's Keyboard Shortcuts editor.
 
-Hydra starts in safe one-shot transport, then Autopilot runs Doctor and the terminal bridge self-test. By default it stays in safe one-shot mode even when the bridge test passes; set `hydraRoom.preferTerminalBridgeOnStart: true` to opt in to automatic visible terminal bridge use. If setup checks fail, Hydra stays in safe one-shot mode and shows fix buttons in the room.
+Hydra starts in one-shot transport, then Autopilot runs Doctor and the terminal bridge self-test. By default it stays in one-shot mode even when the bridge test passes; set `hydraRoom.preferTerminalBridgeOnStart: true` to opt in to automatic visible terminal bridge use. Transport and authority are separate: a one-shot call can still run Full Native after consent. Choose the **Safe Discussion** capability profile when you want read-only agent authority. If setup checks fail, Hydra stays in one-shot mode and shows fix buttons in the room.
 
 The native terminal bridge is experimental and routes calls through visible terminals. Its request files, logs, replies, launchers, and session snapshots live in VS Code's private per-workspace extension storage rather than the project tree. Configured environment values are applied to the terminal process and are not written into launcher scripts; launchers and prompts are integrity-checked before execution. Agent output is echoed in the native terminal and streamed into the room while the command runs. The room shows the active transport in the header, has an Open Terminals button for bringing both native CLIs into view, and can switch back with `Hydra: Advanced: Use Safe One-Shot Transport` if terminal mode gets noisy.
 
 Use `Hydra: Native Action` or the in-room Native Action button as the polished entry point for direct terminal work. It opens a picker for Codex, Claude, or both, with optional editor or working-tree context.
 
-Choose `Codex Command` or `Claude Command` in that picker, from the command palette, or from the Direct Terminals tool group when you need exact native subcommand parity instead of a prompt-shaped agent turn. The input is parsed as args after the configured executable, so examples include `doctor`, `mcp list`, `plugin list`, `features`, or any other native CLI subcommand you want Hydra to run and capture.
+Choose `Codex Command` or `Claude Command` in that picker, from the command palette, or from the Direct Terminals tool group when you need exact native subcommand passthrough instead of a prompt-shaped agent turn. The input is parsed as args after the configured executable, so examples include `doctor`, `mcp list`, `plugin list`, `features`, or any other native CLI subcommand you want Hydra to run and capture.
 
 The same picker also includes a native command catalog based on the current Codex and Claude CLI surfaces: MCP/plugin help and list/status commands, feature/debug/sandbox/app-server inspection, Claude agents/project/auto-mode/ultrareview/auth/install help, and interactive terminal entries for auth/login/logout, resume/continue/fork, worktree, remote-control, app/cloud, install/setup-token, and update flows. The reconnaissance notes live in `docs/native-cli-recon.md`.
 
@@ -165,7 +227,7 @@ Normal room messages use the opener -> reactor -> closer discussion loop by defa
 
 Codex and Claude now default to the same **Full Native — Equal Maximum Access** profile in discussion, Build, and Review. Codex runs with `danger-full-access`; Claude runs with its equivalent permission bypass. Hydra grants both heads the same maximum permission posture instead of silently weakening one, while each head keeps its own configured workspace and native integration surface. Native CLIs implement and name tools differently, so equal maximum access does not imply identical vendor tool catalogs or provider capabilities. The existing modal consent gate remains mandatory per head and workspace before any full-native call runs, and the Profiles control can deliberately narrow either head.
 
-Set `hydraRoom.roomRoster` in User Settings to choose the ordered heads seated in a room. It accepts at least two registered agent IDs from the built-in heads or `hydraRoom.agents`; the first head is the default opener, and later heads are eligible reactors and reviewers. This roster is the durable identity boundary used when Hydra assigns participants across discussion, Build, and Review.
+Set `hydraRoom.roomRoster` in User Settings to choose the ordered heads seated in a room. It accepts at least two registered agent IDs from the built-in heads or `hydraRoom.agents`. `hydraRoom.firstSpeaker` opens when that head is seated; otherwise Hydra uses the first roster entry. The roster is the durable identity boundary used when Hydra assigns participants across discussion, Build, and Review.
 
 Hydra adds Codex `exec`'s `--skip-git-repo-check` for normal room turns so new folders can be used before they have a Git repository. Exact `Hydra: Run Codex Native Command` calls remain raw native passthrough.
 
@@ -188,14 +250,14 @@ Autopilot is the first-run path:
 - warns when command or raw-args settings are overridden by workspace settings
 - runs the terminal bridge self-test
 - opens native terminals only after the bridge is usable
-- keeps safe one-shot automatically unless `hydraRoom.preferTerminalBridgeOnStart` is enabled
+- keeps one-shot transport automatically unless `hydraRoom.preferTerminalBridgeOnStart` is enabled; this transport choice does not reduce the selected capability profile
 
 Turn it off with `hydraRoom.autopilotOnStart: false`. Keep one-shot as the automatic default with `hydraRoom.preferTerminalBridgeOnStart: false`.
 
 ## Transcript
 
-Hydra keeps the full room log at `.hydra/transcript.md`. Agent prompts include the active room transcript so the agents see the same room history Hydra has on disk.
-To keep long rooms from sending the same old discussion back to both agents on every turn, prompt injection keeps only the newest active transcript messages once `hydraRoom.promptTranscriptMaxChars` is exceeded. The default is phase-aware: discussion turns use `80000` characters for lower latency, while Build and Review keep `400000` characters for deeper implementation context. This is a per-call cost and attention guardrail, not a model context-window limit. You can still set a single number to apply to every phase, or use an object like `{ "discussion": 80000, "build": 400000, "review": 400000 }`. When the active transcript crosses the largest configured cap, Hydra also runs a wiki context refresh so durable facts can be compacted into `.hydra/wiki/context.md` before older transcript content is omitted. The omitted history remains in `.hydra/transcript.md` or `.hydra/archive/`.
+Hydra keeps the active room log at `.hydra/transcript.md` and rotates older segments into `.hydra/archive/`. Agent prompts include the active transcript so seated heads see the same current room history Hydra has on disk.
+To keep long rooms from sending the same old discussion back to every head on every turn, prompt injection keeps only the newest active transcript messages once `hydraRoom.promptTranscriptMaxChars` is exceeded. The default is phase-aware: discussion turns use `80000` characters for lower latency, while Build and Review keep `400000` characters for deeper implementation context. This is a per-call cost and attention guardrail, not a model context-window limit. You can still set a single number to apply to every phase, or use an object like `{ "discussion": 80000, "build": 400000, "review": 400000 }`. When the active transcript crosses the largest configured cap, Hydra also runs a wiki context refresh so durable facts can be compacted into `.hydra/wiki/context.md` before older transcript content is omitted. The omitted history remains in `.hydra/transcript.md` or `.hydra/archive/`.
 
 Hydra also writes:
 
@@ -206,8 +268,10 @@ Hydra also writes:
 - `.hydra/duels.md` for a derived audit of formal challenges, paired reveals, independently adjudicated results, corrections, and domain Elo ratings.
 - `.hydra/verification.jsonl` for build/test/check evidence.
 - `.hydra/native-actions.jsonl` for direct native terminal action receipts.
+- `.hydra/agent-calls.jsonl` for redacted dispatch and duel-execution binding receipts.
 - `.hydra/native-capabilities.md` for the latest Codex/Claude version and help snapshot.
 - `.hydra/native-data-snapshot.md` for redacted Codex/Claude config, plugin, model, state, and session metadata.
+- `.hydra/telegram-inbox-state.json` and its acknowledgement log for per-room inbound delivery state.
 - `.hydra/work-queue.jsonl` for queue dismiss/snooze state.
 - `.hydra/session-brief.md` for the latest operator snapshot.
 - `.hydra/wiki/` for the compiled project wiki Hydra injects into future prompts.
@@ -240,23 +304,55 @@ Agent replies are expected to end with:
 
 Hydra stores those packets in `.hydra/decisions.jsonl`, shows the latest decisions in the room, and exposes `Accept Default`. When the default clearly names a builder, Hydra assigns that builder. When a build is done, it requests review. When review blockers need a return pass, it hands back to the builder. Otherwise it sends the default back into the room as the next instruction.
 
-## Evidence Standings
+## Evidence Scoreboard and Agent-Initiated Duels
 
-Use `Hydra: Record Evidence Verdict` to record a head's falsifiable claim and its deterministic or human-adjudicated outcome, then use `Hydra: Open Standings` to inspect the passive reliability table. `Hydra: Review Score Evidence` exposes active evidence, pending claims, and the complete actor-attributed reversal history. If an adjudication is wrong, `Hydra: Reverse Evidence Verdict` appends a reversal instead of erasing history; `Hydra: Adjudicate Pending Score Claim` can then attach a corrected verdict to that same claim. Deterministic scoring never accepts a free-form claim: it creates an exact claim from the latest passing Hydra verification receipt. Every verdict requires an evidence note, and repeated claims in one round cannot inflate maturity. Scores use a conservative Wilson lower bound and remain provisional until five independently resolved rounds. Peer opinions are stored as advisory context only and do not affect scores. The authoritative append-only ledger lives in VS Code's private per-workspace extension storage; `.hydra/scoreboard.md` and `.hydra/score-evidence.md` are derived mirrors and not sources of truth.
+### Passive evidence standings
 
-Evidence Standings are observational only. They cannot change native permissions, approvals, builder assignment, speaking order, or orchestration.
+The scoreboard tracks which heads make falsifiable claims that later hold up. A typical flow is:
 
-Formal Duels are a separate competition with one current path: **agent-initiated, then rated or rejected by policy**. Only a successful reply from the normal serial reactor/closer flow can challenge the head whose reply it just examined by emitting a strict duel intent with a falsifiable proposition, domain, evidence contract, and rationale. There is no human Create Duel action and ordinary user wording does not manufacture agent intent. Set `hydraRoom.agentInitiatedDuels` in User Settings to disable the feature; it is also forced off in untrusted workspaces.
+1. Run `Hydra: Run Verification` when deterministic evidence is available.
+2. Run `Hydra: Record Evidence Verdict` and choose the head, domain, outcome, evidence source, and evidence note.
+3. Inspect the in-room standings rail or open the derived report with `Hydra: Open Standings`.
+4. Use `Hydra: Review Score Evidence` for active claims and reversal history. If a verdict is wrong, append a correction with `Hydra: Reverse Evidence Verdict` and `Hydra: Adjudicate Pending Score Claim`; Hydra never rewrites history in place.
 
-Hydra binds the challenge to the actual challenger, opponent, and source turn, builds one bounded shared evidence packet from the active discussion, and applies admission and anti-farming rules. A rejected challenge is logged and changes no rating; Hydra never downgrades it into an exhibition. An admitted `elo-v3-agent-initiated` duel automatically dispatches both configured heads, seals each private answer before either can see the other, and reveals the pair together. Human involvement is limited to independently adjudicating the revealed evidence or cancelling/correcting the append-only record; the human never supplies either commitment. `Hydra: Advance Formal Duel` opens the next human action for an existing duel, while `Hydra: Open Duel Audit` exposes its provenance.
+Deterministic scoring creates its claim from the exact passing verification receipt instead of attaching an unrelated green check to free-form text. Human adjudication can resolve other falsifiable claims. Peer opinions remain visible but have zero score weight. Repeated claims in one round cannot inflate maturity.
 
-Both participants run under the versioned `hydra-duel-full-native-v1` policy with equal maximum Hydra-grantable permissions. Before admission, Hydra preflights both actual configured heads under that policy and rejects the challenge unless both resolve to supported local full-native spawns. Codex receives ephemeral `danger-full-access`; Claude receives unrestricted nonpersistent execution. Known configured capability flags for models, profiles, features, MCP configs, plugins, browser/IDE integration, settings, agents, and extra directories carry into the duel launch while Hydra replaces restrictive authority, output, persistence, prompt, and working-directory controls. Hydra locks each participant's effective command, model, arguments, working directory, and environment digest at admission and verifies that lock again before dispatch. The digest binds the effective environment without recording its raw values. Each head retains its configured native integrations and tools, but Codex and Claude can expose different vendor-specific catalogs; parity means equal maximum Hydra-granted permissions, not identical tools or provider capabilities. Automatic commitments require prior persistent full-native consent for both heads and never open a surprise consent modal.
+The board shows a source-weighted Wilson lower-bound score, a W/P/L record, and independent resolved rounds. A standing remains provisional until five independently resolved rounds. The authoritative append-only ledger lives in VS Code's private per-workspace extension storage; `.hydra/scoreboard.md` and `.hydra/score-evidence.md` are disposable human-readable mirrors.
 
-The shared project workspace is read-only by duel contract even though each native runtime remains full-access: participants must not modify, create, delete, or rename project content and must put disposable verification artifacts in the operating-system temp directory. At admission, Hydra fingerprints bounded project content and entry metadata outside Git's `.git` directory and Hydra-owned `.hydra`, rechecks that state around both commitments, and keeps a live mutation monitor over the same project boundary. A detected mutation or unverifiable state automatically cancels the duel with no Elo so the heads do not knowingly evaluate different project evidence. This is an integrity tripwire for ordinary project mutations, not an absolute guarantee against a malicious process running as the same OS user.
+<p align="center">
+  <a href="docs/images/evidence-scoreboard.png"><img src="docs/images/evidence-scoreboard.png" width="900" alt="Hydra evidence scoreboard ranking Codex, Gemini, and Claude using resolved falsifiable claims"></a>
+</p>
+<p align="center"><em>Passive evidence standings reward claims that survive verification while remaining separate from permissions and orchestration authority.</em></p>
 
-Every commitment is head-generated and Hydra-bound. There is no operator-authored answer, manual human initiation, or exhibition fallback. Legacy `elo-v1` exhibition/operator rows remain immutable unranked history, while prior rated policies remain replayable for audit. V3 admission and execution records bind the admission-time workspace fingerprint, participant capability lock, configured head, initiating reply, shared-evidence SHA-256, prompt, effective invocation, timing, transport, and response before SecretStorage seals the answer and confidence. Those records prove Hydra's configured dispatch and response binding, not provider-signed model identity, identical vendor tools, or equal hidden provider state. Full-native processes can access the same OS account, so the workspace guard and SecretStorage are application integrity controls—not defenses against a malicious same-user process.
+### Rated formal duels
 
-Duel Elo starts at 1000 with K=24 and is replayed separately per domain. Decisive rated matches move winner and loser by equal-and-opposite amounts; a tie records a draw but moves exactly zero Elo, and void, unresolved, rejected, cancelled, and legacy-unranked matches move nothing. Repeated propositions, reciprocal farming, multiple unresolved duels per head, initiation cooldowns, and daily caps are rejected by Hydra instead of producing noncompetitive matches. Every head sees its rank and exact gap to the domain's #1 in prompt context. Lower-ranked heads are told to work harder and smarter—verify more, expose assumptions, and make sharper falsifiable predictions—to take the crown; the Supreme Head receives the same pressure to defend it. Competitive status remains motivational only: the user's objective, truth, safety, and honesty outrank Elo, and rating never changes permissions, approvals, builder assignment, speaking order, context allocation, or safety authority.
+Formal Duels are a separate competition with one current path: **agent-initiated, then rated or rejected by Hydra policy**.
+
+Prerequisites and trigger:
+
+- The workspace must be trusted, `hydraRoom.agentInitiatedDuels` must be enabled, and both participants need persistent Full Native consent.
+- Rated commitments currently require heads backed by supported local Codex or Claude adapters; Gemini, HTTP-only, and generic CLI-template participants are not admitted by the v3 commitment policy.
+- Only a successful **serial reactor or closer** can challenge the head whose immediately preceding reply it examined. The challenge must name a falsifiable proposition, domain, evidence contract, and rationale. Openers, parallel replies, quoted markers, and user wording cannot create a duel.
+
+Flow:
+
+1. Hydra binds the challenge to the real reply roles and source turn, then builds one bounded shared evidence packet.
+2. Admission checks capability parity, consent, cost limits, active duels, cooldowns, daily caps, repeated propositions, and reciprocal farming. A rejection is logged, changes no Elo, and never becomes an exhibition.
+3. Hydra automatically dispatches both configured heads under `hydra-duel-full-native-v1`, seals each head-generated answer before either can see the other, and reveals the pair together.
+4. The user independently adjudicates the fixed proposition and evidence with `Hydra: Advance Formal Duel`, or cancels/corrects the append-only record. The human never initiates the duel or supplies a participant answer. `Hydra: Open Formal Duels` opens the in-room panel; `Hydra: Open Duel Audit` opens `.hydra/duels.md`.
+
+The two participants receive equal maximum Hydra-grantable authority, but keep their own vendor-native tools, MCP servers, plugins, apps, browser/IDE integrations, accounts, and provider capabilities. Hydra locks the effective command, model, arguments, working directory, and environment digest at admission and verifies the lock again before dispatch.
+
+The project workspace is read-only **by duel contract**, not by OS sandbox. Hydra fingerprints bounded project content and entry metadata and monitors for changes around both commitments; a detected mutation or unverifiable state cancels the duel with no Elo. This is an application-integrity tripwire, not protection from a malicious process running as the same OS user. Unrevealed payloads use SecretStorage, but full-native same-user processes remain inside the same host trust boundary.
+
+Domain Elo starts at 1000 with K=24. Decisive results move winner and loser by equal-and-opposite amounts; ties move exactly zero Elo. Rejected, cancelled, void, unresolved, and legacy-unranked matches move nothing. Ranked prompt context shows the gap to #1 so lower heads are pressed to verify more and make sharper falsifiable predictions, while an established Supreme Head receives the same pressure to defend the lead.
+
+<p align="center">
+  <a href="docs/images/agent-duels.png"><img src="docs/images/agent-duels.png" width="800" alt="Hydra formal duels panel showing an agent-initiated challenge, sealed commitments, domain Elo, and Supreme Head ranking"></a>
+</p>
+<p align="center"><em>Agent-initiated formal duels use a shared evidence brief, sealed paired answers, human adjudication, and domain-specific Elo.</em></p>
+
+**Neither passive standings nor duel Elo grants authority.** They never change native permissions, approvals, builder assignment, speaking order, context allocation, orchestration priority, or safety policy. Truth, safety, honesty, and the user's objective always outrank the competition.
 
 ## Work Queue
 
@@ -282,7 +378,14 @@ Hydra can notify Telegram when an agent decision packet has a non-empty `Decisio
 
 Run `Hydra: Send Test Telegram Message` from the Command Palette or Hydra Command Center after configuring the bot. A successful test writes a confirmation system message into the room; failures point back to the Telegram settings.
 
-Hydra can also poll Telegram for inbound commands. Enable `hydraRoom.telegramInboundPollingEnabled` in User Settings, then send messages in the configured chat that start with `hydraRoom.telegramInboundCommandPrefix` (default: `/hydra`). For example, `/hydra accept the default and continue` is appended to the room as user input. The first poll skips older Bot API updates and stores the next update offset in `.hydra/telegram-inbound.json` so old messages are not replayed after restart. Inbound polling is disabled by default because Telegram messages are remote untrusted input; only set an empty prefix for a private bot chat you fully trust.
+Hydra can also poll Telegram for inbound commands. Enable `hydraRoom.telegramInboundPollingEnabled`, then use either routing form:
+
+- Reply directly to a recent Hydra bot message; Hydra routes the reply back to the originating room.
+- Send `<prefix> <room-token> <command>`, for example `/hydra a1b2c3d4 accept the default and continue`. Decision notifications include the room token. A prefix without the token is not enough to select a room.
+
+Inbound updates are remote untrusted input. Sender display names are sanitized before they reach the transcript or prompt. Set `hydraRoom.telegramInboundAllowedSenderIds` to a list of Telegram user IDs if the configured chat contains more than one person; an empty list allows every sender in that chat. Only use an empty command prefix in a private bot chat you fully trust.
+
+Hydra persists a routed inbox record before advancing Telegram's destructive update offset, deduplicates retries, and acknowledges each room command only after the turn reaches its durable completed or cancelled boundary. Shared poller, offset, routing, and inbox data live under Hydra's private OS configuration directory, keyed by a hash of the bot token. Per-room acknowledgement state lives at `.hydra/telegram-inbox-state.json` plus its append-only acknowledgement log. The bot token is a secret: store it in application-scoped User Settings or the extension-host environment, never commit it, and remember that full-native same-user processes may be able to access host credentials.
 
 ## Verification
 
@@ -303,17 +406,22 @@ Hydra also runs verification automatically after a successful Build phase by def
 
 ## Security
 
-Hydra spawns Codex and Claude with workspace-write authority and network access out of the box:
+Hydra 0.6 defaults Codex and Claude Discussion, Build, and Review profiles to **Full Native - Equal Maximum Access**:
 
-- Codex discussion/build args grant `--sandbox workspace-write` plus `sandbox_workspace_write.network_access=true`. Codex can edit files in the workspace and call out over the network during agent turns.
-- Claude discussion/build/review args use `--permission-mode acceptEdits`. Claude applies file edits without per-tool confirmation.
+- Codex runs `exec` with `--sandbox danger-full-access` and live web search.
+- Claude runs with `--dangerously-skip-permissions` and the workspace added as an accessible directory.
 
-These defaults are productive for self-trusted projects, but they mean a prompt-injected agent — for example via a hostile `CLAUDE.md`, `AGENTS.md`, `.codex/instructions.md`, or `.github/copilot-instructions.md` that Hydra reads into the prompt — can edit local files and exfiltrate over the network. When you open a workspace you don't fully trust:
+Before the first Full Native call for each head and workspace, Hydra requires an explicit choice: **Run once**, **Always for this workspace**, or **Cancel**. **Run once** applies only to the current call; **Always** persists consent for that head and workspace. This authority is broad: the native process runs as your OS user and can access files, shell commands, network services, browser/search features, and configured integrations available to that CLI. Hydra grants Codex and Claude the same maximum posture it knows how to request, but actual capability still depends on the vendor CLI, account, model, installed MCP servers/plugins/apps, browser or IDE integration, local configuration, authentication, and OS permissions.
 
-1. Decline VS Code's Workspace Trust prompt. Hydra declares `capabilities.untrustedWorkspaces` as `limited`, so the sensitive settings (CLI command paths, exec args, verify command, handoff webhook, Telegram credentials, transcript path, native env/PATH) are silently ignored from workspace `.vscode/settings.json`. A hostile repo cannot redirect the agent spawn or exfiltration sinks.
-2. Switch to a tighter capability profile before sending a turn. Run `Hydra: Change Capability Profile` (Command Palette or the in-room button) and pick `Safe Discussion` (Codex: `--sandbox read-only`, Claude: `--permission-mode default`). Or set `hydraRoom.codexDiscussionProfile` / `hydraRoom.claudeDiscussionProfile` to `safeDiscussion` in User Settings to make safe discussion the default.
+These defaults are intended for projects you trust. Prompt injection from repository instructions, source files, fetched content, or a remote message can steer a full-native process. When you open a workspace you do not fully trust:
 
-Use `Hydra: Show Effective Native Authority` and `Hydra: Preview Next Prompt` to inspect what authority the next call will run with and what content it will receive. `Full Native` profiles (`--dangerously-bypass-approvals-and-sandbox`, `--dangerously-skip-permissions`, etc.) trigger a one-shot or persistent consent modal before dispatch; `unknown/custom` arg combinations are not gated, so the prompt preview is your inspection point for those.
+1. Leave VS Code Workspace Trust disabled. Hydra ignores sensitive workspace-scoped settings such as CLI paths/args, verification commands, webhooks, Telegram credentials, transcript paths, and native env/PATH. It also forces risky automation such as agent-initiated duels off. Workspace Trust limits hostile configuration; it does **not** automatically turn a Full Native profile into read-only execution.
+2. Before sending a Discussion turn, run `Hydra: Change Capability Profile` and choose **Safe Discussion** (Codex read-only sandbox; Claude default permission mode), or set `hydraRoom.codexDiscussionProfile` and `hydraRoom.claudeDiscussionProfile` to `safeDiscussion` in User Settings. This narrows Discussion only. Narrow the Build and Review profiles separately before using those phases in an untrusted workspace, or avoid those phases entirely.
+3. Use `Hydra: Show Effective Native Authority` and `Hydra: Preview Next Prompt` to inspect the exact authority and content before dispatch.
+
+Known Full Native profiles trigger consent; `unknown/custom` argument combinations are classified for visibility but are not automatically gated, so prompt preview is especially important for custom invocations.
+
+`.hydra/` is gitignored by default, but it is not encrypted. It can contain transcripts, rendered prompts, attachments, remote commands, receipts, snapshots, and diagnostics. Treat it and generated support bundles as sensitive, inspect them before sharing, and do not assume redaction can recognize every arbitrary secret. VS Code SecretStorage protects unrevealed duel payload handling at the application layer; it is not a defense against a malicious full-native process running as the same OS user.
 
 ## Packaging
 
@@ -322,7 +430,8 @@ cd C:\path\to\hydra
 corepack enable
 pnpm install
 pnpm run check
-pnpm test
+pnpm run test:fast
+pnpm run test:integration
 pnpm run package
 ```
 
@@ -352,9 +461,11 @@ For an isolated smoke test, set `HYDRA_VSCODE_USER_DATA_DIR` and `HYDRA_VSCODE_E
 
 ## Native CLI Internals
 
-Hydra mirrors the actual native invocation surfaces, wire protocols, tool
-catalogs, system-prompt assembly, and `config.toml` knobs of both Claude Code
-and Codex. The reverse-engineered specs live in `docs/native-internals/`:
+Hydra captures and documents the observed native invocation surfaces, wire
+protocols, tool catalogs, system-prompt assembly, and `config.toml` knobs of
+the pinned Claude Code and Codex versions. These reverse-engineered notes are
+version-sensitive rather than timeless provider contracts; they live in
+`docs/native-internals/`:
 
 - `wire-protocol.md` — Claude `stream-json` envelope (outer types, system
   subtypes, SSE delta types, task-notification XML, six permission modes)
