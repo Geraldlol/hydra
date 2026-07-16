@@ -2,7 +2,7 @@
   "name": "vscode-hydra-room",
   "displayName": "Hydra Agents",
   "description": "A multi-head AI collaboration room with evidence-backed decisions, build/review handoffs, and native CLI workflows inside VS Code.",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "packageManager": "pnpm@11.1.3",
   "publisher": "geraldlol",
   "license": "MIT",

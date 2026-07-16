@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.2
 
 - Adds a visible, native in-editor browser through VS Code's Integrated Browser, with a room button and command-palette entry plus Simple Browser fallback.
 - Adds explicit, session-only agent browser control backed by schema-checked VS Code browser tools, per-head page ownership, per-action confirmation, a status-bar kill switch, and quota-limited private screenshots.
