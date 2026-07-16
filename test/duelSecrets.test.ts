@@ -265,8 +265,10 @@ describe("duel SecretStorage payloads", () => {
 
   test("defers fresh unsealed records, then sweeps them after the cross-window grace period", () => withIndex(async (indexFilePath) => {
     const storage = new MemorySecrets();
-    const storedAt = new Date();
     await storeDuelCommitmentSecret(storage, indexFilePath, "duel-orphan", payload);
+    const storedRecord = (await loadDuelCommitmentIndex(indexFilePath))[0];
+    assert.ok(storedRecord);
+    const storedAt = new Date(storedRecord.createdAt);
 
     const fresh = await sweepDuelCommitmentSecrets(storage, indexFilePath, [], { now: storedAt });
     assert.equal(fresh.deferred, 1);
