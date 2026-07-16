@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://marketplace.visualstudio.com/items?itemName=geraldlol.vscode-hydra-room">Install from the Visual Studio Marketplace</a>
-  &nbsp;·&nbsp; Preview 0.6.2
+  &nbsp;·&nbsp; Preview 0.6.3
   &nbsp;·&nbsp; <a href="CHANGELOG.md">Changelog</a>
 </p>
 
@@ -71,7 +71,7 @@ Node.js 22.13 or newer and pnpm 11.1.3 are required for local extension developm
 
 Use the in-room **Browser** button or run `Hydra: Open Integrated Browser` to open a visible page in VS Code's editor-native Integrated Browser. Where that is unavailable, Hydra falls back to Simple Browser or finally the system browser. Manual tabs opened while control is off are never silently inherited by an agent.
 
-Agent control requires VS Code 1.127 or newer with compatible browser chat tools available. Run `Hydra: Toggle Agent Browser Control` and approve the session modal. While control is on, a globe status item remains visible as a kill switch. Hydra attaches structured `hydra_vscode_browser` MCP tools to Codex and Claude turns; Node-equipped custom heads can use the packaged CLI. Agent-created pages are isolated per head. A page is shared with all heads only when you open it through Hydra's Browser command while control is already on.
+Agent control requires VS Code 1.127 or newer with compatible browser chat tools available. After every extension-host reload, run `Hydra: Toggle Agent Browser Control`, approve the session modal, and start a new turn; already-running turns cannot receive the connection. While control is on, a globe status item remains visible as a kill switch. Hydra attaches structured `hydra_vscode_browser` MCP tools to Codex and Claude turns; Node-equipped custom heads can use the packaged CLI adapter. When a browser surface is not named, Hydra's Integrated Browser is the default: an unavailable connection is reported instead of silently switching to Chrome, while an explicit request for Chrome or another browser is still honored. Agent-created pages are isolated per head. A page is shared with all heads only when you open it through Hydra's Browser command while control is already on.
 
 Browser text and screenshots are untrusted input, not instructions. Hydra asks you to approve each agent open, navigation, click, type, drag, hover, or dialog response once and shows the destination/target (including the full length of long text, since only a prefix is displayed); raw Playwright/CDP and local-file uploads are not exposed. Link-local and cloud-metadata addresses and credential-bearing URLs are refused, while loopback and LAN dev servers stay browsable. VS Code's browser policy still applies underneath. The browser grant is separate from filesystem authority, so a `read-only` head can observe pages but needs your one-time action approval to mutate a website.
 

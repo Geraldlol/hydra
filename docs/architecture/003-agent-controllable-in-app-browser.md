@@ -17,7 +17,7 @@ Keep Hydra as an ordinary extension and add an extension-owned `IntegratedBrowse
 
 1. Open visible pages in VS Code's native Integrated Browser. Prefer the built-in `open_browser_page` tool; fall back to `workbench.action.browser.open`, then `simpleBrowser.api.open`, on builds without agentic browser tools.
 2. Discover the current browser tool set at runtime and translate Hydra's stable operations (`open`, `read`, `screenshot`, `navigate`, `click`, `type`, `hover`, `drag`, and `dialog`) into the available VS Code tools.
-3. Expose those operations to dispatched Codex and Claude heads through a small authenticated Streamable HTTP MCP server. Hydra injects the non-secret loopback URL in trusted CLI configuration and places a per-dispatch bearer token only in the child environment. A packaged Node CLI adapter is retained as a fallback for other spawned heads that have Node on `PATH`.
+3. Expose those operations to dispatched Codex and Claude heads through a small authenticated Streamable HTTP MCP server. Hydra injects the non-secret loopback URL in trusted CLI configuration and places a per-dispatch bearer token only in the child environment. A packaged Node CLI adapter exposes the same Integrated Browser surface to other spawned heads that have Node on `PATH`.
 4. Keep browser ownership outside `HydraRoomPanel`, so closing the room does not destroy visible browser tabs. The broker lasts for the extension-host session and exposes a persistent status-bar kill switch while agent control is enabled.
 
 The Code - OSS fork remains a future option only if VS Code removes the tool seam or Hydra needs browser capabilities that an extension cannot provide.
@@ -25,6 +25,7 @@ The Code - OSS fork remains a future option only if VS Code removes the tool sea
 ## Security boundaries
 
 - Agent control is off by default, session-only, and requires a trusted workspace plus explicit modal consent.
+- Reloading the extension host resets control to off, and only turns started after consent receive the connection. Browser work defaults to this Integrated Browser surface unless the user explicitly selects another one; missing Hydra control fails closed and is reported instead of silently switching to Chrome or a separate browser integration.
 - The bridge binds to `127.0.0.1` on an ephemeral port, requires a random 256-bit bearer token, rejects browser `Origin` headers, bounds its queue and invocation duration, caps request/result sizes, and serializes browser actions.
 - A fresh token is passed through the child environment for each dispatch and revoked when that process exits. Hydra redacts issued tokens from stdout/stderr before collected output reaches transcripts or agent-call traces. The spawned process necessarily can read its own token, so the globe kill switch remains the hard revocation boundary.
 - Each head can control only pages it opened. Pages opened by the user through Hydra's Browser command become shared only when control is already enabled; unrelated Integrated Browser tabs are not discovered or inherited.

@@ -92,4 +92,25 @@ describe("Hydra browser broker security contract", () => {
     assert.match(source, /Double click:/);
     assert.match(source, /Button:/);
   });
+
+  test("fails closed instead of silently substituting another browser surface", () => {
+    const promptStart = source.indexOf("promptContext(");
+    const promptEnd = source.indexOf("\n  dispose(): void", promptStart);
+    assert.ok(promptStart >= 0 && promptEnd > promptStart);
+    const prompt = source.slice(promptStart, promptEnd);
+    assert.doesNotMatch(prompt, /return ""/);
+    assert.match(prompt, /Hydra Integrated Browser control is unavailable for this turn/);
+    assert.match(prompt, /Hydra: Toggle Agent Browser Control/);
+    assert.match(prompt, /start a new turn/);
+    assert.match(prompt, /explicit browser choice wins/);
+    assert.match(prompt, /explicitly asks for Chrome/);
+    assert.match(prompt, /HYDRA_BROWSER_MCP_SERVER_NAME/);
+    assert.match(prompt, /browser_status first/);
+    assert.match(prompt, /Do not substitute Chrome or another browser surface/);
+    assert.match(prompt, /Browser or Chrome plugins, `agent\.browsers`, Playwright, a system browser, or web search/);
+    assert.match(prompt, /Switch browser surfaces only if the user explicitly approves/);
+    assert.match(source, /already-running turns cannot receive this browser connection/);
+    assert.match(source, /never switch to Chrome or another browser unless the user explicitly approves/);
+    assert.doesNotMatch(source, /CLI fallback\/status command/);
+  });
 });

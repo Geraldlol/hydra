@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.3
+
+- Makes Integrated Browser routing fail closed: turns without the Hydra browser connection now report the unavailable in-app surface instead of silently substituting Chrome or another browser, while the enable flow makes clear that only newly started turns receive the session-scoped connection.
+
 ## 0.6.2
 
 - Adds a visible, native in-editor browser through VS Code's Integrated Browser, with a room button and command-palette entry plus Simple Browser fallback.
