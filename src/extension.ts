@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { IntegratedBrowserBroker } from "./browserBroker";
 import { HydraRoomPanel } from "./panel";
 import { renderHydraStatusBar, type HydraStatusBarSnapshot } from "./statusBar";
 
@@ -45,6 +46,8 @@ function withSyncErrorReporting(fn: () => void): () => void {
 }
 
 export function activate(context: vscode.ExtensionContext): void {
+  const browserBroker = new IntegratedBrowserBroker(context);
+  HydraRoomPanel.setBrowserBroker(browserBroker);
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   statusBar.name = "Hydra";
   statusBar.command = "hydraRoom.commandCenter";
@@ -73,10 +76,24 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   context.subscriptions.push(
+    browserBroker,
+    { dispose: () => HydraRoomPanel.setBrowserBroker(undefined) },
     statusBar,
     { dispose: () => HydraRoomPanel.setStatusBarUpdater(undefined) },
     vscode.commands.registerCommand("hydraRoom.start", withSyncErrorReporting(openRoom)),
     vscode.commands.registerCommand("hydraRoom.open", withSyncErrorReporting(openRoom)),
+    vscode.commands.registerCommand(
+      "hydraRoom.openBrowser",
+      withErrorReporting(async () => {
+        await browserBroker.openBrowser();
+      })
+    ),
+    vscode.commands.registerCommand(
+      "hydraRoom.toggleBrowserControl",
+      withErrorReporting(async () => {
+        await browserBroker.toggleAgentControl();
+      })
+    ),
     vscode.commands.registerCommand(
       "hydraRoom.askBoth",
       withErrorReporting(async () => {

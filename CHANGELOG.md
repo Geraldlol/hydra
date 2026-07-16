@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Adds a visible, native in-editor browser through VS Code's Integrated Browser, with a room button and command-palette entry plus Simple Browser fallback.
+- Adds explicit, session-only agent browser control backed by schema-checked VS Code browser tools, per-head page ownership, per-action confirmation, a status-bar kill switch, and quota-limited private screenshots.
+- Exposes the browser to Codex and Claude as an authenticated loopback Streamable HTTP MCP server, with per-dispatch environment tokens, collected-output redaction, safe one-shot transport, and a Node-based CLI fallback for other local heads.
+- Hardens the browser consent path after a red-team pass: the Allow Once modal now reveals the full executed length of long text (so a benign prefix cannot hide a large payload) and flags agent-supplied target labels as untrusted, `hover` is confirmed like other interactions, and URL validation rejects link-local / cloud-metadata hosts and credential-bearing URLs while keeping loopback and LAN dev servers browsable.
+- Documents the Code - OSS fork tradeoff and the native-browser architecture in ADR 003.
+
 ## 0.6.1
 
 Marketplace presentation and packaging follow-up.

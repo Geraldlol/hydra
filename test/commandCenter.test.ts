@@ -23,6 +23,7 @@ describe("command center", () => {
 
     assert.deepEqual(actions.map((action) => action.id), [
       "openWorkspaceFolder",
+      "openBrowser",
       "toggleAutoAdvanceActionableDefaults",
       "runDoctor",
     ]);

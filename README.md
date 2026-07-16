@@ -30,7 +30,7 @@ Hydra drives the native CLIs you already installed, using their existing logins 
 - **Domain Elo and competitive pressure** - every domain starts at 1000 Elo. Lower-ranked heads see the gap to #1; the Supreme Head is pressed to defend an established lead. Rank is motivational only and never changes permissions, approvals, builder assignment, speaking order, or safety policy.
 - **Current models and safer Telegram input** - the model chooser/cost catalog is refreshed, inbound sender names are sanitized, and an optional sender-ID allowlist can restrict who may drive a room remotely.
 
-The detailed trust model is documented in [ADR 001: runtime state boundaries](docs/architecture/001-runtime-state-boundaries.md) and [ADR 002: standings, duels, and authority](docs/architecture/002-passive-evidence-standings-and-duels.md).
+The detailed trust model is documented in [ADR 001: runtime state boundaries](docs/architecture/001-runtime-state-boundaries.md), [ADR 002: standings, duels, and authority](docs/architecture/002-passive-evidence-standings-and-duels.md), and [ADR 003: agent-controllable in-app browser](docs/architecture/003-agent-controllable-in-app-browser.md).
 
 ## How a room moves
 
@@ -65,7 +65,17 @@ If VS Code cannot find a CLI, set `hydraRoom.codexCommand` or `hydraRoom.claudeC
 
 Gemini and custom heads are optional. The built-in Gemini adapter is experimental pending broader native CLI verification. Registered `openai-compatible` heads are locally read-only text endpoints; registered `cli-template` heads can declare `read-only`, `workspace-write`, or `full-native` authority.
 
-Node.js 22.13 or newer and pnpm 11.1.3 are required only for local extension development.
+Node.js 22.13 or newer and pnpm 11.1.3 are required for local extension development. Codex and Claude browser control uses MCP and needs no separate Node install; the optional packaged browser CLI for other head types requires `node` on `PATH`.
+
+## Integrated browser
+
+Use the in-room **Browser** button or run `Hydra: Open Integrated Browser` to open a visible page in VS Code's editor-native Integrated Browser. Where that is unavailable, Hydra falls back to Simple Browser or finally the system browser. Manual tabs opened while control is off are never silently inherited by an agent.
+
+Agent control requires VS Code 1.127 or newer with compatible browser chat tools available. Run `Hydra: Toggle Agent Browser Control` and approve the session modal. While control is on, a globe status item remains visible as a kill switch. Hydra attaches structured `hydra_vscode_browser` MCP tools to Codex and Claude turns; Node-equipped custom heads can use the packaged CLI. Agent-created pages are isolated per head. A page is shared with all heads only when you open it through Hydra's Browser command while control is already on.
+
+Browser text and screenshots are untrusted input, not instructions. Hydra asks you to approve each agent open, navigation, click, type, drag, hover, or dialog response once and shows the destination/target (including the full length of long text, since only a prefix is displayed); raw Playwright/CDP and local-file uploads are not exposed. Link-local and cloud-metadata addresses and credential-bearing URLs are refused, while loopback and LAN dev servers stay browsable. VS Code's browser policy still applies underneath. The browser grant is separate from filesystem authority, so a `read-only` head can observe pages but needs your one-time action approval to mutate a website.
+
+The bridge binds to loopback, uses a fresh bearer token per dispatch, revokes it when the head exits, and redacts it from output Hydra collects. The spawned process necessarily receives its own token, so control should be disabled immediately if a head is suspected of compromise. Screenshots are capped and retained only in a per-extension-host private session directory; the globe kill switch deletes that session's copies. Browser-enabled turns bypass Hydra's experimental persistent Terminal Bridge and use the safer one-shot transport so secrets are never serialized into terminal dispatch files.
 
 ## Configure more heads
 
@@ -116,6 +126,8 @@ In the Extension Development Host, run `Hydra: Start`.
 
 - `Hydra: Start`
 - `Hydra: Open Room`
+- `Hydra: Open Integrated Browser`
+- `Hydra: Toggle Agent Browser Control`
 - `Hydra: Send Message`
 - `Hydra: Assign Builder`
 - `Hydra: Assign All Seated Builders`

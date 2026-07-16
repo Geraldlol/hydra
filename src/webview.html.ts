@@ -1665,6 +1665,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
           <button id="sendBtn" type="button">SEND</button>
           <button id="stopBtn" class="danger" type="button">STOP TURN</button>
           <button id="commandCenterBtn" class="secondary" type="button" title="Open Command Center (Ctrl+K)">Commands</button>
+          <button id="browserBtn" class="secondary" type="button" title="Open VS Code's Integrated Browser">Browser</button>
           <button id="nativeActionBtn" class="secondary hidden" type="button" title="Choose a direct native terminal action">Native Action...</button>
           <button id="autoAdvanceDefaultsBtn" class="secondary" type="button">Auto-advance safe defaults: On</button>
         </div>
