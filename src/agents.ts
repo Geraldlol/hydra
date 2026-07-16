@@ -367,6 +367,12 @@ export async function terminateProcessTree(child: cp.ChildProcess, force: boolea
     }
   }
   if (process.platform === "win32") {
+    // taskkill /T can lose descendants when a .cmd shim exits as its tree is
+    // being terminated (the child is re-parented before taskkill walks it).
+    // Snapshot the numeric PID tree first and stop it leaf-first. Keep the
+    // existing taskkill path as a bounded fallback for systems where CIM or
+    // Windows PowerShell is unavailable.
+    if (await terminateWindowsProcessTreeSnapshot(child.pid)) return true;
     return new Promise<boolean>((resolve) => {
       let killer: cp.ChildProcess;
       try {
@@ -424,4 +430,67 @@ export async function terminateProcessTree(child: cp.ChildProcess, force: boolea
       return false;
     }
   }
+}
+
+/** @internal — exported for focused fail-closed helper tests. */
+export async function terminateWindowsProcessTreeSnapshot(
+  rootPid: number,
+  spawnProcess: typeof cp.spawn = cp.spawn,
+): Promise<boolean> {
+  const script = [
+    "$ErrorActionPreference='Stop'",
+    "try {",
+    `  $rootProcessId=${rootPid}`,
+    "  $known=[System.Collections.Generic.HashSet[int]]::new()",
+    "  $ordered=[System.Collections.Generic.List[int]]::new()",
+    "  [void]$known.Add($rootProcessId)",
+    "  [void]$ordered.Add($rootProcessId)",
+    "  function Add-HydraDescendants($rows){$added=$true;while($added){$added=$false;foreach($row in $rows){$childProcessId=[int]$row.ProcessId;$parentProcessId=[int]$row.ParentProcessId;if($known.Contains($parentProcessId)-and $known.Add($childProcessId)){[void]$ordered.Add($childProcessId);$added=$true}}}}",
+    "  function Stop-HydraProcess([int]$targetProcessId){try{Stop-Process -Id $targetProcessId -Force -ErrorAction Stop}catch{if(Get-Process -Id $targetProcessId -ErrorAction SilentlyContinue){throw}}}",
+    "  $maxPasses=4",
+    "  $processes=@(Get-CimInstance Win32_Process -ErrorAction Stop)",
+    "  for($pass=0;$pass -lt $maxPasses;$pass++){",
+    "    Add-HydraDescendants $processes",
+    "    for($index=$ordered.Count-1;$index -ge 0;$index--){Stop-HydraProcess $ordered[$index]}",
+    "    $knownCountBeforeRefresh=$known.Count",
+    "    $processes=@(Get-CimInstance Win32_Process -ErrorAction Stop)",
+    "    Add-HydraDescendants $processes",
+    "    $alive=@($processes | Where-Object { $known.Contains([int]$_.ProcessId) })",
+    "    if($known.Count -eq $knownCountBeforeRefresh -and $alive.Count -eq 0){exit 0}",
+    "  }",
+    "  exit 1",
+    "} catch {",
+    "  exit 1",
+    "}",
+  ].join("\n");
+  return new Promise<boolean>((resolve) => {
+    let killer: cp.ChildProcess;
+    try {
+      killer = spawnProcess(
+        windowsSystemExecutable("powershell.exe"),
+        ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+        { windowsHide: true, stdio: "ignore" },
+      );
+    } catch {
+      resolve(false);
+      return;
+    }
+    let done = false;
+    const finish = (requested: boolean) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timeout);
+      resolve(requested);
+    };
+    const timeout = setTimeout(() => {
+      try {
+        killer.kill();
+      } catch {
+        // The helper may have exited between the timeout and this kill.
+      }
+      finish(false);
+    }, 3_000);
+    killer.on("error", () => finish(false));
+    killer.on("close", (code) => finish(code === 0));
+  });
 }

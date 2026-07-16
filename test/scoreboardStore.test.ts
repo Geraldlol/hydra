@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
   appendScoreboardEvents,
+  appendScoreboardEventsIfAbsent,
   ensureScoreboardLedger,
   loadScoreboardEvents,
   renderScoreEvidenceMarkdown,
@@ -64,6 +65,25 @@ describe("scoreboard persistence", () => {
     const events = await loadScoreboardEvents(file);
     assert.equal(events.length, 4);
     assert.deepEqual(new Set(events.filter((event) => event.type === "claimRegistered").map((event) => event.agentId)), new Set(["codex", "claude"]));
+  });
+
+  test("makes receipt-derived event retries idempotent and rejects id collisions", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-scoreboard-idempotent-"));
+    const file = path.join(dir, "score-events.jsonl");
+    const events = round("codex", "stable");
+    await Promise.all([
+      appendScoreboardEventsIfAbsent(file, events),
+      appendScoreboardEventsIfAbsent(file, events),
+    ]);
+    assert.deepEqual(await loadScoreboardEvents(file), events);
+
+    const originalClaim = events[0];
+    assert.equal(originalClaim?.type, "claimRegistered");
+    const collision: ScoreboardEvent[] = [{ ...originalClaim, statement: "different payload" }];
+    await assert.rejects(
+      appendScoreboardEventsIfAbsent(file, collision),
+      /event id collision/,
+    );
   });
 
   test("fails closed on malformed or referentially invalid history", async () => {

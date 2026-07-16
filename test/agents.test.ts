@@ -1,9 +1,16 @@
 import { describe, test } from "node:test";
 import { strict as assert } from "node:assert";
+import * as cp from "node:child_process";
+import { EventEmitter } from "node:events";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { runAgent, RunResult, stripAnsi } from "../src/agents";
+import {
+  runAgent,
+  RunResult,
+  stripAnsi,
+  terminateWindowsProcessTreeSnapshot,
+} from "../src/agents";
 
 const MOCK_CLI = path.join(__dirname, "fixtures", "mock-cli.js");
 
@@ -158,6 +165,32 @@ describe("runAgent", () => {
       }
       await fs.rm(dir, { recursive: true, force: true });
     }
+  });
+
+  test("Windows snapshot termination rescans descendants and fails closed when its helper fails", async () => {
+    let capturedArgs: readonly string[] = [];
+    const helper = new EventEmitter() as cp.ChildProcess;
+    helper.kill = () => true;
+    const spawnProcess = ((_command: string, args: readonly string[]) => {
+      capturedArgs = args;
+      queueMicrotask(() => helper.emit("close", 1));
+      return helper;
+    }) as typeof cp.spawn;
+
+    assert.equal(await terminateWindowsProcessTreeSnapshot(4242, spawnProcess), false);
+    const script = capturedArgs.at(-1) ?? "";
+    assert.match(script, /\$ErrorActionPreference='Stop'/);
+    assert.match(script, /function Add-HydraDescendants/);
+    assert.match(script, /\$known\.Contains\(\$parentProcessId\)/);
+    assert.equal(
+      script.match(/Get-CimInstance Win32_Process -ErrorAction Stop/g)?.length,
+      2,
+      "the helper must take an initial snapshot and a fresh snapshot after each kill pass",
+    );
+    assert.match(script, /for\(\$pass=0;\$pass -lt \$maxPasses;\$pass\+\+\)/);
+    assert.match(script, /Stop-Process .* -ErrorAction Stop/);
+    assert.match(script, /\$known\.Count -eq \$knownCountBeforeRefresh -and \$alive\.Count -eq 0\)\{exit 0\}/);
+    assert.match(script, /catch \{\s*exit 1\s*\}/);
   });
 
   test("zero timeout disables the wall-clock cap", async () => {

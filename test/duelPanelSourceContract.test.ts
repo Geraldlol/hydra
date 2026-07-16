@@ -178,6 +178,10 @@ describe("formal duel host contracts", () => {
     assert.match(finalization, /const sourceTraceId = this\.pendingAgentTraceIds\.get\(messageId\)/);
     assert.match(finalization, /sourceTraceId,/);
     assert.match(finalization, /sourceMessageText: rawAgentReplyText/);
+    assert.match(finalization, /hasReservedAgentDuelChallengePrefix\(m\.text\)/);
+    assert.match(finalization, /duelContext\.duelProtocolExpected/);
+    assert.match(finalization, /parseDecisionPacket\(m\.text/);
+    assert.match(finalization, /omitted the required HYDRA_DUEL_CHALLENGE_V1 control record/);
     assert.match(finalization, /await this\.persistTranscriptMessage\(\{/);
     assert.match(finalization, /this\.enqueueAgentDuelAdmission\(agentDuelRequest\)/);
     assert.ok(
@@ -193,6 +197,11 @@ describe("formal duel host contracts", () => {
       "heavy admission must be deferred until the complete room turn is idle",
     );
     assert.match(panel, /stdoutSha256: sha256\(result\.stdout\)/);
+    assert.match(panel, /const duelProtocolExpected = agentInitiatedDuels\(\)[\s\S]*input\.phase === "reactor"[\s\S]*input\.phase === "closer"/);
+    assert.match(panel, /allowAgentDuelChallenge: duelProtocolExpected/);
+    assert.match(panel, /reactorEnvelope\.duelProtocolExpected/);
+    assert.match(panel, /closerEnvelope\.duelProtocolExpected/);
+    assert.doesNotMatch(panel, /renderedPrompt\.includes\(AGENT_DUEL_CHALLENGE_MARKER\)/);
   });
 
   test("keeps head-generated commitments out of the room and live-channel paths", () => {

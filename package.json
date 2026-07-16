@@ -1135,6 +1135,12 @@
           "default": true,
           "markdownDescription": "Automatically run Hydra verification after a successful Build phase."
         },
+        "hydraRoom.autoScorePassingBuilds": {
+          "scope": "application",
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Automatically add deterministic passive-score evidence when a serial builder changes the Git-visible workspace and Hydra verifies that exact post-build state under an unchanged eligible package-script plan and bounded verifier-control inventory captured before dispatch. Eligible package-manager executables are resolved outside the workspace; repeated receipts under one plan/control regime share a correlated round. Unsupported/dynamic commands may still verify but do not score. No-op, parallel, failed, cancelled, timed-out, unconfirmed, control-changing, or state-changing runs are never scored. Standings never change agent authority."
+        },
         "hydraRoom.autoAdvanceActionableDefaults": {
           "scope": "application",
           "type": "boolean",
@@ -1556,6 +1562,7 @@
         "hydraRoom.preferTerminalBridgeOnStart",
         "hydraRoom.verifyCommand",
         "hydraRoom.autoVerifyAfterBuild",
+        "hydraRoom.autoScorePassingBuilds",
         "hydraRoom.autoAdvanceActionableDefaults",
         "hydraRoom.autoSkipCloserOnAgreement",
         "hydraRoom.autoRequestReviewAfterPassingVerification",

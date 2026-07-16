@@ -3,6 +3,9 @@
 ## 0.6.3
 
 - Makes Integrated Browser routing fail closed: turns without the Hydra browser connection now report the unavailable in-app surface instead of silently substituting Chrome or another browser, while the enable flow makes clear that only newly started turns receive the session-scoped connection.
+- Makes agent-initiated duels observable in real rooms by reserving top-level `Challenge:` for the strict source-bound control record, placing that protocol after generic phase prose, and reporting missing markers without guessing duel fields from prose.
+- Makes the passive scoreboard active by default for evidence-bound changed serial builds. Hydra latches an absolute eligible package-script verifier and its bounded conventional control surface before dispatch, withholds points if either changes or cannot be frozen safely, correlates repeated same-plan receipts into one maturity round, skips no-op/parallel/non-clean or state-changing runs, appends receipts idempotently, and refreshes already-open windows from the private ledger.
+- Hardens Windows cancellation by repeatedly discovering and terminating late-spawned descendants before reporting success, while retaining the bounded `taskkill` fallback when PowerShell/CIM cannot confirm cleanup.
 
 ## 0.6.2
 

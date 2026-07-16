@@ -17,6 +17,13 @@ describe("buildPrompt()", () => {
       assert.match(out, /HYDRA_DUEL_CHALLENGE_V1:/);
       assert.match(out, /automatically runs both sealed commitments/i);
       assert.match(out, /The user judges/i);
+      const phaseRuleAnchor = phase === "reactor"
+        ? "Start with exactly one of `Agree:`, `Challenge:`, `Amend:`, or `Ask user:`"
+        : "Respond to the reactor's latest message in the shared context above";
+      assert.ok(
+        out.indexOf(phaseRuleAnchor) < out.indexOf("visible `Challenge:` prefix is reserved"),
+        "the strict duel protocol must follow the generic reactor/closer prose",
+      );
     }
     for (const phase of ["opener", "parallel", "build"] as const) {
       const out = buildPrompt({

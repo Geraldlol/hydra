@@ -105,6 +105,12 @@ export function autoVerifyAfterBuild(): boolean {
   return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("autoVerifyAfterBuild", true);
 }
 
+/** Record only changed serial builds backed by a clean Hydra verification. */
+export function autoScorePassingBuilds(): boolean {
+  if (!workspaceExecutionControlsAllowed()) return false;
+  return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("autoScorePassingBuilds", true);
+}
+
 export function autoSkipCloserOnAgreement(): boolean {
   // The safe value is true here: skipping the closer prevents an additional
   // native agent dispatch in an untrusted workspace.

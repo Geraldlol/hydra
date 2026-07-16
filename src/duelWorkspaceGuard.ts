@@ -39,6 +39,10 @@ export class DuelWorkspaceIntegrityError extends Error {
 }
 
 export interface DuelWorkspaceFingerprintOptions {
+  /** Include ignored-file/directory metadata. Defaults true for duel integrity. */
+  includeWorkspaceMetadata?: boolean;
+  /** Hash only Git-dirty tracked worktree files; index OIDs still cover every tracked file. */
+  hashOnlyChangedTrackedFiles?: boolean;
   maxFiles?: number;
   maxMetadataEntries?: number;
   maxFileBytes?: number;
@@ -101,12 +105,12 @@ const SAFE_GIT_PREFIX = [
 
 /**
  * Capture a deterministic digest of Git HEAD, the logical index, indexed
- * worktree entries, and non-ignored untracked regular files.
+ * worktree entries, and non-ignored untracked files/link targets.
  *
- * The capture deliberately avoids `git status` and `git diff`: repository
- * fsmonitor, external-diff, and textconv programs are never needed. File
- * contents are streamed under explicit limits and symbolic links are never
- * followed.
+ * The full duel capture avoids `git status` and `git diff`. The reduced
+ * scoring profile may use guarded `git diff --name-only` with fsmonitor,
+ * external-diff, and textconv hooks disabled. File contents are streamed under
+ * explicit limits and symbolic links are never followed.
  */
 export async function captureDuelWorkspaceFingerprint(
   workspaceRoot: string,
@@ -175,13 +179,32 @@ export async function captureDuelWorkspaceFingerprint(
       entry.gitPath,
     ])));
 
-  for (const gitPath of trackedPaths) {
+  const trackedWorktreePaths = options.hashOnlyChangedTrackedFiles
+    ? uniqueSortedPaths((await runGitNulRecords(
+        gitExecutable,
+        root,
+        ["diff", "--name-only", "--no-ext-diff", "--no-textconv", "-z", "HEAD", "--"],
+        limits,
+        budget,
+      )).map(decodeGitPath))
+    : trackedPaths;
+  if (options.hashOnlyChangedTrackedFiles) {
+    hashText(digest, "tracked-worktree-scope", "git-dirty-only-v1");
+  }
+  for (const gitPath of trackedWorktreePaths) {
     await hashTrackedWorktreeEntry(digest, root, gitPath, limits, budget);
   }
 
   let untrackedFileCount = 0;
   for (const gitPath of untrackedPaths) {
-    if (await hashUntrackedRegularFile(digest, root, gitPath, limits, budget)) {
+    if (await hashUntrackedEntry(
+      digest,
+      root,
+      gitPath,
+      limits,
+      budget,
+      options.includeWorkspaceMetadata === false,
+    )) {
       untrackedFileCount += 1;
     }
   }
@@ -190,7 +213,9 @@ export async function captureDuelWorkspaceFingerprint(
   // covers ignored files, links, directories, and special entries without
   // reading dependency/build trees into memory. ctime/mtime/type/link-target
   // changes make ordinary ignored-file mutations visible to the duel guard.
-  const workspaceEntryCount = await hashWorkspaceEntryMetadata(digest, root, limits);
+  const workspaceEntryCount = options.includeWorkspaceMetadata === false
+    ? 0
+    : await hashWorkspaceEntryMetadata(digest, root, limits);
 
   return {
     version: DUEL_WORKSPACE_FINGERPRINT_VERSION,
@@ -660,12 +685,13 @@ async function hashTrackedWorktreeEntry(
   await hashStableRegularFile(digest, fullPath, gitPath, "tracked-file", stat, limits, budget);
 }
 
-async function hashUntrackedRegularFile(
+async function hashUntrackedEntry(
   digest: Hash,
   root: string,
   gitPath: string,
   limits: RequiredFingerprintOptions,
   budget: CaptureBudget,
+  rejectUnsupportedType: boolean,
 ): Promise<boolean> {
   const fullPath = await safeWorkspacePath(root, gitPath);
   let stat;
@@ -681,9 +707,28 @@ async function hashUntrackedRegularFile(
     }
     throw unreadableError(gitPath, error);
   }
-  // Git lists untracked links, FIFOs, and device nodes too. The duel guard's
-  // untracked contract is deliberately regular-file-only; never follow them.
-  if (!stat.isFile() || stat.isSymbolicLink()) return false;
+  // Git lists untracked links, FIFOs, and device nodes too. Links are part of
+  // Git-visible state, so bind their target text without ever following them.
+  // The duel fingerprint's metadata pass covers other special entries. The
+  // scoring profile deliberately omits that expensive pass, so it must reject
+  // unsupported types instead of silently treating them as unchanged.
+  if (stat.isSymbolicLink()) {
+    if (rejectUnsupportedType) {
+      const target = await readStableLink(fullPath, gitPath, stat, limits);
+      hashText(digest, "untracked-link", JSON.stringify([gitPath, target]));
+    }
+    return false;
+  }
+  if (!stat.isFile()) {
+    if (rejectUnsupportedType) {
+      throw new DuelWorkspaceIntegrityError(
+        "unsupportedFileType",
+        `Untracked entry is not a regular file or symbolic link: ${gitPath}`,
+        gitPath,
+      );
+    }
+    return false;
+  }
   await hashStableRegularFile(digest, fullPath, gitPath, "untracked-file", stat, limits, budget);
   return true;
 }

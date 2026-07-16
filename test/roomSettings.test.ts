@@ -5,6 +5,7 @@ import {
   autopilotOnStart,
   autoAdvanceActionableDefaults,
   autoRequestReviewAfterPassingVerification,
+  autoScorePassingBuilds,
   autoSkipCloserOnAgreement,
   autoVerifyAfterBuild,
   manyHeadsMode,
@@ -67,6 +68,7 @@ describe("room settings", () => {
       autoVerifyAfterBuild: true,
       autoSkipCloserOnAgreement: false,
       autoRequestReviewAfterPassingVerification: true,
+      autoScorePassingBuilds: true,
       autoAdvanceActionableDefaults: true,
     });
 
@@ -78,6 +80,7 @@ describe("room settings", () => {
       assert.equal(preferTerminalBridgeOnStart(), false);
       assert.equal(autoVerifyAfterBuild(), false);
       assert.equal(autoRequestReviewAfterPassingVerification(), false);
+      assert.equal(autoScorePassingBuilds(), false);
       assert.equal(autoAdvanceActionableDefaults(), false);
       assert.equal(autoSkipCloserOnAgreement(), true, "safe value skips the extra closer dispatch");
 
@@ -88,6 +91,7 @@ describe("room settings", () => {
       assert.equal(preferTerminalBridgeOnStart(), true);
       assert.equal(autoVerifyAfterBuild(), true);
       assert.equal(autoRequestReviewAfterPassingVerification(), true);
+      assert.equal(autoScorePassingBuilds(), true);
       assert.equal(autoAdvanceActionableDefaults(), true);
       assert.equal(autoSkipCloserOnAgreement(), false);
     } finally {

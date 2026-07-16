@@ -140,7 +140,9 @@ import {
 import { cleanWorkspaceState as cleanWorkspaceStateFiles } from "./workspaceCleanup";
 import {
   appendVerification,
+  captureVerificationControlFingerprint,
   captureGitHead,
+  createVerificationScoringPlan,
   ensureVerificationFile,
   resolveVerificationCommand,
   readVerifications,
@@ -149,6 +151,9 @@ import {
   verificationPassed,
   VerificationResult,
   verificationSummary,
+  type VerificationCommandResolution,
+  type ResolvedVerificationCommand,
+  type VerificationScoringPlan,
 } from "./verification";
 import { buildWorkQueue, type WorkQueueItem } from "./workQueue";
 import {
@@ -188,12 +193,14 @@ import {
 } from "./scoreboard";
 import {
   appendScoreboardEvents,
+  appendScoreboardEventsIfAbsent,
   ensureScoreboardLedger,
   loadScoreboardEvents,
   privateScoreboardPath,
   writeScoreEvidenceMirror,
   writeScoreboardMirror,
 } from "./scoreboardStore";
+import { scoreboardEventsForVerifiedBuild } from "./scoreboardAutomation";
 import {
   aggregateDuels,
   createDuelAdmission,
@@ -238,6 +245,7 @@ import {
 } from "./duelWorkspaceGuard";
 import {
   buildAgentDuelEvidencePacket,
+  hasReservedAgentDuelChallengePrefix,
   hashAgentDuelSource,
   parseAgentDuelIntent,
   stripAgentDuelChallengeControlLines,
@@ -263,6 +271,7 @@ import {
   autoAdvanceSendInstructionMaxConsecutive,
   autopilotOnStart,
   autoRequestReviewAfterPassingVerification,
+  autoScorePassingBuilds,
   autoSkipCloserOnAgreement,
   autoVerifyAfterBuild,
   claudeAgentCreditCapUsd,
@@ -498,6 +507,8 @@ interface PreparedOneShotSpawn {
 }
 
 interface PendingAgentDuelContext {
+  /** Latched from the exact dispatched prompt; never re-read from live config. */
+  readonly duelProtocolExpected: boolean;
   readonly opponentId: AgentId;
   readonly opponentMessageId: string;
   readonly opponentMessageTimestamp: string;
@@ -512,6 +523,21 @@ interface PendingAgentDuelRequest {
   readonly sourceMessageText: string;
   readonly context: PendingAgentDuelContext;
   readonly intent: AgentDuelIntent;
+}
+
+interface HydraPromptEnvelope extends PromptEnvelope {
+  /** Explicit provenance from the prompt builder; transcript text cannot forge it. */
+  readonly duelProtocolExpected: boolean;
+}
+
+interface SerialBuildScoreContext {
+  readonly builder: AgentId;
+  /** Present only when a command existed before dispatch; otherwise auto-verification live-resolves without scoring. */
+  readonly verificationResolution?: ResolvedVerificationCommand;
+  readonly verificationScoringPlan?: VerificationScoringPlan;
+  readonly beforeFingerprintSha256?: string;
+  readonly postFingerprintSha256?: string;
+  readonly preVerificationControlSha256?: string;
 }
 
 type HttpInvocation = Extract<Invocation, { transport: "http" }>;
@@ -643,6 +669,10 @@ export class HydraRoomPanel {
   private scoreboard: ScoreboardAggregate = { eventCount: 0, standings: [], overallStandings: [] };
   private scoreboardError: string | undefined;
   private scoreboardMirrorError: string | undefined;
+  private scoreboardRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+  private scoreboardRefreshRequested = false;
+  private scoreboardRefreshFailureMessage: string | undefined;
+  private scoreboardRefreshLoop: Promise<void> | undefined;
   private duels: DuelAggregate = initialEmptyDuelAggregate();
   private duelError: string | undefined;
   private duelMirrorError: string | undefined;
@@ -850,6 +880,12 @@ export class HydraRoomPanel {
       clearTimeout(this.duelRefreshTimer);
       this.duelRefreshTimer = undefined;
     }
+    if (this.scoreboardRefreshTimer) {
+      clearTimeout(this.scoreboardRefreshTimer);
+      this.scoreboardRefreshTimer = undefined;
+    }
+    this.scoreboardRefreshRequested = false;
+    this.scoreboardRefreshFailureMessage = undefined;
     if (this.duelSecretSweepTimer) {
       clearTimeout(this.duelSecretSweepTimer);
       this.duelSecretSweepTimer = undefined;
@@ -925,17 +961,13 @@ export class HydraRoomPanel {
     await ensureJsonlFile(this.usageUri.fsPath);
     await ensureFile(this.telegramInboundStateUri.fsPath, "{\"seenIds\":[]}\n");
     await ensureScoreboardLedger(this.scoreEventsUri.fsPath);
-    try {
-      this.scoreboard = aggregateScoreboard(await loadScoreboardEvents(this.scoreEventsUri.fsPath));
-      this.scoreboardError = undefined;
-    } catch {
-      // The private append-only ledger is authoritative. Never substitute a
-      // partial tail or overwrite it after a validation failure: an incomplete
-      // replay could crown the wrong head.
-      this.scoreboard = { eventCount: 0, standings: [], overallStandings: [] };
-      this.scoreboardError = "Private standings ledger failed validation; no scores were loaded.";
-    }
-    if (!this.scoreboardError) await this.refreshScoreboardMirror();
+    // Attach before the first replay, then replay through the same serialized
+    // lane used by watch events. An append in another extension host cannot
+    // land in the old load/watch gap or race an older replay into the UI.
+    this.startScoreboardLedgerWatcher();
+    await this.requestScoreboardRefreshFromLedger(
+      "Private standings ledger failed validation; no scores were loaded.",
+    );
     await ensureDuelLedger(this.duelEventsUri.fsPath);
     try {
       this.duels = aggregateDuels(await loadDuelEvents(this.duelEventsUri.fsPath));
@@ -1289,7 +1321,10 @@ export class HydraRoomPanel {
     await this.runVerificationInternal("manual");
   }
 
-  private async runVerificationInternal(reason: "manual" | "afterBuild"): Promise<VerificationResult | undefined> {
+  private async runVerificationInternal(
+    reason: "manual" | "afterBuild",
+    latchedResolution?: VerificationCommandResolution,
+  ): Promise<VerificationResult | undefined> {
     if (this.unconfirmedNativeTermination) {
       this.appendSystemMessageToUi(this.unconfirmedTerminationMessage());
       this.postState();
@@ -1308,9 +1343,8 @@ export class HydraRoomPanel {
     let ctrl: AbortController | undefined;
     let verification: VerificationResult | undefined;
     try {
-      const cfg = vscode.workspace.getConfiguration("hydraRoom");
-      const resolution = await resolveVerificationCommand({
-        configured: cfg.get<string>("verifyCommand", ""),
+      const resolution = latchedResolution ?? await resolveVerificationCommand({
+        configured: vscode.workspace.getConfiguration("hydraRoom").get<string>("verifyCommand", ""),
         isWorkspaceTrusted: vscode.workspace.isTrusted,
         workspaceRoot: this.workspaceRoot,
       });
@@ -1622,6 +1656,75 @@ export class HydraRoomPanel {
       this.scoreboardMirrorError = "Standings are valid, but Hydra could not refresh `.hydra/scoreboard.md`.";
       return false;
     }
+  }
+
+  private startScoreboardLedgerWatcher(): void {
+    try {
+      const watcher = watchFileSystem(this.scoreEventsUri.fsPath, { persistent: false }, () => {
+        if (this.disposed) return;
+        if (this.scoreboardRefreshTimer) clearTimeout(this.scoreboardRefreshTimer);
+        this.scoreboardRefreshTimer = setTimeout(() => {
+          this.scoreboardRefreshTimer = undefined;
+          void this.requestScoreboardRefreshFromLedger();
+        }, 300);
+      });
+      // Commands in another extension host append under a cross-process lock;
+      // this watcher makes those authoritative results visible here without a
+      // panel reload. Synchronous command replays still work if watching fails.
+      watcher.on("error", () => watcher.close());
+      this.disposables.push({ dispose: () => watcher.close() });
+    } catch {
+      // Some remote/custom filesystems cannot be watched. Score commands remain
+      // usable and perform a complete replay before every mutation.
+    }
+  }
+
+  private requestScoreboardRefreshFromLedger(
+    failureMessage = "Private standings ledger failed validation; cross-window scores were hidden.",
+  ): Promise<void> {
+    this.scoreboardRefreshRequested = true;
+    this.scoreboardRefreshFailureMessage = failureMessage;
+    if (this.scoreboardRefreshLoop) return this.scoreboardRefreshLoop;
+
+    const loop = this.drainScoreboardRefreshRequests();
+    this.scoreboardRefreshLoop = loop;
+    const finish = () => {
+      if (this.scoreboardRefreshLoop !== loop) return;
+      this.scoreboardRefreshLoop = undefined;
+      if (this.scoreboardRefreshRequested && !this.disposed) {
+        void this.requestScoreboardRefreshFromLedger(
+          this.scoreboardRefreshFailureMessage
+            ?? "Private standings ledger failed validation; cross-window scores were hidden.",
+        );
+      }
+    };
+    void loop.then(finish, finish);
+    return loop;
+  }
+
+  private async drainScoreboardRefreshRequests(): Promise<void> {
+    while (this.scoreboardRefreshRequested && !this.disposed) {
+      this.scoreboardRefreshRequested = false;
+      const failureMessage = this.scoreboardRefreshFailureMessage
+        ?? "Private standings ledger failed validation; cross-window scores were hidden.";
+      this.scoreboardRefreshFailureMessage = undefined;
+      await this.refreshScoreboardFromLedgerWatcher(failureMessage);
+    }
+  }
+
+  private async refreshScoreboardFromLedgerWatcher(failureMessage: string): Promise<void> {
+    if (this.disposed) return;
+    try {
+      this.scoreboard = aggregateScoreboard(await loadScoreboardEvents(this.scoreEventsUri.fsPath));
+      this.scoreboardError = undefined;
+      await this.refreshScoreboardMirror();
+    } catch {
+      // Fail closed instead of leaving another window's stale crown visible
+      // after malformed or referentially invalid history reaches the ledger.
+      this.scoreboard = { eventCount: 0, standings: [], overallStandings: [] };
+      this.scoreboardError = failureMessage;
+    }
+    this.postState();
   }
 
   async recordScoreVerdict(): Promise<void> {
@@ -4942,7 +5045,12 @@ export class HydraRoomPanel {
       });
       await this.persistPromptEnvelope(reactorEnvelope);
       reactorId = this.openPendingMessage(reactor, "reactor");
-      this.bindPendingAgentDuelContext(reactorId, opener, openerMessageId);
+      this.bindPendingAgentDuelContext(
+        reactorId,
+        opener,
+        openerMessageId,
+        reactorEnvelope.duelProtocolExpected,
+      );
       this.pendingPromptTranscriptWindows.set(reactorId, reactorContext.transcriptWindow);
       this.postState();
 
@@ -4991,7 +5099,12 @@ export class HydraRoomPanel {
       });
       await this.persistPromptEnvelope(closerEnvelope);
       closerId = this.openPendingMessage(opener, "closer");
-      this.bindPendingAgentDuelContext(closerId, reactor, reactorMessageId);
+      this.bindPendingAgentDuelContext(
+        closerId,
+        reactor,
+        reactorMessageId,
+        closerEnvelope.duelProtocolExpected,
+      );
       this.pendingPromptTranscriptWindows.set(closerId, closerContext.transcriptWindow);
       this.postState();
 
@@ -5117,6 +5230,10 @@ export class HydraRoomPanel {
 
   private async runBuildPhase(builder: AgentId): Promise<void> {
     await this.runTurn(async (ctrl, registerPending) => {
+      const scoreContext: SerialBuildScoreContext | undefined =
+        autoScorePassingBuilds() && autoVerifyAfterBuild()
+          ? await this.captureSerialBuildScoreContext(builder)
+          : undefined;
       let buildId: string | undefined;
       registerPending(async () => {
         if (buildId) {
@@ -5149,7 +5266,12 @@ export class HydraRoomPanel {
       this.currentAbort = undefined;
       this.postState();
       if (!ctrl.signal.aborted && !didAgentFail(result.result)) {
-        await this.afterSuccessfulBuild();
+        await this.afterSuccessfulBuild(scoreContext
+          ? {
+              ...scoreContext,
+              postFingerprintSha256: await this.captureScorableWorkspaceFingerprint("after build"),
+            }
+          : undefined);
       }
     });
   }
@@ -5200,9 +5322,18 @@ export class HydraRoomPanel {
     });
   }
 
-  private async afterSuccessfulBuild(): Promise<void> {
+  private async afterSuccessfulBuild(scoreContext?: SerialBuildScoreContext): Promise<void> {
     if (!autoVerifyAfterBuild()) return;
-    const result = await this.runVerificationInternal("afterBuild");
+    const preVerificationControlSha256 = scoreContext?.verificationScoringPlan?.eligible
+      ? await this.captureCurrentVerificationControlSha256("before verification")
+      : undefined;
+    const result = await this.runVerificationInternal("afterBuild", scoreContext?.verificationResolution);
+    if (result && verificationPassed(result) && autoScorePassingBuilds() && scoreContext) {
+      await this.recordAutomaticVerifiedBuildScore(result, {
+        ...scoreContext,
+        preVerificationControlSha256,
+      });
+    }
     if (
       verificationPassed(result) &&
       autoRequestReviewAfterPassingVerification() &&
@@ -5211,6 +5342,141 @@ export class HydraRoomPanel {
       await this.appendSystemMessage("Hydra auto-review started because verification passed after build.");
       await this.requestReview();
     }
+  }
+
+  private async captureSerialBuildScoreContext(builder: AgentId): Promise<SerialBuildScoreContext> {
+    const preBuildResolution = await resolveVerificationCommand({
+      configured: vscode.workspace.getConfiguration("hydraRoom").get<string>("verifyCommand", ""),
+      isWorkspaceTrusted: vscode.workspace.isTrusted,
+      workspaceRoot: this.workspaceRoot,
+    });
+    const verificationScoringPlan = preBuildResolution.kind === "explicit" || preBuildResolution.kind === "inferred"
+      ? await createVerificationScoringPlan(this.workspaceRoot, preBuildResolution)
+      : undefined;
+    const verificationResolution = preBuildResolution.kind === "explicit" || preBuildResolution.kind === "inferred"
+      ? {
+          ...preBuildResolution,
+          // Eligible plans execute the exact pre-dispatch absolute command
+          // whose digest enters the score evidence. Ineligible commands remain
+          // ordinary latched verification but can never create score events.
+          command: verificationScoringPlan?.eligible
+            ? verificationScoringPlan.command
+            : preBuildResolution.command,
+        }
+      : undefined;
+    return {
+      builder,
+      verificationResolution,
+      verificationScoringPlan,
+      beforeFingerprintSha256: await this.captureScorableWorkspaceFingerprint("before build"),
+    };
+  }
+
+  private async captureCurrentVerificationControlSha256(stage: string): Promise<string | undefined> {
+    try {
+      return (await captureVerificationControlFingerprint(this.workspaceRoot)).sha256;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      await this.recordEvent("diagnostic", `Hydra skipped the ${stage} verifier-control fingerprint: ${detail}`, {
+        stage,
+      });
+      return undefined;
+    }
+  }
+
+  private async captureScorableWorkspaceFingerprint(stage: string): Promise<string | undefined> {
+    if (!this.gitAvailable) return undefined;
+    try {
+      return (await captureDuelWorkspaceFingerprint(this.workspaceRoot, {
+        // Verification routinely writes ignored build output. Passive scoring
+        // binds source/index/untracked content without treating those artifacts
+        // as a builder change or a post-verification mismatch.
+        includeWorkspaceMetadata: false,
+        hashOnlyChangedTrackedFiles: true,
+      })).sha256;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      await this.recordEvent("diagnostic", `Hydra skipped the ${stage} scoreboard fingerprint: ${detail}`, {
+        stage,
+      });
+      return undefined;
+    }
+  }
+
+  private async recordAutomaticVerifiedBuildScore(
+    verification: VerificationResult,
+    context: SerialBuildScoreContext,
+  ): Promise<void> {
+    const plan = context.verificationScoringPlan;
+    if (!plan) {
+      await this.appendSystemMessage("Hydra did not score this passing build because no verification command was available before builder dispatch.");
+      return;
+    }
+    if (!plan.eligible || !plan.controlSha256) {
+      await this.appendSystemMessage(
+        `Hydra did not score this passing build because its bounded conventional verifier-control plan could not be captured before builder dispatch${plan.ineligibleReason ? `: ${plan.ineligibleReason}` : "."}`,
+      );
+      return;
+    }
+    if (context.preVerificationControlSha256 !== plan.controlSha256) {
+      await this.appendSystemMessage("Hydra did not score this passing build because the builder changed, or Hydra could not re-confirm, the pre-dispatch verification controls.");
+      return;
+    }
+    if (!context.beforeFingerprintSha256 || !context.postFingerprintSha256) {
+      await this.appendSystemMessage("Hydra did not score this passing build because a stable Git-visible workspace fingerprint was unavailable.");
+      return;
+    }
+    if (context.beforeFingerprintSha256 === context.postFingerprintSha256) {
+      await this.appendSystemMessage("Hydra did not score this passing build because the serial builder made no Git-visible workspace change.");
+      return;
+    }
+    const verifiedFingerprintSha256 = await this.captureScorableWorkspaceFingerprint("after verification");
+    if (!verifiedFingerprintSha256 || verifiedFingerprintSha256 !== context.postFingerprintSha256) {
+      await this.appendSystemMessage("Hydra did not score this passing build because verification changed, or could not re-confirm, the Git-visible post-build state.");
+      return;
+    }
+    const postVerificationControlSha256 = await this.captureCurrentVerificationControlSha256("after verification");
+    if (postVerificationControlSha256 !== plan.controlSha256) {
+      await this.appendSystemMessage("Hydra did not score this passing build because verification changed, or could not re-confirm, the pre-dispatch verification controls.");
+      return;
+    }
+
+    const events = scoreboardEventsForVerifiedBuild({
+      agentId: context.builder,
+      verification,
+      postBuild: {
+        fingerprintSha256: context.postFingerprintSha256,
+        didChange: true,
+      },
+      verifier: {
+        resolutionKind: plan.resolutionKind,
+        planSha256: plan.planSha256,
+        controlSha256: plan.controlSha256,
+        controlsUnchanged: true,
+      },
+    });
+    if (events.length === 0) return;
+    const validScoreboardBeforeAppend = this.scoreboard;
+    const scoreboardErrorBeforeAppend = this.scoreboardError;
+    try {
+      this.scoreboard = await appendScoreboardEventsIfAbsent(this.scoreEventsUri.fsPath, events);
+      this.scoreboardError = undefined;
+      await this.refreshScoreboardMirror();
+      await this.appendSystemMessage(
+        `Hydra confirmed deterministic passive-score evidence for ${displayNameFor(context.builder)}: the changed serial build passed \`${verification.command}\`.`,
+      );
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      // An append can fail for transient I/O or lock reasons while the replay
+      // already shown in this window remains valid. Preserve that known-good
+      // state; a watcher/next command will replay the authoritative ledger.
+      this.scoreboard = validScoreboardBeforeAppend;
+      this.scoreboardError = scoreboardErrorBeforeAppend;
+      await this.appendSystemMessage(
+        `Hydra could not record automatic passive-score evidence; current valid standings were preserved: ${detail}`,
+      );
+    }
+    this.postState();
   }
 
   private enqueueWikiMaintenanceAfterTurn(source: string): void {
@@ -6935,7 +7201,9 @@ export class HydraRoomPanel {
     verification?: string;
     currentUserMessage?: string;
     attachments?: ReturnType<typeof roomAttachmentSummaries>;
-  }): Promise<PromptEnvelope> {
+  }): Promise<HydraPromptEnvelope> {
+    const duelProtocolExpected = agentInitiatedDuels()
+      && (input.phase === "reactor" || input.phase === "closer");
     const renderedPrompt = buildPrompt({
       agent: input.agent,
       otherAgent: input.otherAgent,
@@ -6950,7 +7218,7 @@ export class HydraRoomPanel {
         input.diff,
         input.verification,
       ]),
-      allowAgentDuelChallenge: agentInitiatedDuels(),
+      allowAgentDuelChallenge: duelProtocolExpected,
     });
     let spawn = this.buildSpawn(input.agent, input.phase);
     const agentKind = getAgentDefinition(input.agent)?.kind ?? "cli-template";
@@ -6966,27 +7234,30 @@ export class HydraRoomPanel {
       // Preview should still work even when the CLI is missing; Doctor owns
       // command repair and the actual call path surfaces spawn failures.
     }
-    return createPromptEnvelope({
-      id: `${Date.now()}-${crypto.randomBytes(3).toString("hex")}-${input.agent}-${input.phase}`,
-      agent: input.agent,
-      otherAgent: input.otherAgent,
-      phase: input.phase,
-      transport: this.transportMode(),
-      cwd: spawn.cwd,
-      command,
-      args: spawn.args,
-      authority: `${authority.label} - ${authority.detail}`,
-      authorityLevel: authority.level,
-      capabilityProfile: profile.id,
-      capabilityProfileLabel: profile.label,
-      capabilityProfileDetail: profile.detail,
-      objective: this.objective,
-      currentUserMessage: input.currentUserMessage,
-      attachments: input.attachments,
-      latestDecisionDefault: this.decisions[this.decisions.length - 1]?.defaultNextAction,
-      latestVerificationSummary: verificationSummary(this.latestVerification()),
-      renderedPrompt,
-    });
+    return {
+      ...createPromptEnvelope({
+        id: `${Date.now()}-${crypto.randomBytes(3).toString("hex")}-${input.agent}-${input.phase}`,
+        agent: input.agent,
+        otherAgent: input.otherAgent,
+        phase: input.phase,
+        transport: this.transportMode(),
+        cwd: spawn.cwd,
+        command,
+        args: spawn.args,
+        authority: `${authority.label} - ${authority.detail}`,
+        authorityLevel: authority.level,
+        capabilityProfile: profile.id,
+        capabilityProfileLabel: profile.label,
+        capabilityProfileDetail: profile.detail,
+        objective: this.objective,
+        currentUserMessage: input.currentUserMessage,
+        attachments: input.attachments,
+        latestDecisionDefault: this.decisions[this.decisions.length - 1]?.defaultNextAction,
+        latestVerificationSummary: verificationSummary(this.latestVerification()),
+        renderedPrompt,
+      }),
+      duelProtocolExpected,
+    };
   }
 
   private async nativeCapabilityPromptContext(agent: AgentId, taskContext: Array<string | undefined>): Promise<string> {
@@ -7915,7 +8186,12 @@ export class HydraRoomPanel {
     return id;
   }
 
-  private bindPendingAgentDuelContext(messageId: string, opponentId: AgentId, opponentMessageId: string): void {
+  private bindPendingAgentDuelContext(
+    messageId: string,
+    opponentId: AgentId,
+    opponentMessageId: string,
+    duelProtocolExpected: boolean,
+  ): void {
     const opponentMessage = this.messagesById.get(opponentMessageId);
     if (
       !opponentMessage
@@ -7930,6 +8206,7 @@ export class HydraRoomPanel {
       .reverse()
       .find((message) => message.role === "user" && Date.parse(message.timestamp) <= Date.parse(opponentMessage.timestamp));
     this.pendingAgentDuelContexts.set(messageId, {
+      duelProtocolExpected,
       opponentId,
       opponentMessageId,
       opponentMessageTimestamp: opponentMessage.timestamp,
@@ -8042,6 +8319,16 @@ export class HydraRoomPanel {
             intent: parsed.intent,
           };
         }
+      } else if (
+        duelContext.duelProtocolExpected
+        && hasReservedAgentDuelChallengePrefix(m.text)
+        && parseDecisionPacket(m.text, {
+          agent: m.role,
+          phase: m.phase,
+          sourceMessageTimestamp: m.timestamp,
+        })
+      ) {
+        agentDuelProtocolError = "the reply used the reserved `Challenge:` prefix but omitted the required HYDRA_DUEL_CHALLENGE_V1 control record; use `Amend:` for ordinary disagreement.";
       }
     }
     if (m.text.trim() === "") m.text = "[no output]";

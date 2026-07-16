@@ -105,6 +105,7 @@ export const TRUST_SCOPED_SETTINGS = [
   "preferTerminalBridgeOnStart",
   "verifyCommand",
   "autoVerifyAfterBuild",
+  "autoScorePassingBuilds",
   "autoAdvanceActionableDefaults",
   "autoSkipCloserOnAgreement",
   "autoRequestReviewAfterPassingVerification",
