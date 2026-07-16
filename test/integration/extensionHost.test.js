@@ -30,6 +30,8 @@ suite("Hydra extension host", () => {
     for (const command of [
       "hydraRoom.start",
       "hydraRoom.open",
+      "hydraRoom.openBrowser",
+      "hydraRoom.toggleBrowserControl",
       "hydraRoom.runDoctor",
       "hydraRoom.stop",
       "hydraRoom.openDuels",

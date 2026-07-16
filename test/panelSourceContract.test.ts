@@ -116,7 +116,7 @@ describe("passive standings source contracts", () => {
 describe("terminal bridge usage source contracts", () => {
   test("terminal bridge usage is extracted from the raw log output", () => {
     const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
-    const branchStart = source.indexOf("if (forceTerminalBridge || this.transportMode() === \"terminalBridge\")");
+    const branchStart = source.indexOf("const browserRequiresOneShot = !!spawn.env?.HYDRA_BROWSER_TOKEN");
     const branchEnd = source.indexOf("const prepared = await this.prepareOneShotRequestFiles", branchStart);
     assert.ok(branchStart >= 0 && branchEnd > branchStart);
 
@@ -163,7 +163,7 @@ describe("terminal bridge usage source contracts", () => {
 
   test("structured terminal live text is always replaced by the authenticated normalized result", () => {
     const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
-    const branchStart = source.indexOf("if (forceTerminalBridge || this.transportMode() === \"terminalBridge\")");
+    const branchStart = source.indexOf("const browserRequiresOneShot = !!spawn.env?.HYDRA_BROWSER_TOKEN");
     const branchEnd = source.indexOf("const prepared = await this.prepareOneShotRequestFiles", branchStart);
     assert.ok(branchStart >= 0 && branchEnd > branchStart);
     const branch = source.slice(branchStart, branchEnd);
@@ -410,11 +410,12 @@ describe("live streaming source contracts", () => {
     // log but not from reply.text) and double-renders the reply into the
     // transcript.
     const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
-    const branchStart = source.indexOf("if (forceTerminalBridge || this.transportMode() === \"terminalBridge\")");
+    const branchStart = source.indexOf("const browserRequiresOneShot = !!spawn.env?.HYDRA_BROWSER_TOKEN");
     const branchEnd = source.indexOf("const prepared = await this.prepareOneShotRequestFiles", branchStart);
     assert.ok(branchStart >= 0 && branchEnd > branchStart);
 
     const branch = source.slice(branchStart, branchEnd);
+    assert.match(branch, /if \(!browserRequiresOneShot && \(forceTerminalBridge \|\| this\.transportMode\(\) === "terminalBridge"\)\)/);
     assert.match(branch, /createLiveTextExtractor\(terminalPrepared\.outputMode\)/);
     // The callback must exist only when an extractor exists (JSON modes).
     assert.match(branch, /const onLiveChunk = liveText\s*\?\s*\(chunk: string\) =>/);

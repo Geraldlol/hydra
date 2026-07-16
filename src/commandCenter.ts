@@ -1,5 +1,7 @@
 export type CommandCenterActionId =
   | "openWorkspaceFolder"
+  | "openBrowser"
+  | "toggleBrowserControl"
   | "stopCurrentTurn"
   | "acceptDefaultDecision"
   | "toggleAutoAdvanceActionableDefaults"
@@ -91,6 +93,8 @@ export interface CommandCenterInput {
   transport: "oneShot" | "terminalBridge";
   workQueueCount: number;
   nativeActionsCount: number;
+  browserControlAvailable?: boolean;
+  browserControlEnabled?: boolean;
   manyHeadsMode?: boolean;
   manyHeadsClaudeWorkerCount?: number;
   wikiStatus?: CommandCenterWikiStatus;
@@ -100,6 +104,15 @@ export function buildCommandCenterActions(input: CommandCenterInput): CommandCen
   if (!input.workspaceReady) {
     return [
       action("openWorkspaceFolder", "Open Folder", "Required", "Choose a project folder so Hydra can write .hydra state and run the native CLIs."),
+      action("openBrowser", "Open Integrated Browser", "Browser", "Open a URL in VS Code's editor-native browser."),
+      ...(input.browserControlAvailable || input.browserControlEnabled ? [
+        action(
+          "toggleBrowserControl",
+          input.browserControlEnabled ? "Turn Off Agent Browser Control" : "Turn On Agent Browser Control",
+          input.browserControlEnabled ? "Agents on" : "Agents off",
+          "Grant or revoke session-only agent access to Hydra-managed Integrated Browser tabs."
+        ),
+      ] : []),
       ...(input.isWorkspaceTrusted === false ? [] : [
         action(
           "toggleAutoAdvanceActionableDefaults",
@@ -149,6 +162,16 @@ export function buildCommandCenterActions(input: CommandCenterInput): CommandCen
       action("nativeAction", "Native Action...", "Native CLIs", "Pick Codex, Claude, both heads, editor context, or working-tree diff."),
       action("pokeBothTerminalsWithDiff", "Poke Both With Diff", "Native CLIs", "Send one instruction with the current working-tree diff to both native terminals.")
     );
+  }
+
+  actions.push(action("openBrowser", "Open Integrated Browser", "Browser", "Open a URL in VS Code's editor-native browser."));
+  if (input.browserControlAvailable || input.browserControlEnabled) {
+    actions.push(action(
+      "toggleBrowserControl",
+      input.browserControlEnabled ? "Turn Off Agent Browser Control" : "Turn On Agent Browser Control",
+      input.browserControlEnabled ? "Agents on" : "Agents off",
+      "Grant or revoke session-only agent access to Hydra-managed Integrated Browser tabs."
+    ));
   }
 
   actions.push(
