@@ -41,6 +41,8 @@ export type WebviewMessage =
   | { type: "captureNativeCapabilities" }
   | { type: "captureNativeDataSnapshot" }
   | { type: "showCommandCenter" }
+  | { type: "openBrowser" }
+  | { type: "toggleBrowserControl" }
   | { type: "previewNextPrompt"; text?: string; opener?: string }
   | { type: "openLastPrompt" }
   | { type: "cleanWorkspaceState" }

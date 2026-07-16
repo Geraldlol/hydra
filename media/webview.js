@@ -49,6 +49,7 @@ const acceptDefaultBtn = document.getElementById("acceptDefaultBtn");
 const autoAdvanceDefaultsBtn = document.getElementById("autoAdvanceDefaultsBtn");
 const openerBtn = document.getElementById("openerBtn");
 const commandCenterBtn = document.getElementById("commandCenterBtn");
+const browserBtn = document.getElementById("browserBtn");
 const setObjectiveBtn = document.getElementById("setObjectiveBtn");
 const previewPromptBtn = document.getElementById("previewPromptBtn");
 const openLastPromptBtn = document.getElementById("openLastPromptBtn");
@@ -213,6 +214,8 @@ let dialogRestoreFocus = null;
 const ACTIONS = [
   { id: "send", group: "Suggested", name: "Send", what: "Start a Hydra turn with the current opener", acc: "Ctrl+Enter", run: () => sendBtn.click(), enabled: () => !sendBtn.disabled },
   { id: "stop", group: "Suggested", name: "Stop Current Turn", what: "Cancel the active agent call", acc: "Esc", run: () => stopBtn.click(), enabled: () => !stopBtn.classList.contains("hidden") && !stopBtn.disabled },
+  { id: "open-browser", group: "Suggested", name: "Open Integrated Browser", what: "Open a URL inside VS Code", run: () => browserBtn.click() },
+  { id: "toggle-browser-control", group: "Workflow", name: "Toggle Agent Browser Control", what: "Grant or revoke session-only control of Hydra browser tabs", run: () => vscode.postMessage({ type: "toggleBrowserControl" }) },
   { id: "pin-objective", group: "Objective", name: "Pin Objective", what: "Use composer text as room objective", run: () => setObjectiveBtn.click(), enabled: () => !setObjectiveBtn.disabled },
   { id: "preview-prompt", group: "Objective", name: "Preview Prompt", what: "Inspect the exact next prompt", run: () => previewPromptBtn.click(), enabled: () => !previewPromptBtn.disabled },
   { id: "open-last-prompt", group: "Objective", name: "Open Last Prompt", what: "Reopen the latest persisted prompt envelope", run: () => openLastPromptBtn.click(), enabled: () => !openLastPromptBtn.disabled },
@@ -303,6 +306,7 @@ commandCenterBtn.addEventListener("click", () => {
   if (cmdOverlay.dataset.open === "true") closePalette();
   else openPalette();
 });
+browserBtn.addEventListener("click", () => vscode.postMessage({ type: "openBrowser" }));
 toggleRibbonsBtn.addEventListener("click", () => setRibbonsMinimized(!ribbonsMinimized));
 railOverflowBtn.addEventListener("click", () => setRailExpanded(!railExpanded));
 ribbonStack.addEventListener("click", (event) => {

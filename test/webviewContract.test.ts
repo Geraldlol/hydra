@@ -27,6 +27,7 @@ const boundIds = [
   "autopilotText",
   "attachFilesBtn",
   "attachmentTray",
+  "browserBtn",
   "captureNativeCapabilitiesBtn",
   "captureNativeDataSnapshotBtn",
   "claudeCommandBtn",
@@ -156,6 +157,7 @@ const hostMessages = [
   "handBack",
   "nativeAction",
   "openAgentCalls",
+  "openBrowser",
   "openRunFailureFile",
   "openObjective",
   "openLastPrompt",
@@ -179,6 +181,7 @@ const hostMessages = [
   "showTerminalBridgeHealth",
   "stop",
   "toggleManyHeadsMode",
+  "toggleBrowserControl",
   "toggleAutoAdvanceActionableDefaults",
   "useOneShotTransport",
   "useTerminalBridge",
@@ -186,6 +189,8 @@ const hostMessages = [
 
 const commandCenterActionCoverage: Record<CommandCenterActionId, readonly RegExp[]> = {
   openWorkspaceFolder: [/id: "open-folder"/, /type: "openWorkspaceFolder"/],
+  openBrowser: [/id: "open-browser"/, /type: "openBrowser"/],
+  toggleBrowserControl: [/id: "toggle-browser-control"/, /type: "toggleBrowserControl"/],
   stopCurrentTurn: [/id: "stop"/, /type: "stop"/],
   acceptDefaultDecision: [/id: "accept-default"/, /type: "acceptDefaultDecision"/],
   toggleAutoAdvanceActionableDefaults: [/id: "toggle-auto-accept-default"/, /type: "toggleAutoAdvanceActionableDefaults"/],

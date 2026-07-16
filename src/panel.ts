@@ -5,6 +5,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { runAgent, AgentSpawn, RunResult, MAX_AGENT_STDOUT_BYTES } from "./agents";
+import type { IntegratedBrowserBroker } from "./browserBroker";
 import { parseGitStatusEntries, type WorkspaceChange } from "./gitStatus";
 import { resolveGitExecutable, workspaceGitExecutionAllowed } from "./gitExecutable";
 import { State, Event, AgentId, transition, isInFlight, shouldRunParallelDiscussion, pickReviewers, DEFAULT_ROSTER } from "./phases";
@@ -585,6 +586,7 @@ export class HydraRoomPanel {
   // process-termination failure. Only reloading VS Code resets this latch.
   private static unconfirmedNativeTerminationForHost = false;
   private static statusBarUpdater: ((snapshot: HydraStatusBarSnapshot) => void) | undefined;
+  private static browserBroker: IntegratedBrowserBroker | undefined;
 
   private readonly context: vscode.ExtensionContext;
   private readonly panel: vscode.WebviewPanel;
@@ -750,6 +752,10 @@ export class HydraRoomPanel {
 
   static setStatusBarUpdater(updater: ((snapshot: HydraStatusBarSnapshot) => void) | undefined): void {
     HydraRoomPanel.statusBarUpdater = updater;
+  }
+
+  static setBrowserBroker(broker: IntegratedBrowserBroker | undefined): void {
+    HydraRoomPanel.browserBroker = broker;
   }
 
   ready(): Promise<void> {
@@ -3742,6 +3748,7 @@ export class HydraRoomPanel {
 
   async showCommandCenter(): Promise<void> {
     await this.ready();
+    const browserStatus = HydraRoomPanel.browserBroker?.status();
     let wikiStatus: CommandCenterWikiStatus | undefined;
     if (this.workspaceReady) {
       try {
@@ -3774,6 +3781,8 @@ export class HydraRoomPanel {
       transport: this.transportMode(),
       workQueueCount: this.workspaceReady ? this.currentWorkQueue().length : 0,
       nativeActionsCount: this.nativeActions.length,
+      browserControlAvailable: browserStatus?.agentControlAvailable ?? false,
+      browserControlEnabled: browserStatus?.enabled ?? false,
       manyHeadsMode: this.effectiveManyHeadsMode(),
       manyHeadsClaudeWorkerCount: manyHeadsClaudeWorkerCount(),
       wikiStatus,
@@ -3797,6 +3806,12 @@ export class HydraRoomPanel {
     switch (action) {
       case "openWorkspaceFolder":
         await this.openWorkspaceFolder();
+        return;
+      case "openBrowser":
+        await this.openBrowser();
+        return;
+      case "toggleBrowserControl":
+        await this.toggleBrowserControl();
         return;
       case "stopCurrentTurn":
         await this.stop();
@@ -3931,6 +3946,22 @@ export class HydraRoomPanel {
         await this.cleanWorkspaceState();
         return;
     }
+  }
+
+  async openBrowser(): Promise<void> {
+    if (!HydraRoomPanel.browserBroker) {
+      await vscode.window.showWarningMessage("Hydra browser integration is unavailable in this extension host.");
+      return;
+    }
+    await HydraRoomPanel.browserBroker.openBrowser();
+  }
+
+  async toggleBrowserControl(): Promise<void> {
+    if (!HydraRoomPanel.browserBroker) {
+      await vscode.window.showWarningMessage("Hydra browser integration is unavailable in this extension host.");
+      return;
+    }
+    await HydraRoomPanel.browserBroker.toggleAgentControl();
   }
 
   async previewNextPrompt(draftText = "", opener: AgentId = this.getFirstSpeaker()): Promise<void> {
@@ -5814,14 +5845,26 @@ export class HydraRoomPanel {
             onEvent: onLiveChannelEvent,
           })
         : undefined;
-      const result = await runAgent(spawn, prompt, timeout, (rawChunk) => {
-        const chunk = redactPrivateArtifactText(rawChunk, privatePaths);
+      const browserBroker = HydraRoomPanel.browserBroker;
+      const browserRedactor = browserBroker?.createAgentOutputRedactor(agent);
+      const emitBrowserSafeChunk = (browserSafeChunk: string): void => {
+        if (!browserSafeChunk) return;
+        const chunk = redactPrivateArtifactText(browserSafeChunk, privatePaths);
         liveChannel?.push(chunk);
         const text = liveText ? liveText.push(chunk) : chunk;
         if (text) onChunk?.(text);
+      };
+      const rawResult = await runAgent(spawn, prompt, timeout, (rawChunk) => {
+        const browserSafeChunk = browserRedactor
+          ? browserRedactor.push(rawChunk)
+          : browserBroker?.redactAgentText(agent, rawChunk) ?? rawChunk;
+        emitBrowserSafeChunk(browserSafeChunk);
       }, signal);
+      emitBrowserSafeChunk(browserRedactor?.flush() ?? "");
+      const result = browserBroker?.redactAgentResult(agent, rawResult) ?? rawResult;
       await liveChannel?.flush();
-      const normalized = await this.normalizeOneShotResult(prepared, result);
+      const normalizedRaw = await this.normalizeOneShotResult(prepared, result);
+      const normalized = HydraRoomPanel.browserBroker?.redactAgentResult(agent, normalizedRaw) ?? normalizedRaw;
       this.latchUnconfirmedNativeTermination(normalized, `${agent} ${phase}`, agent);
       const traceStdout = redactPrivateArtifactText(result.stdout, privatePaths);
       // Stream summaries intentionally include final assistant text for normal
@@ -5872,7 +5915,8 @@ export class HydraRoomPanel {
       return normalized;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      throw new Error(redactPrivateArtifactText(message, privatePaths));
+      const browserSafeMessage = HydraRoomPanel.browserBroker?.redactAgentText(agent, message) ?? message;
+      throw new Error(redactPrivateArtifactText(browserSafeMessage, privatePaths));
     } finally {
       if (prepared.privateArtifacts) {
         await cleanupPrivateArtifacts(privatePaths, prepared.privateArtifacts.boundary);
@@ -6257,6 +6301,7 @@ export class HydraRoomPanel {
     const timeout = agentTimeoutMs(phase);
     const activity = this.startPendingActivity(messageId, agent, phase, timeout);
     let dispatch: AgentDispatchPlan;
+    let browserPreparedSpawn: AgentSpawn | undefined;
     try {
       // Why: dispatch argv must come from the REAL prompt so a cli-template
       // head's ${prompt} placeholder expands; the empty-prompt buildSpawn is
@@ -6273,6 +6318,8 @@ export class HydraRoomPanel {
           cwd: this.workspaceRoot,
           stdin: inv.stdin ?? "",
         });
+        spawn = HydraRoomPanel.browserBroker?.prepareAgentSpawn(agent, getAgentDefinition(agent)?.kind ?? "cli-template", spawn) ?? spawn;
+        browserPreparedSpawn = spawn;
         spawn = {
           ...spawn,
           command: await resolveAgentCommand(agent, spawn.command, effectiveSpawnEnvironment(spawn)),
@@ -6280,6 +6327,7 @@ export class HydraRoomPanel {
         dispatch = { transport: "spawn", spawn };
       }
     } catch (err) {
+      if (browserPreparedSpawn) HydraRoomPanel.browserBroker?.revokeAgentSpawn(browserPreparedSpawn);
       const message = err instanceof Error ? err.message : String(err);
       const traceId = boundTraceId;
       const startedAt = Date.now();
@@ -6327,6 +6375,7 @@ export class HydraRoomPanel {
       activity.stop();
       releaseClaudeCreditReservation?.();
       releaseClaudeCreditReservation = undefined;
+      if (dispatch.transport === "spawn") HydraRoomPanel.browserBroker?.revokeAgentSpawn(dispatch.spawn);
       throw err;
     }
     if (!consent.allowed) {
@@ -6352,20 +6401,23 @@ export class HydraRoomPanel {
       activity.stop();
       releaseClaudeCreditReservation?.();
       releaseClaudeCreditReservation = undefined;
+      if (dispatch.transport === "spawn") HydraRoomPanel.browserBroker?.revokeAgentSpawn(dispatch.spawn);
       const finalized = this.messagesById.get(messageId);
       return { text: finalized?.text ?? "", result };
     }
     try {
-      const result =
+      const rawResult =
         dispatch.transport === "http"
           ? await this.runHttpPipeline(agent, phase, dispatch.invocation, prompt, messageId, timeout, signal, boundTraceId, activity.markOutput)
           : await this.runAgentTransport(agent, phase, dispatch.spawn, prompt, messageId, timeout, signal, forceTerminalBridge, boundTraceId, activity.markOutput);
+      const result = HydraRoomPanel.browserBroker?.redactAgentResult(agent, rawResult) ?? rawResult;
       await this.finalizePendingMessage(messageId, result);
       const finalized = this.messagesById.get(messageId);
       return { text: finalized?.text ?? "", result };
     } finally {
       activity.stop();
       releaseClaudeCreditReservation?.();
+      if (dispatch.transport === "spawn") HydraRoomPanel.browserBroker?.revokeAgentSpawn(dispatch.spawn);
     }
   }
 
@@ -6433,7 +6485,8 @@ export class HydraRoomPanel {
     const startedAt = Date.now();
     const promptSha256 = sha256(prompt);
     try {
-      if (forceTerminalBridge || this.transportMode() === "terminalBridge") {
+      const browserRequiresOneShot = !!spawn.env?.HYDRA_BROWSER_TOKEN;
+      if (!browserRequiresOneShot && (forceTerminalBridge || this.transportMode() === "terminalBridge")) {
         if (!this.terminalBridge) {
           return agentCallFailureResult("Terminal bridge is not available because no workspace terminal was initialized.");
         }
@@ -6466,7 +6519,8 @@ export class HydraRoomPanel {
         const onLiveChunk = liveText
           ? (chunk: string) => {
               markOutput?.();
-              const text = liveText.push(chunk);
+              const rawText = liveText.push(chunk);
+              const text = HydraRoomPanel.browserBroker?.redactAgentText(agent, rawText) ?? rawText;
               if (!text) return;
               const live = this.messagesById.get(messageId);
               if (live) live.text += text;
@@ -6476,7 +6530,7 @@ export class HydraRoomPanel {
         let result: TerminalBridgeRunResult;
         this.terminalBridgeDispatchInFlight += 1;
         try {
-          result = await this.terminalBridge.callAgent(
+          const rawResult = await this.terminalBridge.callAgent(
             agent,
             phase,
             terminalPrepared.spawn,
@@ -6485,10 +6539,12 @@ export class HydraRoomPanel {
             signal,
             onLiveChunk
           );
+          result = HydraRoomPanel.browserBroker?.redactAgentResult(agent, rawResult) ?? rawResult;
         } finally {
           this.terminalBridgeDispatchInFlight = Math.max(0, this.terminalBridgeDispatchInFlight - 1);
         }
-        const normalized = await this.normalizeTerminalBridgeResult(terminalPrepared.outputMode, result);
+        const normalizedRaw = await this.normalizeTerminalBridgeResult(terminalPrepared.outputMode, result);
+        const normalized = HydraRoomPanel.browserBroker?.redactAgentResult(agent, normalizedRaw) ?? normalizedRaw;
         this.latchUnconfirmedNativeTermination(normalized, `${agent} ${phase} terminal bridge`, agent);
         const m = this.messagesById.get(messageId);
         if (m) {
@@ -6896,7 +6952,11 @@ export class HydraRoomPanel {
       ]),
       allowAgentDuelChallenge: agentInitiatedDuels(),
     });
-    const spawn = this.buildSpawn(input.agent, input.phase);
+    let spawn = this.buildSpawn(input.agent, input.phase);
+    const agentKind = getAgentDefinition(input.agent)?.kind ?? "cli-template";
+    // Prompt previews shape the visible argv without minting or revoking a
+    // dispatch bearer. Authorization is created only on the real call path.
+    spawn = HydraRoomPanel.browserBroker?.previewAgentSpawn(agentKind, spawn) ?? spawn;
     const authority = classifyAgentAuthority(input.agent, input.phase, spawn.args);
     const profile = describeCapabilityProfile(input.agent, input.phase, spawn.args, authority);
     let command = spawn.command;
@@ -6931,15 +6991,22 @@ export class HydraRoomPanel {
 
   private async nativeCapabilityPromptContext(agent: AgentId, taskContext: Array<string | undefined>): Promise<string> {
     const base = nativeCapabilitySummary(agent);
-    if (!shouldIncludeNativeIntegrationSummary(...taskContext)) return base;
-    const integration = await readNativeIntegrationSummary(this.nativeCapabilitiesUri.fsPath);
-    if (!integration) return base;
-    return [
-      base,
-      "",
-      "Latest native integration probe summary from `.hydra/native-capabilities.md`:",
-      integration,
-    ].join("\n");
+    const sections = [base];
+    if (shouldIncludeNativeIntegrationSummary(...taskContext)) {
+      const integration = await readNativeIntegrationSummary(this.nativeCapabilitiesUri.fsPath);
+      if (integration) {
+        sections.push(
+          "Latest native integration probe summary from `.hydra/native-capabilities.md`:",
+          integration,
+        );
+      }
+    }
+    const agentKind = getAgentDefinition(agent)?.kind ?? "cli-template";
+    const browser = agentKind === "openai-compatible"
+      ? ""
+      : HydraRoomPanel.browserBroker?.promptContext(agent, agentKind);
+    if (browser) sections.push(browser);
+    return sections.join("\n\n");
   }
 
   private async buildDirectTerminalPokeEnvelope(
@@ -8371,6 +8438,12 @@ export class HydraRoomPanel {
           break;
         case "showCommandCenter":
           await this.showCommandCenter();
+          break;
+        case "openBrowser":
+          await this.openBrowser();
+          break;
+        case "toggleBrowserControl":
+          await this.toggleBrowserControl();
           break;
         case "previewNextPrompt":
           await this.previewNextPrompt(msg.text ?? "", normalizeAgentId(msg.opener, this.getFirstSpeaker(), this.roster()));

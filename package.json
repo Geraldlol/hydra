@@ -54,6 +54,14 @@
         "title": "Hydra: Open Room"
       },
       {
+        "command": "hydraRoom.openBrowser",
+        "title": "Hydra: Open Integrated Browser"
+      },
+      {
+        "command": "hydraRoom.toggleBrowserControl",
+        "title": "Hydra: Toggle Agent Browser Control"
+      },
+      {
         "command": "hydraRoom.askBoth",
         "title": "Hydra: Send Message"
       },
