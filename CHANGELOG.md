@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.4
+
+- Adds a `/hydra-handoff` skill for the Codex CLI and Claude Code that packages the current CLI session into a handoff packet written to `.hydra/handoff-inbox/`, so work can be continued in the Hydra room. One canonical `SKILL.md` installs to both agents via `pnpm run install:handoff-skill`.
+- Ingests handoff packets in the room as a one-click confirm chip with Confirm, an action override (discuss / ask all heads / build), Preview, and Dismiss; confirmation routes through the existing room turn with no new spawn path. Packets are treated as untrusted: nothing runs without an explicit confirmation, ingest is gated on a ready and trusted workspace, only prompt text and a re-validated action enum reach the room, and oversized (over 256 KB) or malformed packets are quarantined instead of ingested.
+
 ## 0.6.3
 
 - Makes Integrated Browser routing fail closed: turns without the Hydra browser connection now report the unavailable in-app surface instead of silently substituting Chrome or another browser, while the enable flow makes clear that only newly started turns receive the session-scoped connection.

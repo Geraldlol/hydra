@@ -8,7 +8,7 @@ This checklist is for packaging and publishing the current Marketplace preview o
 - Extension id: `geraldlol.vscode-hydra-room`
 - Marketplace display name: `Hydra Agents`
 - Package name: `vscode-hydra-room`
-- Release version: `0.6.3`
+- Release version: `0.6.4`
 
 The display name is reversible in a later release. The publisher id and package name are the durable extension identity.
 
