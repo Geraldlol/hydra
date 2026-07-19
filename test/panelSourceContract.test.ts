@@ -997,3 +997,20 @@ describe("wiki wrapup source contracts", () => {
     assert.doesNotMatch(method, /mentionsWikiContext: telemetry\.mentionsWikiContext/);
   });
 });
+
+describe("handoff inbox source contract", () => {
+  test("handoff inbox is wired through the single sendUserMessage entry point", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    assert.match(source, /new HandoffInboxController\(/);
+    const start = source.indexOf("private async runHandoff(");
+    assert.ok(start >= 0, "runHandoff method not found");
+    const end = source.indexOf("private ", start + 1);
+    assert.ok(end > start, "could not bound runHandoff body");
+    const body = source.slice(start, end);
+    assert.match(body, /case "askBoth":[\s\S]*?All of you:[\s\S]*?this\.sendUserMessage\(/);
+    assert.match(body, /case "buildClaude":[\s\S]*?this\.sendUserMessage\(/);
+    // runHandoff must NOT reach assignBuilder (needs AwaitingUser; a cold room can't).
+    assert.doesNotMatch(body, /assignBuilder\(/);
+    assert.match(source, /pendingHandoff: this\.handoffInbox/);
+  });
+});

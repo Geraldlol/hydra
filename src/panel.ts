@@ -347,6 +347,7 @@ import {
   formatTelegramInboundPrompt,
   type TelegramInboundTurnOutcome,
 } from "./telegramController";
+import { HandoffInboxController, type HandoffAction } from "./handoffInbox";
 import { readWorkspaceInstructions, workspaceInstructionsAsContext } from "./workspaceInstructions";
 import {
   appendWorkQueueDisposition,
@@ -749,6 +750,7 @@ export class HydraRoomPanel {
   // sessionId field initializer has run); its deps read panel state through
   // closures so the lazily-set .hydra paths resolve at call time.
   private readonly telegram: TelegramController;
+  private handoffInbox!: HandoffInboxController;
   private agentStatuses: Record<AgentId, AgentStatus> = {};
   private gitAvailable = false;
   private workspaceChanges: WorkspaceChange[] = [];
@@ -828,6 +830,14 @@ export class HydraRoomPanel {
       ready: () => this.ready(),
       sendInboundUserMessage: (text, opener, options) => this.sendInboundUserMessage(text, opener, options),
     });
+    this.handoffInbox = new HandoffInboxController({
+      workspaceRoot: () => this.workspaceRoot,
+      isReady: () => this.workspaceReady && vscode.workspace.isTrusted === true,
+      appendSystemMessage: (text) => this.appendSystemMessage(text),
+      postState: () => this.postState(),
+      runHandoff: (action, prompt) => this.runHandoff(action, prompt),
+      openMarkdownPreview: (title, body) => this.openHandoffPreview(title, body),
+    });
     this.panel.webview.options = {
       enableScripts: true,
       localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "media")],
@@ -901,6 +911,7 @@ export class HydraRoomPanel {
     this.wikiMaintenanceAbort?.abort();
     this.duelCommitmentAbort?.abort();
     this.telegram.dispose();
+    this.handoffInbox?.dispose();
     // TerminalBridge is constructed inside initialize() so it isn't in the
     // disposables array. Dispose explicitly to close cached terminals
     // (otherwise they accumulate as ghost terminals across panel reopens).
@@ -1053,6 +1064,7 @@ export class HydraRoomPanel {
     this.postState();
     if (this.agentDuelAutomationQueue.length > 0) queueMicrotask(() => void this.drainAgentDuelAutomation());
     this.telegram.startInboundPolling();
+    await this.handoffInbox.start();
     if (autopilotOnStart()) {
       this.autopilotStartTimer = setTimeout(() => {
         this.autopilotStartTimer = undefined;
@@ -1154,6 +1166,38 @@ export class HydraRoomPanel {
     });
     void options.telegramChatId;
     return { beforeReplyAt, cancelled: this.stopRequestCount !== stopCountBefore, deferred: false };
+  }
+
+  // Why: the single entry point for an accepted handoff. Every action routes
+  // through sendUserMessage — assignBuilder needs AwaitingUser and cannot run
+  // from a cold room, so a build handoff seats the target head as opener and
+  // lets the normal discussion->build phase machine take over.
+  private async runHandoff(action: HandoffAction, prompt: string): Promise<void> {
+    const first = this.getFirstSpeaker();
+    switch (action) {
+      case "discuss":
+        await this.sendUserMessage(prompt, first);
+        break;
+      case "askBoth":
+        // "All of you:" is head-count-agnostic and makes shouldRunParallelDiscussion
+        // fire deterministically (unless discussionMode is "serial", respected).
+        await this.sendUserMessage(`All of you:\n\n${prompt}`, first);
+        break;
+      case "buildCodex":
+        await this.sendUserMessage(prompt, normalizeAgentId("codex", first, this.roster()));
+        break;
+      case "buildClaude":
+        await this.sendUserMessage(prompt, normalizeAgentId("claude", first, this.roster()));
+        break;
+    }
+  }
+
+  private async openHandoffPreview(title: string, body: string): Promise<void> {
+    const doc = await vscode.workspace.openTextDocument({
+      content: `# ${title}\n\n${body}`,
+      language: "markdown",
+    });
+    await vscode.window.showTextDocument(doc, { preview: true });
   }
 
   private async startUserMessageTurn(
@@ -8744,6 +8788,15 @@ export class HydraRoomPanel {
         case "acceptDefaultDecision":
           await this.acceptDefaultDecision();
           break;
+        case "confirmHandoff":
+          await this.handoffInbox.confirm(msg.action);
+          break;
+        case "dismissHandoff":
+          await this.handoffInbox.dismiss();
+          break;
+        case "previewHandoff":
+          await this.handoffInbox.preview();
+          break;
         case "toggleAutoAdvanceActionableDefaults":
           await this.toggleAutoAdvanceActionableDefaults();
           break;
@@ -9047,6 +9100,7 @@ export class HydraRoomPanel {
         autopilotSummary: this.autopilotSummary,
         needsCodexPath: checkFailed(this.latestDoctorReport, "codex-command"),
         needsClaudePath: checkFailed(this.latestDoctorReport, "claude-command"),
+        pendingHandoff: this.handoffInbox?.pending() ?? null,
       });
     } catch {
       // panel disposed; nothing to do
