@@ -5,6 +5,7 @@
 // confirm chip is the mandatory gate.
 
 import * as fs from "node:fs/promises";
+import { watch as watchFileSystem, type FSWatcher } from "node:fs";
 import * as path from "node:path";
 
 export type HandoffAction = "discuss" | "askBoth" | "buildCodex" | "buildClaude";
@@ -182,4 +183,173 @@ export async function moveHandoffFile(file: string, destDir: string): Promise<vo
       // Source already moved by a concurrent scan — nothing to do.
     }
   }
+}
+
+export interface HandoffInboxDeps {
+  workspaceRoot(): string;
+  // Ready = workspace folder loaded AND workspace trusted. Handoff ingest is
+  // gated on both; see panel wiring.
+  isReady(): boolean;
+  appendSystemMessage(text: string): Promise<void>;
+  postState(): void;
+  // Routes an accepted handoff through the panel's single sendUserMessage entry
+  // point. The panel maps action -> (opener, framing); this module never spawns.
+  runHandoff(action: HandoffAction, prompt: string): Promise<void>;
+  openMarkdownPreview(title: string, body: string): Promise<void>;
+}
+
+export interface PendingHandoffSummary {
+  title: string;
+  source: string;
+  suggestedAction: HandoffAction;
+}
+
+/**
+ * Owns the .hydra/handoff-inbox watcher and drives the room's confirm chip.
+ *
+ * Untrusted-input invariants:
+ *  - nothing here runs an agent; confirm() only calls deps.runHandoff after an
+ *    explicit user click,
+ *  - one packet is presented at a time (a pending chip blocks re-scan), so a
+ *    flood of packets cannot spam the room,
+ *  - rejected packets are quarantined to rejected/ so they cannot re-fire,
+ *  - a processed-set of basenames guards against moveHandoffFile (best-effort,
+ *    returns void even on failure) leaving a handled packet's file behind and
+ *    having a later scan re-present it.
+ */
+export class HandoffInboxController {
+  private watcher: FSWatcher | undefined;
+  private refreshTimer: ReturnType<typeof setTimeout> | undefined;
+  private disposed = false;
+  private pendingPacket: HandoffPacket | undefined;
+  private pendingFile: string | undefined;
+  // Basenames handled this session (consumed or rejected). See class doc.
+  private readonly processed = new Set<string>();
+
+  constructor(private readonly deps: HandoffInboxDeps) {}
+
+  async start(): Promise<void> {
+    if (this.disposed || !this.deps.isReady()) return;
+    try {
+      await ensureHandoffInboxDirs(this.deps.workspaceRoot());
+    } catch {
+      // Cannot create inbox dirs (read-only FS / perms). Handoff ingest is a
+      // best-effort convenience; degrade silently rather than block the room.
+      return;
+    }
+    await this.scanNow();
+    this.startWatcher();
+  }
+
+  private startWatcher(): void {
+    try {
+      const dir = handoffInboxDir(this.deps.workspaceRoot());
+      const watcher = watchFileSystem(dir, { persistent: false }, () => {
+        if (this.disposed) return;
+        if (this.refreshTimer) clearTimeout(this.refreshTimer);
+        this.refreshTimer = setTimeout(() => {
+          this.refreshTimer = undefined;
+          void this.scanNow();
+        }, 300);
+      });
+      // Watch failure must not crash the host; scan-on-open already surfaced
+      // anything written before the room opened.
+      watcher.on("error", () => watcher.close());
+      this.watcher = watcher;
+    } catch {
+      // Some remote/custom filesystems cannot be watched. Scan-on-open remains.
+    }
+  }
+
+  async scanNow(): Promise<void> {
+    if (this.disposed || !this.deps.isReady()) return;
+    // One at a time: a pending chip must be resolved before the next surfaces.
+    if (this.pendingPacket) return;
+
+    const root = this.deps.workspaceRoot();
+    const scan = await scanHandoffInbox(root);
+
+    for (const bad of scan.rejected) {
+      // Already handled this session (e.g. a prior move left the file behind) — skip.
+      if (this.processed.has(basename(bad.file))) continue;
+      await moveHandoffFile(bad.file, handoffRejectedDir(root));
+      await this.deps.appendSystemMessage(
+        `Hydra rejected a handoff packet (${basename(bad.file)}): ${bad.reason}. Moved to handoff-inbox/rejected/.`
+      );
+      this.processed.add(basename(bad.file));
+    }
+
+    const candidates = scan.valid.filter((v) => !this.processed.has(basename(v.file)));
+    if (!candidates.length) {
+      if (scan.rejected.length) this.deps.postState();
+      return;
+    }
+
+    // Filenames are timestamp-prefixed, so lexicographic order is chronological.
+    const sorted = candidates.slice().sort((a, b) => basename(a.file).localeCompare(basename(b.file)));
+    // Why: candidates.length > 0 guarantees sorted[0] exists, but
+    // noUncheckedIndexedAccess still widens the index read to T | undefined.
+    const chosen = sorted[0];
+    if (!chosen) return;
+    this.pendingPacket = chosen.packet;
+    this.pendingFile = chosen.file;
+    await this.deps.appendSystemMessage(
+      `Handoff from ${chosen.packet.source}: "${chosen.packet.title}". Confirm in the banner to run it, or dismiss it.`
+    );
+    this.deps.postState();
+  }
+
+  pending(): PendingHandoffSummary | undefined {
+    if (!this.pendingPacket) return undefined;
+    return {
+      title: this.pendingPacket.title,
+      source: this.pendingPacket.source,
+      suggestedAction: this.pendingPacket.suggestedAction,
+    };
+  }
+
+  async confirm(overrideAction?: HandoffAction): Promise<void> {
+    const packet = this.pendingPacket;
+    const file = this.pendingFile;
+    if (!packet || !file) return;
+    const action = overrideAction && isHandoffAction(overrideAction) ? overrideAction : packet.suggestedAction;
+    // Clear pending and archive BEFORE the (possibly long) turn so a watcher
+    // re-scan cannot re-present the same packet.
+    this.pendingPacket = undefined;
+    this.pendingFile = undefined;
+    await moveHandoffFile(file, handoffConsumedDir(this.deps.workspaceRoot()));
+    this.processed.add(basename(file));
+    this.deps.postState();
+    await this.deps.runHandoff(action, packet.prompt);
+  }
+
+  async dismiss(): Promise<void> {
+    const file = this.pendingFile;
+    this.pendingPacket = undefined;
+    this.pendingFile = undefined;
+    if (file) {
+      await moveHandoffFile(file, handoffConsumedDir(this.deps.workspaceRoot()));
+      this.processed.add(basename(file));
+    }
+    await this.deps.appendSystemMessage("Handoff dismissed.");
+    this.deps.postState();
+    // Slot is free; surface the next queued packet if any.
+    await this.scanNow();
+  }
+
+  async preview(): Promise<void> {
+    const packet = this.pendingPacket;
+    if (!packet) return;
+    await this.deps.openMarkdownPreview(packet.title, packet.prompt);
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    if (this.refreshTimer) clearTimeout(this.refreshTimer);
+    this.watcher?.close();
+  }
+}
+
+function basename(file: string): string {
+  return path.basename(file);
 }

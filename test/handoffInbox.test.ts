@@ -7,6 +7,7 @@ import {
   HANDOFF_ACTIONS,
   HANDOFF_MAX_FILE_BYTES,
   HANDOFF_MAX_TITLE_CHARS,
+  HandoffInboxController,
   ensureHandoffInboxDirs,
   handoffConsumedDir,
   handoffInboxDir,
@@ -15,6 +16,7 @@ import {
   scanHandoffInbox,
   validateHandoffPacket,
 } from "../src/handoffInbox";
+import type { HandoffAction, PendingHandoffSummary } from "../src/handoffInbox";
 
 function goodRaw(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -176,5 +178,146 @@ describe("moveHandoffFile", () => {
     await ensureHandoffInboxDirs(root);
     const missing = path.join(handoffInboxDir(root), "gone.json");
     await moveHandoffFile(missing, handoffRejectedDir(root));
+  });
+});
+
+describe("HandoffInboxController", () => {
+  function makeDeps(root: string) {
+    const calls = {
+      system: [] as string[],
+      handoffs: [] as { action: string; prompt: string }[],
+      previews: [] as { title: string; body: string }[],
+      posts: 0,
+    };
+    const deps = {
+      workspaceRoot: () => root,
+      isReady: () => true,
+      appendSystemMessage: async (t: string) => { calls.system.push(t); },
+      postState: () => { calls.posts += 1; },
+      runHandoff: async (action: string, prompt: string) => { calls.handoffs.push({ action, prompt }); },
+      openMarkdownPreview: async (title: string, body: string) => { calls.previews.push({ title, body }); },
+    };
+    return { deps, calls };
+  }
+  function goodPacket(action = "discuss"): Record<string, unknown> {
+    return { version: 1, createdAt: "t", source: "codex", title: "Do X", prompt: "Body", suggestedAction: action };
+  }
+  async function tmpWorkspace(): Promise<string> {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-handoff-ctrl-"));
+    await ensureHandoffInboxDirs(root);
+    return root;
+  }
+
+  test("scanNow surfaces the oldest valid packet as pending and announces it", async () => {
+    const root = await tmpWorkspace();
+    const { deps, calls } = makeDeps(root);
+    await fs.writeFile(path.join(handoffInboxDir(root), "20260719T183001Z-b.json"), JSON.stringify(goodPacket()), "utf8");
+    await fs.writeFile(path.join(handoffInboxDir(root), "20260719T183000Z-a.json"), JSON.stringify(goodPacket("askBoth")), "utf8");
+    const ctrl = new HandoffInboxController(deps);
+    await ctrl.scanNow();
+    const pending = ctrl.pending();
+    assert.ok(pending);
+    assert.equal(pending?.suggestedAction, "askBoth"); // the -a file sorts first
+    assert.equal(calls.system.length, 1);
+    ctrl.dispose();
+  });
+
+  test("scanNow quarantines a rejected packet and keeps scanning", async () => {
+    const root = await tmpWorkspace();
+    const { deps, calls } = makeDeps(root);
+    await fs.writeFile(path.join(handoffInboxDir(root), "20260719T183000Z-bad.json"), "{ broken", "utf8");
+    const ctrl = new HandoffInboxController(deps);
+    await ctrl.scanNow();
+    assert.equal(ctrl.pending(), undefined);
+    await fs.access(path.join(handoffRejectedDir(root), "20260719T183000Z-bad.json"));
+    assert.ok(calls.system.some((m) => m.includes("rejected")));
+    ctrl.dispose();
+  });
+
+  test("confirm runs the suggested action, moves the file to consumed, clears pending", async () => {
+    const root = await tmpWorkspace();
+    const { deps, calls } = makeDeps(root);
+    const file = path.join(handoffInboxDir(root), "20260719T183000Z-x.json");
+    await fs.writeFile(file, JSON.stringify(goodPacket("discuss")), "utf8");
+    const ctrl = new HandoffInboxController(deps);
+    await ctrl.scanNow();
+    await ctrl.confirm();
+    assert.equal(ctrl.pending(), undefined);
+    assert.deepEqual(calls.handoffs, [{ action: "discuss", prompt: "Body" }]);
+    await fs.access(path.join(handoffConsumedDir(root), "20260719T183000Z-x.json"));
+    ctrl.dispose();
+  });
+
+  test("confirm honors an override action", async () => {
+    const root = await tmpWorkspace();
+    const { deps, calls } = makeDeps(root);
+    await fs.writeFile(path.join(handoffInboxDir(root), "20260719T183000Z-x.json"), JSON.stringify(goodPacket("discuss")), "utf8");
+    const ctrl = new HandoffInboxController(deps);
+    await ctrl.scanNow();
+    await ctrl.confirm("buildClaude");
+    assert.equal(calls.handoffs[0]?.action, "buildClaude");
+    ctrl.dispose();
+  });
+
+  test("dismiss archives the packet without running it", async () => {
+    const root = await tmpWorkspace();
+    const { deps, calls } = makeDeps(root);
+    const file = path.join(handoffInboxDir(root), "20260719T183000Z-x.json");
+    await fs.writeFile(file, JSON.stringify(goodPacket()), "utf8");
+    const ctrl = new HandoffInboxController(deps);
+    await ctrl.scanNow();
+    await ctrl.dismiss();
+    assert.equal(ctrl.pending(), undefined);
+    assert.equal(calls.handoffs.length, 0);
+    await fs.access(path.join(handoffConsumedDir(root), "20260719T183000Z-x.json"));
+    ctrl.dispose();
+  });
+
+  test("preview forwards the pending packet body", async () => {
+    const root = await tmpWorkspace();
+    const { deps, calls } = makeDeps(root);
+    await fs.writeFile(path.join(handoffInboxDir(root), "20260719T183000Z-x.json"), JSON.stringify(goodPacket()), "utf8");
+    const ctrl = new HandoffInboxController(deps);
+    await ctrl.scanNow();
+    await ctrl.preview();
+    assert.deepEqual(calls.previews, [{ title: "Do X", body: "Body" }]);
+    ctrl.dispose();
+  });
+
+  test("scanNow does not replace a packet already pending confirmation", async () => {
+    const root = await tmpWorkspace();
+    const { deps } = makeDeps(root);
+    await fs.writeFile(path.join(handoffInboxDir(root), "20260719T183000Z-a.json"), JSON.stringify(goodPacket("discuss")), "utf8");
+    const ctrl = new HandoffInboxController(deps);
+    await ctrl.scanNow();
+    const first = ctrl.pending();
+    await fs.writeFile(path.join(handoffInboxDir(root), "20260719T183001Z-b.json"), JSON.stringify(goodPacket("askBoth")), "utf8");
+    await ctrl.scanNow();
+    assert.equal(ctrl.pending()?.suggestedAction, first?.suggestedAction);
+    ctrl.dispose();
+  });
+
+  // Deviation 2: an in-memory processed-set guard so a failed/best-effort
+  // moveHandoffFile can never re-present an already-handled packet. Here we
+  // simulate that failure directly: after confirm() consumes the packet, a
+  // file with the SAME basename reappears in the inbox dir (as if the move
+  // never actually removed the source) and scanNow must not resurrect it.
+  test("scanNow does not re-surface a packet whose move silently failed to remove the source", async () => {
+    const root = await tmpWorkspace();
+    const { deps } = makeDeps(root);
+    const name = "20260719T183000Z-x.json";
+    const file = path.join(handoffInboxDir(root), name);
+    await fs.writeFile(file, JSON.stringify(goodPacket()), "utf8");
+    const ctrl = new HandoffInboxController(deps);
+    await ctrl.scanNow();
+    assert.ok(ctrl.pending());
+    await ctrl.confirm();
+    assert.equal(ctrl.pending(), undefined);
+    // Simulate the move silently failing: the same basename is back in the
+    // inbox dir, but the controller already recorded it as processed.
+    await fs.writeFile(file, JSON.stringify(goodPacket()), "utf8");
+    await ctrl.scanNow();
+    assert.equal(ctrl.pending(), undefined);
+    ctrl.dispose();
   });
 });
