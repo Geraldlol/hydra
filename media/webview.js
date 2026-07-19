@@ -192,6 +192,7 @@ let lastFilteredNativeActions = [];
 let defaultOpener = "codex";
 let selectedOpener = "codex";
 let hasOpenerOverride = false;
+let lastHandoffKey = null;
 let transport = "oneShot";
 let lastNativeActions = [];
 let lastState = {};
@@ -2277,10 +2278,20 @@ function renderDecision(decision, count, risky, accepted) {
 }
 function renderHandoff(pending) {
   handoffStrip.classList.toggle("hidden", !pending);
-  if (!pending) return;
+  if (!pending) {
+    lastHandoffKey = null;
+    return;
+  }
   handoffTitle.textContent = pending.title || "Untitled handoff";
   handoffSource.textContent = pending.source ? " (" + pending.source + ")" : "";
-  if (pending.suggestedAction) handoffAction.value = pending.suggestedAction;
+  // Why: only seed the select on a NEW packet -- re-renders (Telegram poll, git
+  // refresh, watch events, the turn interval) must not clobber a user override
+  // made after the packet arrived but before Confirm.
+  const key = [pending.title, pending.source, pending.suggestedAction].join(" ");
+  if (key !== lastHandoffKey) {
+    lastHandoffKey = key;
+    if (pending.suggestedAction) handoffAction.value = pending.suggestedAction;
+  }
 }
 function renderDecisionAction(action, canAccept, accepted, running) {
   const label = accepted ? (running ? "Default Running" : "Default Accepted") : action && action.label ? action.label : "Accept Default";

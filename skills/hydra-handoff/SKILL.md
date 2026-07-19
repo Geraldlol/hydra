@@ -33,6 +33,7 @@ Write a handoff packet that the Hydra VS Code extension picks up and surfaces as
    - `"prompt"`: the markdown from step 3
    - `"suggestedAction"`: one of `"discuss"`, `"askBoth"`, `"buildCodex"`, `"buildClaude"`
    - `"context"` (optional): `{ "branch": "<git branch>", "filesTouched": ["<path>", ...] }` (≤ 50 files)
+   Keep the packet file under 256 KB total — the extension silently quarantines oversized packets, so keep `"prompt"` reasonably concise.
 
 5. **Write it atomically.** Create the directory, write to a `.json.tmp` file, then rename to `.json` (the extension only reads `*.json`, so this prevents it reading a half-written file). Filename: `<UTC timestamp: YYYYMMDDTHHMMSSZ>-<kebab-slug-of-title>.json`.
 

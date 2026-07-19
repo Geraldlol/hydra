@@ -893,6 +893,22 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     #decisionStrip .decision-actions {
       align-self: center;
     }
+    .handoff-action-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--text-muted);
+      font-size: 11px;
+    }
+    .handoff-action-select {
+      min-height: 24px;
+      padding: 3px 8px;
+      color: var(--text-muted);
+      background: var(--abyss-raised);
+      border: 1px solid var(--border);
+      border-radius: var(--r-chip);
+      font-size: 11px;
+    }
     @media (max-width: 880px) {
       #decisionStrip { grid-template-columns: minmax(0, 1fr) auto; }
       #decisionStrip .decision-needed,
