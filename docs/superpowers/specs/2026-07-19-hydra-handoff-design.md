@@ -48,8 +48,11 @@ A valid packet produces a system message plus a confirm chip in the webview:
 
 > Handoff from Claude Code: "Finish JSONL compaction refactor" — run as **Ask Both**?
 
-- **Confirm** routes through the *existing* turn entry points — normal user turn (`discuss`), the ask-both path (`askBoth`), or the assign-builder path (`buildCodex`/`buildClaude`). No new spawn paths.
-- **Override** — the user can change the action in the room before confirming (the chip offers the standard actions, defaulting to the suggested one).
+- **Confirm** routes through the *single existing* turn entry point `panel.sendUserMessage(text, opener)` — no new spawn paths. The `suggestedAction` chooses the opener and how the text is framed:
+  - `discuss` → `sendUserMessage(prompt, firstSpeaker)` (serial, or parallel if the prompt already addresses all heads).
+  - `askBoth` → `sendUserMessage("All of you:\n\n" + prompt, firstSpeaker)` — the head-count-agnostic "All of you" line makes `shouldRunParallelDiscussion` fire deterministically (unless the user set `discussionMode: "serial"`, which is respected).
+  - `buildCodex` / `buildClaude` → `sendUserMessage(prompt, <thatHead>)` — seats the named head as opener so the discussion turn is directed at the intended builder. **Why not `assignBuilder`:** that entry requires the room already be in `AwaitingUser` (post-discussion); a cold handoff is `Idle`, so the phase machine correctly requires a discussion turn first. Skipping to a build phase from a cold room is not possible and is not a goal.
+- **Override** — before confirming, the user can change the action via the chip (defaulting to the suggested one). Overriding to a build action seats that head; overriding to `askBoth` applies the "All of you" framing.
 - **Dismiss** archives without running.
 - Consumed and dismissed packets move to `handoff-inbox/consumed/`; malformed or oversized packets move to `handoff-inbox/rejected/` with a system message naming the file.
 - New webview messages are added to the `WebviewMessage` discriminated union in `src/webviewMessages.ts`.
@@ -65,11 +68,9 @@ A valid packet produces a system message plus a confirm chip in the webview:
 
 ## Skill
 
-Canonical sources live in this repo at `skills/hydra-handoff/`:
+Canonical source lives in this repo at `skills/hydra-handoff/SKILL.md` (one file). Both Claude Code and Codex CLI now use the same on-disk skill layout — `~/.claude/skills/<name>/SKILL.md` and `~/.codex/skills/<name>/SKILL.md` — with identical `name` + `description` frontmatter, so a single canonical `SKILL.md` serves both. (This install has `~/.codex/skills/` and no `~/.codex/prompts/`; the earlier "codex-prompt.md" plan is dropped.)
 
-- `SKILL.md` — Claude Code skill format.
-- `codex-prompt.md` — Codex CLI custom-prompt format (installs as `~/.codex/prompts/hydra-handoff.md`).
-- Installer: `pnpm run install:handoff-skill` (a small Node script in `scripts/`) copies both to their global homes, creating directories as needed.
+- Installer: `pnpm run install:handoff-skill` (a small Node script in `scripts/`) copies `SKILL.md` to `~/.claude/skills/hydra-handoff/SKILL.md` and `~/.codex/skills/hydra-handoff/SKILL.md`, creating directories as needed.
 
 Invocation: `/hydra-handoff [action] [notes]` (both args optional). Behavior:
 
