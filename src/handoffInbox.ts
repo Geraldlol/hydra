@@ -313,12 +313,13 @@ export class HandoffInboxController {
     const file = this.pendingFile;
     if (!packet || !file) return;
     const action = overrideAction && isHandoffAction(overrideAction) ? overrideAction : packet.suggestedAction;
-    // Clear pending and archive BEFORE the (possibly long) turn so a watcher
-    // re-scan cannot re-present the same packet.
+    // Clear pending and mark processed BEFORE the (possibly long) archive
+    // await so a watcher re-scan cannot re-present the same packet in the
+    // window before the move completes.
     this.pendingPacket = undefined;
     this.pendingFile = undefined;
-    await moveHandoffFile(file, handoffConsumedDir(this.deps.workspaceRoot()));
     this.processed.add(basename(file));
+    await moveHandoffFile(file, handoffConsumedDir(this.deps.workspaceRoot()));
     this.deps.postState();
     await this.deps.runHandoff(action, packet.prompt);
   }
@@ -327,9 +328,10 @@ export class HandoffInboxController {
     const file = this.pendingFile;
     this.pendingPacket = undefined;
     this.pendingFile = undefined;
+    // Mark processed BEFORE the archive await — see confirm()'s comment.
     if (file) {
-      await moveHandoffFile(file, handoffConsumedDir(this.deps.workspaceRoot()));
       this.processed.add(basename(file));
+      await moveHandoffFile(file, handoffConsumedDir(this.deps.workspaceRoot()));
     }
     await this.deps.appendSystemMessage("Handoff dismissed.");
     this.deps.postState();
