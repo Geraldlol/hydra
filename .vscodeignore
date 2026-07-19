@@ -3,6 +3,7 @@ node_modules/**
 src/**
 test/**
 scripts/**
+skills/**
 docs/**
 dist/test/**
 .vscode/**

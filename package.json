@@ -1601,7 +1601,8 @@
     "prepackage:pre-release": "pnpm test",
     "package:pre-release": "pnpm exec vsce package --no-dependencies --pre-release",
     "install:local": "node scripts/install-local.js",
-    "install:local:existing": "node scripts/install-local.js --skip-package"
+    "install:local:existing": "node scripts/install-local.js --skip-package",
+    "install:handoff-skill": "node scripts/install-handoff-skill.js"
   },
   "devDependencies": {
     "@types/node": "^22.18.10",
