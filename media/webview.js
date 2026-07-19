@@ -46,6 +46,13 @@ const decisionNeeded = document.getElementById("decisionNeeded");
 const decisionBlockers = document.getElementById("decisionBlockers");
 const decisionBoard = document.getElementById("decisionBoard");
 const acceptDefaultBtn = document.getElementById("acceptDefaultBtn");
+const handoffStrip = document.getElementById("handoffStrip");
+const handoffTitle = document.getElementById("handoffTitle");
+const handoffSource = document.getElementById("handoffSource");
+const handoffAction = document.getElementById("handoffAction");
+const handoffConfirmBtn = document.getElementById("handoffConfirmBtn");
+const handoffPreviewBtn = document.getElementById("handoffPreviewBtn");
+const handoffDismissBtn = document.getElementById("handoffDismissBtn");
 const autoAdvanceDefaultsBtn = document.getElementById("autoAdvanceDefaultsBtn");
 const openerBtn = document.getElementById("openerBtn");
 const commandCenterBtn = document.getElementById("commandCenterBtn");
@@ -343,6 +350,11 @@ stopBtn.addEventListener("click", () => vscode.postMessage({ type: "stop" }));
 assignBothBtn.addEventListener("click", () => vscode.postMessage({ type: "assignParallelBuilders" }));
 reviewBtn.addEventListener("click", () => vscode.postMessage({ type: "requestReview" }));
 acceptDefaultBtn.addEventListener("click", () => vscode.postMessage({ type: "acceptDefaultDecision" }));
+handoffConfirmBtn.addEventListener("click", () => {
+  vscode.postMessage({ type: "confirmHandoff", action: handoffAction.value });
+});
+handoffPreviewBtn.addEventListener("click", () => vscode.postMessage({ type: "previewHandoff" }));
+handoffDismissBtn.addEventListener("click", () => vscode.postMessage({ type: "dismissHandoff" }));
 autoAdvanceDefaultsBtn.addEventListener("click", () => vscode.postMessage({ type: "toggleAutoAdvanceActionableDefaults" }));
 handBackBtn.addEventListener("click", () => vscode.postMessage({ type: "handBack" }));
 nativeTerminalsBtn.addEventListener("click", () => vscode.postMessage({ type: transport === "terminalBridge" ? "useOneShotTransport" : "useTerminalBridge" }));
@@ -600,6 +612,7 @@ function renderState(state) {
   renderNativeActions(state);
   renderWorkQueue(state);
   renderDecision(state.latestDecision, state.decisionsCount || 0, state.latestDecisionRisky, !!state.latestDecisionAccepted);
+  renderHandoff(state.pendingHandoff);
   renderAutoAdvanceDefaults(!!state.autoAdvanceActionableDefaults);
   renderDecisionAction(state.decisionAction, !!state.canAcceptDefault, !!state.latestDecisionAccepted, !!state.canStop);
   renderStandings(state.standings || {});
@@ -792,7 +805,7 @@ function persistWebviewState(extra) {
 }
 
 function updateRibbonMinimizedSummary(state) {
-  const ribbonIds = ["setupStrip", "verificationStrip", "nativeActionStrip", "workQueueStrip", "decisionStrip"];
+  const ribbonIds = ["setupStrip", "verificationStrip", "nativeActionStrip", "workQueueStrip", "decisionStrip", "handoffStrip"];
   const hasVisibleRibbon = ribbonIds.some((id) => {
     const el = document.getElementById(id);
     return el && !el.classList.contains("hidden");
@@ -2261,6 +2274,13 @@ function renderDecision(decision, count, risky, accepted) {
   decisionRecommendation.textContent = decision.recommendation || "None";
   decisionNeeded.textContent = accepted ? "Decision accepted" : hasUserQuestion ? needed : "No user decision requested";
   decisionBlockers.textContent = decision.blockers || "none";
+}
+function renderHandoff(pending) {
+  handoffStrip.classList.toggle("hidden", !pending);
+  if (!pending) return;
+  handoffTitle.textContent = pending.title || "Untitled handoff";
+  handoffSource.textContent = pending.source ? " (" + pending.source + ")" : "";
+  if (pending.suggestedAction) handoffAction.value = pending.suggestedAction;
 }
 function renderDecisionAction(action, canAccept, accepted, running) {
   const label = accepted ? (running ? "Default Running" : "Default Accepted") : action && action.label ? action.label : "Accept Default";

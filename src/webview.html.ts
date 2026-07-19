@@ -1648,6 +1648,23 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
             <div class="decision-field"><strong>Blockers</strong><span id="decisionBlockers">None</span></div>
           </div>
         </div>
+        <div id="handoffStrip" class="decision-strip hidden">
+          <div class="decision-title">Handoff<span id="handoffSource" class="decision-count"></span><button class="secondary ribbon-collapse-btn" type="button" data-ribbon-toggle="handoffStrip" data-ribbon-label="Handoff" aria-label="Collapse Handoff" title="Collapse Handoff" aria-expanded="true">&#8722;</button></div>
+          <div class="decision-field decision-needed"><strong>Queued handoff</strong><span id="handoffTitle">None</span></div>
+          <div class="decision-actions">
+            <label class="handoff-action-label">Run as
+              <select id="handoffAction" class="handoff-action-select">
+                <option value="discuss">Discuss</option>
+                <option value="askBoth">Ask all heads</option>
+                <option value="buildCodex">Build (Codex)</option>
+                <option value="buildClaude">Build (Claude)</option>
+              </select>
+            </label>
+            <button id="handoffConfirmBtn" class="suggested" type="button">Confirm</button>
+            <button id="handoffPreviewBtn" class="secondary" type="button">Preview</button>
+            <button id="handoffDismissBtn" class="secondary" type="button">Dismiss</button>
+          </div>
+        </div>
       </div>
 
       <footer class="composer">

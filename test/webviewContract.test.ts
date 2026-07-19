@@ -63,6 +63,13 @@ const boundIds = [
   "fixClaudeBtn",
   "fixCodexBtn",
   "handBackBtn",
+  "handoffStrip",
+  "handoffTitle",
+  "handoffSource",
+  "handoffAction",
+  "handoffConfirmBtn",
+  "handoffPreviewBtn",
+  "handoffDismissBtn",
   "messages",
   "modelRail",
   "nativeActionBoard",
@@ -148,8 +155,10 @@ const hostMessages = [
   "chooseModelOrEffort",
   "changeCapabilityProfile",
   "configureManyHeadsWorkers",
+  "confirmHandoff",
   "clearAttachment",
   "clearAttachments",
+  "dismissHandoff",
   "resetObjective",
   "testTelegram",
   "fixClaudePath",
@@ -168,6 +177,7 @@ const hostMessages = [
   "openTranscript",
   "openVerification",
   "previewNextPrompt",
+  "previewHandoff",
   "copyRunFailurePromptSha",
   "requestReview",
   "resetStuckTurn",
@@ -668,5 +678,16 @@ describe("webview contract", () => {
     assert.match(surface, /function restoreMessageScroll\(scroll\)[\s\S]*setMessageScrollTop\(messagesEl\.scrollHeight\)/);
     assert.match(html, /#messages \{[\s\S]*scroll-behavior: auto;[\s\S]*overflow-anchor: none;/);
     assert.equal((scriptBody.match(/messagesEl\.scrollTop = messagesEl\.scrollHeight/g) ?? []).length, 0, "bottom snap must go through the scroll restorer");
+  });
+
+  test("renders the handoff confirm chip and wires its controls", () => {
+    assert.match(html, /id="handoffStrip"/);
+    assert.match(html, /<select id="handoffAction"/);
+    assert.match(html, /<button id="handoffConfirmBtn" [^>]*type="button"/);
+    assert.match(html, /<button id="handoffPreviewBtn" [^>]*type="button"/);
+    assert.match(html, /<button id="handoffDismissBtn" [^>]*type="button"/);
+    assert.match(surface, /vscode\.postMessage\(\{ type: "confirmHandoff", action: [^}]+\}\)/);
+    assert.match(surface, /vscode\.postMessage\(\{ type: "dismissHandoff" \}\)/);
+    assert.match(surface, /vscode\.postMessage\(\{ type: "previewHandoff" \}\)/);
   });
 });
