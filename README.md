@@ -374,6 +374,10 @@ Domain Elo starts at 1000 with K=24. Decisive results move winner and loser by e
 
 Hydra computes a live Work Queue from existing durable state: actionable decision defaults, failing verification, and failed or cancelled native actions. Queue items appear in the room with one-click actions such as Accept, Discuss, or Rerun. Use Dismiss to hide an item until its underlying source changes, or Snooze to hide it for one hour. The queue items themselves are the current attention view over `.hydra/decisions.jsonl`, `.hydra/verification.jsonl`, and `.hydra/native-actions.jsonl`; only dismiss/snooze state is stored separately in `.hydra/work-queue.jsonl`.
 
+## Handing off from the Codex / Claude CLI
+
+Run `/hydra-handoff [discuss|askBoth|buildCodex|buildClaude] [notes]` inside a Codex or Claude Code session to package the current work into a handoff. It writes a packet to `.hydra/handoff-inbox/`; the Hydra room (open or next opened in that workspace) shows a confirm chip where you Preview, override the action, and Confirm to run it — or Dismiss. Install the skill once with `pnpm run install:handoff-skill`.
+
 ## Session Brief
 
 Use `Hydra: Open Session Brief` or the in-room Session Brief button to refresh and open `.hydra/session-brief.md`. The brief is a compact human-facing snapshot of the current objective, phase, transport, Work Queue, latest decision, latest verification, recent native actions, and recent room messages. It is not automatically injected into agent prompts; it exists so you can quickly recover the room state after reloads or handoffs without rereading the full transcript.
