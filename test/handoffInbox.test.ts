@@ -1,8 +1,18 @@
 import { describe, test } from "node:test";
 import { strict as assert } from "node:assert";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import {
   HANDOFF_ACTIONS,
+  HANDOFF_MAX_FILE_BYTES,
   HANDOFF_MAX_TITLE_CHARS,
+  ensureHandoffInboxDirs,
+  handoffConsumedDir,
+  handoffInboxDir,
+  handoffRejectedDir,
+  moveHandoffFile,
+  scanHandoffInbox,
   validateHandoffPacket,
 } from "../src/handoffInbox";
 
@@ -90,5 +100,81 @@ describe("validateHandoffPacket", () => {
     assert.equal(long.ok, true);
     if (!long.ok) return;
     assert.ok(long.packet.source.length <= 40);
+  });
+});
+
+describe("scanHandoffInbox", () => {
+  async function tmpWorkspace(): Promise<string> {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-handoff-"));
+    await ensureHandoffInboxDirs(root);
+    return root;
+  }
+  async function writePacket(root: string, name: string, body: unknown): Promise<string> {
+    const file = path.join(handoffInboxDir(root), name);
+    await fs.writeFile(file, typeof body === "string" ? body : JSON.stringify(body), "utf8");
+    return file;
+  }
+  function goodPacket(): Record<string, unknown> {
+    return {
+      version: 1,
+      createdAt: "2026-07-19T18:30:00Z",
+      source: "codex",
+      title: "Do the thing",
+      prompt: "Please do the thing.",
+      suggestedAction: "discuss",
+    };
+  }
+
+  test("returns an empty result when the inbox does not exist", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-handoff-empty-"));
+    const scan = await scanHandoffInbox(root);
+    assert.deepEqual(scan.valid, []);
+    assert.deepEqual(scan.rejected, []);
+  });
+
+  test("collects a valid packet and ignores .tmp and subdirectories", async () => {
+    const root = await tmpWorkspace();
+    await writePacket(root, "20260719T183000Z-do-the-thing.json", goodPacket());
+    await writePacket(root, "20260719T183001Z-half-written.json.tmp", goodPacket());
+    const scan = await scanHandoffInbox(root);
+    assert.equal(scan.valid.length, 1);
+    assert.equal(scan.rejected.length, 0);
+    assert.equal(scan.valid[0]?.packet.title, "Do the thing");
+  });
+
+  test("rejects malformed JSON and oversized files", async () => {
+    const root = await tmpWorkspace();
+    await writePacket(root, "20260719T183000Z-bad.json", "{ not json");
+    await writePacket(root, "20260719T183002Z-big.json", "x".repeat(HANDOFF_MAX_FILE_BYTES + 1));
+    const scan = await scanHandoffInbox(root);
+    assert.equal(scan.valid.length, 0);
+    assert.equal(scan.rejected.length, 2);
+  });
+
+  test("rejects a schema-invalid packet", async () => {
+    const root = await tmpWorkspace();
+    await writePacket(root, "20260719T183000Z-nope.json", { version: 1, title: "", prompt: "", suggestedAction: "x" });
+    const scan = await scanHandoffInbox(root);
+    assert.equal(scan.valid.length, 0);
+    assert.equal(scan.rejected.length, 1);
+  });
+});
+
+describe("moveHandoffFile", () => {
+  test("moves a file into the destination directory", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-handoff-move-"));
+    await ensureHandoffInboxDirs(root);
+    const file = path.join(handoffInboxDir(root), "20260719T183000Z-x.json");
+    await fs.writeFile(file, "{}", "utf8");
+    await moveHandoffFile(file, handoffConsumedDir(root));
+    await assert.rejects(() => fs.access(file));
+    await fs.access(path.join(handoffConsumedDir(root), "20260719T183000Z-x.json"));
+  });
+
+  test("does not throw when the source was already moved", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-handoff-move2-"));
+    await ensureHandoffInboxDirs(root);
+    const missing = path.join(handoffInboxDir(root), "gone.json");
+    await moveHandoffFile(missing, handoffRejectedDir(root));
   });
 });

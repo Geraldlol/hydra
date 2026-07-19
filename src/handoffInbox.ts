@@ -4,6 +4,9 @@
 // parses and surfaces them — nothing here ever spawns an agent. The room's
 // confirm chip is the mandatory gate.
 
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+
 export type HandoffAction = "discuss" | "askBoth" | "buildCodex" | "buildClaude";
 
 export interface HandoffPacket {
@@ -79,4 +82,104 @@ export function validateHandoffPacket(raw: unknown): HandoffValidationResult {
       context,
     },
   };
+}
+
+export function handoffInboxDir(workspaceRoot: string): string {
+  return path.join(workspaceRoot, ".hydra", "handoff-inbox");
+}
+
+export function handoffConsumedDir(workspaceRoot: string): string {
+  return path.join(handoffInboxDir(workspaceRoot), "consumed");
+}
+
+export function handoffRejectedDir(workspaceRoot: string): string {
+  return path.join(handoffInboxDir(workspaceRoot), "rejected");
+}
+
+export async function ensureHandoffInboxDirs(workspaceRoot: string): Promise<void> {
+  // Creating the leaf children creates the parent inbox dir too.
+  await fs.mkdir(handoffConsumedDir(workspaceRoot), { recursive: true });
+  await fs.mkdir(handoffRejectedDir(workspaceRoot), { recursive: true });
+}
+
+export interface ScannedHandoff {
+  file: string;
+  packet: HandoffPacket;
+}
+
+export interface HandoffScanResult {
+  valid: ScannedHandoff[];
+  rejected: { file: string; reason: string }[];
+}
+
+export async function scanHandoffInbox(workspaceRoot: string): Promise<HandoffScanResult> {
+  const dir = handoffInboxDir(workspaceRoot);
+  const result: HandoffScanResult = { valid: [], rejected: [] };
+
+  let entries: string[];
+  try {
+    entries = await fs.readdir(dir);
+  } catch {
+    // ENOENT before the inbox is ensured on first run — nothing to scan.
+    return result;
+  }
+
+  for (const name of entries) {
+    // Only *.json are packets. This skips *.tmp half-writes and the
+    // consumed/ and rejected/ subdirectory names.
+    if (!name.endsWith(".json")) continue;
+    const file = path.join(dir, name);
+
+    let stat;
+    try {
+      stat = await fs.stat(file);
+    } catch {
+      // Vanished between readdir and stat (concurrent consume) — skip.
+      continue;
+    }
+    if (!stat.isFile()) continue;
+    if (stat.size > HANDOFF_MAX_FILE_BYTES) {
+      result.rejected.push({ file, reason: `file exceeds ${HANDOFF_MAX_FILE_BYTES} bytes` });
+      continue;
+    }
+
+    let text: string;
+    try {
+      text = await fs.readFile(file, "utf8");
+    } catch {
+      // Race with a consume/reject move — skip; a later scan re-reads if present.
+      continue;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      result.rejected.push({ file, reason: "invalid JSON" });
+      continue;
+    }
+
+    const validation = validateHandoffPacket(parsed);
+    if (validation.ok) result.valid.push({ file, packet: validation.packet });
+    else result.rejected.push({ file, reason: validation.reason });
+  }
+
+  return result;
+}
+
+export async function moveHandoffFile(file: string, destDir: string): Promise<void> {
+  await fs.mkdir(destDir, { recursive: true });
+  const dest = path.join(destDir, path.basename(file));
+  try {
+    await fs.rename(file, dest);
+  } catch {
+    // rename fails across devices, or on Windows when dest exists. Fall back to
+    // copy+unlink; if the source is already gone (concurrent scan), do nothing.
+    try {
+      await fs.copyFile(file, dest);
+      await fs.unlink(file);
+    } catch {
+      // Source already moved by a concurrent scan — nothing to do.
+    }
+  }
 }
