@@ -1598,7 +1598,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.18.10",
-    "@types/vscode": "1.120.0",
+    "@types/vscode": "1.125.0",
     "@vscode/test-cli": "0.0.15",
     "@vscode/test-electron": "3.0.0",
     "@vscode/vsce": "^3.9.2",
