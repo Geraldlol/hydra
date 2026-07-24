@@ -627,10 +627,18 @@ function renderState(state) {
   renderAttachmentTray(state.pendingAttachments || []);
   const hasAttachments = Array.isArray(state.pendingAttachments) && state.pendingAttachments.length > 0;
   sendBtn.disabled = !state.canSend;
-  sendBtn.textContent = state.canStop ? "QUEUE" : "SEND";
-  sendBtn.title = state.canStop
-    ? "Queue this follow-up and send it after the active turn finishes"
-    : "Send message";
+  const liveSteeringTargetCount = Number.isFinite(state.liveSteeringTargetCount)
+    ? Math.max(0, Math.floor(state.liveSteeringTargetCount))
+    : 0;
+  const canSteerLive = !!state.canStop && liveSteeringTargetCount > 0;
+  sendBtn.textContent = canSteerLive
+    ? `STEER (${liveSteeringTargetCount})`
+    : state.canStop ? "QUEUE" : "SEND";
+  sendBtn.title = canSteerLive
+    ? `Send non-interrupting steering to ${liveSteeringTargetCount} active native head${liveSteeringTargetCount === 1 ? "" : "s"}`
+    : state.canStop
+      ? "Queue this follow-up and send it after the active turn finishes"
+      : "Send message";
   openerBtn.disabled = !state.canSend || currentRoster.length < 2;
   attachFilesBtn.disabled = !state.canAttachFiles;
   clearAttachmentsBtn.disabled = !hasAttachments;

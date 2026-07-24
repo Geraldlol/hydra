@@ -140,34 +140,87 @@ function assistantText(message: Record<string, unknown>): string {
 }
 
 class CodexLiveTextExtractor extends LineBufferedExtractor {
-  // Codex item events carry the message's CUMULATIVE text so far, not a
-  // delta - emit only the unseen suffix per item id.
-  private emittedByItemId = new Map<string, string>();
+  // Native `codex exec --json` item events carry cumulative text. Hydra's
+  // App Server adapter emits live-only `item.delta` envelopes so it does not
+  // construct an O(n^2) cumulative JSONL stream. One state machine supports
+  // both shapes and suppresses the final cumulative completion duplicate.
+  private emittedByItemId = new Map<string, {
+    cumulative?: string;
+    length: number;
+    deltaMode: boolean;
+  }>();
   private lastItemId: string | undefined;
 
   protected extractFromLine(line: string): string {
     const event = parseCodexEventLine(line);
     if (!event) return "";
+    const eventRecord = event as unknown as Record<string, unknown>;
+    if (eventRecord.type === "item.delta") {
+      const item = eventRecord.item;
+      if (!item || typeof item !== "object") return "";
+      const record = item as Record<string, unknown>;
+      if (record.type !== "agent_message") return "";
+      const id = typeof record.id === "string" ? record.id : "";
+      const delta = typeof record.delta === "string" ? record.delta : "";
+      if (!id || !delta) return "";
+      const state = this.stateFor(id);
+      const separator = this.lastItemId !== undefined
+        && this.lastItemId !== id
+        && state.length === 0
+        ? "\n\n"
+        : "";
+      state.length += delta.length;
+      state.cumulative = undefined;
+      state.deltaMode = true;
+      this.lastItemId = id;
+      return separator + delta;
+    }
     if (event.type !== "item.started" && event.type !== "item.updated" && event.type !== "item.completed") return "";
     const item = event.item;
     if (!item || typeof item !== "object" || item.type !== "agent_message") return "";
     const { id, text } = item as AgentMessageItem;
     if (typeof text !== "string" || typeof id !== "string") return "";
+    const state = this.stateFor(id);
+    let suffix: string;
+    if (state.deltaMode) {
+      if (text.length < state.length) return "";
+      suffix = text.slice(state.length);
+    } else {
+      const cumulative = state.cumulative ?? "";
+      if (!text.startsWith(cumulative)) {
+        // The item's text was rewritten rather than extended (shouldn't
+        // happen per the wire contract). Never emit a garbled splice.
+        return "";
+      }
+      suffix = text.slice(cumulative.length);
+    }
+    state.cumulative = text;
+    state.length = text.length;
+    state.deltaMode = false;
+    if (!suffix) return "";
+    const separator = this.lastItemId !== undefined
+      && this.lastItemId !== id
+      && state.length === suffix.length
+      ? "\n\n"
+      : "";
+    this.lastItemId = id;
+    return separator + suffix;
+  }
+
+  private stateFor(id: string): {
+    cumulative?: string;
+    length: number;
+    deltaMode: boolean;
+  } {
     if (!this.emittedByItemId.has(id) && this.emittedByItemId.size >= MAX_TRACKED_CODEX_ITEMS) {
       const oldest = this.emittedByItemId.keys().next().value as string | undefined;
       if (oldest !== undefined) this.emittedByItemId.delete(oldest);
     }
-    const emitted = this.emittedByItemId.get(id) ?? "";
-    if (!text.startsWith(emitted)) {
-      // The item's text was rewritten rather than extended (shouldn't happen
-      // per the wire contract, but never emit a garbled splice if it does).
-      return "";
+    let state = this.emittedByItemId.get(id);
+    if (!state) {
+      state = { length: 0, deltaMode: false };
+      this.emittedByItemId.set(id, state);
     }
-    const suffix = text.slice(emitted.length);
-    if (!suffix) return "";
-    const separator = this.lastItemId !== undefined && this.lastItemId !== id && emitted === "" ? "\n\n" : "";
-    this.emittedByItemId.set(id, text);
-    this.lastItemId = id;
-    return separator + suffix;
+    return state;
   }
 }

@@ -345,6 +345,18 @@ import {
   withClaudeStreamJsonArgs,
 } from "./claudeTransport";
 import {
+  SteeringController,
+  SteeringRequestRejectedError,
+} from "./steeringController";
+import type { SteeringWorkClass } from "./steeringProtocol";
+import { PersistedSteeringStore } from "./steeringStore";
+import {
+  openFileSteeringPersistence,
+  resolveOrphanedSteeringOnStartup,
+  startSteeringOwnerLease,
+} from "./steeringPersistence";
+import { createNativeSteeringRunner } from "./nativeSteeringRuntime";
+import {
   TelegramController,
   formatTelegramInboundPrompt,
   type TelegramInboundTurnOutcome,
@@ -422,6 +434,14 @@ const DUEL_COMMITMENT_HEAD_TIMEOUT_MS = 180_000;
 const DUEL_TERMINAL_LATE_SECRET_SWEEP_DELAY_MS = DUEL_COMMITMENT_HEAD_TIMEOUT_MS + 5_000;
 const MAX_AGENT_DUEL_AUTOMATION_ATTEMPTS = 3;
 const AGENT_DUEL_AUTOMATION_RETRY_DELAYS_MS = [5_000, 30_000] as const;
+// Mission Contract lands in the adjacent foundation slice. Until then every
+// steering receipt binds explicitly to this well-known "not yet contracted"
+// state rather than pretending the current objective is an authoritative
+// contract.
+const UNBOUND_MISSION_CONTRACT_SHA256 = crypto
+  .createHash("sha256")
+  .update("hydra:mission-contract:unbound:v1", "utf8")
+  .digest("hex");
 
 // Keep only the well-formed (finite, non-negative) price fields the user
 // actually supplied so the override stays partial — resolveModelPrices fills
@@ -447,6 +467,12 @@ const ONE_SHOT_WORKSPACE_INSTRUCTIONS_MAX_CHARS_DEFAULTS = {
 } as const;
 
 function promptTranscriptScope(phase: Phase): "discussion" | "build" | "review" {
+  if (phase === "build") return "build";
+  if (phase === "review") return "review";
+  return "discussion";
+}
+
+function steeringWorkClassForPhase(phase: Phase): SteeringWorkClass {
   if (phase === "build") return "build";
   if (phase === "review") return "review";
   return "discussion";
@@ -724,6 +750,13 @@ export class HydraRoomPanel {
   private workspaceRoot!: string;
   private workspaceReady = false;
   private currentAbort: AbortController | undefined;
+  // Steering is intra-turn input, not a phase transition. runTurn assigns one
+  // room-turn generation; each native provider call independently registers
+  // and closes its exact steerable handle beneath that generation.
+  private currentRoomTurnId: string | undefined;
+  private steeringController: SteeringController | undefined;
+  private steeringInitializationError: string | undefined;
+  private steeringRecoveryNotice: string | undefined;
   // Why: a monotonic counter bumped each time a user Stop actually aborts an
   // in-flight turn. The Telegram inbound path snapshots it before dispatching a
   // turn and re-reads it after, so it can skip the auto-reply when the user
@@ -981,6 +1014,35 @@ export class HydraRoomPanel {
     await ensureManyHeadsSmokeFile(this.manyHeadsSmokeUri.fsPath);
     await ensureJsonlFile(this.usageUri.fsPath);
     await ensureFile(this.telegramInboundStateUri.fsPath, "{\"seenIds\":[]}\n");
+    try {
+      const { persistence } = await openFileSteeringPersistence(this.workspacePrivateStorageRoot());
+      const steeringOwnerLease = await startSteeringOwnerLease(
+        this.workspacePrivateStorageRoot(),
+        this.sessionId,
+      );
+      this.disposables.push(steeringOwnerLease);
+      const steeringStore = await PersistedSteeringStore.open(persistence);
+      const recoveredTargets = await resolveOrphanedSteeringOnStartup(
+        steeringStore,
+        (ownerId) => steeringOwnerLease.isOwnerActive(ownerId),
+      );
+      this.steeringController = new SteeringController({
+        store: steeringStore,
+        ownerId: this.sessionId,
+      });
+      this.steeringInitializationError = undefined;
+      this.steeringRecoveryNotice = recoveredTargets > 0
+        ? `Hydra recovered ${recoveredTargets} orphaned steering target(s) without replaying them.`
+        : undefined;
+    } catch {
+      // A partial or hand-edited private ledger must never be replayed
+      // selectively. Normal one-shot operation remains available, but live
+      // steering stays fail-closed for this extension host.
+      this.steeringController = undefined;
+      this.steeringInitializationError =
+        "Live steering is disabled because its private ledger failed strict replay validation.";
+      this.steeringRecoveryNotice = undefined;
+    }
     await ensureScoreboardLedger(this.scoreEventsUri.fsPath);
     // Attach before the first replay, then replay through the same serialized
     // lane used by watch events. An append in another extension host cannot
@@ -1059,6 +1121,12 @@ export class HydraRoomPanel {
     const existing = await readTranscript(this.transcriptUri.fsPath);
     if (this.disposed) return;
     this.setMessages(existing.map((m, i) => ({ ...m, id: `prev-${i}` })));
+    if (this.steeringInitializationError) {
+      this.appendSystemMessageToUi(this.steeringInitializationError);
+    }
+    if (this.steeringRecoveryNotice) {
+      this.appendSystemMessageToUi(this.steeringRecoveryNotice);
+    }
     for (const duel of this.duels.activeDuels) {
       if (
         duel.createdBy === "hydra-runtime"
@@ -1119,6 +1187,11 @@ export class HydraRoomPanel {
       return;
     }
     if (isInFlight(this.state)) {
+      // Only the trusted local composer may enter a native provider session.
+      // Telegram and other routed sends retain their existing fenced queue.
+      if (!options.telegramChatId && await this.tryDeliverLiveSteering(prepared)) {
+        return;
+      }
       const queued = this.appendUserMessageToUi(prepared.displayText);
       this.queuedUserMessages.push({ ...prepared, opener: selectedOpener, timestamp: queued.timestamp, telegramChatId: options.telegramChatId });
       await this.appendSystemMessage("Hydra queued your message until the current turn finishes.");
@@ -1132,6 +1205,55 @@ export class HydraRoomPanel {
     }
     if (!this.autoAdvanceInProgress) this.autoAdvanceSendInstructionCount = 0;
     await this.startUserMessageTurn(prepared.displayText, prepared.promptText, selectedOpener, { alreadyAppended: false });
+  }
+
+  private async tryDeliverLiveSteering(prepared: PreparedRoomMessage): Promise<boolean> {
+    const controller = this.steeringController;
+    const roomTurnId = this.currentRoomTurnId;
+    if (!controller || !roomTurnId) return false;
+    const targets = controller.targetSelections().filter((target) =>
+      target.roomTurnId === roomTurnId && target.capability.kind === "live"
+    );
+    if (targets.length === 0) return false;
+
+    // Persist the user's steering as a first-class transcript message before
+    // provider delivery. If delivery becomes uncertain, the visible message
+    // plus target receipt remains the durable truth; Hydra never retries it.
+    await this.appendUserMessage(prepared.displayText);
+    try {
+      const receipt = await controller.send({
+        source: "localUser",
+        intent: "steer",
+        roomTurnId,
+        text: prepared.promptText,
+        targets,
+      });
+      const acknowledged = receipt.outcomes.filter((outcome) => outcome.outcome === "acknowledged");
+      const uncertain = receipt.outcomes.filter((outcome) => outcome.outcome === "deliveryUnknown");
+      const rejected = receipt.outcomes.length - acknowledged.length - uncertain.length;
+      const deliveryLabels = Array.from(new Set(
+        receipt.outcomes
+          .map((outcome) => outcome.acknowledgedDelivery)
+          .filter((delivery): delivery is NonNullable<typeof delivery> => !!delivery),
+      ));
+      await this.appendSystemMessage(
+        [
+          `Steering receipt ${receipt.steeringId}: ${acknowledged.length}/${receipt.outcomes.length} target(s) acknowledged.`,
+          deliveryLabels.length > 0 ? `Delivery: ${deliveryLabels.join(", ")}.` : "",
+          uncertain.length > 0 ? `${uncertain.length} target(s) have unknown delivery; Hydra will not retry automatically.` : "",
+          rejected > 0 ? `${rejected} target(s) rejected or missed the active window.` : "",
+        ].filter(Boolean).join(" "),
+      );
+    } catch (error) {
+      const detail = error instanceof SteeringRequestRejectedError
+        ? `${error.code}: ${error.message}`
+        : "provider/controller failure";
+      await this.appendSystemMessage(
+        `Steering was not accepted (${detail}). Hydra did not retry or interrupt the active agents.`,
+      );
+    }
+    this.postState();
+    return true;
   }
 
   // Telegram-inbound entry point: dispatch a user turn exactly like
@@ -5096,7 +5218,9 @@ export class HydraRoomPanel {
     options?: { clearSuggestedBuilder?: boolean }
   ): Promise<void> {
     const ctrl = new AbortController();
+    const roomTurnId = `room-turn-${crypto.randomUUID()}`;
     this.currentAbort = ctrl;
+    this.currentRoomTurnId = roomTurnId;
     if (options?.clearSuggestedBuilder) this.suggestedBuilder = undefined;
     let finalizePending: (() => Promise<void>) | undefined;
     try {
@@ -5109,6 +5233,9 @@ export class HydraRoomPanel {
       // early-return branches inside the body already cleared currentAbort and
       // posted state; the guard below makes that work a no-op in those cases.
       if (finalizePending) await finalizePending();
+      if (this.currentRoomTurnId === roomTurnId) {
+        this.currentRoomTurnId = undefined;
+      }
       if (this.currentAbort === ctrl) {
         this.currentAbort = undefined;
         this.postState();
@@ -6216,9 +6343,19 @@ export class HydraRoomPanel {
       onReplaceText?: (text: string) => void;
       onLiveChannelEvent?: (event: LiveChannelEvent) => void;
       recordFailureCard?: (result: RunResult) => void;
+      run?: (onRawChunk: (chunk: string) => void) => Promise<RunResult>;
     } = {}
   ): Promise<RunResult> {
-    const { traceKind, captureLiveChannel = true, sensitive = false, onChunk, onReplaceText, onLiveChannelEvent, recordFailureCard } = opts;
+    const {
+      traceKind,
+      captureLiveChannel = true,
+      sensitive = false,
+      onChunk,
+      onReplaceText,
+      onLiveChannelEvent,
+      recordFailureCard,
+      run,
+    } = opts;
     const spawn = prepared.spawn;
     const promptSha256 = sha256(prompt);
     const privatePaths = prepared.privateArtifacts
@@ -6273,12 +6410,15 @@ export class HydraRoomPanel {
         const text = liveText ? liveText.push(chunk) : chunk;
         if (text) onChunk?.(text);
       };
-      const rawResult = await runAgent(spawn, prompt, timeout, (rawChunk) => {
+      const acceptRawChunk = (rawChunk: string): void => {
         const browserSafeChunk = browserRedactor
           ? browserRedactor.push(rawChunk)
           : browserBroker?.redactAgentText(agent, rawChunk) ?? rawChunk;
         emitBrowserSafeChunk(browserSafeChunk);
-      }, signal);
+      };
+      const rawResult = run
+        ? await run(acceptRawChunk)
+        : await runAgent(spawn, prompt, timeout, acceptRawChunk, signal);
       emitBrowserSafeChunk(browserRedactor?.flush() ?? "");
       const result = browserBroker?.redactAgentResult(agent, rawResult) ?? rawResult;
       await liveChannel?.flush();
@@ -6828,7 +6968,19 @@ export class HydraRoomPanel {
       const rawResult =
         dispatch.transport === "http"
           ? await this.runHttpPipeline(agent, phase, dispatch.invocation, prompt, messageId, timeout, signal, boundTraceId, activity.markOutput)
-          : await this.runAgentTransport(agent, phase, dispatch.spawn, prompt, messageId, timeout, signal, forceTerminalBridge, boundTraceId, activity.markOutput);
+          : await this.runAgentTransport(
+              agent,
+              phase,
+              dispatch.spawn,
+              prompt,
+              messageId,
+              timeout,
+              signal,
+              forceTerminalBridge,
+              boundTraceId,
+              activity.markOutput,
+              manyHeadsDispatch ? "nestedWorker" : steeringWorkClassForPhase(phase),
+            );
       const result = HydraRoomPanel.browserBroker?.redactAgentResult(agent, rawResult) ?? rawResult;
       await this.finalizePendingMessage(messageId, result);
       const finalized = this.messagesById.get(messageId);
@@ -6888,6 +7040,42 @@ export class HydraRoomPanel {
     return { allowed: false, message };
   }
 
+  private createSteerableNativeRunner(
+    agent: AgentId,
+    phase: Phase,
+    prepared: PreparedOneShotSpawn,
+    prompt: string,
+    timeout: number,
+    signal: AbortSignal,
+    traceId: string,
+    workClass: SteeringWorkClass,
+  ): ((onRawChunk: (chunk: string) => void) => Promise<RunResult>) | undefined {
+    const controller = this.steeringController;
+    const roomTurnId = this.currentRoomTurnId;
+    const definition = getAgentDefinition(agent);
+    if (!controller || !roomTurnId || !definition) return undefined;
+
+    const steeringTransport = adapterForKind(definition.kind).steeringTransport;
+    if (!steeringTransport) return undefined;
+    return createNativeSteeringRunner({
+      transport: steeringTransport,
+      controller,
+      spawn: prepared.spawn,
+      prompt,
+      timeoutMs: timeout,
+      signal,
+      callId: traceId,
+      agentId: agent,
+      roomTurnId,
+      ownerId: this.sessionId,
+      missionContractSha256: UNBOUND_MISSION_CONTRACT_SHA256,
+      workClass,
+      phaseSnapshot: phase,
+      appendTrace: (record) => this.appendAgentCallTrace(record),
+      onRegistrationChanged: () => this.postState(),
+    });
+  }
+
   private async runAgentTransport(
     agent: AgentId,
     phase: Phase,
@@ -6898,7 +7086,8 @@ export class HydraRoomPanel {
     signal: AbortSignal,
     forceTerminalBridge = false,
     traceIdOverride?: string,
-    markOutput?: () => void
+    markOutput?: () => void,
+    steeringWorkClass: SteeringWorkClass = steeringWorkClassForPhase(phase),
   ): Promise<RunResult> {
     const traceId = traceIdOverride ?? makeTraceId(agent, phase);
     const startedAt = Date.now();
@@ -7003,6 +7192,16 @@ export class HydraRoomPanel {
       }
 
       const prepared = await this.prepareOneShotRequestFiles(agent, phase, spawn, prompt);
+      const steerableRun = this.createSteerableNativeRunner(
+        agent,
+        phase,
+        prepared,
+        prompt,
+        timeout,
+        signal,
+        traceId,
+        steeringWorkClass,
+      );
       return await this.runOneShotPipeline(agent, phase, prepared, prompt, timeout, signal, traceId, startedAt, {
         onChunk: (chunk) => {
           markOutput?.();
@@ -7030,6 +7229,7 @@ export class HydraRoomPanel {
             requestFiles: requestFileTrace(prepared),
           });
         },
+        ...(steerableRun ? { run: steerableRun } : {}),
       });
     } catch (err) {
       const result = agentCallFailureResult(err instanceof Error ? err.message : String(err));
@@ -9123,6 +9323,11 @@ export class HydraRoomPanel {
     const latestDecisionAccepted = !!latestDecision && latestDecision.timestamp === this.acceptedDefaultDecisionTimestamp;
     const duelReadiness = this.duelReadinessSnapshot();
     const duelRatings = this.duelRatingsWithBaselines();
+    const liveSteeringTargets = this.currentRoomTurnId && this.steeringController
+      ? this.steeringController.targetSelections().filter((target) =>
+          target.roomTurnId === this.currentRoomTurnId && target.capability.kind === "live"
+        )
+      : [];
     try {
       this.panel.webview.postMessage({
         type: "state",
@@ -9133,6 +9338,11 @@ export class HydraRoomPanel {
         canStop,
         unconfirmedNativeTermination: this.unconfirmedNativeTermination,
         queuedUserMessageCount: this.queuedUserMessages.length,
+        liveSteeringTargetCount: liveSteeringTargets.length,
+        liveSteeringDeliveries: Array.from(new Set(
+          liveSteeringTargets.map((target) => target.capability.delivery),
+        )),
+        steeringInitializationError: this.steeringInitializationError,
         canPokeNativeTerminals: automationReady && !isInFlight(this.state) && !this.terminalPokeInFlight && !duelAutomationBusy,
         canClearNativeActions: this.workspaceReady && !this.terminalPokeInFlight,
         canAssignBuilder: automationReady && this.state.name === "AwaitingUser",
