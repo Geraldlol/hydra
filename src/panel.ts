@@ -329,6 +329,10 @@ import {
   type ManyHeadsSmokeAgentCall,
   type ManyHeadsSmokeLiveFile,
 } from "./manyHeadsSmoke";
+import {
+  formatMissionFlightSmokeReport,
+  runMissionFlightSmokeTest as runIsolatedMissionFlightSmokeTest,
+} from "./missionFlightSmoke";
 import type { WebviewMessage } from "./webviewMessages";
 import {
   attachmentDisplaySummary,
@@ -381,10 +385,19 @@ import {
   createFlightRecorderRuntime,
   mapFlightRunResult,
   type FlightAgentRunOperation,
+  type FlightAuxiliaryOperation,
   type FlightRecordedOutcome,
   type FlightRecorderRuntime,
   type FlightRoomTurnContext,
+  type RecordFlightPhaseTransitionInput,
 } from "./flightRecorderRuntime";
+import {
+  buildFlightNativeActionProjection,
+  buildFlightUsageProjection,
+  buildFlightVerificationProjection,
+  buildFlightVerificationStart,
+  type FlightVerificationSourceBinding,
+} from "./flightRecorderProjection";
 import type {
   FlightOutputMetadata,
   FlightSteeringChainMetadata,
@@ -630,9 +643,38 @@ type AgentInvocationPlan =
   | { readonly kind: "failed"; readonly error: unknown };
 
 interface FlightAgentCallState {
+  readonly runId: string;
+  readonly model: string;
+  readonly roomTurn?: FlightRoomTurnContext;
+  operation?: FlightAgentRunOperation;
+  pendingUsage?: UsageRecord;
   terminalSteeringChain: FlightSteeringChainMetadata;
   actualTransport: string;
   outcomeOverride?: FlightRecordedOutcome;
+}
+
+interface ActiveFlightTurn {
+  readonly roomTurnId: string;
+  readonly flightTurn?: FlightRoomTurnContext;
+  cancellationReason?: "reset" | "stop";
+  dispatchStarted: boolean;
+  terminalized: boolean;
+  abortController?: AbortController;
+}
+
+interface PreparedFlightTurn {
+  readonly roomTurnId: string;
+  readonly authorization: Extract<
+    MissionDispatchAuthorization,
+    { kind: "bound" }
+  >;
+  readonly flightTurn?: FlightRoomTurnContext;
+  readonly activeFlightTurn?: ActiveFlightTurn;
+}
+
+interface RecordedNativeAction {
+  readonly receipt: NativeActionReceipt;
+  readonly persisted: boolean;
 }
 
 interface QueuedUserMessage {
@@ -779,6 +821,7 @@ export class HydraRoomPanel {
   private pendingAttachments: PendingRoomAttachment[] = [];
   private drainingQueuedUserMessages = false;
   private verificationRunning = false;
+  private missionFlightSmokeRunning = false;
   private autopilotRunning = false;
   private autopilotSummary = "Not run";
   private terminalPokeInFlight = false;
@@ -801,6 +844,12 @@ export class HydraRoomPanel {
   // room-turn generation; each native provider call independently registers
   // and closes its exact steerable handle beneath that generation.
   private currentRoomTurnId: string | undefined;
+  // Reset uses the exact owning context only; normal transitions always receive
+  // their context as an explicit argument. runTurn restores this slot across
+  // nested auto-advance so a stuck inner turn cannot be attributed to its
+  // outer caller.
+  private currentFlightTurn: FlightRoomTurnContext | undefined;
+  private readonly activeFlightTurns: ActiveFlightTurn[] = [];
   // UI/prompt-context snapshot only. Provider authorization is carried by an
   // immutable MissionDispatchAuthorization argument and never reads this
   // mutable field, so Reset or overlapping cleanup cannot retarget a call.
@@ -809,6 +858,9 @@ export class HydraRoomPanel {
   private missionContractInitializationError: string | undefined;
   private flightRecorderRuntime: FlightRecorderRuntime | undefined;
   private flightRecorderNotice: string | undefined;
+  private flightTransitionReservationInFlight = false;
+  private flightResetGeneration = 0;
+  private flightStopGeneration = 0;
   private initializationMessagesLoaded = false;
   private steeringController: SteeringController | undefined;
   private steeringInitializationError: string | undefined;
@@ -1257,9 +1309,14 @@ export class HydraRoomPanel {
   async sendUserMessage(
     text: string,
     opener: AgentId = this.getFirstSpeaker(),
-    options: { telegramChatId?: string; consumePendingAttachments?: boolean } = {}
+    options: {
+      telegramChatId?: string;
+      consumePendingAttachments?: boolean;
+      signal?: AbortSignal;
+    } = {}
   ): Promise<void> {
     await this.ready();
+    if (options.signal?.aborted) return;
     if (this.unconfirmedNativeTermination) {
       this.appendSystemMessageToUi(this.unconfirmedTerminationMessage());
       this.postState();
@@ -1273,6 +1330,20 @@ export class HydraRoomPanel {
       return;
     }
     const selectedOpener = normalizeAgentId(opener, this.getFirstSpeaker(), this.roster());
+    if (this.flightTransitionReservationInFlight) {
+      const queued = this.appendUserMessageToUi(prepared.displayText);
+      this.queuedUserMessages.push({
+        ...prepared,
+        opener: selectedOpener,
+        timestamp: queued.timestamp,
+        telegramChatId: options.telegramChatId,
+      });
+      await this.appendSystemMessage(
+        "Hydra queued your message until the current phase transition is admitted.",
+      );
+      this.postState();
+      return;
+    }
     if (this.terminalPokeInFlight) {
       const queued = this.appendUserMessageToUi(prepared.displayText);
       this.queuedUserMessages.push({ ...prepared, opener: selectedOpener, timestamp: queued.timestamp, telegramChatId: options.telegramChatId });
@@ -1305,6 +1376,7 @@ export class HydraRoomPanel {
       return;
     }
     if (!this.autoAdvanceInProgress) this.autoAdvanceSendInstructionCount = 0;
+    if (options.signal?.aborted) return;
     await this.startUserMessageTurn(prepared.displayText, prepared.promptText, selectedOpener, {
       alreadyAppended: false,
       source: options.telegramChatId
@@ -1387,6 +1459,7 @@ export class HydraRoomPanel {
       this.agentDuelAdmissionRunning ||
       this.agentDuelAutomationRunning ||
       !!this.duelCommitmentAbort ||
+      this.flightTransitionReservationInFlight ||
       isInFlight(this.state) ||
       !isSendable(this.state)
     ) {
@@ -1457,6 +1530,9 @@ export class HydraRoomPanel {
       return;
     }
     const parallel = shouldRunParallelDiscussion(promptText, discussionMode());
+    const flightSource = options.source ?? "localUser";
+    const preparedFlight = await this.prepareInitiatingFlightTurn(flightSource);
+    if (this.preparedFlightWasCancelled(preparedFlight)) return;
     // Transition state synchronously BEFORE any await. A second concurrent
     // sendUserMessage hitting after this.ready() but during appendUserMessage
     // would otherwise pass the guard above and orphan the first turn's
@@ -1464,22 +1540,45 @@ export class HydraRoomPanel {
     // isSendable.
     const previousState = this.state;
     const roster = this.roster();
-    this.applyEvent({
-      type: "userSent",
-      opener: selectedOpener,
-      parallel,
-      reactor: pickReviewers(selectedOpener, roster)[0] ?? selectedOpener,
-      parallelAgents: parallel ? roster : undefined,
-    });
+    try {
+      this.applyEvent({
+        type: "userSent",
+        opener: selectedOpener,
+        parallel,
+        reactor: pickReviewers(selectedOpener, roster)[0] ?? selectedOpener,
+        parallelAgents: parallel ? roster : undefined,
+      }, preparedFlight.flightTurn);
+    } catch (error) {
+      await this.finishPreparedFlightTurn(
+        preparedFlight,
+        { status: "failed", failureCode: "validationFailure" },
+      );
+      throw error;
+    } finally {
+      this.releaseInitiatingFlightTurnReservation();
+    }
     let timestamp = options.timestamp;
     if (!options.alreadyAppended) {
       try {
         timestamp = (await this.appendUserMessage(displayText)).timestamp;
       } catch (err) {
-        this.applyEvent({ type: "reservationFailed", restore: previousState });
+        if (!this.preparedFlightWasCancelled(preparedFlight)) {
+          this.applyEvent(
+            { type: "reservationFailed", restore: previousState },
+            preparedFlight.flightTurn,
+          );
+          await this.finishPreparedFlightTurn(
+            preparedFlight,
+            { status: "failed", failureCode: "validationFailure" },
+          );
+        }
         this.postState();
         throw err;
       }
+    }
+    if (this.preparedFlightWasCancelled(preparedFlight)) {
+      this.postState();
+      return;
     }
     if (parallel) {
       await this.runParallelDiscussionTurn(
@@ -1487,7 +1586,8 @@ export class HydraRoomPanel {
         displayText,
         previousState,
         timestamp,
-        options.source ?? "localUser",
+        flightSource,
+        preparedFlight,
       );
     } else {
       await this.runDiscussionTurn(
@@ -1496,7 +1596,8 @@ export class HydraRoomPanel {
         displayText,
         previousState,
         timestamp,
-        options.source ?? "localUser",
+        flightSource,
+        preparedFlight,
       );
     }
     await this.drainQueuedUserMessages();
@@ -1510,13 +1611,18 @@ export class HydraRoomPanel {
     // (a no-op when nothing is running) before the early return.
     this.wikiMaintenanceAbort?.abort();
     this.duelCommitmentAbort?.abort();
+    const activeFlightTurn = this.activeFlightTurns.at(-1);
+    const activeFlightPending =
+      activeFlightTurn !== undefined && !activeFlightTurn.terminalized;
     if (
       !isInFlight(this.state) &&
       !this.terminalPokeInFlight &&
       !this.verificationRunning &&
       !this.autopilotRunning &&
       !this.agentDuelAutomationRunning &&
-      !this.duelCommitmentAbort
+      !this.duelCommitmentAbort &&
+      !activeFlightPending &&
+      !this.flightTransitionReservationInFlight
     ) {
       return;
     }
@@ -1525,11 +1631,38 @@ export class HydraRoomPanel {
     // cancelled=true. The in-flight method then observes ctrl.signal.aborted,
     // cleans up, and posts state.
     this.stopRequestCount++;
+    if (this.flightTransitionReservationInFlight) {
+      this.flightStopGeneration += 1;
+    }
+    if (activeFlightTurn && !activeFlightTurn.terminalized) {
+      activeFlightTurn.cancellationReason ??= "stop";
+    }
+    activeFlightTurn?.abortController?.abort();
     this.currentAbort?.abort();
+    try {
+      if (
+        activeFlightTurn
+        && !activeFlightTurn.dispatchStarted
+        && !activeFlightTurn.terminalized
+      ) {
+        if (isInFlight(this.state)) {
+          this.applyEvent({ type: "stop" }, activeFlightTurn.flightTurn);
+        }
+        await this.finishActiveFlightTurn(
+          activeFlightTurn,
+          activeFlightTurn.cancellationReason === "reset"
+            ? { status: "incomplete", failureCode: "unknown" }
+            : { status: "cancelled", failureCode: "cancelled" },
+        );
+      }
+    } finally {
+      this.postState();
+    }
   }
 
-  async assignBuilder(builder: AgentId): Promise<void> {
+  async assignBuilder(builder: AgentId, signal?: AbortSignal): Promise<void> {
     await this.ready();
+    if (signal?.aborted) return;
     if (!this.workspaceReady) return;
     if (!this.isActiveAgent(builder)) {
       await this.appendSystemMessage(`Builder unavailable: ${displayNameFor(builder)} is not currently seated in this room.`);
@@ -1541,22 +1674,49 @@ export class HydraRoomPanel {
       this.postState();
       return;
     }
-    if (this.state.name !== "AwaitingUser") return;
+    if (this.flightTransitionReservationInFlight || this.state.name !== "AwaitingUser") return;
     // Reserve the build synchronously. A double-click (or duplicate webview
     // message) must not pass the AwaitingUser guard twice while the transcript
     // append below is pending.
+    const preparedFlight = await this.prepareInitiatingFlightTurn(
+      this.autoAdvanceInProgress ? "system" : "localUser",
+    );
+    if (this.preparedFlightWasCancelled(preparedFlight)) return;
     const previousState = this.state;
-    this.applyEvent({ type: "assignBuilder", builder });
+    try {
+      this.applyEvent(
+        { type: "assignBuilder", builder },
+        preparedFlight.flightTurn,
+      );
+    } catch (error) {
+      await this.finishPreparedFlightTurn(
+        preparedFlight,
+        { status: "failed", failureCode: "validationFailure" },
+      );
+      throw error;
+    } finally {
+      this.releaseInitiatingFlightTurnReservation();
+    }
     try {
       await this.appendSystemMessage(
         `${displayNameFor(builder)} assigned as builder. This is explicit user build authority; previous survey or planning defaults no longer block implementation.`
       );
     } catch (err) {
-      this.applyEvent({ type: "reservationFailed", restore: previousState });
+      if (!this.preparedFlightWasCancelled(preparedFlight)) {
+        this.applyEvent(
+          { type: "reservationFailed", restore: previousState },
+          preparedFlight.flightTurn,
+        );
+        await this.finishPreparedFlightTurn(
+          preparedFlight,
+          { status: "failed", failureCode: "validationFailure" },
+        );
+      }
       this.postState();
       throw err;
     }
-    await this.runBuildPhase(builder, previousState);
+    if (this.preparedFlightWasCancelled(preparedFlight)) return;
+    await this.runBuildPhase(builder, previousState, preparedFlight);
     await this.drainQueuedUserMessages();
   }
 
@@ -1568,37 +1728,92 @@ export class HydraRoomPanel {
       this.postState();
       return;
     }
-    if (this.state.name !== "AwaitingUser") return;
+    if (this.flightTransitionReservationInFlight || this.state.name !== "AwaitingUser") return;
     const agents = this.roster();
+    const preparedFlight = await this.prepareInitiatingFlightTurn(
+      this.autoAdvanceInProgress ? "system" : "localUser",
+    );
+    if (this.preparedFlightWasCancelled(preparedFlight)) return;
     const previousState = this.state;
-    this.applyEvent({ type: "assignBuilders", agents });
+    try {
+      this.applyEvent(
+        { type: "assignBuilders", agents },
+        preparedFlight.flightTurn,
+      );
+    } catch (error) {
+      await this.finishPreparedFlightTurn(
+        preparedFlight,
+        { status: "failed", failureCode: "validationFailure" },
+      );
+      throw error;
+    } finally {
+      this.releaseInitiatingFlightTurnReservation();
+    }
     try {
       await this.appendSystemMessage(
         `${agents.map(displayNameFor).join(" + ")} assigned as parallel room builders. Hydra will dispatch all ${agents.length} Build workers with the same room objective and transcript context.`
       );
     } catch (err) {
-      this.applyEvent({ type: "reservationFailed", restore: previousState });
+      if (!this.preparedFlightWasCancelled(preparedFlight)) {
+        this.applyEvent(
+          { type: "reservationFailed", restore: previousState },
+          preparedFlight.flightTurn,
+        );
+        await this.finishPreparedFlightTurn(
+          preparedFlight,
+          { status: "failed", failureCode: "validationFailure" },
+        );
+      }
       this.postState();
       throw err;
     }
-    await this.runParallelBuildPhase(agents, previousState);
+    if (this.preparedFlightWasCancelled(preparedFlight)) return;
+    await this.runParallelBuildPhase(agents, previousState, preparedFlight);
     await this.drainQueuedUserMessages();
   }
 
-  async requestReview(): Promise<void> {
+  async requestReview(signal?: AbortSignal): Promise<void> {
     await this.ready();
+    if (signal?.aborted) return;
     if (!this.workspaceReady) return;
     if (this.unconfirmedNativeTermination) {
       this.appendSystemMessageToUi(this.unconfirmedTerminationMessage());
       this.postState();
       return;
     }
-    if (this.state.name !== "BuildDone" && this.state.name !== "ParallelBuildDone") return;
+    if (
+      this.flightTransitionReservationInFlight
+      || (this.state.name !== "BuildDone" && this.state.name !== "ParallelBuildDone")
+    ) return;
+    const preparedFlight = await this.prepareInitiatingFlightTurn(
+      this.autoAdvanceInProgress ? "system" : "localUser",
+    );
+    if (this.preparedFlightWasCancelled(preparedFlight)) return;
     if (!this.gitAvailable) {
-      await this.appendSystemMessage(
+      try {
+        await this.appendSystemMessage(
         "Review unavailable: workspace is not a git repository. Returning to discussion — build edits remain in the working tree for manual review."
-      );
-      this.applyEvent({ type: "requestReviewSkipped" });
+        );
+        if (this.preparedFlightWasCancelled(preparedFlight)) return;
+        this.applyEvent(
+          { type: "requestReviewSkipped" },
+          preparedFlight.flightTurn,
+        );
+        await this.finishPreparedFlightTurn(
+          preparedFlight,
+          { status: "succeeded", failureCode: null },
+        );
+      } catch (error) {
+        if (!this.preparedFlightWasCancelled(preparedFlight)) {
+          await this.finishPreparedFlightTurn(
+            preparedFlight,
+            { status: "failed", failureCode: "validationFailure" },
+          );
+        }
+        throw error;
+      } finally {
+        this.releaseInitiatingFlightTurnReservation();
+      }
       return;
     }
     let parallelAgents: AgentId[] | undefined;
@@ -1609,11 +1824,31 @@ export class HydraRoomPanel {
       reviewer = pickReviewers(this.state.builder, this.roster())[0] ?? this.state.builder;
     }
     const previousState = this.state;
-    this.applyEvent({ type: "requestReview", reviewers: parallelAgents ?? (reviewer ? [reviewer] : undefined) });
+    try {
+      this.applyEvent(
+        {
+          type: "requestReview",
+          reviewers: parallelAgents ?? (reviewer ? [reviewer] : undefined),
+        },
+        preparedFlight.flightTurn,
+      );
+    } catch (error) {
+      await this.finishPreparedFlightTurn(
+        preparedFlight,
+        { status: "failed", failureCode: "validationFailure" },
+      );
+      throw error;
+    } finally {
+      this.releaseInitiatingFlightTurnReservation();
+    }
     if (parallelAgents) {
-      await this.runParallelReviewPhase(parallelAgents, previousState);
+      await this.runParallelReviewPhase(
+        parallelAgents,
+        previousState,
+        preparedFlight,
+      );
     } else if (reviewer) {
-      await this.runReviewPhase(reviewer, previousState);
+      await this.runReviewPhase(reviewer, previousState, preparedFlight);
     }
     await this.drainQueuedUserMessages();
   }
@@ -1627,13 +1862,22 @@ export class HydraRoomPanel {
   private async runVerificationInternal(
     reason: "manual" | "afterBuild",
     latchedResolution?: VerificationCommandResolution,
+    parentFlightTurn?: FlightRoomTurnContext,
+    sourceFlightBinding?: FlightVerificationSourceBinding,
+    parentSignal?: AbortSignal,
   ): Promise<VerificationResult | undefined> {
+    if (parentSignal?.aborted) return undefined;
     if (this.unconfirmedNativeTermination) {
       this.appendSystemMessageToUi(this.unconfirmedTerminationMessage());
       this.postState();
       return undefined;
     }
-    if (isInFlight(this.state) || this.verificationRunning) {
+    if (
+      this.flightTransitionReservationInFlight
+      || isInFlight(this.state)
+      || this.terminalPokeInFlight
+      || this.verificationRunning
+    ) {
       await this.appendSystemMessage("Verification is paused because Hydra is already running work.");
       this.postState();
       return undefined;
@@ -1642,15 +1886,35 @@ export class HydraRoomPanel {
     // Reserve before resolving an inferred command. Two rapid invocations
     // must not both pass the guard while package.json is being read.
     this.verificationRunning = true;
+    const previousAbort = this.currentAbort;
+    const ctrl = new AbortController();
+    const abortFromParent = () => ctrl.abort();
+    if (parentSignal) {
+      if (parentSignal.aborted) ctrl.abort();
+      else parentSignal.addEventListener("abort", abortFromParent, { once: true });
+    }
+    this.currentAbort = ctrl;
     this.postState();
-    let ctrl: AbortController | undefined;
     let verification: VerificationResult | undefined;
+    let standaloneFlight: PreparedFlightTurn | undefined;
+    let verificationOperation: FlightAuxiliaryOperation | undefined;
+    let flightOutcome: FlightRecordedOutcome | undefined;
+    let flightProjectionBase:
+      | {
+          readonly verificationId: string;
+          readonly resolution: ResolvedVerificationCommand;
+          readonly timeoutMs: number;
+          readonly maxOutputChars: number;
+          readonly source?: FlightVerificationSourceBinding;
+        }
+      | undefined;
     try {
       const resolution = latchedResolution ?? await resolveVerificationCommand({
         configured: vscode.workspace.getConfiguration("hydraRoom").get<string>("verifyCommand", ""),
         isWorkspaceTrusted: vscode.workspace.isTrusted,
         workspaceRoot: this.workspaceRoot,
       });
+      if (ctrl.signal.aborted) return undefined;
       if (resolution.kind === "refusedUntrustedInference") {
         await this.appendSystemMessage(
           "Verification unavailable: this workspace is not trusted, so Hydra will not run inferred package.json scripts. Set hydraRoom.verifyCommand in User or Machine Settings to opt in, or grant Workspace Trust."
@@ -1666,9 +1930,43 @@ export class HydraRoomPanel {
         return undefined;
       }
       const command = resolution.command;
+      const verificationId = `verification-${crypto.randomUUID()}`;
+      const timeoutMs = verificationTimeoutMs();
+      const maxOutputChars = verificationMaxOutputChars();
+      let flightTurn = parentFlightTurn;
+      if (!flightTurn) {
+        standaloneFlight = await this.prepareFlightTurn(
+          this.state.name,
+          reason === "manual" ? "localUser" : "system",
+          `room-turn-${verificationId}`,
+        );
+        flightTurn = standaloneFlight.flightTurn;
+      }
+      if (ctrl.signal.aborted) {
+        flightOutcome = { status: "cancelled", failureCode: "cancelled" };
+        return undefined;
+      }
+      // Only an explicit caller may bind verification to a source run. A later
+      // manual verification can observe a different dirty tree, so inheriting
+      // the last build's run id would manufacture provenance.
+      const source = sourceFlightBinding;
+      flightProjectionBase = {
+        verificationId,
+        resolution,
+        timeoutMs,
+        maxOutputChars,
+        ...(source === undefined ? {} : { source }),
+      };
+      const flightStart =
+        buildFlightVerificationStart(flightProjectionBase);
+      if (flightTurn && this.flightRecorderRuntime) {
+        verificationOperation =
+          await this.flightRecorderRuntime.beginAuxiliaryOperation(
+            flightTurn,
+            { subject: flightStart.subject },
+          );
+      }
 
-      ctrl = new AbortController();
-      this.currentAbort = ctrl;
       await this.recordEvent("verificationStarted", `${reason === "afterBuild" ? "Auto-verification" : "Verification"} started`, {
         command,
         reason,
@@ -1676,13 +1974,36 @@ export class HydraRoomPanel {
       await this.appendSystemMessage(
         `${reason === "afterBuild" ? "Hydra auto-verification started after build" : "Hydra verification started"}:\n${command}`
       );
+      const headBefore = this.gitAvailable
+        ? await captureGitHead(this.workspaceRoot)
+        : undefined;
       const result = await runVerificationCommand({
         cwd: this.workspaceRoot,
         command,
-        timeoutMs: verificationTimeoutMs(),
-        maxOutputChars: verificationMaxOutputChars(),
+        timeoutMs,
+        maxOutputChars,
         signal: ctrl.signal,
       });
+      if (headBefore) result.headSha = headBefore;
+      const projection = buildFlightVerificationProjection({
+        ...flightProjectionBase,
+        result,
+      });
+      flightOutcome = projection.outcome;
+      if (
+        verificationOperation
+        && flightProjectionBase
+        && this.flightRecorderRuntime
+      ) {
+        await this.flightRecorderRuntime.finishAuxiliaryOperation(
+          verificationOperation,
+          {
+            ...projection.outcome,
+            observation: projection.observation,
+          },
+        );
+        verificationOperation = undefined;
+      }
       if (this.latchUnconfirmedNativeTermination(result, "verification")) {
         verification = result;
         this.verifications.push(result);
@@ -1693,13 +2014,8 @@ export class HydraRoomPanel {
       } else if (result.cancelled) {
         await this.appendSystemMessage("Hydra verification cancelled by user.");
       } else {
-        // Anchor the verification to the git HEAD that was tested. A
-        // reviewer prompt can compare to current HEAD to detect a stale
-        // (or forged) verification record.
-        if (this.gitAvailable) {
-          const head = await captureGitHead(this.workspaceRoot);
-          if (head) result.headSha = head;
-        }
+        // The pre-run HEAD is the tested starting revision. Capturing it after
+        // the command could bind a verifier-created commit instead.
         verification = result;
         this.verifications.push(result);
         await appendVerification(this.verificationUri.fsPath, result);
@@ -1720,9 +2036,54 @@ export class HydraRoomPanel {
         });
       }
       return verification;
+    } catch (error) {
+      if (
+        verificationOperation
+        && flightProjectionBase
+        && this.flightRecorderRuntime
+      ) {
+        const fallbackResult: VerificationResult = {
+          timestamp: new Date().toISOString(),
+          command: "",
+          cwd: "",
+          exitCode: null,
+          timedOut: false,
+          durationMs: 0,
+          stdout: "",
+          stderr: "",
+        };
+        const fallback = buildFlightVerificationProjection({
+          verificationId: flightProjectionBase.verificationId,
+          resolution: flightProjectionBase.resolution,
+          timeoutMs: flightProjectionBase.timeoutMs,
+          maxOutputChars: flightProjectionBase.maxOutputChars,
+          ...(flightProjectionBase.source === undefined
+            ? {}
+            : { source: flightProjectionBase.source }),
+          result: fallbackResult,
+        });
+        flightOutcome = fallback.outcome;
+        await this.flightRecorderRuntime.finishAuxiliaryOperation(
+          verificationOperation,
+          {
+            ...flightOutcome,
+            observation: fallback.observation,
+          },
+        );
+        verificationOperation = undefined;
+      }
+      throw error;
     } finally {
+      await this.finishPreparedFlightTurn(
+        standaloneFlight,
+        flightOutcome ?? {
+          status: "failed",
+          failureCode: "unknown",
+        },
+      );
       this.verificationRunning = false;
-      if (ctrl && this.currentAbort === ctrl) this.currentAbort = undefined;
+      parentSignal?.removeEventListener("abort", abortFromParent);
+      if (this.currentAbort === ctrl) this.currentAbort = previousAbort;
       this.postState();
     }
   }
@@ -1779,16 +2140,42 @@ export class HydraRoomPanel {
     this.postState();
   }
 
-  async handBack(): Promise<void> {
+  async handBack(signal?: AbortSignal): Promise<void> {
     await this.ready();
+    if (signal?.aborted) return;
     if (!this.workspaceReady) return;
-    if (this.state.name !== "ReviewDone" && this.state.name !== "ParallelReviewDone") return;
+    if (
+      this.flightTransitionReservationInFlight
+      || (this.state.name !== "ReviewDone" && this.state.name !== "ParallelReviewDone")
+    ) return;
+    const preparedFlight = await this.prepareInitiatingFlightTurn(
+      this.autoAdvanceInProgress ? "system" : "localUser",
+    );
+    if (this.preparedFlightWasCancelled(preparedFlight)) return;
     const previousState = this.state;
-    this.applyEvent({ type: "handBack" });
+    try {
+      this.applyEvent({ type: "handBack" }, preparedFlight.flightTurn);
+    } catch (error) {
+      await this.finishPreparedFlightTurn(
+        preparedFlight,
+        { status: "failed", failureCode: "validationFailure" },
+      );
+      throw error;
+    } finally {
+      this.releaseInitiatingFlightTurnReservation();
+    }
     if (previousState.name === "ParallelReviewDone") {
-      await this.runParallelBuildPhase([...previousState.builders], previousState);
+      await this.runParallelBuildPhase(
+        [...previousState.builders],
+        previousState,
+        preparedFlight,
+      );
     } else {
-      await this.runBuildPhase(previousState.builder, previousState);
+      await this.runBuildPhase(
+        previousState.builder,
+        previousState,
+        preparedFlight,
+      );
     }
     await this.drainQueuedUserMessages();
   }
@@ -1804,6 +2191,7 @@ export class HydraRoomPanel {
         !this.agentDuelAdmissionRunning &&
         !this.agentDuelAutomationRunning &&
         !this.duelCommitmentAbort &&
+        !this.flightTransitionReservationInFlight &&
         !isInFlight(this.state) &&
         isSendable(this.state)
       ) {
@@ -1841,6 +2229,7 @@ export class HydraRoomPanel {
     await this.ready();
     if (!this.workspaceReady) return;
     if (
+      this.flightTransitionReservationInFlight ||
       isInFlight(this.state) ||
       this.terminalPokeInFlight ||
       this.verificationRunning ||
@@ -4079,6 +4468,59 @@ export class HydraRoomPanel {
     this.postState();
   }
 
+  async runMissionFlightSmokeTest(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    if (
+      this.missionFlightSmokeRunning
+      || this.flightTransitionReservationInFlight
+      || isInFlight(this.state)
+      || this.terminalPokeInFlight
+      || this.verificationRunning
+      || this.autopilotRunning
+      || this.agentDuelAdmissionRunning
+      || this.agentDuelAutomationRunning
+      || !!this.duelCommitmentAbort
+    ) {
+      await this.appendSystemMessage(
+        "Mission/Flight smoke test skipped because Hydra is already running work.",
+      );
+      this.postState();
+      return;
+    }
+
+    this.missionFlightSmokeRunning = true;
+    this.postState();
+    try {
+      const report = await runIsolatedMissionFlightSmokeTest({
+        privateWorkspaceRoot: this.workspacePrivateStorageRoot(),
+      });
+      const formatted = formatMissionFlightSmokeReport(report);
+      await this.appendSystemMessage(formatted);
+      await this.recordEvent(
+        "commandInvoked",
+        `Mission/Flight smoke test ${report.passed ? "passed" : "failed"}.`,
+        {
+          passed: report.passed,
+          missionEventCount: report.observed.missionEventCount,
+          flightRecordCount: report.observed.flightRecordCount,
+        },
+      );
+      if (report.passed) {
+        void vscode.window.showInformationMessage(
+          "Hydra Mission/Flight smoke test passed.",
+        );
+      } else {
+        void vscode.window.showWarningMessage(
+          "Hydra Mission/Flight smoke test failed. See the room transcript for bounded diagnostics.",
+        );
+      }
+    } finally {
+      this.missionFlightSmokeRunning = false;
+      this.postState();
+    }
+  }
+
   async runManyHeadsSmokeTest(): Promise<void> {
     await this.ready();
     if (!this.workspaceReady) return;
@@ -4292,18 +4734,30 @@ export class HydraRoomPanel {
         // Wiki status is advisory; keep Command Center usable if wiki files are hand-edited mid-read.
       }
     }
+    const phaseAdmissionReady =
+      this.workspaceReady && !this.flightTransitionReservationInFlight;
     const actions = buildCommandCenterActions({
       workspaceReady: this.workspaceReady,
       isWorkspaceTrusted: vscode.workspace.isTrusted === true,
-      canStop: isInFlight(this.state) || this.terminalPokeInFlight || this.verificationRunning || this.autopilotRunning,
-      canAcceptDefault: this.workspaceReady && !isInFlight(this.state) && !this.terminalPokeInFlight && this.currentDecisionAction().kind !== "none",
+      canStop:
+        this.flightTransitionReservationInFlight
+        || this.activeFlightTurns.some((turn) => !turn.terminalized)
+        || isInFlight(this.state)
+        || this.terminalPokeInFlight
+        || this.verificationRunning
+        || this.autopilotRunning,
+      canAcceptDefault: phaseAdmissionReady && !isInFlight(this.state) && !this.terminalPokeInFlight && this.currentDecisionAction().kind !== "none",
       autoAdvanceActionableDefaults: this.effectiveAutoAdvanceActionableDefaults(),
-      canAssignBuilder: this.workspaceReady && this.state.name === "AwaitingUser",
-      canRequestReview: this.workspaceReady && (this.state.name === "BuildDone" || this.state.name === "ParallelBuildDone") && this.gitAvailable,
-      canHandBack: this.workspaceReady && (this.state.name === "ReviewDone" || this.state.name === "ParallelReviewDone") && !this.state.approved,
-      canRunVerification: this.workspaceReady && !isInFlight(this.state) && !this.terminalPokeInFlight && !this.verificationRunning,
+      canAssignBuilder: phaseAdmissionReady && this.state.name === "AwaitingUser",
+      canRequestReview: phaseAdmissionReady && (this.state.name === "BuildDone" || this.state.name === "ParallelBuildDone") && this.gitAvailable,
+      canHandBack: phaseAdmissionReady && (this.state.name === "ReviewDone" || this.state.name === "ParallelReviewDone") && !this.state.approved,
+      canRunVerification: phaseAdmissionReady && !isInFlight(this.state) && !this.terminalPokeInFlight && !this.verificationRunning,
       canRunWikiWrapup: this.canRunManualWikiWrapup(),
-      canPokeNativeTerminals: this.workspaceReady && !isInFlight(this.state) && !this.terminalPokeInFlight,
+      canPokeNativeTerminals:
+        phaseAdmissionReady
+        && !isInFlight(this.state)
+        && !this.terminalPokeInFlight
+        && !this.verificationRunning,
       needsCodexPath: checkFailed(this.latestDoctorReport, "codex-command"),
       needsClaudePath: checkFailed(this.latestDoctorReport, "claude-command"),
       transport: this.transportMode(),
@@ -4494,7 +4948,11 @@ export class HydraRoomPanel {
 
   async previewNextPrompt(draftText = "", opener: AgentId = this.getFirstSpeaker()): Promise<void> {
     await this.ready();
-    if (!this.workspaceReady || isInFlight(this.state)) return;
+    if (
+      !this.workspaceReady
+      || this.flightTransitionReservationInFlight
+      || isInFlight(this.state)
+    ) return;
     const controller = this.missionContractController;
     if (!controller) {
       throw new Error(
@@ -4689,21 +5147,63 @@ export class HydraRoomPanel {
       this.postState();
       return;
     }
-    if (isInFlight(this.state) || this.terminalPokeInFlight) return;
+    if (
+      this.flightTransitionReservationInFlight
+      || isInFlight(this.state)
+      || this.verificationRunning
+      || this.terminalPokeInFlight
+    ) return;
     const rawArgs = splitNativeArgs(argsLine.trim());
     if (rawArgs.length === 0) return;
 
     const actionId = `na-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
     let status: NativeActionStatus = "failed";
+    const previousAbort = this.currentAbort;
     const ctrl = new AbortController();
     this.currentAbort = ctrl;
     this.terminalPokeInFlight = true;
+    this.postState();
     const commandLine = `${agent} ${rawArgs.join(" ")}`;
+    let preparedFlight: PreparedFlightTurn | undefined;
+    let nativeFlightOperation: FlightAuxiliaryOperation | undefined;
+    let submissionSettled = false;
     try {
       const authorization = await this.freshMissionAuthorization(actionId);
+      if (ctrl.signal.aborted) return;
+      const flightTurn = await this.beginFlightRoomTurn(
+        actionId,
+        authorization.binding,
+        this.state.name,
+        "localUser",
+      );
+      preparedFlight = {
+        roomTurnId: actionId,
+        authorization,
+        ...(flightTurn === undefined ? {} : { flightTurn }),
+      };
+      if (ctrl.signal.aborted) return;
+      if (flightTurn && this.flightRecorderRuntime) {
+        nativeFlightOperation =
+          await this.flightRecorderRuntime.beginAuxiliaryOperation(
+            flightTurn,
+            {
+              subject: {
+                kind: "nativeAction",
+                nativeActionId: actionId,
+                actionKind: "command",
+                headCount: 1,
+                attachmentCount: 0,
+                evidenceClass: "hydraObserved",
+              },
+            },
+          );
+      }
+      if (ctrl.signal.aborted) return;
       await this.appendUserMessage(`[Native ${displayNameFor(agent)} command]\n\n${commandLine}`);
-      const messageId = this.openPendingMessage(agent, "opener");
+      if (ctrl.signal.aborted) return;
       const spawn = await this.buildNativeCommandSpawn(agent, rawArgs);
+      if (ctrl.signal.aborted) return;
+      const messageId = this.openPendingMessage(agent, "opener");
       const result = await this.runAgentTransport(
         agent,
         "opener",
@@ -4715,10 +5215,16 @@ export class HydraRoomPanel {
         authorization,
         this.transportMode() === "terminalBridge"
       );
+      submissionSettled = true;
+      status = ctrl.signal.aborted
+        ? "cancelled"
+        : didAgentFail(result)
+          ? "failed"
+          : "completed";
       await this.finalizePendingMessage(messageId, result);
-      status = ctrl.signal.aborted ? "cancelled" : didAgentFail(result) ? "failed" : "completed";
     } finally {
-      await this.recordNativeAction({
+      if (ctrl.signal.aborted && !submissionSettled) status = "cancelled";
+      const recordedReceipt = await this.recordNativeAction({
         id: actionId,
         agents: [agent],
         instruction: commandLine,
@@ -4727,8 +5233,27 @@ export class HydraRoomPanel {
         promptEnvelopeIds: [],
         status,
       });
+      const projection = buildFlightNativeActionProjection({
+        receipt: recordedReceipt.receipt,
+        receiptPersisted: recordedReceipt.persisted,
+        actionKind: "command",
+        attachmentCount: 0,
+      });
+      if (nativeFlightOperation && this.flightRecorderRuntime) {
+        await this.flightRecorderRuntime.finishAuxiliaryOperation(
+          nativeFlightOperation,
+          {
+            ...projection.outcome,
+            observation: projection.observation,
+          },
+        );
+      }
+      await this.finishPreparedFlightTurn(
+        preparedFlight,
+        projection.outcome,
+      );
       this.terminalPokeInFlight = false;
-      this.currentAbort = undefined;
+      if (this.currentAbort === ctrl) this.currentAbort = previousAbort;
       this.postState();
       await this.drainQueuedUserMessages();
     }
@@ -4747,7 +5272,12 @@ export class HydraRoomPanel {
       this.postState();
       return;
     }
-    if (isInFlight(this.state) || this.terminalPokeInFlight) return;
+    if (
+      this.flightTransitionReservationInFlight
+      || isInFlight(this.state)
+      || this.verificationRunning
+      || this.terminalPokeInFlight
+    ) return;
     const trimmed = line.trim();
     if (!trimmed) return;
     if (!this.terminalBridge) {
@@ -4759,21 +5289,59 @@ export class HydraRoomPanel {
     const actionId = `na-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
     let status: NativeActionStatus = "failed";
     this.terminalPokeInFlight = true;
+    const previousAbort = this.currentAbort;
     const ctrl = new AbortController();
     this.currentAbort = ctrl;
+    this.postState();
+    let preparedFlight: PreparedFlightTurn | undefined;
+    let nativeFlightOperation: FlightAuxiliaryOperation | undefined;
+    let submissionSettled = false;
     try {
       const authorization = await this.freshMissionAuthorization(actionId);
+      if (ctrl.signal.aborted) return;
+      const flightTurn = await this.beginFlightRoomTurn(
+        actionId,
+        authorization.binding,
+        this.state.name,
+        "localUser",
+      );
+      preparedFlight = {
+        roomTurnId: actionId,
+        authorization,
+        ...(flightTurn === undefined ? {} : { flightTurn }),
+      };
+      if (ctrl.signal.aborted) return;
+      if (flightTurn && this.flightRecorderRuntime) {
+        nativeFlightOperation =
+          await this.flightRecorderRuntime.beginAuxiliaryOperation(
+            flightTurn,
+            {
+              subject: {
+                kind: "nativeAction",
+                nativeActionId: actionId,
+                actionKind: "rawLine",
+                headCount: 1,
+                attachmentCount: 0,
+                evidenceClass: "hydraObserved",
+              },
+            },
+          );
+      }
+      if (ctrl.signal.aborted) return;
       await this.appendUserMessage(`[Raw ${displayNameFor(agent)} terminal line]\n\n${trimmed}`);
+      if (ctrl.signal.aborted) return;
       await this.terminalBridge.sendRawLine(
         agent,
         trimmed,
         authorization.submissionGate,
         ctrl.signal,
       );
-      await this.appendSystemMessage(`Sent raw line to ${displayNameFor(agent)} terminal. Continue interaction in the visible terminal if the CLI is interactive.`);
+      submissionSettled = true;
       status = "completed";
+      await this.appendSystemMessage(`Sent raw line to ${displayNameFor(agent)} terminal. Continue interaction in the visible terminal if the CLI is interactive.`);
     } finally {
-      await this.recordNativeAction({
+      if (ctrl.signal.aborted && !submissionSettled) status = "cancelled";
+      const recordedReceipt = await this.recordNativeAction({
         id: actionId,
         agents: [agent],
         instruction: `[raw terminal] ${trimmed}`,
@@ -4782,8 +5350,27 @@ export class HydraRoomPanel {
         promptEnvelopeIds: [],
         status,
       });
+      const projection = buildFlightNativeActionProjection({
+        receipt: recordedReceipt.receipt,
+        receiptPersisted: recordedReceipt.persisted,
+        actionKind: "rawLine",
+        attachmentCount: 0,
+      });
+      if (nativeFlightOperation && this.flightRecorderRuntime) {
+        await this.flightRecorderRuntime.finishAuxiliaryOperation(
+          nativeFlightOperation,
+          {
+            ...projection.outcome,
+            observation: projection.observation,
+          },
+        );
+      }
+      await this.finishPreparedFlightTurn(
+        preparedFlight,
+        projection.outcome,
+      );
       this.terminalPokeInFlight = false;
-      if (this.currentAbort === ctrl) this.currentAbort = undefined;
+      if (this.currentAbort === ctrl) this.currentAbort = previousAbort;
       this.postState();
       await this.drainQueuedUserMessages();
     }
@@ -4801,14 +5388,21 @@ export class HydraRoomPanel {
       this.postState();
       return;
     }
-    if (isInFlight(this.state) || this.terminalPokeInFlight) return;
+    if (
+      this.flightTransitionReservationInFlight
+      || isInFlight(this.state)
+      || this.verificationRunning
+      || this.terminalPokeInFlight
+    ) return;
     const targetAgents = uniqueAgents(agents).filter((agent) => this.isActiveAgent(agent));
     if (targetAgents.length === 0) return;
     // Reserve before diff/editor preflight, both of which can await. Otherwise
     // two rapid pokes can pass the guard and dispatch overlapping terminal work.
     this.terminalPokeInFlight = true;
+    const previousAbort = this.currentAbort;
+    const ctrl = new AbortController();
+    this.currentAbort = ctrl;
     this.postState();
-    let ctrl: AbortController | undefined;
     try {
       const pokeOptions = normalizePokeOptions(options);
       const editorContext = pokeOptions.includeEditorContext ? this.activeEditorContext() : undefined;
@@ -4825,6 +5419,7 @@ export class HydraRoomPanel {
           return;
         }
         const diff = await captureGitDiff(this.workspaceRoot, diffMaxLines());
+        if (ctrl.signal.aborted) return;
         if (diff === null) {
           await this.appendSystemMessage("Working-tree poke unavailable: git diff failed.");
           this.postState();
@@ -4844,16 +5439,36 @@ export class HydraRoomPanel {
       const promptEnvelopeIds: string[] = [];
       let status: NativeActionStatus = "failed";
       let flightTurn: FlightRoomTurnContext | undefined;
-      ctrl = new AbortController();
-      this.currentAbort = ctrl;
+      let nativeFlightOperation: FlightAuxiliaryOperation | undefined;
       try {
       const authorization = await this.freshMissionAuthorization(actionId);
+      if (ctrl.signal.aborted) return;
       flightTurn = await this.beginFlightRoomTurn(
         actionId,
         authorization.binding,
         "nativeAction",
         "localUser",
       );
+      if (ctrl.signal.aborted) return;
+      if (flightTurn && this.flightRecorderRuntime) {
+        nativeFlightOperation =
+          await this.flightRecorderRuntime.beginAuxiliaryOperation(
+            flightTurn,
+            {
+              subject: {
+                kind: "nativeAction",
+                nativeActionId: actionId,
+                actionKind: "prompt",
+                headCount: targetAgents.length,
+                attachmentCount:
+                  Number(editorContext !== undefined)
+                  + Number(workspaceDiff !== undefined),
+                evidenceClass: "hydraObserved",
+              },
+            },
+          );
+      }
+      if (ctrl.signal.aborted) return;
       // Why: targetAgents is non-empty here — pokeNativeTerminals returns early
       // above when uniqueAgents() yields length 0, so [0] is always defined.
       const firstAgent = targetAgents[0]!;
@@ -4870,7 +5485,9 @@ export class HydraRoomPanel {
       ].filter(Boolean).join("\n");
       const attachmentBlock = attachmentSummary ? `\n\n${attachmentSummary}` : "";
       await this.appendUserMessage(`[Direct to ${targetLabel}]${attachmentBlock}\n\n${instruction}`);
+      if (ctrl.signal.aborted) return;
       await this.terminalBridge.openAll();
+      if (ctrl.signal.aborted) return;
       const calls: Promise<{ text: string; result: RunResult }>[] = [];
       try {
         for (const agent of targetAgents) {
@@ -4881,8 +5498,16 @@ export class HydraRoomPanel {
             editorContext,
             workspaceDiff,
           );
+          if (ctrl.signal.aborted) {
+            await Promise.allSettled(calls);
+            return;
+          }
           promptEnvelopeIds.push(envelope.id);
           await this.persistPromptEnvelope(envelope);
+          if (ctrl.signal.aborted) {
+            await Promise.allSettled(calls);
+            return;
+          }
           const messageId = this.openPendingMessage(agent, "opener");
           const pending = this.messagesById.get(messageId);
           if (pending) pending.activity = `${displayNameFor(agent)} native terminal poke running...`;
@@ -4900,11 +5525,11 @@ export class HydraRoomPanel {
               false,
               flightTurn,
             ),
-            () => ctrl?.abort(),
+            () => ctrl.abort(),
           ));
         }
         this.postState();
-        const results = await settleAgentCalls(calls, () => ctrl?.abort());
+        const results = await settleAgentCalls(calls, () => ctrl.abort());
         status = ctrl.signal.aborted
           ? "cancelled"
           : results.some(({ result }) => didAgentFail(result))
@@ -4916,17 +5541,8 @@ export class HydraRoomPanel {
         throw error;
       }
       } finally {
-        if (flightTurn && this.flightRecorderRuntime) {
-          await this.flightRecorderRuntime.finishRoomTurn(
-            flightTurn,
-            status === "completed"
-              ? { status: "succeeded", failureCode: null }
-              : status === "cancelled"
-                ? { status: "cancelled", failureCode: "cancelled" }
-                : { status: "failed", failureCode: "providerFailure" },
-          );
-        }
-        await this.recordNativeAction({
+        if (ctrl.signal.aborted) status = "cancelled";
+        const recordedReceipt = await this.recordNativeAction({
           id: actionId,
           agents: targetAgents,
           instruction,
@@ -4937,11 +5553,33 @@ export class HydraRoomPanel {
           promptEnvelopeIds,
           status,
         });
-        if (this.currentAbort === ctrl) this.currentAbort = undefined;
+        const projection = buildFlightNativeActionProjection({
+          receipt: recordedReceipt.receipt,
+          receiptPersisted: recordedReceipt.persisted,
+          actionKind: "prompt",
+          attachmentCount:
+            Number(editorContext !== undefined)
+            + Number(workspaceDiff !== undefined),
+        });
+        if (nativeFlightOperation && this.flightRecorderRuntime) {
+          await this.flightRecorderRuntime.finishAuxiliaryOperation(
+            nativeFlightOperation,
+            {
+              ...projection.outcome,
+              observation: projection.observation,
+            },
+          );
+        }
+        if (flightTurn && this.flightRecorderRuntime) {
+          await this.flightRecorderRuntime.finishRoomTurn(
+            flightTurn,
+            projection.outcome,
+          );
+        }
       }
     } finally {
       this.terminalPokeInFlight = false;
-      if (ctrl && this.currentAbort === ctrl) this.currentAbort = undefined;
+      if (this.currentAbort === ctrl) this.currentAbort = previousAbort;
       this.postState();
       await this.drainQueuedUserMessages();
     }
@@ -4950,7 +5588,11 @@ export class HydraRoomPanel {
   async showNativeActionPicker(draftText = ""): Promise<void> {
     await this.ready();
     if (!this.workspaceReady) return;
-    if (isInFlight(this.state) || this.terminalPokeInFlight) return;
+    if (
+      isInFlight(this.state)
+      || this.verificationRunning
+      || this.terminalPokeInFlight
+    ) return;
 
     const pick = await vscode.window.showQuickPick(nativeActionPicks(), {
       title: "Hydra: Native Action",
@@ -5076,7 +5718,17 @@ export class HydraRoomPanel {
     workspaceDiff?: string;
     promptEnvelopeIds: string[];
     status: NativeActionStatus;
-  }): Promise<void> {
+  }): Promise<RecordedNativeAction> {
+    let nativeSessionHints: NativeActionReceipt["nativeSessionHints"] = [];
+    try {
+      nativeSessionHints = await collectNativeSessionHints(
+        this.workspaceRoot,
+        input.agents,
+      );
+    } catch {
+      // Session hints are diagnostic enrichment. Their failure cannot skip the
+      // authoritative action receipt or the caller's cleanup/finalization.
+    }
     const receipt: NativeActionReceipt = {
       id: input.id,
       timestamp: new Date().toISOString(),
@@ -5097,12 +5749,14 @@ export class HydraRoomPanel {
         : undefined,
       workspaceDiffChars: input.workspaceDiff?.length,
       promptEnvelopeIds: input.promptEnvelopeIds,
-      nativeSessionHints: await collectNativeSessionHints(this.workspaceRoot, input.agents),
+      nativeSessionHints,
       status: input.status,
     };
     this.nativeActions.push(receipt);
+    let persisted = false;
     try {
       await appendNativeAction(this.nativeActionsUri.fsPath, receipt);
+      persisted = true;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       try {
@@ -5111,6 +5765,7 @@ export class HydraRoomPanel {
         // Keep cleanup paths from being blocked by a secondary receipt warning.
       }
     }
+    return { receipt, persisted };
   }
 
   private async recordWorkQueueDisposition(disposition: WorkQueueDisposition): Promise<void> {
@@ -5374,6 +6029,15 @@ export class HydraRoomPanel {
   async resetStuckTurn(): Promise<void> {
     await this.ready();
     if (!this.workspaceReady) return;
+    this.flightResetGeneration += 1;
+    const activeFlightTurns = [...this.activeFlightTurns];
+    for (const active of activeFlightTurns) {
+      active.cancellationReason = "reset";
+      active.abortController?.abort();
+    }
+    const resetFlightTurn =
+      activeFlightTurns.at(-1)?.flightTurn
+      ?? this.currentFlightTurn;
     this.currentAbort?.abort();
     this.wikiMaintenanceAbort?.abort();
     this.duelCommitmentAbort?.abort();
@@ -5394,11 +6058,21 @@ export class HydraRoomPanel {
         cancelled: true,
       });
     }
+    this.queuedUserMessages = [];
+    if (isInFlight(this.state)) {
+      this.applyEvent({ type: "stop" }, resetFlightTurn);
+    }
+    for (const active of activeFlightTurns.reverse()) {
+      await this.finishActiveFlightTurn(active, {
+        status: "incomplete",
+        failureCode: "unknown",
+      });
+    }
+    this.activeFlightTurns.length = 0;
     this.currentAbort = undefined;
     this.currentRoomTurnId = undefined;
     this.currentMissionContractBinding = undefined;
-    this.queuedUserMessages = [];
-    if (isInFlight(this.state)) this.applyEvent({ type: "stop" });
+    this.currentFlightTurn = undefined;
     for (const agent of this.roster()) this.setAgentStatus(agent, "idle", "Idle");
     await this.appendSystemMessage(
       changed
@@ -5433,6 +6107,146 @@ export class HydraRoomPanel {
   // failure messaging live in each body; only the controller/finalize boilerplate
   // is shared here. applyEvent stays the sole state mutator inside the bodies, so
   // the transition() invariant is untouched.
+  private async prepareFlightTurn(
+    phase: string,
+    source: FlightTraceStartedPayload["source"],
+    roomTurnId = `room-turn-${crypto.randomUUID()}`,
+  ): Promise<PreparedFlightTurn> {
+    const authorization = await this.freshMissionAuthorization(roomTurnId);
+    const flightTurn = await this.beginFlightRoomTurn(
+      roomTurnId,
+      authorization.binding,
+      phase,
+      source,
+    );
+    return Object.freeze({
+      roomTurnId,
+      authorization,
+      ...(flightTurn === undefined ? {} : { flightTurn }),
+    });
+  }
+
+  private async prepareInitiatingFlightTurn(
+    source: FlightTraceStartedPayload["source"],
+  ): Promise<PreparedFlightTurn> {
+    if (this.flightTransitionReservationInFlight) {
+      throw new Error("Another Hydra phase transition is already being reserved.");
+    }
+    const resetGeneration = this.flightResetGeneration;
+    const stopGeneration = this.flightStopGeneration;
+    this.flightTransitionReservationInFlight = true;
+    this.postState();
+    try {
+      const prepared =
+        await this.prepareFlightTurn(this.state.name, source);
+      const cancellationReason =
+        this.flightResetGeneration !== resetGeneration
+          ? "reset"
+          : this.flightStopGeneration !== stopGeneration
+            ? "stop"
+            : undefined;
+      if (cancellationReason) {
+        const activeFlightTurn: ActiveFlightTurn = {
+          roomTurnId: prepared.roomTurnId,
+          ...(prepared.flightTurn === undefined
+            ? {}
+            : { flightTurn: prepared.flightTurn }),
+          cancellationReason,
+          dispatchStarted: false,
+          terminalized: false,
+        };
+        const cancelledPrepared = Object.freeze({
+          ...prepared,
+          activeFlightTurn,
+        });
+        await this.finishPreparedFlightTurn(
+          cancelledPrepared,
+          cancellationReason === "stop"
+            ? { status: "cancelled", failureCode: "cancelled" }
+            : { status: "incomplete", failureCode: "unknown" },
+        );
+        this.flightTransitionReservationInFlight = false;
+        this.postState();
+        return cancelledPrepared;
+      }
+      const activeFlightTurn: ActiveFlightTurn = {
+        roomTurnId: prepared.roomTurnId,
+        ...(prepared.flightTurn === undefined
+          ? {}
+          : { flightTurn: prepared.flightTurn }),
+        dispatchStarted: false,
+        terminalized: false,
+      };
+      this.activeFlightTurns.push(activeFlightTurn);
+      return Object.freeze({
+        ...prepared,
+        activeFlightTurn,
+      });
+    } catch (error) {
+      this.flightTransitionReservationInFlight = false;
+      this.postState();
+      throw error;
+    }
+  }
+
+  private releaseInitiatingFlightTurnReservation(): void {
+    this.flightTransitionReservationInFlight = false;
+    this.postState();
+  }
+
+  private async finishPreparedFlightTurn(
+    prepared: PreparedFlightTurn | undefined,
+    outcome: FlightRecordedOutcome,
+  ): Promise<void> {
+    if (prepared?.activeFlightTurn) {
+      await this.finishActiveFlightTurn(prepared.activeFlightTurn, outcome);
+      return;
+    }
+    if (prepared?.flightTurn && this.flightRecorderRuntime) {
+      await this.flightRecorderRuntime.finishRoomTurn(
+        prepared.flightTurn,
+        outcome,
+      );
+    }
+  }
+
+  private async finishActiveFlightTurn(
+    activeFlightTurn: ActiveFlightTurn,
+    outcome: FlightRecordedOutcome,
+  ): Promise<void> {
+    if (activeFlightTurn.terminalized) {
+      this.unregisterActiveFlightTurn(activeFlightTurn);
+      return;
+    }
+    // Claim terminalization before the recorder await so Reset, Stop, and the
+    // normal runner cannot append competing terminal events for one trace.
+    activeFlightTurn.terminalized = true;
+    try {
+      if (activeFlightTurn.flightTurn && this.flightRecorderRuntime) {
+        await this.flightRecorderRuntime.finishRoomTurn(
+          activeFlightTurn.flightTurn,
+          outcome,
+        );
+      }
+    } finally {
+      this.unregisterActiveFlightTurn(activeFlightTurn);
+    }
+  }
+
+  private unregisterActiveFlightTurn(
+    activeFlightTurn: ActiveFlightTurn | undefined,
+  ): void {
+    if (!activeFlightTurn) return;
+    const index = this.activeFlightTurns.indexOf(activeFlightTurn);
+    if (index >= 0) this.activeFlightTurns.splice(index, 1);
+  }
+
+  private preparedFlightWasCancelled(
+    prepared: PreparedFlightTurn,
+  ): boolean {
+    return prepared.activeFlightTurn?.cancellationReason !== undefined;
+  }
+
   private async beginFlightRoomTurn(
     roomTurnId: string,
     missionBinding: MissionContractBinding,
@@ -5472,46 +6286,59 @@ export class HydraRoomPanel {
       clearSuggestedBuilder?: boolean;
       restoreState?: State;
       flightSource?: FlightTraceStartedPayload["source"];
+      preparedFlight?: PreparedFlightTurn;
     }
   ): Promise<void> {
-    const missionController = this.missionContractController;
-    if (!missionController) {
-      if (options?.restoreState && isInFlight(this.state)) {
-        this.applyEvent({ type: "reservationFailed", restore: options.restoreState });
-      } else if (isInFlight(this.state)) {
-        this.applyEvent({ type: "stop" });
+    let preparedFlight = options?.preparedFlight;
+    if (!preparedFlight) {
+      try {
+        preparedFlight = await this.prepareFlightTurn(
+          this.state.name,
+          options?.flightSource ?? "system",
+        );
+      } catch {
+        if (options?.restoreState && isInFlight(this.state)) {
+          this.applyEvent({
+            type: "reservationFailed",
+            restore: options.restoreState,
+          });
+        } else if (isInFlight(this.state)) {
+          this.applyEvent({ type: "stop" });
+        }
+        this.postState();
+        throw new Error(
+          "Mission Contract freshness could not be established; Hydra did not start the room turn.",
+        );
       }
-      this.postState();
-      throw new Error(
-        this.missionContractInitializationError
-          ?? "Mission Contract enforcement is unavailable; Hydra will not start a room turn."
-      );
     }
-    let missionSnapshot;
-    try {
-      missionSnapshot = await missionController.refresh();
-    } catch {
-      if (options?.restoreState && isInFlight(this.state)) {
-        this.applyEvent({ type: "reservationFailed", restore: options.restoreState });
-      } else if (isInFlight(this.state)) {
-        this.applyEvent({ type: "stop" });
-      }
-      this.postState();
-      throw new Error("Mission Contract freshness could not be established; Hydra did not start the room turn.");
-    }
-    const missionBinding = missionSnapshot.binding;
+    if (this.preparedFlightWasCancelled(preparedFlight)) return;
+    const missionBinding = preparedFlight.authorization.binding;
     const ctrl = new AbortController();
-    const roomTurnId = `room-turn-${crypto.randomUUID()}`;
+    const roomTurnId = preparedFlight.roomTurnId;
+    const previousRoomTurnId = this.currentRoomTurnId;
+    const previousMissionContractBinding =
+      this.currentMissionContractBinding;
+    const previousFlightTurn = this.currentFlightTurn;
+    const previousAbort = this.currentAbort;
     this.currentAbort = ctrl;
     this.currentRoomTurnId = roomTurnId;
     this.currentMissionContractBinding = missionBinding;
-    const authorization = this.missionBoundAuthorization(missionBinding, roomTurnId);
-    const flightTurn = await this.beginFlightRoomTurn(
-      roomTurnId,
-      missionBinding,
-      this.state.name,
-      options?.flightSource ?? "system",
-    );
+    const authorization = preparedFlight.authorization;
+    const flightTurn = preparedFlight.flightTurn;
+    this.currentFlightTurn = flightTurn;
+    const activeFlightEntry =
+      preparedFlight.activeFlightTurn
+      ?? {
+        roomTurnId,
+        ...(flightTurn === undefined ? {} : { flightTurn }),
+        dispatchStarted: false,
+        terminalized: false,
+      };
+    activeFlightEntry.dispatchStarted = true;
+    activeFlightEntry.abortController = ctrl;
+    if (!this.activeFlightTurns.includes(activeFlightEntry)) {
+      this.activeFlightTurns.push(activeFlightEntry);
+    }
     if (options?.clearSuggestedBuilder) this.suggestedBuilder = undefined;
     let finalizePending: (() => Promise<void>) | undefined;
     let bodyThrew = false;
@@ -5550,17 +6377,26 @@ export class HydraRoomPanel {
     let recorderThrew = false;
     let recorderError: unknown;
     try {
-      if (flightTurn && this.flightRecorderRuntime) {
-        const outcome: FlightRecordedOutcome = bodyThrew || finalizerThrew
+      if ((bodyThrew || finalizerThrew) && isInFlight(this.state)) {
+        this.applyEvent({ type: "stop" }, flightTurn);
+      }
+      const cancellationOutcome: FlightRecordedOutcome | undefined =
+        activeFlightEntry.cancellationReason === "reset"
+          ? { status: "incomplete", failureCode: "unknown" }
+          : activeFlightEntry.cancellationReason === "stop"
+            ? { status: "cancelled", failureCode: "cancelled" }
+            : undefined;
+      const outcome: FlightRecordedOutcome =
+        cancellationOutcome
+        ?? (bodyThrew || finalizerThrew
           ? { status: "failed", failureCode: "unknown" }
           : flightOutcomeOverride
             ?? (ctrl.signal.aborted
               ? { status: "cancelled", failureCode: "cancelled" }
               : this.state.name === "Idle"
                 ? { status: "failed", failureCode: "providerFailure" }
-                : { status: "succeeded", failureCode: null });
-        await this.flightRecorderRuntime.finishRoomTurn(flightTurn, outcome);
-      }
+                : { status: "succeeded", failureCode: null }));
+      await this.finishActiveFlightTurn(activeFlightEntry, outcome);
     } catch (error) {
       recorderThrew = true;
       recorderError = error;
@@ -5569,17 +6405,21 @@ export class HydraRoomPanel {
     let cleanupThrew = false;
     let cleanupError: unknown;
     try {
-      if ((bodyThrew || finalizerThrew) && isInFlight(this.state)) {
-        this.applyEvent({ type: "stop" });
-      }
+      activeFlightEntry.abortController = undefined;
+      this.unregisterActiveFlightTurn(activeFlightEntry);
       if (this.currentRoomTurnId === roomTurnId) {
-        this.currentRoomTurnId = undefined;
-        this.currentMissionContractBinding = undefined;
+        this.currentRoomTurnId = previousRoomTurnId;
+        this.currentMissionContractBinding =
+          previousMissionContractBinding;
+        this.currentFlightTurn = previousFlightTurn;
+        if (this.currentAbort === ctrl || this.currentAbort === undefined) {
+          this.currentAbort = previousAbort;
+        }
       }
       if (this.currentAbort === ctrl) {
-        this.currentAbort = undefined;
-        this.postState();
+        this.currentAbort = previousAbort;
       }
+      this.postState();
     } catch (error) {
       cleanupThrew = true;
       cleanupError = error;
@@ -5605,6 +6445,7 @@ export class HydraRoomPanel {
     restoreState: State,
     currentUserTimestamp?: string,
     flightSource: FlightTraceStartedPayload["source"] = "localUser",
+    preparedFlight?: PreparedFlightTurn,
   ): Promise<void> {
     await this.runTurn(async (ctrl, registerPending, authorization, flightTurn) => {
       // Track pending message ids opened in this method so a synchronous throw
@@ -5653,13 +6494,13 @@ export class HydraRoomPanel {
       openerId = undefined; // callAgent finalized the pending bubble.
 
       if (ctrl.signal.aborted || didAgentFail(openerResult.result)) {
-        this.applyEvent({ type: "stop" });
+        this.applyEvent({ type: "stop" }, flightTurn);
         this.currentAbort = undefined;
         this.postState();
         return;
       }
 
-      this.applyEvent({ type: "openerDone" });
+      this.applyEvent({ type: "openerDone" }, flightTurn);
 
       // Build the reactor prompt only after the opener has finalized into
       // the transcript. This ordering is what makes the second head actually
@@ -5698,24 +6539,24 @@ export class HydraRoomPanel {
       reactorId = undefined;
 
       if (ctrl.signal.aborted || didAgentFail(reactorResult.result)) {
-        this.applyEvent({ type: "stop" });
+        this.applyEvent({ type: "stop" }, flightTurn);
         this.currentAbort = undefined;
         this.postState();
         return;
       }
 
-      this.applyEvent({ type: "reactorDone" });
+      this.applyEvent({ type: "reactorDone" }, flightTurn);
 
       if (autoSkipCloserOnAgreement() && shouldAutoSkipCloserOnAgreement(reactorResult.text, {
         agent: reactor,
         phase: "reactor",
         sourceMessageTimestamp: this.messagesById.get(reactorMessageId)?.timestamp ?? new Date().toISOString(),
       })) {
-        this.applyEvent({ type: "closerDone" });
+        this.applyEvent({ type: "closerDone" }, flightTurn);
         this.currentAbort = undefined;
         this.postState();
         this.enqueueWikiMaintenanceAfterTurn("discussion");
-        await this.autoAdvanceActionableDefault("discussion");
+        await this.autoAdvanceActionableDefault("discussion", ctrl.signal);
         return;
       }
 
@@ -5755,7 +6596,7 @@ export class HydraRoomPanel {
       closerId = undefined;
 
       if (ctrl.signal.aborted || didAgentFail(closerResult.result)) {
-        this.applyEvent({ type: "stop" });
+        this.applyEvent({ type: "stop" }, flightTurn);
         this.currentAbort = undefined;
         this.postState();
         return;
@@ -5775,15 +6616,16 @@ export class HydraRoomPanel {
       } else {
         this.suggestedBuilder = undefined;
       }
-      this.applyEvent({ type: "closerDone" });
+      this.applyEvent({ type: "closerDone" }, flightTurn);
       this.currentAbort = undefined;
       this.postState();
       this.enqueueWikiMaintenanceAfterTurn("discussion");
-      await this.autoAdvanceActionableDefault("discussion");
+      await this.autoAdvanceActionableDefault("discussion", ctrl.signal);
     }, {
       clearSuggestedBuilder: true,
       restoreState,
       flightSource,
+      preparedFlight,
     });
   }
 
@@ -5793,6 +6635,7 @@ export class HydraRoomPanel {
     restoreState: State,
     currentUserTimestamp?: string,
     flightSource: FlightTraceStartedPayload["source"] = "localUser",
+    preparedFlight?: PreparedFlightTurn,
   ): Promise<void> {
     await this.runTurn(async (ctrl, registerPending, authorization, flightTurn) => {
       // Track every pending bubble opened in the prep loop so we can finalize
@@ -5875,24 +6718,32 @@ export class HydraRoomPanel {
         throw error;
       }
       if (ctrl.signal.aborted || results.some(({ result }) => didAgentFail(result))) {
-        this.applyEvent({ type: "stop" });
+        this.applyEvent({ type: "stop" }, flightTurn);
       } else {
-        this.applyEvent({ type: "parallelDone" });
+        this.applyEvent({ type: "parallelDone" }, flightTurn);
       }
       this.currentAbort = undefined;
       this.postState();
       if (!ctrl.signal.aborted && results.every(({ result }) => !didAgentFail(result))) {
         this.enqueueWikiMaintenanceAfterTurn("parallel discussion");
       }
-      await this.autoAdvanceActionableDefault("parallel discussion");
+      await this.autoAdvanceActionableDefault(
+        "parallel discussion",
+        ctrl.signal,
+      );
     }, {
       clearSuggestedBuilder: true,
       restoreState,
       flightSource,
+      preparedFlight,
     });
   }
 
-  private async runBuildPhase(builder: AgentId, restoreState: State): Promise<void> {
+  private async runBuildPhase(
+    builder: AgentId,
+    restoreState: State,
+    preparedFlight?: PreparedFlightTurn,
+  ): Promise<void> {
     await this.runTurn(async (ctrl, registerPending, authorization, flightTurn) => {
       const scoreContext: SerialBuildScoreContext | undefined =
         autoScorePassingBuilds() && autoVerifyAfterBuild()
@@ -5927,27 +6778,42 @@ export class HydraRoomPanel {
       buildId = undefined; // callAgent finalized the pending bubble.
 
       if (ctrl.signal.aborted || didAgentFail(result.result)) {
-        this.applyEvent({ type: "stop" });
+        this.applyEvent({ type: "stop" }, flightTurn);
       } else {
-        this.applyEvent({ type: "buildDone" });
+        this.applyEvent({ type: "buildDone" }, flightTurn);
       }
       this.currentAbort = undefined;
       this.postState();
       if (!ctrl.signal.aborted && !didAgentFail(result.result)) {
-        await this.afterSuccessfulBuild(scoreContext
-          ? {
-              ...scoreContext,
-              postFingerprintSha256: await this.captureScorableWorkspaceFingerprint("after build"),
-            }
-          : undefined);
+        let completedScoreContext: SerialBuildScoreContext | undefined;
+        if (scoreContext) {
+          const postFingerprintSha256 =
+            await this.captureScorableWorkspaceFingerprint("after build");
+          if (ctrl.signal.aborted) return;
+          completedScoreContext = {
+            ...scoreContext,
+            postFingerprintSha256,
+          };
+        }
+        await this.afterSuccessfulBuild(
+          completedScoreContext,
+          flightTurn,
+          result.flightSource,
+          ctrl.signal,
+        );
       }
     }, {
       restoreState,
       flightSource: this.autoAdvanceInProgress ? "system" : "localUser",
+      preparedFlight,
     });
   }
 
-  private async runParallelBuildPhase(agents: AgentId[], restoreState: State): Promise<void> {
+  private async runParallelBuildPhase(
+    agents: AgentId[],
+    restoreState: State,
+    preparedFlight?: PreparedFlightTurn,
+  ): Promise<void> {
     await this.runTurn(async (ctrl, registerPending, authorization, flightTurn) => {
       const openedIds: string[] = [];
       let promiseStarted = false;
@@ -5996,40 +6862,62 @@ export class HydraRoomPanel {
         throw error;
       }
       if (ctrl.signal.aborted || results.some(({ result }) => didAgentFail(result))) {
-        this.applyEvent({ type: "stop" });
+        this.applyEvent({ type: "stop" }, flightTurn);
       } else {
-        this.applyEvent({ type: "parallelBuildDone" });
+        this.applyEvent({ type: "parallelBuildDone" }, flightTurn);
       }
       this.currentAbort = undefined;
       this.postState();
       if (!ctrl.signal.aborted && results.every(({ result }) => !didAgentFail(result))) {
-        await this.afterSuccessfulBuild();
+        await this.afterSuccessfulBuild(
+          undefined,
+          flightTurn,
+          undefined,
+          ctrl.signal,
+        );
       }
     }, {
       restoreState,
       flightSource: this.autoAdvanceInProgress ? "system" : "localUser",
+      preparedFlight,
     });
   }
 
-  private async afterSuccessfulBuild(scoreContext?: SerialBuildScoreContext): Promise<void> {
+  private async afterSuccessfulBuild(
+    scoreContext?: SerialBuildScoreContext,
+    flightTurn?: FlightRoomTurnContext,
+    source?: FlightVerificationSourceBinding,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (signal?.aborted) return;
     if (!autoVerifyAfterBuild()) return;
     const preVerificationControlSha256 = scoreContext?.verificationScoringPlan?.eligible
       ? await this.captureCurrentVerificationControlSha256("before verification")
       : undefined;
-    const result = await this.runVerificationInternal("afterBuild", scoreContext?.verificationResolution);
+    if (signal?.aborted) return;
+    const result = await this.runVerificationInternal(
+      "afterBuild",
+      scoreContext?.verificationResolution,
+      flightTurn,
+      source,
+      signal,
+    );
+    if (signal?.aborted) return;
     if (result && verificationPassed(result) && autoScorePassingBuilds() && scoreContext) {
       await this.recordAutomaticVerifiedBuildScore(result, {
         ...scoreContext,
         preVerificationControlSha256,
       });
     }
+    if (signal?.aborted) return;
     if (
       verificationPassed(result) &&
       autoRequestReviewAfterPassingVerification() &&
       (this.state.name === "BuildDone" || this.state.name === "ParallelBuildDone")
     ) {
       await this.appendSystemMessage("Hydra auto-review started because verification passed after build.");
-      await this.requestReview();
+      if (signal?.aborted) return;
+      await this.requestReview(signal);
     }
   }
 
@@ -6776,6 +7664,7 @@ export class HydraRoomPanel {
       onChunk?: (chunk: string) => void;
       onReplaceText?: (text: string) => void;
       onLiveChannelEvent?: (event: LiveChannelEvent) => void;
+      onUsageRecord?: (record: UsageRecord) => void;
       recordFailureCard?: (result: RunResult) => void;
       run?: (onRawChunk: (chunk: string) => void) => Promise<RunResult>;
     }
@@ -6788,6 +7677,7 @@ export class HydraRoomPanel {
       onChunk,
       onReplaceText,
       onLiveChannelEvent,
+      onUsageRecord,
       recordFailureCard,
       run,
     } = opts;
@@ -6913,7 +7803,14 @@ export class HydraRoomPanel {
       // Why: usage must parse the RAW stdout. normalizeOneShotResult swaps in
       // the --output-last-message reply text for plain Codex, which drops the
       // trailing "tokens used" footer and silently disabled Codex usage rows.
-      await this.extractAndRecordUsage({ agent, phase, requestId: traceId, result, outputMode: prepared.outputMode });
+      const usage = await this.extractAndRecordUsage({
+        agent,
+        phase,
+        requestId: traceId,
+        result,
+        outputMode: prepared.outputMode,
+      });
+      if (usage) onUsageRecord?.(usage);
       return normalized;
     } catch (err) {
       if (
@@ -6948,6 +7845,7 @@ export class HydraRoomPanel {
     traceIdOverride?: string,
     markOutput?: () => void,
     onMissionRejected?: () => void,
+    flightState?: FlightAgentCallState,
   ): Promise<RunResult> {
     const traceId = traceIdOverride ?? makeTraceId(agent, phase);
     const startedAt = Date.now();
@@ -7004,7 +7902,15 @@ export class HydraRoomPanel {
       if (!result.cancelled && !result.timedOut) {
         const tokens = adapter?.parseUsage(raw);
         if (tokens) {
-          await this.recordUsage({ agent, phase, requestId: traceId, model: def?.model, source: "unknown", tokens });
+          const usage = await this.recordUsage({
+            agent,
+            phase,
+            requestId: traceId,
+            model: def?.model,
+            source: "unknown",
+            tokens,
+          });
+          if (flightState) flightState.pendingUsage = usage;
         }
       }
       return normalized;
@@ -7049,7 +7955,11 @@ export class HydraRoomPanel {
     ].join("");
   }
 
-  private async autoAdvanceActionableDefault(source: string): Promise<void> {
+  private async autoAdvanceActionableDefault(
+    source: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (signal?.aborted) return;
     if (!this.effectiveAutoAdvanceActionableDefaults()) return;
     if (!this.workspaceReady || isInFlight(this.state) || this.terminalPokeInFlight || this.verificationRunning) return;
     const latest = this.decisions[this.decisions.length - 1];
@@ -7089,7 +7999,8 @@ export class HydraRoomPanel {
       await this.appendSystemMessage(
         `Hydra auto-advanced after ${source}: ${action.detail}${this.autoAdvanceExplainer()}`
       );
-      await this.assignBuilder(action.builder);
+      if (signal?.aborted) return;
+      await this.assignBuilder(action.builder, signal);
       return;
     }
     if (action.kind === "requestReview" && (this.state.name === "BuildDone" || this.state.name === "ParallelBuildDone")) {
@@ -7098,7 +8009,8 @@ export class HydraRoomPanel {
       await this.appendSystemMessage(
         `Hydra auto-advanced after ${source}: ${action.detail}${this.autoAdvanceExplainer()}`
       );
-      await this.requestReview();
+      if (signal?.aborted) return;
+      await this.requestReview(signal);
       return;
     }
     if (action.kind === "handBack" && (this.state.name === "ReviewDone" || this.state.name === "ParallelReviewDone")) {
@@ -7107,7 +8019,8 @@ export class HydraRoomPanel {
       await this.appendSystemMessage(
         `Hydra auto-advanced after ${source}: ${action.detail}${this.autoAdvanceExplainer()}`
       );
-      await this.handBack();
+      if (signal?.aborted) return;
+      await this.handBack(signal);
       return;
     }
     if (action.kind === "sendInstruction" && action.instruction && isSendable(this.state)) {
@@ -7123,16 +8036,25 @@ export class HydraRoomPanel {
       await this.appendSystemMessage(
         `Hydra auto-advanced after ${source} (send-instruction ${this.autoAdvanceSendInstructionCount}/${cap}): ${action.detail}${this.autoAdvanceExplainer()}`
       );
+      if (signal?.aborted) return;
       this.autoAdvanceInProgress = true;
       try {
-        await this.sendUserMessage(action.instruction, this.getFirstSpeaker());
+        await this.sendUserMessage(
+          action.instruction,
+          this.getFirstSpeaker(),
+          { signal },
+        );
       } finally {
         this.autoAdvanceInProgress = false;
       }
     }
   }
 
-  private async runReviewPhase(reviewer: AgentId, restoreState: State): Promise<void> {
+  private async runReviewPhase(
+    reviewer: AgentId,
+    restoreState: State,
+    preparedFlight?: PreparedFlightTurn,
+  ): Promise<void> {
     await this.runTurn(async (ctrl, registerPending, authorization, flightTurn, setFlightOutcome) => {
       let reviewId: string | undefined;
       let reviewIdFinalized = false;
@@ -7165,7 +8087,10 @@ export class HydraRoomPanel {
         }
         this.pendingPromptTranscriptWindows.delete(reviewId);
         reviewIdFinalized = true;
-        this.applyEvent({ type: "reviewDone", approved: false });
+        this.applyEvent(
+          { type: "reviewDone", approved: false },
+          flightTurn,
+        );
         this.currentAbort = undefined;
         this.postState();
         return;
@@ -7191,20 +8116,25 @@ export class HydraRoomPanel {
       reviewIdFinalized = true;
 
       if (ctrl.signal.aborted || didAgentFail(result.result)) {
-        this.applyEvent({ type: "stop" });
+        this.applyEvent({ type: "stop" }, flightTurn);
       } else {
         const approved = APPROVED_SENTINEL_RE.test(result.text);
-        this.applyEvent({ type: "reviewDone", approved });
+        this.applyEvent({ type: "reviewDone", approved }, flightTurn);
       }
       this.currentAbort = undefined;
       this.postState();
     }, {
       restoreState,
       flightSource: this.autoAdvanceInProgress ? "system" : "localUser",
+      preparedFlight,
     });
   }
 
-  private async runParallelReviewPhase(reviewers: AgentId[], restoreState: State): Promise<void> {
+  private async runParallelReviewPhase(
+    reviewers: AgentId[],
+    restoreState: State,
+    preparedFlight?: PreparedFlightTurn,
+  ): Promise<void> {
     await this.runTurn(async (ctrl, registerPending, authorization, flightTurn, setFlightOutcome) => {
       const openedIds: string[] = [];
       let promiseStarted = false;
@@ -7220,7 +8150,10 @@ export class HydraRoomPanel {
       if (diff === null) {
         setFlightOutcome({ status: "failed", failureCode: "validationFailure" });
         await this.appendSystemMessage("[git diff failed; cannot review]");
-        this.applyEvent({ type: "parallelReviewDone", approved: false });
+        this.applyEvent(
+          { type: "parallelReviewDone", approved: false },
+          flightTurn,
+        );
         this.currentAbort = undefined;
         this.postState();
         return;
@@ -7263,16 +8196,20 @@ export class HydraRoomPanel {
         throw error;
       }
       if (ctrl.signal.aborted || results.some(({ result }) => didAgentFail(result))) {
-        this.applyEvent({ type: "stop" });
+        this.applyEvent({ type: "stop" }, flightTurn);
       } else {
         const approved = results.every(({ text }) => APPROVED_SENTINEL_RE.test(text));
-        this.applyEvent({ type: "parallelReviewDone", approved });
+        this.applyEvent(
+          { type: "parallelReviewDone", approved },
+          flightTurn,
+        );
       }
       this.currentAbort = undefined;
       this.postState();
     }, {
       restoreState,
       flightSource: this.autoAdvanceInProgress ? "system" : "localUser",
+      preparedFlight,
     });
   }
 
@@ -7420,7 +8357,11 @@ export class HydraRoomPanel {
     traceIdOverride?: string,
     manyHeadsDispatch = false,
     flightTurn?: FlightRoomTurnContext,
-  ): Promise<{ text: string; result: RunResult }> {
+  ): Promise<{
+    text: string;
+    result: RunResult;
+    flightSource?: FlightVerificationSourceBinding;
+  }> {
     const boundTraceId = traceIdOverride ?? makeTraceId(agent, phase);
     let invocationPlan: AgentInvocationPlan;
     try {
@@ -7461,6 +8402,9 @@ export class HydraRoomPanel {
       indeterminate: false,
     };
     const flightState: FlightAgentCallState = {
+      runId: boundTraceId,
+      model,
+      ...(flightTurn === undefined ? {} : { roomTurn: flightTurn }),
       terminalSteeringChain: initialSteeringChain,
       actualTransport: "notSubmitted",
     };
@@ -7483,6 +8427,7 @@ export class HydraRoomPanel {
         initialSteeringChain,
         evidenceClass: "hydraObserved",
       });
+      flightState.operation = flightOperation;
     }
 
     let resultForFlight: RunResult | undefined;
@@ -7502,12 +8447,48 @@ export class HydraRoomPanel {
         flightState,
       );
       resultForFlight = outcome.result;
-      return outcome;
+      return {
+        ...outcome,
+        flightSource: {
+          runId: boundTraceId,
+          steeringChain: {
+            sha256: flightState.terminalSteeringChain.sha256,
+            indeterminate: flightState.terminalSteeringChain.indeterminate,
+          },
+        },
+      };
     } catch (error) {
       threw = true;
       throw error;
     } finally {
       if (flightOperation && this.flightRecorderRuntime) {
+        const usage = flightState.pendingUsage
+          ? buildFlightUsageProjection({
+              usageId: `usage-${crypto.randomUUID()}`,
+              runId: boundTraceId,
+              model,
+              record: flightState.pendingUsage,
+              steeringChain: flightState.terminalSteeringChain,
+            })
+          : undefined;
+        if (usage && flightTurn) {
+          const usageOperation =
+            await this.flightRecorderRuntime.beginAuxiliaryOperation(
+              flightTurn,
+              {
+                subject: usage.subject,
+                parentOperationId: flightOperation.operationId,
+              },
+            );
+          await this.flightRecorderRuntime.finishAuxiliaryOperation(
+            usageOperation,
+            {
+              ...usage.outcome,
+              observation: usage.observation,
+              evidenceClass: "providerObserved",
+            },
+          );
+        }
         const outcome = flightState.outcomeOverride
           ?? (resultForFlight
             ? mapFlightRunResult(resultForFlight)
@@ -7780,6 +8761,7 @@ export class HydraRoomPanel {
               };
             }
           },
+          flightState,
         );
       } else {
         rawResult = await this.runAgentTransport(
@@ -7814,6 +8796,7 @@ export class HydraRoomPanel {
               };
             }
           },
+          flightState,
         );
       }
       const result = HydraRoomPanel.browserBroker?.redactAgentResult(agent, rawResult) ?? rawResult;
@@ -7946,6 +8929,7 @@ export class HydraRoomPanel {
     ) => void,
     onActualTransport?: (transport: string) => void,
     onMissionRejected?: () => void,
+    flightState?: FlightAgentCallState,
   ): Promise<RunResult> {
     const traceId = traceIdOverride ?? makeTraceId(agent, phase);
     const startedAt = Date.now();
@@ -8042,13 +9026,14 @@ export class HydraRoomPanel {
           requestFiles: requestFileTrace(normalized),
         });
         await this.appendAgentCallTrace(completedAgentCallTrace(traceId, agent, phase, "terminalBridge", startedAt, normalized));
-        await this.extractAndRecordUsage({
+        const usage = await this.extractAndRecordUsage({
           agent,
           phase,
           requestId: traceId,
           result: await this.terminalBridgeUsageResult(normalized),
           outputMode: terminalPrepared.outputMode,
         });
+        if (flightState && usage) flightState.pendingUsage = usage;
         return normalized;
       }
 
@@ -8082,6 +9067,9 @@ export class HydraRoomPanel {
           }
         },
         onLiveChannelEvent: (event) => this.appendMessageLiveChannelEvent(messageId, event),
+        onUsageRecord: (record) => {
+          if (flightState) flightState.pendingUsage = record;
+        },
         recordFailureCard: (normalized) => {
           this.recordRunFailureCard(messageId, {
             id: traceId,
@@ -8677,7 +9665,7 @@ export class HydraRoomPanel {
     source: UsageRecord["source"];
     tokens: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreateTokens: number; reasoningTokens: number };
     nativeCostUsd?: number;
-  }): Promise<void> {
+  }): Promise<UsageRecord> {
     const { agentDefaults, modelOverrides } = this.modelPrices();
     const record = buildUsageRecord({
       sessionId: this.sessionId,
@@ -8717,6 +9705,7 @@ export class HydraRoomPanel {
     // unaffected, and current-session rows are never older than the window.
     this.usageRecords = boundUsageRecords(this.usageRecords);
     this.postState();
+    return record;
   }
 
   private async extractAndRecordUsage(args: {
@@ -8725,8 +9714,8 @@ export class HydraRoomPanel {
     requestId?: string;
     result: RunResult;
     outputMode?: "plain" | "claudeStreamJson" | "codexJson" | "passthrough";
-  }): Promise<void> {
-    if (args.result.cancelled || args.result.timedOut) return;
+  }): Promise<UsageRecord | undefined> {
+    if (args.result.cancelled || args.result.timedOut) return undefined;
     const { agent, phase, requestId, result, outputMode } = args;
     const agentKind = getAgentDefinition(agent)?.kind;
     const model = modelForPhase(agent, phase) || undefined;
@@ -8734,16 +9723,14 @@ export class HydraRoomPanel {
       const summary = summarizeClaudeEvents(parseClaudeEventStream(result.stdout));
       const tokens = usageFromClaudeSummary(summary.usage);
       if (tokens) {
-        await this.recordUsage({ agent, phase, requestId, model, source: "claudeStreamJson", tokens, nativeCostUsd: summary.totalCostUsd });
-        return;
+        return await this.recordUsage({ agent, phase, requestId, model, source: "claudeStreamJson", tokens, nativeCostUsd: summary.totalCostUsd });
       }
     }
     if (agentKind === "codex" && outputMode === "codexJson") {
       const summary = summarizeCodexEvents(parseCodexEventStream(result.stdout));
       const tokens = usageFromCodexSummary(summary.usage);
       if (tokens) {
-        await this.recordUsage({ agent, phase, requestId, model, source: "codexJson", tokens });
-        return;
+        return await this.recordUsage({ agent, phase, requestId, model, source: "codexJson", tokens });
       }
     }
     if (agentKind === "codex") {
@@ -8759,7 +9746,7 @@ export class HydraRoomPanel {
         // the cost estimate ~8x (gpt-5.5: $10/MTok out vs $1.25/MTok in).
         // Bill at the input rate instead; enable hydraRoom.codexJson for
         // exact splits from turn.completed events.
-        await this.recordUsage({
+        return await this.recordUsage({
           agent,
           phase,
           requestId,
@@ -8769,6 +9756,7 @@ export class HydraRoomPanel {
         });
       }
     }
+    return undefined;
   }
 
   private async buildNextPromptPreviewEnvelope(
@@ -10268,10 +11256,15 @@ export class HydraRoomPanel {
   private postState(): void {
     if (this.disposed) return;
     const workQueue = this.workspaceReady ? this.currentWorkQueue() : [];
-    const automationReady = this.workspaceReady && !this.unconfirmedNativeTermination;
+    const automationReady =
+      this.workspaceReady
+      && !this.unconfirmedNativeTermination
+      && !this.flightTransitionReservationInFlight;
     const duelCommitmentBusy = this.agentDuelAutomationRunning || !!this.duelCommitmentAbort;
     const duelAutomationBusy = this.agentDuelAdmissionRunning || duelCommitmentBusy;
     const canStop =
+      this.flightTransitionReservationInFlight ||
+      this.activeFlightTurns.some((turn) => !turn.terminalized) ||
       isInFlight(this.state) ||
       this.terminalPokeInFlight ||
       this.verificationRunning ||
@@ -10316,7 +11309,12 @@ export class HydraRoomPanel {
           liveSteeringTargets.map((target) => target.capability.delivery),
         )),
         steeringInitializationError: this.steeringInitializationError,
-        canPokeNativeTerminals: automationReady && !isInFlight(this.state) && !this.terminalPokeInFlight && !duelAutomationBusy,
+        canPokeNativeTerminals:
+          automationReady
+          && !isInFlight(this.state)
+          && !this.terminalPokeInFlight
+          && !this.verificationRunning
+          && !duelAutomationBusy,
         canClearNativeActions: this.workspaceReady && !this.terminalPokeInFlight,
         canAssignBuilder: automationReady && this.state.name === "AwaitingUser",
         canRequestReview: automationReady && (this.state.name === "BuildDone" || this.state.name === "ParallelBuildDone") && this.gitAvailable,
@@ -10419,13 +11417,29 @@ export class HydraRoomPanel {
     }
   }
 
-  private applyEvent(event: Event): void {
+  private applyEvent(
+    event: Event,
+    flightTurn?: FlightRoomTurnContext,
+  ): void {
     const prev = this.state;
     this.state = transition(this.state, event);
     if (this.state !== prev) {
+      const occurredAt = new Date().toISOString();
       // Best-effort phase-transition trail for telemetry. recordEvent swallows
       // its own write errors and must never block the room, so fire-and-forget.
       void this.recordEvent("phaseTransition", `${prev.name} -> ${this.state.name}`);
+      if (flightTurn && this.flightRecorderRuntime) {
+        const transitionRecord: RecordFlightPhaseTransitionInput = {
+          fromPhase: prev.name,
+          toPhase: this.state.name,
+          trigger: event.type,
+          occurredAt,
+        };
+        void this.flightRecorderRuntime.recordPhaseTransition(
+          flightTurn,
+          transitionRecord,
+        );
+      }
     }
   }
 

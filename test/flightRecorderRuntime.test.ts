@@ -193,6 +193,328 @@ describe("Flight Recorder runtime", () => {
     assert.equal(mirror.includes(PROMPT), false);
   });
 
+  test("records phase plus usage, verification, and native-action children in exact lifecycle order", async (t) => {
+    const root = await tempRoot(t);
+    const runtime = await createFlightRecorderRuntime({
+      privateWorkspaceRoot: root,
+      ownerId: "extension-host-auxiliary-lifecycle",
+      now: () => new Date("2026-07-24T12:00:00.000Z"),
+    });
+    t.after(() => runtime.dispose());
+
+    const room = await runtime.beginRoomTurn({
+      traceId: "trace-runtime-auxiliary-lifecycle",
+      roomTurnId: "room-turn-auxiliary-lifecycle",
+      phase: "Opener",
+      missionDocumentSha256: DOCUMENT,
+      missionBindingSha256: MISSION,
+      source: "localUser",
+      baseRevisionSha: "a".repeat(40),
+    });
+    assert.equal(await runtime.recordPhaseTransition(room, {
+      fromPhase: "AwaitingUser",
+      toPhase: "Opener",
+      trigger: "userSent",
+      occurredAt: "2026-07-24T11:59:59.000Z",
+    }), true);
+
+    const runId = "run-auxiliary-lifecycle";
+    const agent = await runtime.beginAgentRun(room, agentInput(runId));
+    const terminalSteeringChain = {
+      sha256: TERMINAL_CHAIN,
+      indeterminate: true,
+    } as const;
+    const usage = await runtime.beginAuxiliaryOperation(room, {
+      parentOperationId: agent.operationId,
+      subject: {
+        kind: "usage",
+        usageId: "usage-auxiliary-lifecycle",
+        runId,
+        model: "gpt-test",
+        source: "native",
+        evidenceClass: "providerObserved",
+      },
+    });
+    assert.equal(usage.recorded, true);
+    assert.equal(usage.parentOperationId, agent.operationId);
+    assert.equal(await runtime.finishAuxiliaryOperation(usage, {
+      status: "succeeded",
+      failureCode: null,
+      observation: {
+        kind: "usage",
+        observationType: "usageSummary",
+        inputTokens: 10,
+        outputTokens: 20,
+        cacheReadTokens: 3,
+        cacheCreationTokens: 4,
+        reasoningTokens: 5,
+        totalCostUsd: 0.25,
+        costSource: "native",
+        steeringChain: terminalSteeringChain,
+        evidenceClass: "providerObserved",
+      },
+    }), true);
+    assert.equal(await runtime.finishAgentRun(agent, {
+      status: "succeeded",
+      failureCode: null,
+      output: EMPTY_OUTPUT,
+      terminalSteeringChain,
+      actualTransport: "appServer",
+      evidenceClass: "providerObserved",
+    }), true);
+
+    const verification = await runtime.beginAuxiliaryOperation(room, {
+      subject: {
+        kind: "verification",
+        verificationId: "verification-auxiliary-lifecycle",
+        planSha256: "8".repeat(64),
+        invocationShapeSha256: "9".repeat(64),
+        sourceRunId: runId,
+        sourceSteeringChain: terminalSteeringChain,
+        evidenceClass: "hydraObserved",
+      },
+    });
+    assert.equal(verification.recorded, true);
+    assert.equal(verification.parentOperationId, room.phaseOperationId);
+    assert.equal(await runtime.finishAuxiliaryOperation(verification, {
+      status: "succeeded",
+      failureCode: null,
+      observation: {
+        kind: "verification",
+        observationType: "verificationReceipt",
+        receiptSha256: "a".repeat(64),
+        headRevisionSha: "b".repeat(40),
+        exitCode: 0,
+        stdout: EMPTY_OUTPUT,
+        stderr: EMPTY_OUTPUT,
+        sourceSteeringChain: terminalSteeringChain,
+        evidenceClass: "hydraObserved",
+      },
+    }), true);
+
+    const nativeAction = await runtime.beginAuxiliaryOperation(room, {
+      subject: {
+        kind: "nativeAction",
+        nativeActionId: "native-action-auxiliary-lifecycle",
+        actionKind: "prompt",
+        headCount: 2,
+        attachmentCount: 1,
+        evidenceClass: "hydraObserved",
+      },
+    });
+    assert.equal(nativeAction.recorded, true);
+    assert.equal(nativeAction.parentOperationId, room.phaseOperationId);
+    assert.equal(await runtime.finishAuxiliaryOperation(nativeAction, {
+      status: "succeeded",
+      failureCode: null,
+      observation: {
+        kind: "nativeAction",
+        observationType: "nativeActionReceipt",
+        receiptSha256: "c".repeat(64),
+        status: "recorded",
+        evidenceClass: "hydraObserved",
+      },
+    }), true);
+
+    assert.equal(await runtime.finishRoomTurn(room, {
+      status: "succeeded",
+      failureCode: null,
+    }), true);
+    const replay = await runtime.inspectTrace(room.traceId);
+    assert.ok(replay);
+    assert.equal(replay.completeness, "complete");
+    assert.deepEqual(
+      replay.records.map((record) => [
+        record.recordType,
+        record.operationKind,
+        record.operationId ?? null,
+        record.parentOperationId ?? null,
+      ]),
+      [
+        ["traceStarted", "roomTurn", null, null],
+        ["operationStarted", "phase", room.phaseOperationId, null],
+        ["operationEvent", "phase", room.phaseOperationId, null],
+        ["operationStarted", "agentRun", agent.operationId, room.phaseOperationId],
+        ["operationStarted", "usage", usage.operationId, agent.operationId],
+        ["operationEvent", "usage", usage.operationId, agent.operationId],
+        ["operationFinished", "usage", usage.operationId, agent.operationId],
+        ["operationFinished", "agentRun", agent.operationId, room.phaseOperationId],
+        ["operationStarted", "verification", verification.operationId, room.phaseOperationId],
+        ["operationEvent", "verification", verification.operationId, room.phaseOperationId],
+        ["operationFinished", "verification", verification.operationId, room.phaseOperationId],
+        ["operationStarted", "nativeAction", nativeAction.operationId, room.phaseOperationId],
+        ["operationEvent", "nativeAction", nativeAction.operationId, room.phaseOperationId],
+        ["operationFinished", "nativeAction", nativeAction.operationId, room.phaseOperationId],
+        ["operationFinished", "phase", room.phaseOperationId, null],
+        ["traceFinished", "roomTurn", null, null],
+      ],
+    );
+
+    const phaseEvent = replay.records.find((record) =>
+      record.recordType === "operationEvent"
+      && record.operationKind === "phase"
+    );
+    assert.deepEqual(
+      phaseEvent?.payload.payloadType === "operationEvent"
+        ? phaseEvent.payload.observation
+        : undefined,
+      {
+        kind: "phase",
+        observationType: "phaseTransition",
+        fromPhase: "AwaitingUser",
+        toPhase: "Opener",
+        trigger: "userSent",
+      },
+    );
+    assert.equal(phaseEvent?.occurredAt, "2026-07-24T11:59:59.000Z");
+
+    const usageEvent = replay.records.find((record) =>
+      record.recordType === "operationEvent"
+      && record.operationKind === "usage"
+    );
+    const agentFinish = replay.records.find((record) =>
+      record.recordType === "operationFinished"
+      && record.operationKind === "agentRun"
+    );
+    const usageSteeringChain =
+      usageEvent?.payload.payloadType === "operationEvent"
+      && usageEvent.payload.observation.observationType === "usageSummary"
+        ? usageEvent.payload.observation.steeringChain
+        : undefined;
+    const agentSteeringChain =
+      agentFinish?.payload.payloadType === "operationFinished"
+        ? agentFinish.payload.steeringChain
+        : undefined;
+    assert.deepEqual(usageSteeringChain, terminalSteeringChain);
+    assert.deepEqual(agentSteeringChain, terminalSteeringChain);
+    assert.deepEqual(usageSteeringChain, agentSteeringChain);
+  });
+
+  test("rejects wrong auxiliary observations and every lifecycle mutation after finish", async (t) => {
+    const root = await tempRoot(t);
+    const runtime = await createFlightRecorderRuntime({
+      privateWorkspaceRoot: root,
+      ownerId: "extension-host-auxiliary-rejection",
+    });
+    t.after(() => runtime.dispose());
+
+    const room = await runtime.beginRoomTurn({
+      traceId: "trace-runtime-auxiliary-rejection",
+      roomTurnId: "room-turn-auxiliary-rejection",
+      phase: "Build",
+      missionDocumentSha256: DOCUMENT,
+      missionBindingSha256: MISSION,
+      source: "localUser",
+      baseRevisionSha: null,
+    });
+    const nativeAction = await runtime.beginAuxiliaryOperation(room, {
+      subject: {
+        kind: "nativeAction",
+        nativeActionId: "native-action-auxiliary-rejection",
+        actionKind: "rawLine",
+        headCount: 1,
+        attachmentCount: 0,
+        evidenceClass: "hydraObserved",
+      },
+    });
+
+    assert.equal(await runtime.finishAuxiliaryOperation(nativeAction, {
+      status: "succeeded",
+      failureCode: null,
+      observation: {
+        kind: "usage",
+        observationType: "usageSummary",
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        reasoningTokens: 0,
+        totalCostUsd: 0,
+        costSource: "computed",
+        steeringChain: {
+          sha256: TERMINAL_CHAIN,
+          indeterminate: false,
+        },
+        evidenceClass: "hydraObserved",
+      },
+    }), false);
+    assert.equal(await runtime.finishAuxiliaryOperation(nativeAction, {
+      status: "succeeded",
+      failureCode: null,
+      observation: {
+        kind: "nativeAction",
+        observationType: "nativeActionReceipt",
+        receiptSha256: "d".repeat(64),
+        status: "recorded",
+        evidenceClass: "hydraObserved",
+      },
+    }), true);
+    assert.equal(await runtime.finishAuxiliaryOperation(nativeAction, {
+      status: "succeeded",
+      failureCode: null,
+      observation: {
+        kind: "nativeAction",
+        observationType: "nativeActionReceipt",
+        receiptSha256: "d".repeat(64),
+        status: "recorded",
+        evidenceClass: "hydraObserved",
+      },
+    }), false);
+    assert.equal(await runtime.finishRoomTurn(room, {
+      status: "succeeded",
+      failureCode: null,
+    }), true);
+    assert.equal(await runtime.recordPhaseTransition(room, {
+      fromPhase: "Build",
+      toPhase: "BuildDone",
+      trigger: "buildDone",
+    }), false);
+
+    const afterFinish = await runtime.beginAuxiliaryOperation(room, {
+      subject: {
+        kind: "verification",
+        verificationId: "verification-after-finish",
+        planSha256: "e".repeat(64),
+        invocationShapeSha256: "f".repeat(64),
+        sourceRunId: null,
+        sourceSteeringChain: null,
+        evidenceClass: "hydraObserved",
+      },
+    });
+    assert.equal(afterFinish.recorded, false);
+    assert.equal(await runtime.finishAuxiliaryOperation(afterFinish, {
+      status: "succeeded",
+      failureCode: null,
+      observation: {
+        kind: "verification",
+        observationType: "verificationReceipt",
+        receiptSha256: "1".repeat(64),
+        headRevisionSha: null,
+        exitCode: 0,
+        stdout: EMPTY_OUTPUT,
+        stderr: EMPTY_OUTPUT,
+        sourceSteeringChain: null,
+        evidenceClass: "hydraObserved",
+      },
+    }), false);
+    assert.equal(await runtime.finishRoomTurn(room, {
+      status: "succeeded",
+      failureCode: null,
+    }), false);
+
+    const replay = await runtime.inspectTrace(room.traceId);
+    assert.ok(replay);
+    assert.equal(
+      replay.records.filter((record) =>
+        record.recordType === "operationEvent"
+        && record.operationKind === "nativeAction"
+      ).length,
+      1,
+    );
+    assert.equal(await runtime.inspectTrace("not a valid trace id"), undefined);
+    assert.equal(runtime.notice, undefined);
+  });
+
   test(
     "lifecycle admission stays prompt behind blocked I/O and flush preserves exact record order",
     { timeout: 10_000 },
@@ -635,6 +957,11 @@ describe("Flight Recorder runtime", () => {
         child: { status: "failed", failureCode: "validationFailure" },
         parent: { status: "failed", failureCode: "unknown" },
       },
+      {
+        suffix: "recorder",
+        child: { status: "incomplete", failureCode: "recorderFailure" },
+        parent: { status: "succeeded", failureCode: null },
+      },
     ] as const;
 
     for (const scenario of cases) {
@@ -691,6 +1018,10 @@ describe("Flight Recorder runtime", () => {
           ? traceFinish.status
           : undefined,
         scenario.child.status,
+      );
+      assert.equal(
+        replay?.incomplete,
+        scenario.child.status === "incomplete",
       );
     }
   });

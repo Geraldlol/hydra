@@ -1,5 +1,6 @@
 import { describe, test } from "node:test";
 import { strict as assert } from "node:assert";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -91,7 +92,21 @@ describe("verification evidence", () => {
       stderr: "",
     };
     await ensureVerificationFile(file);
-    await appendVerification(file, result);
+    await appendVerification(file, {
+      ...result,
+      stdoutBytes: 2,
+      stdoutSha256: "a".repeat(64),
+      stderrBytes: 0,
+      stderrSha256: "b".repeat(64),
+    });
+    const workspaceLog = await fs.readFile(file, "utf8");
+    assert.doesNotMatch(workspaceLog, /stdoutBytes|stdoutSha256|stderrBytes|stderrSha256/);
+    assert.doesNotMatch(workspaceLog, new RegExp("a{64}|b{64}"));
+    await fs.appendFile(
+      file,
+      `${JSON.stringify({ ...result, stdoutBytes: 2 })}\n`,
+      "utf8",
+    );
     await fs.appendFile(file, "nope\n", "utf8");
     assert.deepEqual(await readVerifications(file), [result]);
   });
@@ -417,6 +432,129 @@ describe("verification shell selection", () => {
 });
 
 describe("verification process lifecycle", () => {
+  test("computes full raw stdout and stderr metadata before truncating the retained tails", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-verify-output-metadata-"));
+    const script = path.join(dir, "emit-output.js");
+    const stdout = `${"🙂".repeat(8)}${"S".repeat(96)}`;
+    const stderr = `${"λ".repeat(12)}${"E".repeat(80)}`;
+    await fs.writeFile(
+      script,
+      [
+        `process.stdout.write(${JSON.stringify(stdout)});`,
+        `process.stderr.write(${JSON.stringify(stderr)});`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    try {
+      const result = await runVerificationCommand({
+        cwd: dir,
+        command: `"${process.execPath}" "${script}"`,
+        timeoutMs: 5_000,
+        maxOutputChars: 24,
+      });
+
+      assert.equal(result.exitCode, 0);
+      assert.notEqual(result.stdout, stdout);
+      assert.notEqual(result.stderr, stderr);
+      assert.match(result.stdout, /\[\.\.\. truncated /);
+      assert.match(result.stderr, /\[\.\.\. truncated /);
+      assert.equal(result.stdoutBytes, Buffer.byteLength(stdout, "utf8"));
+      assert.equal(result.stderrBytes, Buffer.byteLength(stderr, "utf8"));
+      assert.equal(
+        result.stdoutSha256,
+        createHash("sha256").update(stdout, "utf8").digest("hex"),
+      );
+      assert.equal(
+        result.stderrSha256,
+        createHash("sha256").update(stderr, "utf8").digest("hex"),
+      );
+      assert.doesNotMatch(
+        JSON.stringify(result),
+        /stdoutBytes|stdoutSha256|stderrBytes|stderrSha256/,
+      );
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("raw metadata is stable when UTF-8 and ANSI bytes cross pipe chunks", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-verify-split-output-"));
+    const script = path.join(dir, "emit-split-output.js");
+    const stdout = Buffer.from("🙂\u001b[31mRED\u001b[0m", "utf8");
+    const stderr = Buffer.from("λ\u001b[33mWARN\u001b[0m", "utf8");
+    await fs.writeFile(
+      script,
+      [
+        `const stdout = Buffer.from(${JSON.stringify([...stdout])});`,
+        `const stderr = Buffer.from(${JSON.stringify([...stderr])});`,
+        "process.stdout.write(stdout.subarray(0, 2));",
+        "process.stderr.write(stderr.subarray(0, 1));",
+        "setTimeout(() => {",
+        "  process.stdout.write(stdout.subarray(2, 6));",
+        "  process.stderr.write(stderr.subarray(1, 4));",
+        "  setTimeout(() => {",
+        "    process.stdout.write(stdout.subarray(6));",
+        "    process.stderr.write(stderr.subarray(4));",
+        "  }, 20);",
+        "}, 20);",
+      ].join("\n"),
+      "utf8",
+    );
+
+    try {
+      const result = await runVerificationCommand({
+        cwd: dir,
+        command: `"${process.execPath}" "${script}"`,
+        timeoutMs: 5_000,
+        maxOutputChars: 1_000,
+      });
+
+      assert.equal(result.exitCode, 0);
+      assert.equal(result.stdoutBytes, stdout.length);
+      assert.equal(result.stderrBytes, stderr.length);
+      assert.equal(
+        result.stdoutSha256,
+        createHash("sha256").update(stdout).digest("hex"),
+      );
+      assert.equal(
+        result.stderrSha256,
+        createHash("sha256").update(stderr).digest("hex"),
+      );
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a pre-aborted verification never spawns the configured command", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-verify-pre-abort-"));
+    const script = path.join(dir, "write-canary.js");
+    const canary = path.join(dir, "spawned.txt");
+    await fs.writeFile(
+      script,
+      `require("node:fs").writeFileSync(${JSON.stringify(canary)}, "spawned");`,
+      "utf8",
+    );
+    const ctrl = new AbortController();
+    ctrl.abort();
+
+    try {
+      const result = await runVerificationCommand({
+        cwd: dir,
+        command: `"${process.execPath}" "${script}"`,
+        timeoutMs: 5_000,
+        maxOutputChars: 1_000,
+        signal: ctrl.signal,
+      });
+
+      assert.equal(result.cancelled, true);
+      assert.equal(result.exitCode, null);
+      await assert.rejects(fs.access(canary), { code: "ENOENT" });
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("a timed-out command with a pipe-holding grandchild always settles", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-verify-tree-"));
     const script = path.join(dir, "hold-open.js");

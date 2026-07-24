@@ -22,7 +22,7 @@ describe("Mission Contract panel integration source contract", () => {
   test("passes one immutable binding through the room turn and exact submission gates", () => {
     assert.match(
       panel,
-      /missionSnapshot = await missionController\.refresh\(\);[\s\S]*const authorization = this\.missionBoundAuthorization\(missionBinding, roomTurnId\)/,
+      /const snapshot = await controller\.refresh\(\);[\s\S]*return this\.missionBoundAuthorization\(snapshot\.binding, dispatchId\)/,
     );
     assert.match(panel, /await body\([\s\S]*authorization/);
     assert.match(panel, /authorization: Extract<MissionDispatchAuthorization, \{ kind: "bound" \}>/);
@@ -54,8 +54,14 @@ describe("Mission Contract panel integration source contract", () => {
     const runTurn = panel.slice(runTurnStart, runTurnEnd);
     assert.match(runTurn, /reservationFailed/);
     assert.match(runTurn, /restore: options\.restoreState/);
-    assert.match(panel, /runBuildPhase\(builder, previousState\)/);
-    assert.match(panel, /runParallelReviewPhase\(parallelAgents, previousState\)/);
+    assert.match(
+      panel,
+      /runBuildPhase\(\s*builder,\s*previousState,\s*preparedFlight/,
+    );
+    assert.match(
+      panel,
+      /runParallelReviewPhase\(\s*parallelAgents,\s*previousState,\s*preparedFlight/,
+    );
   });
 
   test("binds steering and prompt provenance to document and active-binding hashes", () => {

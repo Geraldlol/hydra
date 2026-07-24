@@ -129,7 +129,10 @@ describe("passive standings source contracts", () => {
     assert.match(source, /verificationResolution\?: ResolvedVerificationCommand/);
     assert.match(source, /verificationScoringPlan\?: VerificationScoringPlan/);
     assert.match(source, /createVerificationScoringPlan\(this\.workspaceRoot, preBuildResolution\)/);
-    assert.match(source, /runVerificationInternal\("afterBuild", scoreContext\?\.verificationResolution\)/);
+    assert.match(
+      source,
+      /runVerificationInternal\(\s*"afterBuild",\s*scoreContext\?\.verificationResolution,/,
+    );
     assert.match(source, /context\.preVerificationControlSha256 !== plan\.controlSha256/);
     assert.match(source, /postVerificationControlSha256 !== plan\.controlSha256/);
     assert.match(source, /verification-plan-sha256|planSha256: plan\.planSha256/);
@@ -174,7 +177,10 @@ describe("passive standings source contracts", () => {
     const runEnd = source.indexOf("async acceptDefaultDecision(", runStart);
     const run = source.slice(runStart, runEnd);
     assert.match(run, /latchedResolution \?\? await resolveVerificationCommand\(/);
-    assert.match(source, /runVerificationInternal\("afterBuild", scoreContext\?\.verificationResolution\)/);
+    assert.match(
+      source,
+      /runVerificationInternal\(\s*"afterBuild",\s*scoreContext\?\.verificationResolution,/,
+    );
   });
 });
 
@@ -333,9 +339,20 @@ describe("terminal bridge usage source contracts", () => {
     const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
 
     const assign = source.slice(source.indexOf("async assignBuilder("), source.indexOf("async assignParallelBuilders("));
-    const assignReservation = assign.indexOf('this.applyEvent({ type: "assignBuilder", builder })');
-    const assignedMessage = assign.indexOf("assigned as builder", assignReservation);
-    assert.ok(assignReservation >= 0 && assignedMessage > assignReservation);
+    const assignReservation = assign.indexOf("await this.prepareInitiatingFlightTurn(");
+    const assignTransition = assign.indexOf('type: "assignBuilder"', assignReservation);
+    const assignedMessage = assign.indexOf("assigned as builder", assignTransition);
+    assert.ok(assignReservation >= 0 && assignTransition > assignReservation);
+    assert.ok(assignedMessage > assignTransition);
+
+    const reservationHelper = source.slice(
+      source.indexOf("private async prepareInitiatingFlightTurn("),
+      source.indexOf("private releaseInitiatingFlightTurnReservation("),
+    );
+    assert.ok(
+      reservationHelper.indexOf("this.flightTransitionReservationInFlight = true")
+        < reservationHelper.indexOf("await this.prepareFlightTurn("),
+    );
 
     const verify = source.slice(source.indexOf("private async runVerificationInternal("), source.indexOf("async acceptDefaultDecision("));
     assert.ok(verify.indexOf("this.verificationRunning = true") < verify.indexOf("await resolveVerificationCommand("));
@@ -352,7 +369,10 @@ describe("terminal bridge usage source contracts", () => {
     const method = source.slice(start, end);
 
     assert.ok(method.indexOf("const previousState = this.state") < method.indexOf("this.applyEvent({"));
-    assert.match(method, /catch \(err\) \{[\s\S]*this\.applyEvent\(\{ type: "reservationFailed", restore: previousState \}\);[\s\S]*this\.postState\(\);[\s\S]*throw err/);
+    assert.match(
+      method,
+      /catch \(err\) \{[\s\S]*type: "reservationFailed", restore: previousState[\s\S]*preparedFlight\.flightTurn[\s\S]*finishPreparedFlightTurn\([\s\S]*this\.postState\(\);[\s\S]*throw err/,
+    );
   });
 
   test("webview builder messages are normalized before dispatch", () => {
@@ -506,7 +526,10 @@ describe("usage tracker source contracts", () => {
     const methodEnd = source.indexOf("private autoAdvanceExplainer(", methodStart);
     assert.ok(methodStart >= 0 && methodEnd > methodStart, "could not bound runOneShotPipeline body");
     const method = source.slice(methodStart, methodEnd);
-    assert.match(method, /await this\.extractAndRecordUsage\(\{ agent, phase, requestId: traceId, result, outputMode: prepared\.outputMode \}\)/);
+    assert.match(
+      method,
+      /await this\.extractAndRecordUsage\(\{\s*agent,\s*phase,\s*requestId: traceId,\s*result,\s*outputMode: prepared\.outputMode,\s*\}\)/,
+    );
     assert.doesNotMatch(method, /usageResult/);
   });
 

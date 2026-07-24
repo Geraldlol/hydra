@@ -605,6 +605,13 @@ export function activate(context: vscode.ExtensionContext): void {
       })
     ),
     vscode.commands.registerCommand(
+      "hydraRoom.runMissionFlightSmokeTest",
+      withErrorReporting(async () => {
+        const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
+        await panel.runMissionFlightSmokeTest();
+      })
+    ),
+    vscode.commands.registerCommand(
       "hydraRoom.runManyHeadsSmokeTest",
       withErrorReporting(async () => {
         if (vscode.workspace.isTrusted !== true) {

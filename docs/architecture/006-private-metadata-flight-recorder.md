@@ -155,7 +155,9 @@ It never silently presents a partial trace as complete.
   linked control trace; no accepted transition silently falls back to only the
   legacy event log.
 - `applyEvent` records a phase transition only after the canonical
-  `transition()` reducer accepts it.
+  `transition()` reducer accepts it. The caller passes the exact trace context;
+  nested auto-advance and concurrent control work never rely on a mutable
+  process-global "active trace."
 - Prompt-envelope construction records prompt/context/component hashes before
   body compaction, never their bodies.
 - Agent planning records the exact trace ID, contract hash, authority
@@ -170,10 +172,28 @@ It never silently presents a partial trace as complete.
 - Steering projects metadata only after the authoritative steering event
   append succeeds. Completion, usage, verification, claims, and convergence
   bind the terminal steering-chain hash and its indeterminate flag.
-- Verification uses one verification ID and exactly one terminal record for
-  pass, failure, cancellation, timeout, or unconfirmed termination.
-- Browser, native action, and approval controllers receive narrow recorder
-  sinks; they never pass content-bearing payloads.
+- Usage is projected as a child of its `agentRun` only after the provider
+  steering queue closes, and before that parent agent operation finishes. The
+  usage observation and agent completion therefore bind the same terminal
+  steering-chain hash.
+- Verification uses one verification operation and exactly one terminal
+  record for pass, failure, cancellation, timeout, or unconfirmed termination.
+  It hashes and counts the complete raw stdout/stderr byte streams before
+  decoding and the existing human-readable tail cap, and binds the Git HEAD
+  captured before the verifier runs so a verifier-created commit cannot
+  rewrite the tested starting revision. Those full-stream fields are
+  non-enumerable in memory and
+  are stripped from `.hydra/verification.jsonl`; only the private Flight
+  projection receives them.
+- Native commands, raw lines, and multi-head terminal pokes start a
+  `nativeAction` operation before dispatch. Hydra records the existing durable
+  native-action receipt before finishing that Flight operation. A failed
+  receipt append terminalizes the operation as `incomplete/recorderFailure`,
+  so a complete Flight trace cannot claim a receipt that was never durably
+  accepted.
+- Browser, approval, and structured tool/edit controllers will receive narrow
+  recorder sinks in later stages; they must never pass content-bearing
+  payloads.
 
 Provider floods produce `traceLimited` plus explicit completeness limits rather
 than unbounded cardinality or a false complete view.
@@ -266,18 +286,21 @@ coverage includes user send, builder assignment, review request, hand-back,
 Stop, reservation failure, and auto-advance causal links exactly once.
 
 Roll out protocol/store/controller first, then agent and steering lifecycles,
-then verification/usage/native/browser projections, then the mirror and
-extension-host smoke. Replay and eval remain unavailable until isolation,
+then phase/verification/usage/native projections and the extension-host smoke.
+Browser, approval, and structured tool/edit projections follow as separate
+controller integrations. Replay and eval remain unavailable until isolation,
 consent, cost, and retained-content gates land. Rollback disables recording
 and hides the mirror while preserving private traces for inspection.
 
 ### Current staged implementation
 
 The first runtime stage records one Mission-bound trace for each `runTurn`
-execution and direct multi-head native poke, with a phase parent and exactly
-one terminal `agentRun` operation per participating head. Completion carries
-the terminal steering-chain hash read only after the provider acceptance queue
-closes; if that read is unavailable, the chain is explicitly indeterminate.
+execution. Each participating provider head has exactly one terminal
+`agentRun` operation beneath the phase parent; standalone native paths use
+their own control trace and `nativeAction` operation instead. Agent completion
+carries the terminal steering-chain hash read only after the provider
+acceptance queue closes; if that read is unavailable, the chain is explicitly
+indeterminate.
 The start record labels only the planned transport; completion records the
 actual HTTP, Terminal Bridge, ordinary one-shot, Codex App Server, Codex
 one-shot fallback, or Claude session path selected at runtime. That selected
@@ -304,14 +327,47 @@ queues an incomplete close for admitted open traces before releasing the
 private owner lease. Recorder failure remains nonthrowing with respect to the
 underlying agent operation and makes the affected trace ineligible.
 
-This stage deliberately does **not** claim full transition coverage yet.
-Existing entry points reserve the canonical phase with `applyEvent` before
-`runTurn` begins, so the initiating transition is not yet inside the Flight
-trace. Standalone raw-line/native commands, Stop, accepted intermediate phase
-transitions, verification, usage, tool/edit normalization, browser/native
-actions, Replay, and Create Eval still require their later controller sinks.
-Until those integrations land, the recorder is a strict partial timeline, not
-a complete regression receipt.
+The follow-up integration starts a prepared trace before each initiating
+canonical transition and threads that exact context through `runTurn`.
+`applyEvent` emits a Flight phase-transition observation only after
+`transition()` accepts the event. Accepted intermediate, Stop, reservation
+failure, and nested auto-advance paths use explicit trace contexts rather than
+a shared active-trace slot, preserving causality when room work nests or
+overlaps.
+
+Provider usage is held in memory until the steering acceptance queue closes.
+Hydra then projects one bounded `usage` child operation, with the terminal
+steering-chain hash, before finishing its parent `agentRun`. Malformed or
+non-finite token/cost summaries are rejected instead of being coerced into
+evidence.
+
+Verification starts a dedicated operation before process launch and records
+one terminal receipt across pass, failure, cancellation, timeout, transport
+failure, or unconfirmed termination. Its receipt uses full raw stdout/stderr
+byte counts and hashes computed before decoding and retained-tail truncation,
+and the pre-run Git HEAD. A serial build can bind the exact source run and
+terminal steering chain. A parallel N-head build deliberately leaves those
+singular source fields absent: one `sourceRunId` and steering chain cannot
+honestly represent multiple builders.
+
+Native command, raw-line, and multi-head poke paths open their `nativeAction`
+operation before dispatch, append the existing durable native-action receipt,
+and only then finish the Flight operation. Cancellation and provider failure
+remain explicit terminal outcomes; Flight does not replace the native-action
+ledger as the receipt authority.
+
+`hydraRoom.runMissionFlightSmokeTest` exercises the Mission and Flight
+foundation without an agent call, verifier, browser, or workspace mutation.
+It uses an extension-private disposable child to test proposal/confirmation/
+amendment and stale-binding rejection, followed by a synthetic trace containing
+an accepted phase transition, usage, verification, and native-action
+operations. The test validates strict replay completeness, metadata-only
+storage, operation order, owner-lease shutdown, exact cleanup, and writes only
+a bounded latest diagnostic report outside the disposable run.
+
+This remains a strict partial timeline, not a complete regression receipt.
+Browser, approval, structured provider tool/edit normalization, Replay, and
+Create Eval still require their later controller sinks and safety gates.
 
 ## Source anchors
 

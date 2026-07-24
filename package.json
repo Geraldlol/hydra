@@ -283,6 +283,10 @@
         "title": "Hydra: Advanced: Run Terminal Bridge Self-Test"
       },
       {
+        "command": "hydraRoom.runMissionFlightSmokeTest",
+        "title": "Hydra: Advanced: Run Mission + Flight Recorder Smoke Test"
+      },
+      {
         "command": "hydraRoom.runManyHeadsSmokeTest",
         "title": "Hydra: Advanced: Run Claude Worker Fanout Smoke Test",
         "enablement": "isWorkspaceTrusted"

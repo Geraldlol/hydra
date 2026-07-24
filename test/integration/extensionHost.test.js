@@ -39,6 +39,7 @@ suite("Hydra extension host", () => {
       "hydraRoom.cancelDuel",
       "hydraRoom.openDuelAudit",
       "hydraRoom.correctDuelResult",
+      "hydraRoom.runMissionFlightSmokeTest",
     ]) {
       assert.ok(commands.has(command), `${command} was not registered`);
     }
@@ -50,6 +51,12 @@ suite("Hydra extension host", () => {
     const transcript = path.join(hydraDir, "transcript.md");
     await waitForFile(transcript);
     assert.match(await fs.readFile(transcript, "utf8"), /^# Hydra Room Transcript/m);
+  });
+
+  test("runs the isolated Mission and Flight smoke command in the extension host", async () => {
+    const transcript = path.join(hydraDir, "transcript.md");
+    await vscode.commands.executeCommand("hydraRoom.runMissionFlightSmokeTest");
+    await waitForText(transcript, /Mission\/Flight smoke test passed\./);
   });
 });
 
@@ -64,4 +71,18 @@ async function waitForFile(filePath) {
     }
   }
   assert.fail(`timed out waiting for ${filePath}`);
+}
+
+async function waitForText(filePath, pattern) {
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    try {
+      const content = await fs.readFile(filePath, "utf8");
+      if (pattern.test(content)) return;
+    } catch {
+      // The room may still be replacing its transcript atomically.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.fail(`timed out waiting for ${pattern} in ${filePath}`);
 }

@@ -10,10 +10,15 @@ import {
   type FlightAgentRunSubject,
   type FlightEvidenceClass,
   type FlightFailureCode,
+  type FlightNativeActionSubject,
+  type FlightOperationObservation,
   type FlightOutputMetadata,
   type FlightSteeringChainMetadata,
   type FlightTerminalStatus,
+  type FlightTraceReplay,
   type FlightTraceStartedPayload,
+  type FlightUsageSubject,
+  type FlightVerificationSubject,
 } from "./flightRecorderProtocol";
 import {
   cleanupFlightRecorderStorage,
@@ -137,9 +142,54 @@ export interface FinishFlightAgentRunInput extends FlightRecordedOutcome {
 
 export interface FinishFlightRoomTurnInput extends FlightRecordedOutcome {}
 
+export type FlightAuxiliaryOperationKind =
+  | "verification"
+  | "usage"
+  | "nativeAction";
+
+export type FlightAuxiliaryOperationSubject =
+  | FlightVerificationSubject
+  | FlightUsageSubject
+  | FlightNativeActionSubject;
+
+export interface BeginFlightAuxiliaryOperationInput {
+  readonly subject: FlightAuxiliaryOperationSubject;
+  /**
+   * Omit for a phase child. Usage normally names its still-open agentRun
+   * parent so lifecycle ordering remains explicit.
+   */
+  readonly parentOperationId?: string;
+}
+
+export interface FlightAuxiliaryOperation {
+  readonly traceId: string;
+  readonly phaseOperationId: string;
+  readonly operationId: string;
+  readonly parentOperationId: string;
+  readonly operationKind: FlightAuxiliaryOperationKind;
+  readonly missionBindingSha256: string;
+  readonly startedAtMs: number;
+  readonly evidenceClass: FlightEvidenceClass;
+  readonly recorded: boolean;
+}
+
+export interface FinishFlightAuxiliaryOperationInput
+  extends FlightRecordedOutcome {
+  readonly observation: FlightOperationObservation;
+  readonly evidenceClass?: FlightEvidenceClass;
+}
+
+export interface RecordFlightPhaseTransitionInput {
+  readonly fromPhase: string;
+  readonly toPhase: string;
+  readonly trigger: string;
+  readonly occurredAt?: string;
+}
+
 interface MutableRoomTurn {
   context: FlightRoomTurnContext;
   readonly agentOperations: Map<string, MutableAgentOperation>;
+  readonly auxiliaryOperations: Map<string, MutableAuxiliaryOperation>;
   finished: boolean;
   traceStarted: boolean;
   phaseStarted: boolean;
@@ -147,6 +197,13 @@ interface MutableRoomTurn {
 
 interface MutableAgentOperation {
   handle: FlightAgentRunOperation;
+  finished: boolean;
+  started: boolean;
+  outcome?: FlightRecordedOutcome;
+}
+
+interface MutableAuxiliaryOperation {
+  handle: FlightAuxiliaryOperation;
   finished: boolean;
   started: boolean;
   outcome?: FlightRecordedOutcome;
@@ -284,6 +341,7 @@ export class FlightRecorderRuntime {
     const state: MutableRoomTurn = {
       context,
       agentOperations: new Map(),
+      auxiliaryOperations: new Map(),
       finished: false,
       traceStarted: false,
       phaseStarted: false,
@@ -492,6 +550,202 @@ export class FlightRecorderRuntime {
     }
   }
 
+  async beginAuxiliaryOperation(
+    roomTurn: FlightRoomTurnContext,
+    input: BeginFlightAuxiliaryOperationInput,
+  ): Promise<FlightAuxiliaryOperation> {
+    const operationId = this.newIdentifier(`flight-${input.subject.kind}`);
+    const startedAtMs = this.nowMs();
+    const parentOperationId =
+      input.parentOperationId ?? roomTurn.phaseOperationId;
+    let handle: FlightAuxiliaryOperation = Object.freeze({
+      traceId: roomTurn.traceId,
+      phaseOperationId: roomTurn.phaseOperationId,
+      operationId,
+      parentOperationId,
+      operationKind: input.subject.kind,
+      missionBindingSha256: roomTurn.missionBindingSha256,
+      startedAtMs,
+      evidenceClass: input.subject.evidenceClass,
+      recorded: false,
+    });
+    const state = this.roomTurns.get(roomTurn.traceId);
+    const parentAgent = parentOperationId === roomTurn.phaseOperationId
+      ? undefined
+      : state?.agentOperations.get(parentOperationId);
+
+    try {
+      if (this.disposed
+        || !this.controller
+        || !roomTurn.recorded
+        || !state
+        || state.finished
+        || state.context.phaseOperationId !== roomTurn.phaseOperationId
+        || state.context.missionBindingSha256
+          !== roomTurn.missionBindingSha256
+        || (
+          parentOperationId !== roomTurn.phaseOperationId
+          && (!parentAgent || parentAgent.finished)
+        )) {
+        return handle;
+      }
+      const controller = this.controller;
+      handle = Object.freeze({ ...handle, recorded: true });
+      const operation: MutableAuxiliaryOperation = {
+        handle,
+        finished: false,
+        started: false,
+      };
+      state.auxiliaryOperations.set(operationId, operation);
+      this.enqueueAuthoritativeWork(roomTurn.traceId, async () => {
+        if (!state.phaseStarted
+          || (
+            parentOperationId !== roomTurn.phaseOperationId
+            && !parentAgent?.started
+          )) {
+          return;
+        }
+        const receipt = await controller.startOperation({
+          traceId: roomTurn.traceId,
+          operationId,
+          parentOperationId,
+          operationKind: input.subject.kind,
+          missionBindingSha256: roomTurn.missionBindingSha256,
+          subject: structuredClone(input.subject),
+        });
+        if (!receipt.ok) {
+          this.latchNotice(
+            "recordingDegraded",
+            roomTurn.traceId,
+            receipt.health.noticeCode,
+          );
+          return;
+        }
+        operation.started = true;
+      });
+      return handle;
+    } catch {
+      this.latchNotice("recordingDegraded", roomTurn.traceId);
+      return handle;
+    }
+  }
+
+  async finishAuxiliaryOperation(
+    operation: FlightAuxiliaryOperation,
+    input: FinishFlightAuxiliaryOperationInput,
+  ): Promise<boolean> {
+    try {
+      const state = this.roomTurns.get(operation.traceId);
+      const mutable = state?.auxiliaryOperations.get(operation.operationId);
+      if (this.disposed
+        || !this.controller
+        || !operation.recorded
+        || !mutable
+        || mutable.finished
+        || state?.finished
+        || mutable.handle.parentOperationId !== operation.parentOperationId
+        || mutable.handle.operationKind !== operation.operationKind
+        || mutable.handle.missionBindingSha256
+          !== operation.missionBindingSha256
+        || input.observation.kind !== operation.operationKind) {
+        return false;
+      }
+      const controller = this.controller;
+      const durationMs = this.durationSince(operation.startedAtMs);
+      mutable.finished = true;
+      mutable.outcome = Object.freeze({
+        status: input.status,
+        failureCode: input.failureCode,
+      });
+      this.enqueueAuthoritativeWork(operation.traceId, async () => {
+        if (!mutable.started) return;
+        const event = await controller.recordEvent({
+          traceId: operation.traceId,
+          operationId: operation.operationId,
+          parentOperationId: operation.parentOperationId,
+          operationKind: operation.operationKind,
+          observation: structuredClone(input.observation),
+          missionBindingSha256: operation.missionBindingSha256,
+        });
+        const finish = await controller.finishOperation({
+          traceId: operation.traceId,
+          operationId: operation.operationId,
+          parentOperationId: operation.parentOperationId,
+          operationKind: operation.operationKind,
+          status: input.status,
+          durationMs,
+          failureCode: input.failureCode,
+          output: null,
+          steeringChain: null,
+          actualTransport: null,
+          evidenceClass: input.evidenceClass ?? operation.evidenceClass,
+          missionBindingSha256: operation.missionBindingSha256,
+        });
+        if (!event.ok || !finish.ok) {
+          this.latchNotice(
+            "recordingDegraded",
+            operation.traceId,
+            event.health.noticeCode ?? finish.health.noticeCode,
+          );
+        }
+      });
+      return true;
+    } catch {
+      this.latchNotice("recordingDegraded", operation.traceId);
+      return false;
+    }
+  }
+
+  async recordPhaseTransition(
+    roomTurn: FlightRoomTurnContext,
+    input: RecordFlightPhaseTransitionInput,
+  ): Promise<boolean> {
+    try {
+      const state = this.roomTurns.get(roomTurn.traceId);
+      if (this.disposed
+        || !this.controller
+        || !roomTurn.recorded
+        || !state
+        || state.finished
+        || state.context.phaseOperationId !== roomTurn.phaseOperationId
+        || state.context.missionBindingSha256
+          !== roomTurn.missionBindingSha256) {
+        return false;
+      }
+      const controller = this.controller;
+      this.enqueueAuthoritativeWork(roomTurn.traceId, async () => {
+        if (!state.phaseStarted) return;
+        const receipt = await controller.recordEvent({
+          traceId: roomTurn.traceId,
+          operationId: roomTurn.phaseOperationId,
+          operationKind: "phase",
+          missionBindingSha256: roomTurn.missionBindingSha256,
+          ...(input.occurredAt === undefined
+            ? {}
+            : { occurredAt: input.occurredAt }),
+          observation: {
+            kind: "phase",
+            observationType: "phaseTransition",
+            fromPhase: input.fromPhase,
+            toPhase: input.toPhase,
+            trigger: input.trigger,
+          },
+        });
+        if (!receipt.ok) {
+          this.latchNotice(
+            "recordingDegraded",
+            roomTurn.traceId,
+            receipt.health.noticeCode,
+          );
+        }
+      });
+      return true;
+    } catch {
+      this.latchNotice("recordingDegraded", roomTurn.traceId);
+      return false;
+    }
+  }
+
   async finishRoomTurn(
     roomTurn: FlightRoomTurnContext,
     input: FinishFlightRoomTurnInput,
@@ -545,7 +799,7 @@ export class FlightRecorderRuntime {
           traceId: roomTurn.traceId,
           status: phaseOk ? outcome.status : "incomplete",
           durationMs,
-          incomplete: !phaseOk,
+          incomplete: !phaseOk || outcome.status === "incomplete",
         });
         if (!trace.ok) {
           this.latchNotice(
@@ -561,6 +815,19 @@ export class FlightRecorderRuntime {
       this.roomTurns.delete(roomTurn.traceId);
       this.latchNotice("recordingDegraded", roomTurn.traceId);
       return false;
+    }
+  }
+
+  async inspectTrace(
+    traceId: string,
+  ): Promise<FlightTraceReplay | undefined> {
+    if (!isFlightTraceId(traceId)) return undefined;
+    try {
+      await this.flushDerivedWork(traceId);
+      return await this.store?.load(traceId);
+    } catch {
+      this.latchNotice("recordingDegraded", traceId);
+      return undefined;
     }
   }
 
@@ -761,7 +1028,11 @@ export class FlightRecorderRuntime {
     state: MutableRoomTurn,
     parent: FlightRecordedOutcome,
   ): FlightRecordedOutcome {
-    for (const operation of state.agentOperations.values()) {
+    const childOutcomes = [
+      ...state.agentOperations.values(),
+      ...state.auxiliaryOperations.values(),
+    ];
+    for (const operation of childOutcomes) {
       if (
         operation.outcome?.status === "deliveryUnknown"
         || operation.outcome?.failureCode === "terminationUnconfirmed"
@@ -779,9 +1050,9 @@ export class FlightRecorderRuntime {
           parent.failureCode === "providerFailure"
           || parent.failureCode === "unknown"
         )
-      );
+    );
     if (!parentIsCoarse) return parent;
-    for (const operation of state.agentOperations.values()) {
+    for (const operation of childOutcomes) {
       if (operation.outcome && operation.outcome.status !== "succeeded") {
         return operation.outcome;
       }

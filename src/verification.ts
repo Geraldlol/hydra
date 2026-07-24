@@ -57,6 +57,11 @@ export interface VerificationResult {
   durationMs: number;
   stdout: string;
   stderr: string;
+  /** Full raw stream metadata, computed before decoding and the retained tail cap. */
+  stdoutBytes?: number;
+  stdoutSha256?: string;
+  stderrBytes?: number;
+  stderrSha256?: string;
   /** True when Hydra could not observe the spawned process closing after cancellation. */
   terminationFailed?: boolean;
   // Git HEAD at the moment verification ran. Captured so reviewers can
@@ -86,8 +91,15 @@ export async function ensureVerificationFile(filePath: string): Promise<void> {
 }
 
 export async function appendVerification(filePath: string, result: VerificationResult): Promise<void> {
+  const {
+    stdoutBytes: _stdoutBytes,
+    stdoutSha256: _stdoutSha256,
+    stderrBytes: _stderrBytes,
+    stderrSha256: _stderrSha256,
+    ...workspaceRecord
+  } = result;
   await serializePerFile(filePath, async () => {
-    await appendFileSafely(filePath, `${JSON.stringify(result)}\n`);
+    await appendFileSafely(filePath, `${JSON.stringify(workspaceRecord)}\n`);
   });
 }
 
@@ -396,6 +408,25 @@ export interface VerificationResultWithCancel extends VerificationResult {
 
 export async function runVerificationCommand(options: VerificationRunOptions): Promise<VerificationResultWithCancel> {
   const started = Date.now();
+  if (options.signal?.aborted) {
+    const emptySha256 = createHash("sha256").update(Buffer.alloc(0)).digest("hex");
+    return withPrivateVerificationOutputMetadata({
+      timestamp: new Date().toISOString(),
+      command: options.command,
+      cwd: options.cwd,
+      exitCode: null,
+      timedOut: false,
+      durationMs: Date.now() - started,
+      stdout: "",
+      stderr: "",
+      cancelled: true,
+    }, {
+      stdoutBytes: 0,
+      stdoutSha256: emptySha256,
+      stderrBytes: 0,
+      stderrSha256: emptySha256,
+    });
+  }
   return new Promise<VerificationResultWithCancel>((resolve) => {
     const processSpec = verificationProcessForCommand(options.command);
     const child = cp.spawn(processSpec.command, processSpec.args, {
@@ -407,6 +438,10 @@ export async function runVerificationCommand(options: VerificationRunOptions): P
     });
     let stdout = "";
     let stderr = "";
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    const stdoutHash = createHash("sha256");
+    const stderrHash = createHash("sha256");
     let timedOut = false;
     let cancelled = false;
     let settled = false;
@@ -415,10 +450,26 @@ export async function runVerificationCommand(options: VerificationRunOptions): P
     let terminationStarted = false;
     let terminationFailed = false;
     const signal = options.signal;
-    const appendStdout = (text: string) => {
+    const appendStdout = (chunk: Buffer | string) => {
+      const bytes = typeof chunk === "string"
+        ? Buffer.from(chunk, "utf8")
+        : chunk;
+      const text = typeof chunk === "string"
+        ? chunk
+        : stripAnsi(chunk.toString("utf8"));
+      stdoutBytes += bytes.length;
+      stdoutHash.update(bytes);
       stdout = truncateTail(stdout + text, options.maxOutputChars);
     };
-    const appendStderr = (text: string) => {
+    const appendStderr = (chunk: Buffer | string) => {
+      const bytes = typeof chunk === "string"
+        ? Buffer.from(chunk, "utf8")
+        : chunk;
+      const text = typeof chunk === "string"
+        ? chunk
+        : stripAnsi(chunk.toString("utf8"));
+      stderrBytes += bytes.length;
+      stderrHash.update(bytes);
       stderr = truncateTail(stderr + text, options.maxOutputChars);
     };
     const finish = (exitCode: number | null) => {
@@ -428,7 +479,7 @@ export async function runVerificationCommand(options: VerificationRunOptions): P
       if (forceBackstop) clearTimeout(forceBackstop);
       if (failureBackstop) clearTimeout(failureBackstop);
       if (signal && abortHandler) signal.removeEventListener("abort", abortHandler);
-      resolve({
+      resolve(withPrivateVerificationOutputMetadata({
         timestamp: new Date().toISOString(),
         command: options.command,
         cwd: options.cwd,
@@ -439,7 +490,12 @@ export async function runVerificationCommand(options: VerificationRunOptions): P
         stderr: stderr.trimEnd(),
         ...(cancelled ? { cancelled: true } : {}),
         ...(terminationFailed ? { terminationFailed: true } : {}),
-      });
+      }, {
+        stdoutBytes,
+        stdoutSha256: stdoutHash.digest("hex"),
+        stderrBytes,
+        stderrSha256: stderrHash.digest("hex"),
+      }));
     };
     const beginTermination = () => {
       if (terminationStarted || settled) return;
@@ -483,14 +539,34 @@ export async function runVerificationCommand(options: VerificationRunOptions): P
       else signal.addEventListener("abort", abortHandler, { once: true });
     }
 
-    child.stdout?.on("data", (chunk: Buffer) => appendStdout(stripAnsi(chunk.toString("utf8"))));
-    child.stderr?.on("data", (chunk: Buffer) => appendStderr(stripAnsi(chunk.toString("utf8"))));
+    child.stdout?.on("data", (chunk: Buffer) => appendStdout(chunk));
+    child.stderr?.on("data", (chunk: Buffer) => appendStderr(chunk));
     child.on("error", (err) => {
       appendStderr(err instanceof Error ? err.message : String(err));
       finish(null);
     });
     child.on("close", (exitCode) => finish(exitCode));
   });
+}
+
+function withPrivateVerificationOutputMetadata<
+  T extends VerificationResult,
+>(
+  result: T,
+  metadata: Required<
+    Pick<
+      VerificationResult,
+      "stdoutBytes" | "stdoutSha256" | "stderrBytes" | "stderrSha256"
+    >
+  >,
+): T {
+  Object.defineProperties(result, {
+    stdoutBytes: { value: metadata.stdoutBytes, enumerable: false },
+    stdoutSha256: { value: metadata.stdoutSha256, enumerable: false },
+    stderrBytes: { value: metadata.stderrBytes, enumerable: false },
+    stderrSha256: { value: metadata.stderrSha256, enumerable: false },
+  });
+  return result;
 }
 
 export function verificationProcessForCommand(
@@ -603,6 +679,22 @@ function isVerificationResult(value: unknown): value is VerificationResult {
     typeof result.durationMs === "number" &&
     typeof result.stdout === "string" &&
     typeof result.stderr === "string" &&
+    ((result.stdoutBytes === undefined && result.stdoutSha256 === undefined)
+      || (
+        typeof result.stdoutBytes === "number"
+        && Number.isSafeInteger(result.stdoutBytes)
+        && result.stdoutBytes >= 0
+        && typeof result.stdoutSha256 === "string"
+        && /^[0-9a-f]{64}$/i.test(result.stdoutSha256)
+      )) &&
+    ((result.stderrBytes === undefined && result.stderrSha256 === undefined)
+      || (
+        typeof result.stderrBytes === "number"
+        && Number.isSafeInteger(result.stderrBytes)
+        && result.stderrBytes >= 0
+        && typeof result.stderrSha256 === "string"
+        && /^[0-9a-f]{64}$/i.test(result.stderrSha256)
+      )) &&
     (result.terminationFailed === undefined || typeof result.terminationFailed === "boolean")
   );
 }

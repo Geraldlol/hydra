@@ -33,11 +33,11 @@ describe("Flight Recorder staged panel integration source contract", () => {
     const start = panel.indexOf("private async runTurn(");
     const end = panel.indexOf("private async runDiscussionTurn(", start);
     const method = panel.slice(start, end);
-    assert.match(method, /const flightTurn = await this\.beginFlightRoomTurn\(/);
+    assert.match(method, /preparedFlight = await this\.prepareFlightTurn\(/);
     assert.match(method, /authorization,[\s\S]*flightTurn/);
     assert.match(
       method,
-      /this\.flightRecorderRuntime\.finishRoomTurn\(flightTurn, outcome\)/,
+      /this\.finishActiveFlightTurn\(activeFlightEntry, outcome\)/,
     );
     assert.match(panel, /source: "telegram"/);
   });
@@ -75,7 +75,7 @@ describe("Flight Recorder staged panel integration source contract", () => {
       (panel.match(/results = await settleAgentCalls\(calls, \(\) => ctrl\??\.abort\(\)\)/g) ?? []).length,
       4,
     );
-    assert.match(panel, /const results = await settleAgentCalls\(calls, \(\) => ctrl\?\.abort\(\)\)/);
+    assert.match(panel, /const results = await settleAgentCalls\(calls, \(\) => ctrl\.abort\(\)\)/);
     assert.doesNotMatch(panel, /Promise\.all\(calls\)/);
     assert.equal((panel.match(/observeAgentCall\(\s*this\.callAgent\(/g) ?? []).length, 4);
     assert.match(panel, /const observed = calls\.map\(\(call\) => call\.catch/);
@@ -128,11 +128,11 @@ describe("Flight Recorder staged panel integration source contract", () => {
     assert.ok(runTurn.indexOf("bodyThrew") < runTurn.indexOf("ctrl.signal.aborted"));
     assert.match(
       runTurn,
-      /if \(\(bodyThrew \|\| finalizerThrew\) && isInFlight\(this\.state\)\) \{\s*this\.applyEvent\(\{ type: "stop" \}\);/,
+      /if \(\(bodyThrew \|\| finalizerThrew\) && isInFlight\(this\.state\)\) \{\s*this\.applyEvent\(\{ type: "stop" \}, flightTurn\);/,
     );
     assert.match(
       runTurn,
-      /if \(finalizePending\) await finalizePending\(\);[\s\S]*finishRoomTurn\(flightTurn, outcome\)[\s\S]*this\.currentRoomTurnId = undefined/,
+      /if \(finalizePending\) await finalizePending\(\);[\s\S]*finishActiveFlightTurn\(activeFlightEntry, outcome\)[\s\S]*this\.currentRoomTurnId = previousRoomTurnId/,
     );
     assert.match(runTurn, /if \(bodyThrew\) throw bodyError;[\s\S]*if \(finalizerThrew\) throw finalizerError;/);
   });

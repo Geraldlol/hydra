@@ -192,10 +192,11 @@ describe("formal duel host contracts", () => {
       "normal message persistence must complete before autonomous duel admission is queued",
     );
     const turn = methodSource("private async runTurn(", "private async runDiscussionTurn(");
-    assert.match(turn, /this\.currentAbort = undefined/);
+    assert.match(turn, /activeFlightEntry\.abortController = undefined/);
+    assert.match(turn, /this\.currentAbort = previousAbort/);
     assert.match(turn, /this\.drainAgentDuelAdmissions\(\)/);
     assert.ok(
-      turn.indexOf("this.currentAbort = undefined") < turn.indexOf("this.drainAgentDuelAdmissions()"),
+      turn.indexOf("this.currentAbort = previousAbort") < turn.indexOf("this.drainAgentDuelAdmissions()"),
       "heavy admission must be deferred until the complete room turn is idle",
     );
     assert.match(panel, /stdoutSha256: sha256\(result\.stdout\)/);
