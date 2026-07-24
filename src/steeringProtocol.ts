@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { UNBOUND_MISSION_BINDING_SHA256 } from "./missionContract";
 
 export const STEERING_SCHEMA_VERSION = 1 as const;
 
@@ -105,7 +106,17 @@ export interface SteeringTargetBinding {
   readonly roomTurnId: string;
   readonly sequence: number;
   readonly expectedDelivery: SteeringDelivery;
-  readonly missionContractSha256: string;
+  /**
+   * Hash of the normalized Mission Contract document. It is null only while
+   * the authoritative Mission ledger is explicitly unbound.
+   */
+  readonly missionDocumentSha256: string | null;
+  /**
+   * Digest of the active Mission binding lifecycle state. Unlike the document
+   * hash, this changes across confirmation/retirement boundaries and is
+   * always present, including the well-known unbound binding.
+   */
+  readonly missionBindingSha256: string;
   readonly authoritySha256: string;
   readonly initialPromptSha256: string;
   readonly ownerId: string;
@@ -184,6 +195,8 @@ export type SteeringProviderAcknowledgement =
       readonly generation: string;
       readonly sequence: number;
       readonly textSha256: string;
+      readonly missionDocumentSha256: string | null;
+      readonly missionBindingSha256: string;
       readonly delivery: Exclude<SteeringDelivery, "unsupported">;
       readonly providerReceiptSha256: string;
     }
@@ -195,6 +208,8 @@ export type SteeringProviderAcknowledgement =
       readonly generation: string;
       readonly sequence: number;
       readonly textSha256: string;
+      readonly missionDocumentSha256: string | null;
+      readonly missionBindingSha256: string;
       readonly delivery: SteeringDelivery;
       readonly reason: string;
     };
@@ -377,7 +392,8 @@ export function isSteeringTargetBinding(value: unknown): value is SteeringTarget
     "roomTurnId",
     "sequence",
     "expectedDelivery",
-    "missionContractSha256",
+    "missionDocumentSha256",
+    "missionBindingSha256",
     "authoritySha256",
     "initialPromptSha256",
     "ownerId",
@@ -392,7 +408,7 @@ export function isSteeringTargetBinding(value: unknown): value is SteeringTarget
     && isPositiveSafeInteger(value.sequence)
     && typeof value.expectedDelivery === "string"
     && STEERING_DELIVERIES.has(value.expectedDelivery as SteeringDelivery)
-    && isSha256(value.missionContractSha256)
+    && isMissionBindingPair(value.missionDocumentSha256, value.missionBindingSha256)
     && isSha256(value.authoritySha256)
     && isSha256(value.initialPromptSha256)
     && isBoundedIdentifier(value.ownerId)
@@ -522,10 +538,13 @@ export function isSteeringProviderAcknowledgement(
       "generation",
       "sequence",
       "textSha256",
+      "missionDocumentSha256",
+      "missionBindingSha256",
       "delivery",
       "providerReceiptSha256",
     ])
       && isProviderAcknowledgementHeader(value)
+      && isMissionBindingPair(value.missionDocumentSha256, value.missionBindingSha256)
       && typeof value.delivery === "string"
       && value.delivery !== "unsupported"
       && STEERING_DELIVERIES.has(value.delivery as SteeringDelivery)
@@ -540,10 +559,13 @@ export function isSteeringProviderAcknowledgement(
       "generation",
       "sequence",
       "textSha256",
+      "missionDocumentSha256",
+      "missionBindingSha256",
       "delivery",
       "reason",
     ])
       && isProviderAcknowledgementHeader(value)
+      && isMissionBindingPair(value.missionDocumentSha256, value.missionBindingSha256)
       && typeof value.delivery === "string"
       && STEERING_DELIVERIES.has(value.delivery as SteeringDelivery)
       && isReason(value.reason);
@@ -561,6 +583,8 @@ export function acknowledgementMatchesRequest(
     && acknowledgement.generation === request.target.generation
     && acknowledgement.sequence === request.target.sequence
     && acknowledgement.textSha256 === request.textSha256
+    && acknowledgement.missionDocumentSha256 === request.target.missionDocumentSha256
+    && acknowledgement.missionBindingSha256 === request.target.missionBindingSha256
     && acknowledgement.delivery === expectedDelivery;
 }
 
@@ -584,6 +608,16 @@ export function lockedWorkCode(
 
 export function isSha256(value: unknown): value is string {
   return typeof value === "string" && SHA256_PATTERN.test(value);
+}
+
+export function isMissionBindingPair(
+  documentSha256: unknown,
+  bindingSha256: unknown,
+): documentSha256 is string | null {
+  if (!isSha256(bindingSha256)) return false;
+  return documentSha256 === null
+    ? bindingSha256 === UNBOUND_MISSION_BINDING_SHA256
+    : isSha256(documentSha256) && bindingSha256 !== UNBOUND_MISSION_BINDING_SHA256;
 }
 
 export function isBoundedIdentifier(value: unknown): value is string {

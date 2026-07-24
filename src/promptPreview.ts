@@ -28,6 +28,10 @@ export interface PromptEnvelope {
   capabilityProfile: CapabilityProfileId;
   capabilityProfileLabel: string;
   capabilityProfileDetail: string;
+  missionId?: string;
+  missionRevision?: number;
+  missionDocumentSha256?: string;
+  missionBindingSha256?: string;
   objective?: string;
   currentUserMessage?: string;
   latestDecisionDefault?: string;
@@ -74,6 +78,10 @@ export interface CreatePromptEnvelopeInput {
   capabilityProfile?: CapabilityProfileId;
   capabilityProfileLabel?: string;
   capabilityProfileDetail?: string;
+  missionId?: string;
+  missionRevision?: number;
+  missionDocumentSha256?: string;
+  missionBindingSha256?: string;
   objective?: string;
   currentUserMessage?: string;
   latestDecisionDefault?: string;
@@ -99,6 +107,10 @@ export function createPromptEnvelope(input: CreatePromptEnvelopeInput): PromptEn
     capabilityProfile: input.capabilityProfile ?? "custom",
     capabilityProfileLabel: input.capabilityProfileLabel ?? "Custom",
     capabilityProfileDetail: input.capabilityProfileDetail ?? "Raw native CLI args do not match a known Hydra profile.",
+    missionId: emptyToUndefined(input.missionId),
+    missionRevision: input.missionRevision,
+    missionDocumentSha256: emptyToUndefined(input.missionDocumentSha256),
+    missionBindingSha256: emptyToUndefined(input.missionBindingSha256),
     objective: emptyToUndefined(input.objective),
     currentUserMessage: emptyToUndefined(input.currentUserMessage),
     latestDecisionDefault: emptyToUndefined(input.latestDecisionDefault),
@@ -244,6 +256,15 @@ export function renderPromptEnvelopePreview(envelope: PromptEnvelope): string {
     `Authority level: ${envelope.authorityLevel}`,
     `Capability profile: ${envelope.capabilityProfileLabel} (${envelope.capabilityProfile})`,
     `Profile detail: ${envelope.capabilityProfileDetail}`,
+    envelope.missionBindingSha256
+      ? `Mission binding SHA-256: ${envelope.missionBindingSha256}`
+      : "Mission binding SHA-256: <none>",
+    envelope.missionDocumentSha256
+      ? `Mission document SHA-256: ${envelope.missionDocumentSha256}`
+      : "Mission document SHA-256: <unbound>",
+    envelope.missionId
+      ? `Mission: ${envelope.missionId} revision ${envelope.missionRevision ?? "unknown"}`
+      : "Mission: <unbound>",
     envelope.objective ? `Objective: ${envelope.objective}` : "Objective: <none>",
     envelope.currentUserMessage ? `Current user message: ${envelope.currentUserMessage}` : "Current user message: <none>",
     envelope.latestDecisionDefault ? `Latest default decision: ${envelope.latestDecisionDefault}` : "Latest default decision: <none>",

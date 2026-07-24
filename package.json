@@ -215,6 +215,10 @@
         "title": "Hydra: Open Room Objective"
       },
       {
+        "command": "hydraRoom.openMissionContract",
+        "title": "Hydra: Open Mission Contract"
+      },
+      {
         "command": "hydraRoom.openNativeTerminals",
         "title": "Hydra: Advanced: Open Native Terminals"
       },

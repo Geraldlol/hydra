@@ -27,17 +27,24 @@ import {
   SteeringProviderError,
   type LiveActiveSteeringHandle,
 } from "../src/steeringController";
+import {
+  MISSION_SUBMISSION_WRITTEN,
+  MissionSubmissionRejectedError,
+  type MissionSubmissionGate,
+} from "../src/missionDispatch";
 
 const WORKSPACE_ROOT = path.resolve(__dirname, "..", "..");
 const FIXTURE = path.join(__dirname, "fixtures", "mock-claude-session-cli.js");
-const MISSION = "a".repeat(64);
+const MISSION_DOCUMENT = "9".repeat(64);
+const MISSION_BINDING = "a".repeat(64);
 const AUTHORITY = "b".repeat(64);
 const INITIAL_PROMPT = "c".repeat(64);
 const BINDING: ClaudeSessionRunBinding = {
   callId: "call-claude-session",
   generation: "generation-one",
   ownerId: "owner-one",
-  missionContractSha256: MISSION,
+  missionDocumentSha256: MISSION_DOCUMENT,
+  missionBindingSha256: MISSION_BINDING,
   authoritySha256: AUTHORITY,
 };
 
@@ -125,6 +132,151 @@ describe("Claude persistent-session invocation planning", () => {
 });
 
 describe("Claude persistent-session provider contract", () => {
+  test("marks an ambiguous initial stdin write as delivery unknown", async () => {
+    let writes = 0;
+    const startProcess = (
+      _spawn: AgentSpawn,
+      timeoutMs: number,
+    ): PersistentAgentProcess => {
+      let open = true;
+      let resolveResult!: (result: RunResult) => void;
+      const result = new Promise<RunResult>((resolve) => {
+        resolveResult = resolve;
+      });
+      const finish = (): void => {
+        if (!open) return;
+        open = false;
+        resolveResult({
+          stdout: "",
+          stderr: "",
+          exitCode: null,
+          timedOut: false,
+          cancelled: false,
+          timeoutMs,
+        });
+      };
+      return {
+        child: undefined,
+        result,
+        get inputOpen(): boolean {
+          return open;
+        },
+        async write(): Promise<void> {
+          writes++;
+          throw Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
+        },
+        async endInput(): Promise<void> {
+          finish();
+        },
+        terminate(): void {
+          finish();
+        },
+      };
+    };
+
+    const result = await runClaudeSession({
+      plan: fixturePlan("normal"),
+      prompt: "possibly accepted",
+      timeoutMs: 2_000,
+      signal: new AbortController().signal,
+      binding: BINDING,
+      onChunk: () => undefined,
+      startProcess,
+    });
+    assert.equal(writes, 1);
+    assert.equal(result.deliveryUnknown, true);
+    assert.match(result.stderr, /safe retry boundary/i);
+  });
+
+  test("rejects a stale Mission binding before the initial stdin write", async () => {
+    let writes = 0;
+    let terminated = false;
+    const startProcess = (
+      _spawn: AgentSpawn,
+      timeoutMs: number,
+    ): PersistentAgentProcess => {
+      let resolveResult!: (result: RunResult) => void;
+      const result = new Promise<RunResult>((resolve) => {
+        resolveResult = resolve;
+      });
+      const finish = () => resolveResult({
+        stdout: "",
+        stderr: "",
+        exitCode: null,
+        timedOut: false,
+        cancelled: false,
+        timeoutMs,
+      });
+      return {
+        child: undefined,
+        result,
+        inputOpen: true,
+        async write(): Promise<void> {
+          writes++;
+        },
+        async endInput(): Promise<void> {
+          finish();
+        },
+        terminate(): void {
+          terminated = true;
+          finish();
+        },
+      };
+    };
+    const submissionGate: MissionSubmissionGate = {
+      write: async (point) => {
+        assert.equal(point, "claude.initial");
+        throw new MissionSubmissionRejectedError("Mission binding changed");
+      },
+    };
+
+    await assert.rejects(
+      runClaudeSession({
+        plan: fixturePlan("normal"),
+        prompt: "must not be written",
+        timeoutMs: 2_000,
+        signal: new AbortController().signal,
+        binding: BINDING,
+        submissionGate,
+        onChunk: () => undefined,
+        startProcess,
+      }),
+      MissionSubmissionRejectedError,
+    );
+    assert.equal(writes, 0);
+    assert.equal(terminated, true);
+  });
+
+  test("rejects stale queued steering without failing the live Claude session", async () => {
+    const allowGate: MissionSubmissionGate = {
+      write: async (_point, performWrite) => {
+        assert.equal(await performWrite(), MISSION_SUBMISSION_WRITTEN);
+      },
+    };
+    const rejectGate: MissionSubmissionGate = {
+      write: async () => {
+        throw new MissionSubmissionRejectedError("Mission binding changed");
+      },
+    };
+    const session = startFixtureSession("normal", "initial mission-gated", allowGate);
+    const handle = await session.handle;
+
+    await assert.rejects(
+      handle.steer(request("stale-steer", 1, "must not be written"), rejectGate),
+      MissionSubmissionRejectedError,
+    );
+    assert.equal((await handle.inspect()).active, true);
+    const acknowledgement = await handle.steer(
+      request("valid-steer", 2, "valid correction"),
+      allowGate,
+    ) as SteeringProviderAcknowledgement;
+    assertAcknowledged(acknowledgement, "valid-steer", 2);
+    const result = await session.result;
+    assert.equal(result.exitCode, 0);
+    assert.doesNotMatch(result.stdout, /must not be written/);
+    assert.match(result.stdout, /valid correction/);
+  });
+
   test("accepts timeout zero as Hydra's uncapped session mode", async () => {
     let handle: LiveActiveSteeringHandle | undefined;
     const result = await runClaudeSession({
@@ -256,12 +408,21 @@ describe("Claude persistent-session provider contract", () => {
   test("checks every local binding and does not write a rejected request", async () => {
     const session = startFixtureSession("normal", "binding check");
     const handle = await session.handle;
-    const malformed = request("wrong-binding", 1, "must not cross stdin");
-    const acknowledgement = await handle.steer({
-      ...malformed,
-      target: { ...malformed.target, generation: "other-generation" },
-    }) as SteeringProviderAcknowledgement;
-    assert.equal(acknowledgement.status, "rejected");
+    const patches: ReadonlyArray<Partial<SteeringProviderRequest["target"]>> = [
+      { generation: "other-generation" },
+      { ownerId: "other-owner" },
+      { missionDocumentSha256: "d".repeat(64) },
+      { missionBindingSha256: "d".repeat(64) },
+      { authoritySha256: "d".repeat(64) },
+    ];
+    for (const [index, patch] of patches.entries()) {
+      const malformed = request(`wrong-binding-${index}`, index + 1, "must not cross stdin");
+      const acknowledgement = await handle.steer({
+        ...malformed,
+        target: { ...malformed.target, ...patch },
+      }) as SteeringProviderAcknowledgement;
+      assert.equal(acknowledgement.status, "rejected");
+    }
     const result = await session.result;
     const users = parsedEvents(result.stdout).filter((event) => event.type === "user");
     assert.equal(users.length, 1);
@@ -389,7 +550,11 @@ describe("Claude persistent-session provider contract", () => {
   });
 });
 
-function startFixtureSession(scenario: string, prompt: string): {
+function startFixtureSession(
+  scenario: string,
+  prompt: string,
+  submissionGate?: MissionSubmissionGate,
+): {
   readonly handle: Promise<LiveActiveSteeringHandle>;
   readonly result: Promise<RunResult>;
 } {
@@ -403,6 +568,7 @@ function startFixtureSession(scenario: string, prompt: string): {
     timeoutMs: 3_000,
     signal: new AbortController().signal,
     binding: BINDING,
+    ...(submissionGate ? { submissionGate } : {}),
     onChunk: () => undefined,
     onHandleReady: resolveHandle,
   });
@@ -452,7 +618,8 @@ function request(steeringId: string, sequence: number, text: string): SteeringPr
       roomTurnId: "room-turn-one",
       sequence,
       expectedDelivery: "sameSessionNextTurn",
-      missionContractSha256: BINDING.missionContractSha256,
+      missionDocumentSha256: BINDING.missionDocumentSha256,
+      missionBindingSha256: BINDING.missionBindingSha256,
       authoritySha256: BINDING.authoritySha256,
       initialPromptSha256: INITIAL_PROMPT,
       ownerId: BINDING.ownerId,
@@ -470,6 +637,8 @@ function assertAcknowledged(
   if (acknowledgement.status !== "acknowledged") return;
   assert.equal(acknowledgement.steeringId, steeringId);
   assert.equal(acknowledgement.sequence, sequence);
+  assert.equal(acknowledgement.missionDocumentSha256, BINDING.missionDocumentSha256);
+  assert.equal(acknowledgement.missionBindingSha256, BINDING.missionBindingSha256);
   assert.equal(acknowledgement.delivery, "sameSessionNextTurn");
   assert.match(acknowledgement.providerReceiptSha256, /^[a-f0-9]{64}$/);
 }

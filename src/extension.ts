@@ -351,6 +351,13 @@ export function activate(context: vscode.ExtensionContext): void {
       })
     ),
     vscode.commands.registerCommand(
+      "hydraRoom.openMissionContract",
+      withErrorReporting(async () => {
+        const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
+        await panel.openMissionContract();
+      })
+    ),
+    vscode.commands.registerCommand(
       "hydraRoom.pokeCodexTerminal",
       withErrorReporting(async () => {
         const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);

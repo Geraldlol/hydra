@@ -15,6 +15,7 @@ import {
 import {
   STEERING_SCHEMA_VERSION,
   isBoundedIdentifier,
+  isMissionBindingPair,
   isSha256,
   isSteeringTargetBinding,
   sha256Utf8,
@@ -27,6 +28,12 @@ import {
   type ActiveRunInspection,
   type LiveActiveSteeringHandle,
 } from "./steeringController";
+import {
+  MISSION_SUBMISSION_WRITTEN,
+  MissionSubmissionRejectedError,
+  SubmissionCancelledBeforeWriteError,
+  type MissionSubmissionGate,
+} from "./missionDispatch";
 
 export const CLAUDE_SESSION_PROTOCOL = "claude-stream-json-v2/replayed-user";
 export const MIN_CLAUDE_SESSION_VERSION = "2.1.205";
@@ -54,7 +61,8 @@ export interface ClaudeSessionRunBinding {
   readonly callId: string;
   readonly generation: string;
   readonly ownerId: string;
-  readonly missionContractSha256: string;
+  readonly missionDocumentSha256: string | null;
+  readonly missionBindingSha256: string;
   readonly authoritySha256: string;
 }
 
@@ -66,6 +74,8 @@ export interface ClaudeSessionRunOptions {
   readonly binding: ClaudeSessionRunBinding;
   readonly onChunk: (chunk: string) => void;
   readonly onHandleReady?: (handle: LiveActiveSteeringHandle) => void;
+  /** Mission lease gate used only for initial/steering stdin writes. */
+  readonly submissionGate?: MissionSubmissionGate;
   /** @internal Deterministic process seam for provider contract tests. */
   readonly startProcess?: typeof startPersistentAgentProcess;
 }
@@ -267,6 +277,11 @@ export async function runClaudeSession(options: ClaudeSessionRunOptions): Promis
     exitCode: (outcome.kind === "failed" || providerReportedError) && raw.exitCode === 0
       ? 1
       : raw.exitCode,
+    ...(protocol.initialDeliveryMayBeUnknown()
+      && !raw.cancelled
+      && !raw.timedOut
+      ? { deliveryUnknown: true }
+      : {}),
   };
 }
 
@@ -285,7 +300,7 @@ interface InputTurn {
   readonly request?: SteeringProviderRequest;
   readonly replay: Promise<ReplayReceipt>;
   resolveReplay: (receipt: ReplayReceipt) => void;
-  rejectReplay: (error: SteeringProviderError) => void;
+  rejectReplay: (error: Error) => void;
   writeStarted: boolean;
   replayed: boolean;
 }
@@ -323,6 +338,7 @@ class ClaudeSessionProtocol {
   private finished = false;
   private failed = false;
   private flushed = false;
+  private initialDeliveryUnknown = false;
 
   constructor(private readonly options: ClaudeSessionRunOptions) {
     this.handle = new ClaudeSessionHandle(this, options.binding);
@@ -345,7 +361,7 @@ class ClaudeSessionProtocol {
     }
     const turn = this.createTurn("initial", prompt);
     this.awaitingReplay.push(turn);
-    await this.writeTurn(turn);
+    await this.writeTurn(turn, this.options.submissionGate);
   }
 
   completion(): Promise<ProtocolOutcome> {
@@ -366,6 +382,10 @@ class ClaudeSessionProtocol {
 
   sessionId(): string {
     return this.providerSessionId;
+  }
+
+  initialDeliveryMayBeUnknown(): boolean {
+    return this.initialDeliveryUnknown;
   }
 
   push(chunk: string): void {
@@ -411,7 +431,10 @@ class ClaudeSessionProtocol {
     this.scheduleCompletionCheck();
   }
 
-  async deliver(request: SteeringProviderRequest): Promise<SteeringProviderAcknowledgement> {
+  async deliver(
+    request: SteeringProviderRequest,
+    submissionGate?: MissionSubmissionGate,
+  ): Promise<SteeringProviderAcknowledgement> {
     if (!this.handle.isActive() || this.finished || this.failed || !this.processHandle?.inputOpen) {
       throw new SteeringProviderError("processExit", false, "The Claude session is no longer active.");
     }
@@ -423,7 +446,7 @@ class ClaudeSessionProtocol {
     }
     const turn = this.createTurn("steering", request.text, request);
     this.awaitingReplay.push(turn);
-    await this.writeTurn(turn);
+    await this.writeTurn(turn, submissionGate);
     const receipt = await turn.replay;
     return {
       schemaVersion: STEERING_SCHEMA_VERSION,
@@ -433,6 +456,8 @@ class ClaudeSessionProtocol {
       generation: request.target.generation,
       sequence: request.target.sequence,
       textSha256: request.textSha256,
+      missionDocumentSha256: request.target.missionDocumentSha256,
+      missionBindingSha256: request.target.missionBindingSha256,
       delivery: "sameSessionNextTurn",
       providerReceiptSha256: sha256Utf8(JSON.stringify({
         protocol: CLAUDE_SESSION_PROTOCOL,
@@ -443,6 +468,8 @@ class ClaudeSessionProtocol {
         generation: request.target.generation,
         sequence: request.target.sequence,
         textSha256: request.textSha256,
+        missionDocumentSha256: request.target.missionDocumentSha256,
+        missionBindingSha256: request.target.missionBindingSha256,
       })),
     };
   }
@@ -466,7 +493,7 @@ class ClaudeSessionProtocol {
     request?: SteeringProviderRequest,
   ): InputTurn {
     let resolveReplay!: (receipt: ReplayReceipt) => void;
-    let rejectReplay!: (error: SteeringProviderError) => void;
+    let rejectReplay!: (error: Error) => void;
     const replay = new Promise<ReplayReceipt>((resolve, reject) => {
       resolveReplay = resolve;
       rejectReplay = reject;
@@ -489,7 +516,10 @@ class ClaudeSessionProtocol {
     };
   }
 
-  private async writeTurn(turn: InputTurn): Promise<void> {
+  private async writeTurn(
+    turn: InputTurn,
+    submissionGate?: MissionSubmissionGate,
+  ): Promise<void> {
     const processHandle = this.processHandle;
     if (!processHandle?.inputOpen) {
       this.removeAwaitingReplay(turn);
@@ -525,10 +555,37 @@ class ClaudeSessionProtocol {
       this.fail(error.message, "providerFailure");
       return;
     }
-    turn.writeStarted = true;
     try {
-      await processHandle.write(line);
+      if (submissionGate) {
+        await submissionGate.write(
+          turn.kind === "initial" ? "claude.initial" : "claude.steer",
+          async (): Promise<typeof MISSION_SUBMISSION_WRITTEN> => {
+            if (this.options.signal.aborted) {
+              throw new SubmissionCancelledBeforeWriteError(
+                "Claude input was cancelled before provider submission.",
+              );
+            }
+            turn.writeStarted = true;
+            await processHandle.write(line);
+            return MISSION_SUBMISSION_WRITTEN;
+          },
+        );
+      } else {
+        turn.writeStarted = true;
+        await processHandle.write(line);
+      }
     } catch (error) {
+      if (
+        error instanceof MissionSubmissionRejectedError
+        || error instanceof SubmissionCancelledBeforeWriteError
+      ) {
+        this.removeAwaitingReplay(turn);
+        turn.rejectReplay(error);
+        if (turn.kind === "initial") {
+          this.fail(error.message, "providerFailure");
+        }
+        throw error;
+      }
       // A stream callback error can arrive after some or all bytes crossed the
       // pipe. Never retry this envelope or let a later FIFO input overtake it.
       const providerError = new SteeringProviderError(
@@ -536,6 +593,9 @@ class ClaudeSessionProtocol {
         true,
         `Claude stdin write failed without a safe retry boundary: ${errorMessage(error)}`,
       );
+      if (turn.kind === "initial" && turn.writeStarted) {
+        this.initialDeliveryUnknown = true;
+      }
       turn.rejectReplay(providerError);
       this.fail(providerError.message, "providerFailure");
     }
@@ -826,11 +886,14 @@ class ClaudeSessionHandle implements LiveActiveSteeringHandle {
     };
   }
 
-  steer(request: SteeringProviderRequest): Promise<SteeringProviderAcknowledgement> {
+  steer(
+    request: SteeringProviderRequest,
+    submissionGate?: MissionSubmissionGate,
+  ): Promise<SteeringProviderAcknowledgement> {
     this.protocol.reserveDelivery();
     const delivered = this.tail.then(
-      () => this.protocol.deliver(request),
-      () => this.protocol.deliver(request),
+      () => this.protocol.deliver(request, submissionGate),
+      () => this.protocol.deliver(request, submissionGate),
     );
     const finalized = delivered.finally(() => this.protocol.releaseDelivery());
     this.tail = finalized.then(() => undefined, () => undefined);
@@ -971,7 +1034,8 @@ function requestMatchesBinding(
     && request.target.callId === binding.callId
     && request.target.generation === binding.generation
     && request.target.ownerId === binding.ownerId
-    && request.target.missionContractSha256 === binding.missionContractSha256
+    && request.target.missionDocumentSha256 === binding.missionDocumentSha256
+    && request.target.missionBindingSha256 === binding.missionBindingSha256
     && request.target.authoritySha256 === binding.authoritySha256;
 }
 
@@ -987,6 +1051,8 @@ function rejectedAcknowledgement(
     generation: request.target.generation,
     sequence: request.target.sequence,
     textSha256: request.textSha256,
+    missionDocumentSha256: request.target.missionDocumentSha256,
+    missionBindingSha256: request.target.missionBindingSha256,
     delivery: "sameSessionNextTurn",
     reason,
   };
@@ -1205,9 +1271,11 @@ function validateRunOptions(options: ClaudeSessionRunOptions): void {
   ] as const) {
     if (!isBoundedIdentifier(value)) throw new Error(`Claude session ${label} is invalid.`);
   }
-  if (!isSha256(options.binding.missionContractSha256)
-    || !isSha256(options.binding.authoritySha256)) {
-    throw new Error("Claude session Mission Contract/authority bindings are invalid.");
+  if (!isMissionBindingPair(
+    options.binding.missionDocumentSha256,
+    options.binding.missionBindingSha256,
+  ) || !isSha256(options.binding.authoritySha256)) {
+    throw new Error("Claude session Mission document/binding or authority hashes are invalid.");
   }
   if (!Number.isFinite(options.timeoutMs) || options.timeoutMs < 0) {
     throw new Error("Claude session timeout must be a non-negative finite number.");

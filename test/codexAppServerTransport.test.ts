@@ -18,10 +18,16 @@ import {
 } from "../src/steeringProtocol";
 import type { LiveActiveSteeringHandle } from "../src/steeringController";
 import { createLiveTextExtractor } from "../src/liveText";
+import {
+  MISSION_SUBMISSION_WRITTEN,
+  MissionSubmissionRejectedError,
+  type MissionSubmissionGate,
+} from "../src/missionDispatch";
 
 const FAKE_APP_SERVER = path.join(__dirname, "fixtures", "fake-codex-app-server.js");
 const SHA_A = "a".repeat(64);
 const SHA_B = "b".repeat(64);
+const SHA_C = "c".repeat(64);
 
 function codexSpawn(args: string[], cwd = path.resolve("C:\\repo")) {
   return { command: "codex", args, cwd, env: { HYDRA_TEST: "yes" } };
@@ -32,7 +38,8 @@ function binding(): CodexAppServerRunBinding {
     callId: "call-1",
     generation: "generation-1",
     ownerId: "owner-1",
-    missionContractSha256: SHA_A,
+    missionDocumentSha256: SHA_C,
+    missionBindingSha256: SHA_A,
     authoritySha256: SHA_B,
   };
 }
@@ -86,7 +93,8 @@ function providerRequest(text: string): SteeringProviderRequest {
       roomTurnId: "room-turn-1",
       sequence: 1,
       expectedDelivery: "sameTurn",
-      missionContractSha256: SHA_A,
+      missionDocumentSha256: SHA_C,
+      missionBindingSha256: SHA_A,
       authoritySha256: SHA_B,
       initialPromptSha256: sha256Utf8("initial prompt"),
       ownerId: "owner-1",
@@ -205,6 +213,92 @@ describe("planCodexAppServer", () => {
 });
 
 describe("runCodexAppServerTurn", () => {
+  test("rejects a stale Mission binding before turn/start and never falls back", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-codex-mission-reject-"));
+    const logPath = path.join(directory, "requests.jsonl");
+    let gateCalls = 0;
+    const submissionGate: MissionSubmissionGate = {
+      write: async (point) => {
+        gateCalls++;
+        assert.equal(point, "codex.turnStart");
+        throw new MissionSubmissionRejectedError("Mission binding changed");
+      },
+    };
+    try {
+      await assert.rejects(
+        runCodexAppServerTurn({
+          plan: fakePlan(directory, "normal", logPath),
+          prompt: "must never cross turn/start",
+          timeoutMs: 2_000,
+          signal: new AbortController().signal,
+          binding: binding(),
+          submissionGate,
+          onChunk: () => undefined,
+        }),
+        MissionSubmissionRejectedError,
+      );
+      assert.equal(gateCalls, 1);
+      const methods = (await fs.readFile(logPath, "utf8"))
+        .trim()
+        .split(/\r?\n/)
+        .map((line) => (JSON.parse(line) as { method?: string }).method);
+      assert.deepEqual(methods, ["initialize", "initialized", "thread/start"]);
+    } finally {
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects stale turn steering with zero RPC bytes and keeps the turn usable", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-codex-steer-gate-"));
+    const logPath = path.join(directory, "requests.jsonl");
+    let handleReady!: (handle: LiveActiveSteeringHandle) => void;
+    const handlePromise = new Promise<LiveActiveSteeringHandle>((resolve) => {
+      handleReady = resolve;
+    });
+    const allowGate: MissionSubmissionGate = {
+      write: async (_point, performWrite) => {
+        assert.equal(await performWrite(), MISSION_SUBMISSION_WRITTEN);
+      },
+    };
+    const rejectGate: MissionSubmissionGate = {
+      write: async () => {
+        throw new MissionSubmissionRejectedError("Mission binding changed");
+      },
+    };
+    try {
+      const run = runCodexAppServerTurn({
+        plan: fakePlan(directory, "normal", logPath),
+        prompt: "initial prompt",
+        timeoutMs: 5_000,
+        signal: new AbortController().signal,
+        binding: binding(),
+        submissionGate: allowGate,
+        onChunk: () => undefined,
+        onHandleReady: handleReady,
+      });
+      const handle = await handlePromise;
+      await assert.rejects(
+        handle.steer(providerRequest("must not be written"), rejectGate),
+        MissionSubmissionRejectedError,
+      );
+      const acknowledgement = await handle.steer(
+        providerRequest("valid correction"),
+        allowGate,
+      );
+      assert.ok(isSteeringProviderAcknowledgement(acknowledgement));
+      const result = await run;
+      if (spawnBlockedBySandbox(result.stderr)) return;
+      assert.equal(result.exitCode, 0);
+      const methods = (await fs.readFile(logPath, "utf8"))
+        .trim()
+        .split(/\r?\n/)
+        .map((line) => (JSON.parse(line) as { method?: string }).method);
+      assert.equal(methods.filter((method) => method === "turn/steer").length, 1);
+    } finally {
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test("streams many App Server deltas without cumulative quadratic capture", async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-codex-many-deltas-"));
     const live = createLiveTextExtractor("codexJson");
@@ -260,22 +354,30 @@ describe("runCodexAppServerTurn", () => {
       const handle = await handlePromise;
       assert.deepEqual(handle.inspect(), { ...binding(), active: true });
 
-      const wrongBinding = providerRequest("must not leave Hydra");
-      const rejected = await handle.steer({
-        ...wrongBinding,
-        target: {
-          ...wrongBinding.target,
-          authoritySha256: "c".repeat(64),
-        },
-      });
-      assert.ok(isSteeringProviderAcknowledgement(rejected));
-      assert.equal(rejected.status, "rejected");
+      for (const targetPatch of [
+        { authoritySha256: "d".repeat(64) },
+        { missionDocumentSha256: "d".repeat(64) },
+        { missionBindingSha256: "d".repeat(64) },
+      ]) {
+        const wrongBinding = providerRequest("must not leave Hydra");
+        const rejected = await handle.steer({
+          ...wrongBinding,
+          target: {
+            ...wrongBinding.target,
+            ...targetPatch,
+          },
+        });
+        assert.ok(isSteeringProviderAcknowledgement(rejected));
+        assert.equal(rejected.status, "rejected");
+      }
 
       const acknowledgement = await handle.steer(providerRequest("focus on tests"));
       assert.ok(isSteeringProviderAcknowledgement(acknowledgement));
       assert.equal(acknowledgement.status, "acknowledged");
       assert.equal(acknowledgement.delivery, "sameTurn");
       assert.equal(acknowledgement.callId, "call-1");
+      assert.equal(acknowledgement.missionDocumentSha256, SHA_C);
+      assert.equal(acknowledgement.missionBindingSha256, SHA_A);
 
       const result = await runPromise;
       if (spawnBlockedBySandbox(result.stderr)) return;
@@ -400,7 +502,11 @@ describe("runCodexAppServerTurn", () => {
   test("never advertises fallback after the model request may have been accepted", async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-codex-post-submit-"));
     try {
-      for (const mode of ["malformed-turn-start", "exit-after-turn-start"]) {
+      for (const mode of [
+        "malformed-turn-start",
+        "exit-after-turn-start",
+        "exit-zero-after-turn-start",
+      ]) {
         const result = await runCodexAppServerTurn({
           plan: fakePlan(directory, mode),
           prompt: "possibly accepted",
@@ -413,6 +519,12 @@ describe("runCodexAppServerTurn", () => {
           result.stderr,
           /(malformed turn\/start response|exited (?:during negotiation|before the protocol completed))/i,
           mode,
+        );
+        assert.notEqual(result.exitCode, 0, `${mode} must never look successful`);
+        assert.equal(
+          result.deliveryUnknown,
+          true,
+          `${mode} crossed the model submission boundary without a trustworthy terminal receipt`,
         );
       }
     } finally {

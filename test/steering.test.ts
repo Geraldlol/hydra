@@ -38,10 +38,17 @@ import {
   type SteeringAcknowledgementWaitResult,
   type SteeringTargetSelection,
 } from "../src/steeringController";
+import { UNBOUND_MISSION_BINDING_SHA256 } from "../src/missionContract";
+import {
+  MISSION_SUBMISSION_WRITTEN,
+  MissionSubmissionRejectedError,
+  type MissionSubmissionGate,
+} from "../src/missionDispatch";
 
 const TIME = "2026-07-24T12:00:00.000Z";
 const OWNER = "extension-host-one";
-const MISSION = "1".repeat(64);
+const MISSION_DOCUMENT = "0".repeat(64);
+const MISSION_BINDING = "1".repeat(64);
 const AUTHORITY = "2".repeat(64);
 const PROMPT = "3".repeat(64);
 const RECEIPT = "4".repeat(64);
@@ -75,7 +82,8 @@ function requestEvent(
       roomTurnId: "room-turn-one",
       sequence,
       expectedDelivery: "sameTurn",
-      missionContractSha256: MISSION,
+      missionDocumentSha256: MISSION_DOCUMENT,
+      missionBindingSha256: MISSION_BINDING,
       authoritySha256: AUTHORITY,
       initialPromptSha256: PROMPT,
       ownerId: OWNER,
@@ -162,6 +170,30 @@ describe("steering protocol", () => {
       ...valid,
       targets: [{ ...valid.targets[0], expectedDelivery: "invented" }],
     }), false);
+    assert.equal(isSteeringEvent({
+      ...valid,
+      targets: [{
+        ...valid.targets[0],
+        missionDocumentSha256: undefined,
+        missionBindingSha256: undefined,
+        missionContractSha256: MISSION_BINDING,
+      }],
+    }), false, "the pre-release ambiguous Mission hash schema must fail closed");
+    assert.equal(isSteeringEvent({
+      ...valid,
+      targets: [{
+        ...valid.targets[0],
+        missionDocumentSha256: null,
+      }],
+    }), false, "null document hashes require the explicit unbound binding digest");
+    assert.equal(isSteeringEvent({
+      ...valid,
+      targets: [{
+        ...valid.targets[0],
+        missionDocumentSha256: null,
+        missionBindingSha256: UNBOUND_MISSION_BINDING_SHA256,
+      }],
+    }), true);
 
     const acknowledgement = providerAcknowledgement({
       steeringId: valid.steeringId,
@@ -176,6 +208,13 @@ describe("steering protocol", () => {
     });
     assert.equal(isSteeringProviderAcknowledgement(acknowledgement), true);
     assert.equal(isSteeringProviderAcknowledgement({ ...acknowledgement, extra: "forged" }), false);
+    const legacyAcknowledgement = {
+      ...acknowledgement,
+      missionContractSha256: acknowledgement.missionBindingSha256,
+    } as Record<string, unknown>;
+    delete legacyAcknowledgement.missionDocumentSha256;
+    delete legacyAcknowledgement.missionBindingSha256;
+    assert.equal(isSteeringProviderAcknowledgement(legacyAcknowledgement), false);
   });
 });
 
@@ -374,7 +413,8 @@ class FakeHandle implements LiveActiveSteeringHandle {
       generation,
       active: true,
       ownerId: OWNER,
-      missionContractSha256: MISSION,
+      missionDocumentSha256: MISSION_DOCUMENT,
+      missionBindingSha256: MISSION_BINDING,
       authoritySha256: AUTHORITY,
     };
   }
@@ -383,8 +423,15 @@ class FakeHandle implements LiveActiveSteeringHandle {
     return { ...this.inspection };
   }
 
-  async steer(request: SteeringProviderRequest) {
-    this.requests.push(request);
+  async steer(
+    request: SteeringProviderRequest,
+    submissionGate?: MissionSubmissionGate,
+  ) {
+    if (!submissionGate) throw new Error("Fake provider requires a Mission submission gate.");
+    await submissionGate.write("codex.turnSteer", () => {
+      this.requests.push(request);
+      return MISSION_SUBMISSION_WRITTEN;
+    });
     if (this.response) return this.response(request);
     return providerAcknowledgement(request, this.capability.delivery);
   }
@@ -407,6 +454,8 @@ function providerAcknowledgement(
     generation: request.target.generation,
     sequence: request.target.sequence,
     textSha256: request.textSha256,
+    missionDocumentSha256: request.target.missionDocumentSha256,
+    missionBindingSha256: request.target.missionBindingSha256,
     delivery,
     providerReceiptSha256: sha256Utf8(`provider:${request.target.callId}:${request.target.sequence}`),
   };
@@ -429,7 +478,8 @@ function registration(
     generation: options.generation ?? "generation-one",
     agentId: options.agentId ?? "codex",
     roomTurnId: options.roomTurnId ?? "room-turn-one",
-    missionContractSha256: MISSION,
+    missionDocumentSha256: MISSION_DOCUMENT,
+    missionBindingSha256: MISSION_BINDING,
     authoritySha256: AUTHORITY,
     initialPromptSha256: PROMPT,
     ownerId: OWNER,
@@ -448,6 +498,14 @@ function controllerOptions(
   return {
     store,
     ownerId: OWNER,
+    missionSubmissionGate: (expectedBindingSha256: string): MissionSubmissionGate => {
+      assert.equal(expectedBindingSha256, MISSION_BINDING);
+      return {
+        write: async (_point, performWrite) => {
+          assert.equal(await performWrite(), MISSION_SUBMISSION_WRITTEN);
+        },
+      };
+    },
     now: () => TIME,
     newId: (kind: "steering" | "event") => `${kind}-${++id}`,
     acknowledgementTimeoutMs: 100,
@@ -547,7 +605,8 @@ describe("steering controller with deterministic providers", () => {
       generation: "generation-queue",
       active: true,
       ownerId: OWNER,
-      missionContractSha256: MISSION,
+      missionDocumentSha256: MISSION_DOCUMENT,
+      missionBindingSha256: MISSION_BINDING,
       authoritySha256: AUTHORITY,
     };
     const queued: ActiveSteeringHandle = {
@@ -574,8 +633,11 @@ describe("steering controller with deterministic providers", () => {
     };
     const queuedRequests: SteeringProviderRequest[] = [];
     const controller = new SteeringController(controllerOptions(undefined, {
-      queueNextHydraTurn: async (request) => {
-        queuedRequests.push(request);
+      queueNextHydraTurn: async (request, submissionGate) => {
+        await submissionGate.write("hydra.queueNext", () => {
+          queuedRequests.push(request);
+          return MISSION_SUBMISSION_WRITTEN;
+        });
         return providerAcknowledgement(request, "nextHydraTurn");
       },
     }));
@@ -663,7 +725,8 @@ describe("steering controller with deterministic providers", () => {
 
   test("rechecks mission, authority, and owner bindings before every provider write", async () => {
     for (const [field, replacement, expectedCode] of [
-      ["missionContractSha256", "a".repeat(64), "missionHashMismatch"],
+      ["missionBindingSha256", "a".repeat(64), "missionHashMismatch"],
+      ["missionDocumentSha256", "b".repeat(64), "missionHashMismatch"],
       ["authoritySha256", "b".repeat(64), "authorityHashMismatch"],
       ["ownerId", "another-extension-host", "remoteOwner"],
     ] as const) {
@@ -683,6 +746,104 @@ describe("steering controller with deterministic providers", () => {
       assert.equal(receipt.outcomes[0]?.code, expectedCode);
       assert.equal(handle.requests.length, 0);
     }
+  });
+
+  test("rechecks the live authoritative mission binding before every provider write", async () => {
+    const handle = new FakeHandle("call-live-mission", "generation-live-mission");
+    let currentMissionBindingSha256 = MISSION_BINDING;
+    const controller = new SteeringController(controllerOptions(undefined, {
+      missionSubmissionGate: (expectedBindingSha256) => ({
+        write: async (_point, performWrite) => {
+          if (expectedBindingSha256 !== currentMissionBindingSha256) {
+            throw new MissionSubmissionRejectedError("Mission binding changed");
+          }
+          assert.equal(await performWrite(), MISSION_SUBMISSION_WRITTEN);
+        },
+      }),
+    }));
+    const selected = controller.registerRun(registration(handle, {
+      callId: "call-live-mission",
+      generation: "generation-live-mission",
+    }));
+    currentMissionBindingSha256 = "a".repeat(64);
+
+    const receipt = await controller.send({
+      source: "localUser",
+      intent: "steer",
+      roomTurnId: "room-turn-one",
+      text: "Must not cross a Mission Contract amendment.",
+      targets: [selected],
+    });
+
+    assert.equal(receipt.outcomes[0]?.code, "missionHashMismatch");
+    assert.equal(handle.requests.length, 0);
+  });
+
+  test("awaits the authoritative Mission binding assertion before invoking the provider", async () => {
+    const handle = new FakeHandle("call-mission-linearized", "generation-mission-linearized");
+    let releaseAssertion!: () => void;
+    let markAssertionEntered!: () => void;
+    const assertionEntered = new Promise<void>((resolve) => {
+      markAssertionEntered = resolve;
+    });
+    const assertionGate = new Promise<void>((resolve) => {
+      releaseAssertion = resolve;
+    });
+    const controller = new SteeringController(controllerOptions(undefined, {
+      missionSubmissionGate: (expectedBindingSha256) => ({
+        write: async (_point, performWrite) => {
+          assert.equal(expectedBindingSha256, MISSION_BINDING);
+          markAssertionEntered();
+          await assertionGate;
+          assert.equal(await performWrite(), MISSION_SUBMISSION_WRITTEN);
+        },
+      }),
+    }));
+    const selected = controller.registerRun(registration(handle, {
+      callId: "call-mission-linearized",
+      generation: "generation-mission-linearized",
+    }));
+
+    const send = controller.send({
+      source: "localUser",
+      intent: "steer",
+      roomTurnId: "room-turn-one",
+      text: "Wait for the authoritative ledger assertion.",
+      targets: [selected],
+    });
+    await assertionEntered;
+    assert.equal(handle.requests.length, 0);
+    releaseAssertion();
+
+    const receipt = await send;
+    assert.equal(receipt.outcomes[0]?.outcome, "acknowledged");
+    assert.equal(handle.requests.length, 1);
+  });
+
+  test("fails live mission rechecks closed when the authoritative read fails", async () => {
+    const handle = new FakeHandle("call-mission-read-failure", "generation-mission-read-failure");
+    const controller = new SteeringController(controllerOptions(undefined, {
+      missionSubmissionGate: () => ({
+        write: async () => {
+          throw new MissionSubmissionRejectedError("private ledger unavailable");
+        },
+      }),
+    }));
+    const selected = controller.registerRun(registration(handle, {
+      callId: "call-mission-read-failure",
+      generation: "generation-mission-read-failure",
+    }));
+
+    const receipt = await controller.send({
+      source: "localUser",
+      intent: "steer",
+      roomTurnId: "room-turn-one",
+      text: "Must not steer without current mission evidence.",
+      targets: [selected],
+    });
+
+    assert.equal(receipt.outcomes[0]?.code, "missionHashMismatch");
+    assert.equal(handle.requests.length, 0);
   });
 
   test("rejects sealed, referee, verification, and locked Arena work without provider writes", async () => {
@@ -746,22 +907,28 @@ describe("steering controller with deterministic providers", () => {
   });
 
   test("treats malformed or mismatched acknowledgements as unknown, not success", async () => {
-    const handle = new FakeHandle("call-one", "generation-one");
-    handle.response = async (request) => ({
-      ...providerAcknowledgement(request),
-      generation: "wrong-generation",
-    });
-    const controller = new SteeringController(controllerOptions());
-    const selected = controller.registerRun(registration(handle));
-    const receipt = await controller.send({
-      source: "localUser",
-      intent: "steer",
-      roomTurnId: "room-turn-one",
-      text: "Bind the exact generation.",
-      targets: [selected],
-    });
-    assert.equal(receipt.outcomes[0]?.code, "malformedAcknowledgement");
-    assert.equal(receipt.outcomes[0]?.chainIndeterminate, true);
+    for (const acknowledgementPatch of [
+      { generation: "wrong-generation" },
+      { missionDocumentSha256: "d".repeat(64) },
+      { missionBindingSha256: "d".repeat(64) },
+    ]) {
+      const handle = new FakeHandle("call-one", "generation-one");
+      handle.response = async (request) => ({
+        ...providerAcknowledgement(request),
+        ...acknowledgementPatch,
+      });
+      const controller = new SteeringController(controllerOptions());
+      const selected = controller.registerRun(registration(handle));
+      const receipt = await controller.send({
+        source: "localUser",
+        intent: "steer",
+        roomTurnId: "room-turn-one",
+        text: "Bind the exact provider acknowledgement.",
+        targets: [selected],
+      });
+      assert.equal(receipt.outcomes[0]?.code, "malformedAcknowledgement");
+      assert.equal(receipt.outcomes[0]?.chainIndeterminate, true);
+    }
   });
 
   test("distinguishes known pre-write failures from uncertain provider exits", async () => {

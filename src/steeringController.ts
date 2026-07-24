@@ -6,6 +6,7 @@ import {
   dispositionForDelivery,
   isBoundedIdentifier,
   isCanonicalTimestamp,
+  isMissionBindingPair,
   isSha256,
   isSteeringCapability,
   isSteeringProviderAcknowledgement,
@@ -27,13 +28,18 @@ import {
   type SteeringWorkClass,
 } from "./steeringProtocol";
 import type { SteeringStore } from "./steeringStore";
+import {
+  MissionSubmissionRejectedError,
+  type MissionSubmissionGate,
+} from "./missionDispatch";
 
 export interface ActiveRunInspection {
   readonly callId: string;
   readonly generation: string;
   readonly active: boolean;
   readonly ownerId: string;
-  readonly missionContractSha256: string;
+  readonly missionDocumentSha256: string | null;
+  readonly missionBindingSha256: string;
   readonly authoritySha256: string;
 }
 
@@ -45,7 +51,10 @@ interface ActiveSteeringHandleBase {
 
 export interface LiveActiveSteeringHandle extends ActiveSteeringHandleBase {
   readonly capability: Extract<SteeringCapability, { kind: "live" }>;
-  steer(request: SteeringProviderRequest): Promise<unknown>;
+  steer(
+    request: SteeringProviderRequest,
+    submissionGate?: MissionSubmissionGate,
+  ): Promise<unknown>;
 }
 
 export interface NonLiveActiveSteeringHandle extends ActiveSteeringHandleBase {
@@ -59,7 +68,8 @@ export interface ActiveSteeringRunRegistration {
   readonly generation: string;
   readonly agentId: string;
   readonly roomTurnId: string;
-  readonly missionContractSha256: string;
+  readonly missionDocumentSha256: string | null;
+  readonly missionBindingSha256: string;
   readonly authoritySha256: string;
   readonly initialPromptSha256: string;
   readonly ownerId: string;
@@ -76,7 +86,8 @@ export interface SteeringTargetSelection {
   readonly generation: string;
   readonly agentId: string;
   readonly roomTurnId: string;
-  readonly missionContractSha256: string;
+  readonly missionDocumentSha256: string | null;
+  readonly missionBindingSha256: string;
   readonly authoritySha256: string;
   readonly initialPromptSha256: string;
   readonly ownerId: string;
@@ -142,6 +153,14 @@ export type SteeringAcknowledgementWaitResult =
 export interface SteeringControllerDependencies {
   readonly store: SteeringStore;
   readonly ownerId: string;
+  /**
+   * Holds the authoritative Mission ledger lease through only the exact
+   * provider/queue write. Provider handles must use this gate at their real
+   * stdin/RPC boundary rather than around their full response lifetime.
+   */
+  readonly missionSubmissionGate: (
+    expectedBindingSha256: string,
+  ) => MissionSubmissionGate;
   readonly now?: () => string;
   readonly newId?: (kind: "steering" | "event") => string;
   readonly acknowledgementTimeoutMs?: number;
@@ -153,7 +172,10 @@ export interface SteeringControllerDependencies {
    * Existing Hydra room queue adapter. It is separate from a live provider
    * handle so "queue" can never be mislabeled as native same-turn steering.
    */
-  readonly queueNextHydraTurn?: (request: SteeringProviderRequest) => Promise<unknown>;
+  readonly queueNextHydraTurn?: (
+    request: SteeringProviderRequest,
+    submissionGate: MissionSubmissionGate,
+  ) => Promise<unknown>;
 }
 
 interface ActiveRunState {
@@ -187,6 +209,9 @@ export class SteeringController {
 
   constructor(private readonly deps: SteeringControllerDependencies) {
     if (!isBoundedIdentifier(deps.ownerId)) throw new Error("Steering controller owner ID is invalid.");
+    if (typeof deps.missionSubmissionGate !== "function") {
+      throw new Error("Steering controller requires an authoritative Mission submission gate.");
+    }
     this.now = deps.now ?? (() => new Date().toISOString());
     this.newId = deps.newId ?? ((kind) => `${kind}-${randomUUID()}`);
     const timeout = deps.acknowledgementTimeoutMs ?? 15_000;
@@ -380,7 +405,8 @@ export class SteeringController {
           roomTurnId: state.registration.roomTurnId,
           sequence,
           expectedDelivery,
-          missionContractSha256: state.registration.missionContractSha256,
+          missionDocumentSha256: state.registration.missionDocumentSha256,
+          missionBindingSha256: state.registration.missionBindingSha256,
           authoritySha256: state.registration.authoritySha256,
           initialPromptSha256: state.registration.initialPromptSha256,
           ownerId: state.registration.ownerId,
@@ -468,13 +494,13 @@ export class SteeringController {
     if (inspection.ownerId !== this.deps.ownerId || inspection.ownerId !== binding.ownerId) {
       return this.recordOutcome(admitted, binding, "rejected", "remoteOwner");
     }
-    if (inspection.missionContractSha256 !== binding.missionContractSha256) {
+    if (inspection.missionDocumentSha256 !== binding.missionDocumentSha256
+      || inspection.missionBindingSha256 !== binding.missionBindingSha256) {
       return this.recordOutcome(admitted, binding, "rejected", "missionHashMismatch");
     }
     if (inspection.authoritySha256 !== binding.authoritySha256) {
       return this.recordOutcome(admitted, binding, "rejected", "authorityHashMismatch");
     }
-
     const request: SteeringProviderRequest = {
       schemaVersion: STEERING_SCHEMA_VERSION,
       steeringId: admitted.event.steeringId,
@@ -488,14 +514,17 @@ export class SteeringController {
     };
     let delivery: Promise<unknown>;
     const handle = state.registration.handle;
+    const submissionGate = this.deps.missionSubmissionGate(
+      binding.missionBindingSha256,
+    );
     if (admitted.event.intent === "queue"
       || handle.capability.kind === "nextDispatch") {
       if (!this.deps.queueNextHydraTurn) {
         return this.recordOutcome(admitted, binding, "unsupported", "unsupported");
       }
-      delivery = this.deps.queueNextHydraTurn(request);
+      delivery = this.deps.queueNextHydraTurn(request, submissionGate);
     } else if (isLiveHandle(handle)) {
-      delivery = handle.steer(request);
+      delivery = handle.steer(request, submissionGate);
     } else {
       return this.recordOutcome(admitted, binding, "unsupported", "unsupported");
     }
@@ -509,6 +538,9 @@ export class SteeringController {
     }
     if (waited.kind === "rejected") {
       const error = waited.error;
+      if (error instanceof MissionSubmissionRejectedError) {
+        return this.recordOutcome(admitted, binding, "rejected", "missionHashMismatch");
+      }
       if (error instanceof SteeringProviderError) {
         return this.recordOutcome(
           admitted,
@@ -609,7 +641,8 @@ function createSelection(registration: ActiveSteeringRunRegistration): SteeringT
     generation: registration.generation,
     agentId: registration.agentId,
     roomTurnId: registration.roomTurnId,
-    missionContractSha256: registration.missionContractSha256,
+    missionDocumentSha256: registration.missionDocumentSha256,
+    missionBindingSha256: registration.missionBindingSha256,
     authoritySha256: registration.authoritySha256,
     initialPromptSha256: registration.initialPromptSha256,
     ownerId: registration.ownerId,
@@ -633,12 +666,13 @@ function selectionHash(
     ? [selection.capability.kind, selection.capability.delivery, selection.capability.protocol]
     : [selection.capability.kind, selection.capability.delivery, selection.capability.reason];
   return sha256Utf8(JSON.stringify([
-    "hydra-steering-selection-v1",
+    "hydra-steering-selection-mission-binding-v1",
     selection.callId,
     selection.generation,
     selection.agentId,
     selection.roomTurnId,
-    selection.missionContractSha256,
+    selection.missionDocumentSha256,
+    selection.missionBindingSha256,
     selection.authoritySha256,
     selection.initialPromptSha256,
     selection.ownerId,
@@ -671,7 +705,8 @@ function isSelectionShape(value: unknown): value is SteeringTargetSelection {
     "generation",
     "agentId",
     "roomTurnId",
-    "missionContractSha256",
+    "missionDocumentSha256",
+    "missionBindingSha256",
     "authoritySha256",
     "initialPromptSha256",
     "ownerId",
@@ -691,7 +726,7 @@ function isSelectionShape(value: unknown): value is SteeringTargetSelection {
     && isBoundedIdentifier(selection.generation)
     && isBoundedIdentifier(selection.agentId)
     && isBoundedIdentifier(selection.roomTurnId)
-    && isSha256(selection.missionContractSha256)
+    && isMissionBindingPair(selection.missionDocumentSha256, selection.missionBindingSha256)
     && isSha256(selection.authoritySha256)
     && isSha256(selection.initialPromptSha256)
     && isBoundedIdentifier(selection.ownerId)
@@ -727,8 +762,13 @@ function validateRegistration(registration: ActiveSteeringRunRegistration): void
   ] as const) {
     if (!isBoundedIdentifier(value)) throw new Error(`Steering ${label} is invalid.`);
   }
+  if (!isMissionBindingPair(
+    registration.missionDocumentSha256,
+    registration.missionBindingSha256,
+  )) {
+    throw new Error("Steering Mission document/binding hashes are invalid or inconsistent.");
+  }
   for (const [label, value] of [
-    ["Mission Contract", registration.missionContractSha256],
     ["authority", registration.authoritySha256],
     ["initial prompt", registration.initialPromptSha256],
   ] as const) {
@@ -773,7 +813,8 @@ function isActiveRunInspection(value: unknown): value is ActiveRunInspection {
     "generation",
     "active",
     "ownerId",
-    "missionContractSha256",
+    "missionDocumentSha256",
+    "missionBindingSha256",
     "authoritySha256",
   ]);
   if (keys.length !== expected.size || !keys.every((key) => expected.has(key))) return false;
@@ -782,7 +823,7 @@ function isActiveRunInspection(value: unknown): value is ActiveRunInspection {
     && isBoundedIdentifier(inspection.generation)
     && typeof inspection.active === "boolean"
     && isBoundedIdentifier(inspection.ownerId)
-    && isSha256(inspection.missionContractSha256)
+    && isMissionBindingPair(inspection.missionDocumentSha256, inspection.missionBindingSha256)
     && isSha256(inspection.authoritySha256);
 }
 

@@ -270,7 +270,10 @@ describe("terminal bridge usage source contracts", () => {
     assert.match(source, /effectivePhasedNumberSetting\(raw, scope, fallback\)/);
     assert.match(source, /wikiContextRefreshTranscriptMaxChars/);
     assert.match(source, /ONE_SHOT_WORKSPACE_INSTRUCTIONS_MAX_CHARS_DEFAULTS/);
-    assert.match(source, /roomContext: this\.buildPromptContext\(phase, "terminalBridge", agent, "terminalPoke"\)/);
+    assert.match(
+      source,
+      /const roomContext = this\.buildPromptContext\(\s*phase,\s*"terminalBridge",\s*agent,\s*"terminalPoke",\s*missionBinding,\s*\);[\s\S]*buildDirectTerminalPokePrompt\(\{[\s\S]*roomContext,/,
+    );
   });
 
   test("model and effort choosers write application-scoped settings globally", () => {

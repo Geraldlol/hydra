@@ -56,6 +56,9 @@ export interface RunResult {
   // without observing the child process close. Another turn must not start in
   // this extension host because the native CLI may still be running.
   terminationFailed?: boolean;
+  // A provider-bound write may have crossed the transport boundary, but Hydra
+  // cannot prove whether the provider accepted or completed it. Never retry.
+  deliveryUnknown?: boolean;
 }
 
 export interface AgentSpawn {
@@ -231,13 +234,15 @@ export async function runAgent(
     const hasTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0;
     const timer = hasTimeout
       ? setTimeout(() => {
-          timedOut = true;
-          beginTermination();
+          if (!settled && !terminationStarted) {
+            timedOut = true;
+            beginTermination();
+          }
         }, timeoutMs)
       : undefined;
 
     const abortHandler = () => {
-      if (!settled) {
+      if (!settled && !terminationStarted) {
         cancelled = true;
         beginTermination();
       }

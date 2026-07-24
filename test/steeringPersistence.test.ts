@@ -23,7 +23,8 @@ import {
 
 const TIME = "2026-07-24T12:00:00.000Z";
 const TEXT = "Use the deterministic acceptance check.";
-const MISSION = "1".repeat(64);
+const MISSION_DOCUMENT = "0".repeat(64);
+const MISSION_BINDING = "1".repeat(64);
 const AUTHORITY = "2".repeat(64);
 const PROMPT = "3".repeat(64);
 
@@ -52,7 +53,8 @@ function requestEvent(
       roomTurnId: `room-turn-${suffix}`,
       sequence: 1,
       expectedDelivery: "sameTurn",
-      missionContractSha256: MISSION,
+      missionDocumentSha256: MISSION_DOCUMENT,
+      missionBindingSha256: MISSION_BINDING,
       authoritySha256: AUTHORITY,
       initialPromptSha256: PROMPT,
       ownerId,
@@ -129,9 +131,20 @@ describe("file steering persistence", () => {
   });
 
   test("fails closed on malformed and torn ledger records", async (t) => {
+    const legacy = requestEvent("legacy");
+    const legacyTarget = {
+      ...legacy.targets[0],
+      missionContractSha256: legacy.targets[0]!.missionBindingSha256,
+    } as Record<string, unknown>;
+    delete legacyTarget.missionDocumentSha256;
+    delete legacyTarget.missionBindingSha256;
     for (const [name, content] of [
       ["malformed", "{not-json}\n"],
       ["torn", '{"schemaVersion":1,"type":"steeringRequested"'],
+      ["legacy-ambiguous-mission-hash", `${JSON.stringify({
+        ...legacy,
+        targets: [legacyTarget],
+      })}\n`],
     ] as const) {
       const root = path.join(await privateRoot(t), name);
       const { persistence, paths } = await openFileSteeringPersistence(root);

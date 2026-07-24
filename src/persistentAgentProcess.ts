@@ -184,13 +184,15 @@ export function startPersistentAgentProcess(
   const hasTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0;
   const timer = hasTimeout
     ? setTimeout(() => {
-        timedOut = true;
-        beginTermination();
+        if (!settled && !terminationStarted) {
+          timedOut = true;
+          beginTermination();
+        }
       }, timeoutMs)
     : undefined;
 
   const abortHandler = (): void => {
-    if (settled) return;
+    if (settled || terminationStarted) return;
     cancelled = true;
     beginTermination();
   };

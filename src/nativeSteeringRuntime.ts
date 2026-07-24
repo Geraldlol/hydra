@@ -22,11 +22,21 @@ import {
   type SteeringTargetSelection,
 } from "./steeringController";
 import {
+  computeSteeringChainSha256,
   sha256Utf8,
+  type SteeringChainBinding,
   type SteeringWorkClass,
 } from "./steeringProtocol";
+import {
+  startMissionBoundSubmission,
+  type MissionSubmissionGate,
+} from "./missionDispatch";
 
 export type NativeSteeringTransport = "codexAppServer" | "claudeSession";
+export type NativeSteeringExecutionTransport =
+  | "codexAppServer"
+  | "claudeSession"
+  | "oneShotFallback";
 
 export interface NativeSteeringRuntimeOptions {
   readonly transport: NativeSteeringTransport;
@@ -39,10 +49,24 @@ export interface NativeSteeringRuntimeOptions {
   readonly agentId: string;
   readonly roomTurnId: string;
   readonly ownerId: string;
-  readonly missionContractSha256: string;
+  readonly missionDocumentSha256: string | null;
+  readonly missionBindingSha256: string;
+  readonly submissionGate: MissionSubmissionGate;
   readonly workClass: SteeringWorkClass;
   readonly phaseSnapshot: string;
   readonly appendTrace: (record: Record<string, unknown>) => Promise<void>;
+  /**
+   * Reports the terminal steering-chain binding after the acceptance queue
+   * closes. Failure to close or replay the private steering ledger is reported
+   * as indeterminate and can never make Flight Recorder look complete.
+   */
+  readonly onSteeringChain?: (
+    chain: Pick<SteeringChainBinding, "steeringChainSha256" | "chainIndeterminate">,
+  ) => void;
+  /** Reports the exact provider path attempted for terminal trace evidence. */
+  readonly onTransportSelected?: (
+    transport: NativeSteeringExecutionTransport,
+  ) => void;
   readonly onRegistrationChanged: () => void;
 }
 
@@ -73,10 +97,15 @@ export function createNativeSteeringRunner(
     callId: options.callId,
     generation,
     ownerId: options.ownerId,
-    missionContractSha256: options.missionContractSha256,
+    missionDocumentSha256: options.missionDocumentSha256,
+    missionBindingSha256: options.missionBindingSha256,
     authoritySha256: steeringAuthoritySha256(options.spawn),
   };
   const initialPromptSha256 = sha256Utf8(options.prompt);
+  const initialSteeringChainSha256 = computeSteeringChainSha256(
+    initialPromptSha256,
+    [],
+  );
 
   return async (onRawChunk) => {
     let result: RunResult | undefined;
@@ -95,12 +124,17 @@ export function createNativeSteeringRunner(
         ...(timeoutDeadlineMs === undefined ? {} : { timeoutDeadlineMs }),
         handle,
       });
-      options.onRegistrationChanged();
+      try {
+        options.onRegistrationChanged();
+      } catch {
+        // UI refresh cannot invalidate a registered provider run.
+      }
     };
 
     try {
       if (codexPlan?.kind === "supported") {
         try {
+          reportTransport(options, "codexAppServer");
           result = await runCodexAppServerTurn({
             plan: codexPlan.plan,
             prompt: options.prompt,
@@ -108,6 +142,7 @@ export function createNativeSteeringRunner(
             ...(timeoutDeadlineMs === undefined ? {} : { timeoutDeadlineMs }),
             signal: options.signal,
             binding,
+            submissionGate: options.submissionGate,
             onChunk: onRawChunk,
             onHandleReady,
           });
@@ -139,11 +174,17 @@ export function createNativeSteeringRunner(
           const fallbackTimeout = remainingMs === undefined
             ? 0
             : Math.max(1, Math.floor(remainingMs));
-          result = await runAgent(
-            options.spawn,
-            options.prompt,
-            fallbackTimeout,
-            onRawChunk,
+          reportTransport(options, "oneShotFallback");
+          result = await startMissionBoundSubmission(
+            options.submissionGate,
+            "native.oneShot",
+            () => runAgent(
+              options.spawn,
+              options.prompt,
+              fallbackTimeout,
+              onRawChunk,
+              options.signal,
+            ),
             options.signal,
           );
           return result;
@@ -154,12 +195,14 @@ export function createNativeSteeringRunner(
         // Claude writes its initial stream-json request before runtime
         // capability proof arrives. Any later failure is terminal for this
         // call and must never be replayed through the one-shot adapter.
+        reportTransport(options, "claudeSession");
         result = await runClaudeSessionTurn({
           plan: claudePlan.plan,
           prompt: options.prompt,
           timeoutMs: options.timeoutMs,
           signal: options.signal,
           binding,
+          submissionGate: options.submissionGate,
           onChunk: onRawChunk,
           onHandleReady,
         });
@@ -168,6 +211,13 @@ export function createNativeSteeringRunner(
 
       throw new Error("The selected steering transport has no runnable native plan.");
     } finally {
+      let terminalChain: Pick<
+        SteeringChainBinding,
+        "steeringChainSha256" | "chainIndeterminate"
+      > = {
+        steeringChainSha256: initialSteeringChainSha256,
+        chainIndeterminate: false,
+      };
       if (selection) {
         const reason = !result || didRunFail(result)
           ? options.signal.aborted || result?.cancelled ? "cancelled" : "failed"
@@ -176,31 +226,72 @@ export function createNativeSteeringRunner(
         // behind any delivery already admitted before provider completion.
         // Read the chain only after that queue drains so completion evidence
         // cannot capture a pre-steer hash with a non-terminal sequence.
-        await options.controller.closeRun(selection, reason).catch(() => undefined);
+        let closeFailed = false;
+        await options.controller.closeRun(selection, reason).catch(() => {
+          closeFailed = true;
+        });
+        let chain: SteeringChainBinding | undefined;
         try {
-          const chain = options.controller.chainBinding(selection);
-          await options.appendTrace({
-            id: options.callId,
-            event: "steeringChain",
-            timestamp: new Date().toISOString(),
-            agent: options.agentId,
-            phase: options.phaseSnapshot,
-            transport: "oneShot",
-            generation,
+          chain = options.controller.chainBinding(selection);
+          terminalChain = {
             steeringChainSha256: chain.steeringChainSha256,
-            chainIndeterminate: chain.chainIndeterminate,
-            lastSequence: chain.lastSequence,
-            lastTerminalSequence: chain.lastTerminalSequence,
-            lastAcknowledgedSequence: chain.lastAcknowledgedSequence,
-          });
+            chainIndeterminate: closeFailed || chain.chainIndeterminate,
+          };
         } catch {
-          // The private steering ledger remains authoritative. A diagnostic
-          // trace failure cannot trigger a provider retry or hide its result.
+          terminalChain = {
+            steeringChainSha256: initialSteeringChainSha256,
+            chainIndeterminate: true,
+          };
         }
-        options.onRegistrationChanged();
+        if (chain) {
+          try {
+            await options.appendTrace({
+              id: options.callId,
+              event: "steeringChain",
+              timestamp: new Date().toISOString(),
+              agent: options.agentId,
+              phase: options.phaseSnapshot,
+              transport: "oneShot",
+              generation,
+              missionDocumentSha256: options.missionDocumentSha256,
+              missionBindingSha256: options.missionBindingSha256,
+              steeringChainSha256: chain.steeringChainSha256,
+              chainIndeterminate: terminalChain.chainIndeterminate,
+              lastSequence: chain.lastSequence,
+              lastTerminalSequence: chain.lastTerminalSequence,
+              lastAcknowledgedSequence: chain.lastAcknowledgedSequence,
+            });
+          } catch {
+            // The private steering ledger remains authoritative. A diagnostic
+            // trace failure cannot trigger a provider retry or hide its result.
+          }
+        }
+      }
+      try {
+        options.onSteeringChain?.(terminalChain);
+      } catch {
+        // Telemetry consumers cannot change provider completion semantics.
+      }
+      if (selection) {
+        try {
+          options.onRegistrationChanged();
+        } catch {
+          // UI refresh cannot change provider completion semantics.
+        }
       }
     }
   };
+}
+
+function reportTransport(
+  options: NativeSteeringRuntimeOptions,
+  transport: NativeSteeringExecutionTransport,
+): void {
+  try {
+    options.onTransportSelected?.(transport);
+  } catch {
+    // Recorder/UI callbacks cannot alter provider selection or completion.
+  }
 }
 
 export function steeringAuthoritySha256(spawn: AgentSpawn): string {
@@ -215,6 +306,7 @@ export function steeringAuthoritySha256(spawn: AgentSpawn): string {
 
 function didRunFail(result: RunResult): boolean {
   return !!result.terminationFailed
+    || !!result.deliveryUnknown
     || result.cancelled
     || result.timedOut
     || result.exitCode !== 0;

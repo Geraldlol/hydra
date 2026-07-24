@@ -5,10 +5,20 @@ import { BoundedLineScanner } from "./fileQueue";
 import { startPersistentAgentProcess, type PersistentAgentProcess } from "./persistentAgentProcess";
 import {
   STEERING_SCHEMA_VERSION,
+  isBoundedIdentifier,
+  isMissionBindingPair,
+  isSha256,
   sha256Utf8,
   type SteeringProviderAcknowledgement,
   type SteeringProviderRequest,
 } from "./steeringProtocol";
+import {
+  MISSION_SUBMISSION_WRITTEN,
+  MissionSubmissionRejectedError,
+  SubmissionCancelledBeforeWriteError,
+  type MissionSubmissionPoint,
+  type MissionSubmissionGate,
+} from "./missionDispatch";
 import {
   SteeringProviderError,
   type ActiveRunInspection,
@@ -49,7 +59,8 @@ export interface CodexAppServerRunBinding {
   readonly callId: string;
   readonly generation: string;
   readonly ownerId: string;
-  readonly missionContractSha256: string;
+  readonly missionDocumentSha256: string | null;
+  readonly missionBindingSha256: string;
   readonly authoritySha256: string;
 }
 
@@ -63,6 +74,8 @@ export interface CodexAppServerRunOptions {
   readonly binding: CodexAppServerRunBinding;
   readonly onChunk: (chunk: string) => void;
   readonly onHandleReady?: (handle: LiveActiveSteeringHandle) => void;
+  /** Mission lease gate used only for turn/start and turn/steer writes. */
+  readonly submissionGate?: MissionSubmissionGate;
 }
 
 /**
@@ -198,6 +211,7 @@ export function planCodexAppServer(spawn: AgentSpawn): CodexAppServerPlanResult 
  * not gain a second provider-specific parser.
  */
 export async function runCodexAppServerTurn(options: CodexAppServerRunOptions): Promise<RunResult> {
+  validateRunBinding(options.binding);
   const childAbort = new AbortController();
   let timedOut = false;
   let modelRequestSubmitted = false;
@@ -400,7 +414,7 @@ export async function runCodexAppServerTurn(options: CodexAppServerRunOptions): 
         threadId,
         clientUserMessageId: `hydra-initial-${randomUUID()}`,
         input: [textInput(options.prompt)],
-      }),
+      }, options.submissionGate, "codex.turnStart", options.signal),
       processExit,
       NEGOTIATION_TIMEOUT_MS,
       "Codex App Server turn start failed.",
@@ -416,6 +430,7 @@ export async function runCodexAppServerTurn(options: CodexAppServerRunOptions): 
       threadId,
       turnId,
       binding: options.binding,
+      signal: options.signal,
     });
     options.onHandleReady?.(handle);
     rpc.flushDeferredNotifications();
@@ -440,6 +455,14 @@ export async function runCodexAppServerTurn(options: CodexAppServerRunOptions): 
     };
   } catch (error) {
     handle?.markInactive();
+    if (
+      error instanceof MissionSubmissionRejectedError
+      || error instanceof SubmissionCancelledBeforeWriteError
+    ) {
+      await startShutdown("abort");
+      await processExit;
+      throw error;
+    }
     if (!modelRequestSubmitted && error instanceof CodexAppServerFallbackError) {
       await startShutdown("abort");
       await processExit;
@@ -457,8 +480,10 @@ export async function runCodexAppServerTurn(options: CodexAppServerRunOptions): 
       ...rawResult,
       stdout: syntheticStdout.join(""),
       stderr: [rawResult.stderr, message].filter(Boolean).join("\n"),
+      exitCode: rawResult.exitCode === 0 ? 1 : rawResult.exitCode,
       timedOut,
       cancelled: options.signal.aborted && !timedOut,
+      deliveryUnknown: !options.signal.aborted && !timedOut,
       timeoutMs: options.timeoutMs,
     };
   } finally {
@@ -473,6 +498,7 @@ interface CodexAppServerHandleOptions {
   readonly threadId: string;
   readonly turnId: string;
   readonly binding: CodexAppServerRunBinding;
+  readonly signal: AbortSignal;
 }
 
 class CodexAppServerHandle implements LiveActiveSteeringHandle {
@@ -492,7 +518,10 @@ class CodexAppServerHandle implements LiveActiveSteeringHandle {
     };
   }
 
-  async steer(request: SteeringProviderRequest): Promise<SteeringProviderAcknowledgement> {
+  async steer(
+    request: SteeringProviderRequest,
+    submissionGate?: MissionSubmissionGate,
+  ): Promise<SteeringProviderAcknowledgement> {
     if (!this.active) {
       throw new SteeringProviderError("processExit", false, "The Codex turn is no longer active.");
     }
@@ -506,8 +535,9 @@ class CodexAppServerHandle implements LiveActiveSteeringHandle {
         expectedTurnId: this.options.turnId,
         clientUserMessageId: `hydra-steer-${request.steeringId}-${request.target.sequence}`,
         input: [textInput(request.text)],
-      });
+      }, submissionGate, "codex.turnSteer", this.options.signal);
     } catch (error) {
+      if (error instanceof MissionSubmissionRejectedError) throw error;
       throw new SteeringProviderError(
         "providerFailure",
         true,
@@ -530,6 +560,8 @@ class CodexAppServerHandle implements LiveActiveSteeringHandle {
       generation: request.target.generation,
       sequence: request.target.sequence,
       textSha256: request.textSha256,
+      missionDocumentSha256: request.target.missionDocumentSha256,
+      missionBindingSha256: request.target.missionBindingSha256,
       delivery: "sameTurn",
       providerReceiptSha256: sha256Utf8(JSON.stringify({
         protocol: APP_SERVER_PROTOCOL,
@@ -537,6 +569,8 @@ class CodexAppServerHandle implements LiveActiveSteeringHandle {
         expectedTurnId: this.options.turnId,
         returnedTurnId: result.turnId,
         clientUserMessageId: `hydra-steer-${request.steeringId}-${request.target.sequence}`,
+        missionDocumentSha256: request.target.missionDocumentSha256,
+        missionBindingSha256: request.target.missionBindingSha256,
       })),
     };
   }
@@ -597,14 +631,32 @@ class JsonLineRpcClient {
     this.scanner.push(chunk, (line) => this.consumeLine(line));
   }
 
-  request(method: string, params: unknown): Promise<unknown> {
+  request(
+    method: string,
+    params: unknown,
+    submissionGate?: MissionSubmissionGate,
+    submissionPoint?: Extract<MissionSubmissionPoint, "codex.turnStart" | "codex.turnSteer">,
+    submissionSignal?: AbortSignal,
+  ): Promise<unknown> {
     if (this.pending.size >= MAX_PENDING_RPC_REQUESTS) {
       return Promise.reject(new Error("Codex App Server RPC queue is full."));
     }
     const id = this.nextId++;
     return new Promise<unknown>((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
-      void this.sendLine(JSON.stringify({ id, method, params })).catch((error) => {
+      const send = () => this.sendLine(JSON.stringify({ id, method, params }));
+      const submission = submissionGate && submissionPoint
+        ? submissionGate.write(submissionPoint, async (): Promise<typeof MISSION_SUBMISSION_WRITTEN> => {
+            if (submissionSignal?.aborted) {
+              throw new SubmissionCancelledBeforeWriteError(
+                `Codex ${submissionPoint} was cancelled before provider submission.`,
+              );
+            }
+            await send();
+            return MISSION_SUBMISSION_WRITTEN;
+          })
+        : send();
+      void submission.catch((error) => {
         this.pending.delete(id);
         reject(error instanceof Error ? error : new Error(String(error)));
       });
@@ -843,7 +895,8 @@ function requestMatchesBinding(
   return request.target.callId === binding.callId
     && request.target.generation === binding.generation
     && request.target.ownerId === binding.ownerId
-    && request.target.missionContractSha256 === binding.missionContractSha256
+    && request.target.missionDocumentSha256 === binding.missionDocumentSha256
+    && request.target.missionBindingSha256 === binding.missionBindingSha256
     && request.target.authoritySha256 === binding.authoritySha256;
 }
 
@@ -860,9 +913,25 @@ function rejectedAcknowledgement(
     generation: request.target.generation,
     sequence: request.target.sequence,
     textSha256: request.textSha256,
+    missionDocumentSha256: request.target.missionDocumentSha256,
+    missionBindingSha256: request.target.missionBindingSha256,
     delivery,
     reason,
   };
+}
+
+function validateRunBinding(binding: CodexAppServerRunBinding): void {
+  for (const [label, value] of [
+    ["call ID", binding.callId],
+    ["generation", binding.generation],
+    ["owner ID", binding.ownerId],
+  ] as const) {
+    if (!isBoundedIdentifier(value)) throw new Error(`Codex App Server ${label} is invalid.`);
+  }
+  if (!isMissionBindingPair(binding.missionDocumentSha256, binding.missionBindingSha256)
+    || !isSha256(binding.authoritySha256)) {
+    throw new Error("Codex App Server Mission document/binding or authority hashes are invalid.");
+  }
 }
 
 async function protocolStep(

@@ -10,11 +10,29 @@ import {
 } from "../src/nativeSteeringRuntime";
 import { SteeringController } from "../src/steeringController";
 import { InMemorySteeringStore } from "../src/steeringStore";
+import {
+  computeSteeringChainSha256,
+  sha256Utf8,
+} from "../src/steeringProtocol";
+import {
+  MISSION_SUBMISSION_WRITTEN,
+  type MissionSubmissionGate,
+} from "../src/missionDispatch";
 
 const CODEX_FIXTURE = path.join(__dirname, "fixtures", "fake-codex-app-server.js");
 const CLAUDE_FIXTURE = path.join(__dirname, "fixtures", "mock-claude-session-cli.js");
 const OWNER = "runtime-test-owner";
-const MISSION = "a".repeat(64);
+const MISSION_DOCUMENT = "9".repeat(64);
+const MISSION_BINDING = "a".repeat(64);
+
+function missionSubmissionGate(expectedBindingSha256: string): MissionSubmissionGate {
+  assert.equal(expectedBindingSha256, MISSION_BINDING);
+  return {
+    write: async (_point, performWrite) => {
+      assert.equal(await performWrite(), MISSION_SUBMISSION_WRITTEN);
+    },
+  };
+}
 
 describe("native steering runtime", () => {
   test("returns undefined when provider argv cannot be promoted losslessly", () => {
@@ -22,6 +40,7 @@ describe("native steering runtime", () => {
     const controller = new SteeringController({
       store: new InMemorySteeringStore(),
       ownerId: OWNER,
+      missionSubmissionGate,
     });
 
     assert.equal(createNativeSteeringRunner(runtimeOptions({
@@ -50,9 +69,15 @@ describe("native steering runtime", () => {
     const controller = new SteeringController({
       store,
       ownerId: OWNER,
+      missionSubmissionGate,
       acknowledgementTimeoutMs: 2_000,
     });
     const traces: Record<string, unknown>[] = [];
+    const terminalChains: Array<{
+      steeringChainSha256: string;
+      chainIndeterminate: boolean;
+    }> = [];
+    const transports: string[] = [];
     let registrationChanges = 0;
     let resolveRegistered!: () => void;
     const registered = new Promise<void>((resolve) => {
@@ -70,6 +95,12 @@ describe("native steering runtime", () => {
         appendTrace: async (record) => {
           traces.push(record);
         },
+        onSteeringChain: (chain) => {
+          terminalChains.push(chain);
+        },
+        onTransportSelected: (transport) => {
+          transports.push(transport);
+        },
         onRegistrationChanged: () => {
           registrationChanges++;
           if (controller.targetSelections().length === 1) resolveRegistered();
@@ -83,6 +114,8 @@ describe("native steering runtime", () => {
       const selection = controller.targetSelections();
       assert.equal(selection.length, 1);
       assert.equal(selection[0]?.agentId, "codex");
+      assert.equal(selection[0]?.missionDocumentSha256, MISSION_DOCUMENT);
+      assert.equal(selection[0]?.missionBindingSha256, MISSION_BINDING);
       assert.equal(selection[0]?.capability.kind, "live");
       assert.equal(
         selection[0]?.capability.kind === "live"
@@ -112,10 +145,17 @@ describe("native steering runtime", () => {
       assert.equal(traces.length, 1);
       assert.equal(traces[0]?.event, "steeringChain");
       assert.equal(traces[0]?.agent, "codex");
+      assert.equal(traces[0]?.missionDocumentSha256, MISSION_DOCUMENT);
+      assert.equal(traces[0]?.missionBindingSha256, MISSION_BINDING);
       assert.equal(traces[0]?.chainIndeterminate, false);
       assert.equal(traces[0]?.lastSequence, 1);
       assert.equal(traces[0]?.lastAcknowledgedSequence, 1);
       assert.match(String(traces[0]?.steeringChainSha256), /^[a-f0-9]{64}$/);
+      assert.deepEqual(terminalChains, [{
+        steeringChainSha256: traces[0]?.steeringChainSha256,
+        chainIndeterminate: false,
+      }]);
+      assert.deepEqual(transports, ["codexAppServer"]);
 
       const invocations = await fixture.invocations();
       assert.equal(invocations.length, 1);
@@ -130,8 +170,14 @@ describe("native steering runtime", () => {
     const controller = new SteeringController({
       store: new InMemorySteeringStore(),
       ownerId: OWNER,
+      missionSubmissionGate,
     });
     const traces: Record<string, unknown>[] = [];
+    const terminalChains: Array<{
+      steeringChainSha256: string;
+      chainIndeterminate: boolean;
+    }> = [];
+    const transports: string[] = [];
     let registrationChanges = 0;
 
     try {
@@ -145,6 +191,12 @@ describe("native steering runtime", () => {
         appendTrace: async (record) => {
           traces.push(record);
         },
+        onSteeringChain: (chain) => {
+          terminalChains.push(chain);
+        },
+        onTransportSelected: (transport) => {
+          transports.push(transport);
+        },
         onRegistrationChanged: () => {
           registrationChanges++;
         },
@@ -157,6 +209,10 @@ describe("native steering runtime", () => {
       assert.deepEqual(controller.targetSelections(), []);
       assert.equal(registrationChanges, 0);
       assert.deepEqual(traces, []);
+      assert.equal(terminalChains.length, 1);
+      assert.match(terminalChains[0]!.steeringChainSha256, /^[a-f0-9]{64}$/);
+      assert.equal(terminalChains[0]!.chainIndeterminate, false);
+      assert.deepEqual(transports, ["codexAppServer", "oneShotFallback"]);
 
       const invocations = await fixture.invocations();
       assert.equal(invocations.length, 2, "one App Server negotiation plus one one-shot fallback");
@@ -178,6 +234,7 @@ describe("native steering runtime", () => {
       const controller = new SteeringController({
         store: new InMemorySteeringStore(),
         ownerId: OWNER,
+        missionSubmissionGate,
       });
       const abort = new AbortController();
 
@@ -221,6 +278,7 @@ describe("native steering runtime", () => {
     const controller = new SteeringController({
       store: new InMemorySteeringStore(),
       ownerId: OWNER,
+      missionSubmissionGate,
       acknowledgementTimeoutMs: 2_000,
     });
     const traces: Record<string, unknown>[] = [];
@@ -269,13 +327,58 @@ describe("native steering runtime", () => {
     }
   });
 
+  test("reports the authoritative terminal chain even when the legacy trace sink fails", async () => {
+    const fixture = await createNativeCliFixture();
+    const controller = new SteeringController({
+      store: new InMemorySteeringStore(),
+      ownerId: OWNER,
+      missionSubmissionGate,
+    });
+    const terminalChains: Array<{
+      steeringChainSha256: string;
+      chainIndeterminate: boolean;
+    }> = [];
+
+    try {
+      const runner = createNativeSteeringRunner(runtimeOptions({
+        transport: "codexAppServer",
+        controller,
+        spawn: fixture.spawn(
+          ["exec", "--sandbox", "read-only", "--json", "-"],
+          { HYDRA_FAKE_CODEX_MODE: "complete-without-steer" },
+        ),
+        appendTrace: async () => {
+          throw new Error("legacy trace unavailable");
+        },
+        onSteeringChain: (chain) => {
+          terminalChains.push(chain);
+        },
+      }));
+      assert.ok(runner);
+
+      const result = await runner(() => undefined);
+      assert.equal(result.exitCode, 0);
+      assert.deepEqual(terminalChains, [{
+        steeringChainSha256: computeSteeringChainSha256(
+          sha256Utf8("initial runtime prompt"),
+          [],
+        ),
+        chainIndeterminate: false,
+      }]);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
   test("does not retry or fall back after a Claude runtime protocol failure", async () => {
     const fixture = await createNativeCliFixture();
     const controller = new SteeringController({
       store: new InMemorySteeringStore(),
       ownerId: OWNER,
+      missionSubmissionGate,
     });
     const traces: Record<string, unknown>[] = [];
+    const transports: string[] = [];
     let registrationChanges = 0;
 
     try {
@@ -287,6 +390,9 @@ describe("native steering runtime", () => {
         }),
         appendTrace: async (record) => {
           traces.push(record);
+        },
+        onTransportSelected: (transport) => {
+          transports.push(transport);
         },
         onRegistrationChanged: () => {
           registrationChanges++;
@@ -301,6 +407,7 @@ describe("native steering runtime", () => {
       assert.deepEqual(controller.targetSelections(), []);
       assert.equal(registrationChanges, 0);
       assert.deepEqual(traces, []);
+      assert.deepEqual(transports, ["claudeSession"]);
 
       const invocations = await fixture.invocations();
       assert.equal(invocations.length, 1, "a post-write Claude failure must remain one native submission");
@@ -318,6 +425,7 @@ describe("native steering runtime", () => {
     const controller = new SteeringController({
       store: new InMemorySteeringStore(),
       ownerId: OWNER,
+      missionSubmissionGate,
     });
 
     try {
@@ -361,12 +469,14 @@ function runtimeOptions(
     agentId: overrides.transport === "codexAppServer" ? "codex" : "claude",
     roomTurnId: "room-turn-runtime",
     ownerId: OWNER,
-    missionContractSha256: MISSION,
+    missionDocumentSha256: MISSION_DOCUMENT,
+    missionBindingSha256: MISSION_BINDING,
     workClass: "discussion",
     phaseSnapshot: "Opener",
     appendTrace: async () => undefined,
     onRegistrationChanged: () => undefined,
     ...overrides,
+    submissionGate: overrides.submissionGate ?? missionSubmissionGate(MISSION_BINDING),
   };
 }
 

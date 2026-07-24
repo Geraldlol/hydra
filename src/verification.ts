@@ -521,16 +521,27 @@ function isPowerShellInterpolatedCommand(command: string): boolean {
   );
 }
 
-export async function captureGitHead(cwd: string): Promise<string | undefined> {
+export async function captureGitHead(
+  cwd: string,
+  timeoutMs = 30_000,
+): Promise<string | undefined> {
   const gitExecutable = await resolveGitExecutable(cwd);
   if (!gitExecutable) return undefined;
   return new Promise<string | undefined>((resolve) => {
     const child = cp.spawn(gitExecutable, ["rev-parse", "HEAD"], { cwd, windowsHide: true, env: process.env });
     let out = "";
     let settled = false;
+    const boundedTimeoutMs = Number.isFinite(timeoutMs)
+      ? Math.max(1, Math.floor(timeoutMs))
+      : 30_000;
+    const timer = setTimeout(() => {
+      void terminateProcessTree(child, true).catch(() => undefined);
+      finish(undefined);
+    }, boundedTimeoutMs);
     const finish = (sha: string | undefined) => {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
       resolve(sha);
     };
     child.stdout?.on("data", (chunk: Buffer) => (out += chunk.toString("utf8")));

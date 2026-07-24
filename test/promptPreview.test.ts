@@ -61,6 +61,28 @@ describe("prompt preview envelopes", () => {
     assert.match(preview, /```text\nReview the diff\.\n```/);
   });
 
+  test("binds prompt provenance to the exact Mission Contract revision", () => {
+    const envelope = createPromptEnvelope({
+      id: "p-mission",
+      agent: "codex",
+      otherAgent: "claude",
+      phase: "build",
+      transport: "oneShot",
+      cwd: "C:\\repo",
+      command: "codex",
+      args: ["exec", "-"],
+      missionId: "mission-one",
+      missionRevision: 2,
+      missionDocumentSha256: "a".repeat(64),
+      missionBindingSha256: "b".repeat(64),
+      renderedPrompt: "Build under the confirmed contract.",
+    });
+
+    assert.equal(envelope.missionBindingSha256, "b".repeat(64));
+    assert.equal(envelope.missionDocumentSha256, "a".repeat(64));
+    assert.match(renderPromptEnvelopePreview(envelope), /Mission: mission-one revision 2/);
+  });
+
   test("analyzes prompt budget by prompt sections", () => {
     const budget = analyzePromptBudget([
       "Preamble",

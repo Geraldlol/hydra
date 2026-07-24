@@ -195,6 +195,10 @@ input.on("line", (line) => {
       process.exit(17);
       return;
     }
+    if (mode === "exit-zero-after-turn-start") {
+      process.exit(0);
+      return;
+    }
     if (mode === "malformed-turn-start") {
       send({ id: message.id, result: { turn: {} } });
       return;
