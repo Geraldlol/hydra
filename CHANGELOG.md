@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.1
+
+- Makes an empty duel ledger visible as a real 1000-Elo, zero-match provisional baseline for every seated head and supported duel domain, while preserving replayed ratings as the sole source of ranked Elo changes.
+- Adds live duel readiness and blocker reporting for workspace trust, configuration, equal full-native profiles, persistent consent, cost caps, and serial discussion eligibility.
+- Adds `Hydra: Run Duel Readiness Test` and an in-panel readiness button. The deterministic host-side check validates the exact hidden challenge protocol without calling an agent, creating a duel event, or changing Elo.
+- Records the latest eligible duel-protocol outcome, including valid requests, rejected requests, and eligible reactor/closer replies that intentionally emitted no consequential challenge.
+
 ## 0.7.0
 
 - Adds a `/hydra-handoff` skill for the Codex CLI and Claude Code that packages the current CLI session into a handoff packet written to `.hydra/handoff-inbox/`, so work can be continued in the Hydra room. One canonical `SKILL.md` installs to both agents via `pnpm run install:handoff-skill`.

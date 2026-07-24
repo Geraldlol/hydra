@@ -237,7 +237,7 @@ import {
   storeDuelCommitmentSecret,
   sweepDuelCommitmentSecrets,
 } from "./duelSecrets";
-import { renderDuelMotivationContext } from "./duelMotivation";
+import { renderDuelMotivationContext, withDuelRatingBaselines } from "./duelMotivation";
 import {
   captureDuelWorkspaceFingerprint,
   watchDuelWorkspaceMutations,
@@ -245,6 +245,8 @@ import {
 } from "./duelWorkspaceGuard";
 import {
   buildAgentDuelEvidencePacket,
+  AGENT_DUEL_CHALLENGE_MARKER,
+  AGENT_DUEL_DOMAINS,
   hasReservedAgentDuelChallengePrefix,
   hashAgentDuelSource,
   parseAgentDuelIntent,
@@ -531,6 +533,13 @@ interface HydraPromptEnvelope extends PromptEnvelope {
   readonly duelProtocolExpected: boolean;
 }
 
+interface DuelReadinessSnapshot {
+  readonly ready: boolean;
+  readonly summary: string;
+  readonly blockers: readonly string[];
+  readonly notes: readonly string[];
+}
+
 interface SerialBuildScoreContext {
   readonly builder: AgentId;
   /** Present only when a command existed before dispatch; otherwise auto-verification live-resolves without scoring. */
@@ -677,6 +686,7 @@ export class HydraRoomPanel {
   private duels: DuelAggregate = initialEmptyDuelAggregate();
   private duelError: string | undefined;
   private duelMirrorError: string | undefined;
+  private duelProtocolStatus = "No eligible serial reactor or closer has completed in this window yet.";
   private duelRefreshTimer: ReturnType<typeof setTimeout> | undefined;
   private duelCommitmentAbort: AbortController | undefined;
   private readonly pendingAgentDuelContexts = new Map<string, PendingAgentDuelContext>();
@@ -2145,6 +2155,103 @@ export class HydraRoomPanel {
     await this.panel.webview.postMessage({ type: "openPanel", panel: "duels" });
   }
 
+  private duelRatingsWithBaselines() {
+    return withDuelRatingBaselines(
+      this.duels.ratings,
+      this.roster(),
+      AGENT_DUEL_DOMAINS,
+    );
+  }
+
+  private duelReadinessSnapshot(): DuelReadinessSnapshot {
+    const blockers: string[] = [];
+    const notes: string[] = [];
+    if (!this.workspaceReady) blockers.push("Open a workspace folder.");
+    if (!vscode.workspace.isTrusted) blockers.push("Trust this workspace.");
+    if (!agentInitiatedDuels()) blockers.push("Enable `hydraRoom.agentInitiatedDuels` in User Settings.");
+    if (this.duelError) blockers.push("Repair the private duel ledger before admitting challenges.");
+
+    const roster = this.roster();
+    const unsupported = roster.filter((agent) => !this.supportsFullAccessRatedDuel(agent));
+    if (unsupported.length > 0) {
+      blockers.push(`No equal full-native rated profile is available for ${unsupported.map(displayNameFor).join(", ")}.`);
+    }
+    const missingConsent = roster.filter((agent) =>
+      !this.context.workspaceState.get<boolean>(fullNativeConsentKey(agent), false)
+    );
+    if (missingConsent.length > 0) {
+      blockers.push(`Choose Always Allow on one full-native call for ${missingConsent.map(displayNameFor).join(", ")}.`);
+    }
+    if (this.sessionCostCapExceeded()) blockers.push("The session cost cap has been reached.");
+
+    const mode = discussionMode();
+    if (mode === "parallel") {
+      blockers.push("Discussion mode is forced parallel; formal challenges require a serial reactor or closer.");
+    } else if (mode === "parallelOnBoth") {
+      notes.push("Messages addressed to both/all heads run in parallel and cannot initiate a duel; ordinary messages use the serial path.");
+    }
+    notes.push("Only a consequential, falsifiable disagreement may become rated; ordinary Agree/Amend replies intentionally produce no duel.");
+
+    return {
+      ready: blockers.length === 0,
+      summary: blockers.length === 0
+        ? "Ready for an eligible serial reactor or closer to initiate a rated challenge."
+        : `Not ready: ${blockers.join(" ")}`,
+      blockers,
+      notes,
+    };
+  }
+
+  /**
+   * Deterministic host-side smoke test. It exercises every static admission
+   * gate plus the exact hidden control-record parser, but deliberately writes
+   * no duel event and cannot change Elo.
+   */
+  async runDuelReadinessSmokeTest(): Promise<void> {
+    await this.ready();
+    const readiness = this.duelReadinessSnapshot();
+    const roster = this.roster();
+    const challenger = roster[1] ?? roster[0] ?? "claude";
+    const challenged = roster[0] ?? "codex";
+    const control = {
+      opponentId: challenged,
+      domain: "runtime",
+      proposition: "Hydra's deterministic duel readiness parser accepts this host-generated smoke record.",
+      evidenceContract: "The local parser returns kind challenge and removes the hidden control line.",
+      rationale: "This validates wiring without creating a rated match or spending agent credits.",
+    };
+    const syntheticReply = [
+      "Challenge: deterministic host-only protocol smoke test.",
+      "",
+      `${AGENT_DUEL_CHALLENGE_MARKER} ${JSON.stringify(control)}`,
+      "Recommendation: Report whether the duel protocol is ready.",
+      "Default next action: Continue normal room work.",
+      "Decision needed from user: none",
+      "Blockers: none",
+    ].join("\n");
+    const parsed = parseAgentDuelIntent(syntheticReply, challenged);
+    const parserPassed = parsed.kind === "challenge"
+      && parsed.intent.opponentId === challenged
+      && !parsed.cleanedText.includes(AGENT_DUEL_CHALLENGE_MARKER);
+    const passed = readiness.ready && parserPassed;
+    const detail = passed
+      ? `Duel readiness smoke test passed for ${displayNameFor(challenger)} vs ${displayNameFor(challenged)}. Static gates and the exact challenge parser are ready; no duel event was created and Elo is unchanged.`
+      : `Duel readiness smoke test did not pass. ${readiness.summary}${parserPassed ? "" : " The exact challenge parser failed its deterministic self-check."} No duel event was created and Elo is unchanged.`;
+    this.duelProtocolStatus = detail;
+    await this.recordEvent("diagnostic", detail, {
+      smokeTest: true,
+      passed,
+      parserPassed,
+      challenger,
+      challenged,
+      blockers: readiness.blockers.join(" | "),
+    });
+    await this.appendSystemMessage(detail);
+    this.postState();
+    if (passed) await vscode.window.showInformationMessage(detail);
+    else await vscode.window.showWarningMessage(detail);
+  }
+
   async openDuelAudit(): Promise<void> {
     await this.ready();
     if (!this.workspaceReady) return;
@@ -2189,6 +2296,7 @@ export class HydraRoomPanel {
     const challenged = request.context.opponentId;
     const reject = async (reason: string): Promise<void> => {
       const detail = `${displayNameFor(challenger)} challenge rejected: ${reason} No duel or Elo change occurred.`;
+      this.duelProtocolStatus = detail;
       await this.appendSystemMessage(detail);
       await this.recordEvent("diagnostic", detail, {
         challenger,
@@ -2346,6 +2454,7 @@ export class HydraRoomPanel {
     await this.appendSystemMessage(
       `${displayNameFor(challenger)} initiated a rated ${request.intent.domain} duel against ${displayNameFor(challenged)}. Hydra admitted it by policy and queued both equal full-native sealed commitments. Proposition: ${request.intent.proposition}`,
     );
+    this.duelProtocolStatus = `${displayNameFor(challenger)} challenge admitted; sealed commitments are queued.`;
     await this.recordEvent("diagnostic", "Hydra admitted an agent-initiated formal duel.", {
       duelId,
       challenger,
@@ -5828,7 +5937,7 @@ export class HydraRoomPanel {
       proposition: duel.proposition,
       evidenceContract: duel.evidenceContract,
       sharedEvidencePacket,
-      rankingMotivation: renderDuelMotivationContext(participantId, this.duels.ratings, displayNameFor),
+      rankingMotivation: renderDuelMotivationContext(participantId, this.duelRatingsWithBaselines(), displayNameFor),
     });
     const traceId = `${makeTraceId(participantId, phase)}-duel-commitment`;
     const startedAtMs = Date.now();
@@ -8030,7 +8139,7 @@ export class HydraRoomPanel {
     if (agent && use === "room" && agentInitiatedDuels()) {
       // Ratings are a visible motivation signal only. No decision, phase,
       // authority, or builder-selection path reads this block.
-      sections.push("", renderDuelMotivationContext(agent, this.duels.ratings, displayNameFor));
+      sections.push("", renderDuelMotivationContext(agent, this.duelRatingsWithBaselines(), displayNameFor));
     }
     const transcriptCap = use === "terminalPoke" ? 0 : this.promptTranscriptMaxChars(phase);
     const transcriptWindow = buildPromptContextWindow(
@@ -8332,6 +8441,7 @@ export class HydraRoomPanel {
     }
     let agentDuelRequest: PendingAgentDuelRequest | undefined;
     let agentDuelProtocolError: string | undefined;
+    let agentDuelProtocolObservation: string | undefined;
     if (
       duelContext
       && isAgentMessageRole(m.role)
@@ -8373,6 +8483,8 @@ export class HydraRoomPanel {
         })
       ) {
         agentDuelProtocolError = "the reply used the reserved `Challenge:` prefix but omitted the required HYDRA_DUEL_CHALLENGE_V1 control record; use `Amend:` for ordinary disagreement.";
+      } else if (duelContext.duelProtocolExpected) {
+        agentDuelProtocolObservation = `${displayNameFor(m.role as AgentId)} completed an eligible ${m.phase} without requesting a formal duel. The protocol was active; no consequential challenge record was emitted.`;
       }
     }
     if (m.text.trim() === "") m.text = "[no output]";
@@ -8396,11 +8508,21 @@ export class HydraRoomPanel {
     await this.recordWikiUsageTelemetry(m, promptTranscriptWindow);
     this.pendingPromptTranscriptWindows.delete(messageId);
     if (agentDuelProtocolError) {
+      this.duelProtocolStatus = `${displayNameFor(m.role as AgentId)} emitted an invalid duel request: ${agentDuelProtocolError}`;
       await this.appendSystemMessage(
         `${displayNameFor(m.role as AgentId)} duel request rejected: ${agentDuelProtocolError} No duel or Elo change occurred.`,
       );
     } else if (agentDuelRequest) {
+      this.duelProtocolStatus = `${displayNameFor(agentDuelRequest.challengerId)} emitted a valid formal challenge; Hydra queued policy admission.`;
       this.enqueueAgentDuelAdmission(agentDuelRequest);
+    } else if (agentDuelProtocolObservation) {
+      this.duelProtocolStatus = agentDuelProtocolObservation;
+      await this.recordEvent("diagnostic", agentDuelProtocolObservation, {
+        agent: m.role,
+        phase: m.phase ?? "unknown",
+        duelProtocolExpected: true,
+        outcome: "no-challenge",
+      });
     }
   }
 
@@ -8830,6 +8952,9 @@ export class HydraRoomPanel {
         case "openDuels":
           await this.openDuelsPanel();
           break;
+        case "runDuelReadinessSmokeTest":
+          await this.runDuelReadinessSmokeTest();
+          break;
         case "advanceDuel":
           await this.advanceDuel(String(msg.duelId ?? ""));
           break;
@@ -8996,6 +9121,8 @@ export class HydraRoomPanel {
     // here — there's nothing left to update.
     const latestDecision = this.decisions[this.decisions.length - 1];
     const latestDecisionAccepted = !!latestDecision && latestDecision.timestamp === this.acceptedDefaultDecisionTimestamp;
+    const duelReadiness = this.duelReadinessSnapshot();
+    const duelRatings = this.duelRatingsWithBaselines();
     try {
       this.panel.webview.postMessage({
         type: "state",
@@ -9069,17 +9196,19 @@ export class HydraRoomPanel {
         },
         duels: {
           agentInitiatedEnabled: agentInitiatedDuels(),
+          readiness: duelReadiness,
+          protocolStatus: this.duelProtocolStatus,
           automationRunning: this.agentDuelAdmissionRunning || this.agentDuelAutomationRunning,
           automationQueued: this.agentDuelAdmissionQueue.length + this.agentDuelAutomationQueue.length,
           eventCount: this.duels.eventCount,
           error: this.duelError,
           mirrorError: this.duelMirrorError,
           activeTotal: this.duels.activeDuels.length,
-          ratingsTotal: this.duels.ratings.length,
+          ratingsTotal: duelRatings.length,
           recentTotal: this.duels.recentDuels.length,
           ratedDuelCount: Math.floor(this.duels.ratings.reduce((total, rating) => total + rating.ratedMatches, 0) / 2),
           active: this.duels.activeDuels.slice(0, 50),
-          ratings: this.duels.ratings.slice(0, 200),
+          ratings: duelRatings.slice(0, 200),
           recent: this.duels.recentDuels.slice(0, 20),
         },
         decisionAction: this.currentDecisionAction(),

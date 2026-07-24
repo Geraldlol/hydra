@@ -149,6 +149,7 @@ const duelsRail = document.getElementById("duelsRail");
 const duelsPanelCount = document.getElementById("duelsPanelCount");
 const duelsBoard = document.getElementById("duelsBoard");
 const agentDuelMode = document.getElementById("agentDuelMode");
+const runDuelSmokeTestBtn = document.getElementById("runDuelSmokeTestBtn");
 const openDuelAuditBtn = document.getElementById("openDuelAuditBtn");
 const correctDuelResultBtn = document.getElementById("correctDuelResultBtn");
 if (usageRail) {
@@ -403,6 +404,7 @@ if (openEvidenceBtn) openEvidenceBtn.addEventListener("click", () => vscode.post
 if (reverseVerdictBtn) reverseVerdictBtn.addEventListener("click", () => vscode.postMessage({ type: "reverseScoreVerdict" }));
 if (openStandingsBtn) openStandingsBtn.addEventListener("click", () => vscode.postMessage({ type: "openStandings" }));
 if (openDuelAuditBtn) openDuelAuditBtn.addEventListener("click", () => vscode.postMessage({ type: "openDuelAudit" }));
+if (runDuelSmokeTestBtn) runDuelSmokeTestBtn.addEventListener("click", () => vscode.postMessage({ type: "runDuelReadinessSmokeTest" }));
 if (correctDuelResultBtn) correctDuelResultBtn.addEventListener("click", () => vscode.postMessage({ type: "correctDuelResult" }));
 nativeAgentFilter.addEventListener("change", () => renderNativeActions(lastState));
 nativeStatusFilter.addEventListener("change", () => renderNativeActions(lastState));
@@ -695,6 +697,7 @@ function renderState(state) {
   if (reverseVerdictBtn) reverseVerdictBtn.disabled = !!state.canOpenFolder;
   if (openStandingsBtn) openStandingsBtn.disabled = !!state.canOpenFolder;
   if (openDuelAuditBtn) openDuelAuditBtn.disabled = !!state.canOpenFolder;
+  if (runDuelSmokeTestBtn) runDuelSmokeTestBtn.disabled = !!state.canOpenFolder;
   if (correctDuelResultBtn) correctDuelResultBtn.disabled = !!state.canOpenFolder;
   renderOpenerButton();
   renderPalette(paletteInput.value || "");
@@ -1722,6 +1725,11 @@ function renderDuels(data) {
   const recentTotal = Math.max(recent.length, Number(data && data.recentTotal) || 0);
   const error = data && typeof data.error === "string" ? data.error.trim() : "";
   const mirrorError = data && typeof data.mirrorError === "string" ? data.mirrorError.trim() : "";
+  const readiness = data && data.readiness && typeof data.readiness === "object" ? data.readiness : {};
+  const readinessReady = !!readiness.ready;
+  const readinessSummary = typeof readiness.summary === "string" ? readiness.summary.trim() : "Duel readiness has not been evaluated.";
+  const readinessNotes = Array.isArray(readiness.notes) ? readiness.notes.filter((note) => typeof note === "string" && note.trim()) : [];
+  const protocolStatus = data && typeof data.protocolStatus === "string" ? data.protocolStatus.trim() : "";
   if (agentDuelMode) {
     const enabled = !!(data && data.agentInitiatedEnabled);
     const running = !!(data && data.automationRunning);
@@ -1730,10 +1738,13 @@ function renderDuels(data) {
       ? "Agent challenges: running"
       : queued > 0
         ? "Agent challenges: " + queued + " queued"
-        : enabled
-          ? "Agent challenges: enabled"
+        : enabled && readinessReady
+          ? "Agent challenges: ready"
+          : enabled
+            ? "Agent challenges: blocked"
           : "Agent challenges: paused";
-    agentDuelMode.className = "duel-status" + (!enabled ? " warn" : "");
+    agentDuelMode.className = "duel-status" + (!enabled || !readinessReady ? " warn" : "");
+    agentDuelMode.title = readinessSummary;
   }
   // Every rated duel increments both participants, so the ratings table's
   // match total is exactly twice the number of rated duels.
@@ -1775,6 +1786,17 @@ function renderDuels(data) {
     warning.className = "standing-policy";
     warning.textContent = mirrorError + " The private duel ledger and in-room ratings remain valid.";
     duelsBoard.append(warning);
+  }
+
+  const readinessMessage = document.createElement("p");
+  readinessMessage.className = "standing-policy";
+  readinessMessage.textContent = readinessSummary + (readinessNotes.length ? " " + readinessNotes.join(" ") : "");
+  duelsBoard.append(readinessMessage);
+  if (protocolStatus) {
+    const protocolMessage = document.createElement("p");
+    protocolMessage.className = "standing-policy";
+    protocolMessage.textContent = "Latest protocol outcome: " + protocolStatus;
+    duelsBoard.append(protocolMessage);
   }
 
   const activeSection = duelSection("Active duels", active.length + " requiring attention");

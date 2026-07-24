@@ -119,6 +119,7 @@ const boundIds = [
   "ribbonMinimizedSummary",
   "ribbonStack",
   "runVerificationBtn",
+  "runDuelSmokeTestBtn",
   "safeModeBtn",
   "sendBtn",
   "setObjectiveBtn",
@@ -184,6 +185,7 @@ const hostMessages = [
   "runDoctor",
   "runNativeCommand",
   "runVerification",
+  "runDuelReadinessSmokeTest",
   "send",
   "sendRawTerminalLine",
   "setObjective",
@@ -440,6 +442,15 @@ describe("webview contract", () => {
     }
   });
 
+  test("shows duel readiness and wires the non-rated protocol test", () => {
+    assert.match(html, /id="runDuelSmokeTestBtn"[^>]*>Run Readiness Test<\/button>/);
+    assert.match(surface, /runDuelSmokeTestBtn\.addEventListener\("click", \(\) => vscode\.postMessage\(\{ type: "runDuelReadinessSmokeTest" \}\)\)/);
+    assert.match(surface, /Agent challenges: ready/);
+    assert.match(surface, /Agent challenges: blocked/);
+    assert.match(surface, /Latest protocol outcome:/);
+    assert.match(surface, /readinessSummary/);
+  });
+
   test("model rail opens model-or-thinking chooser", () => {
     assert.match(html, /id="modelRail"[^>]+title="Click to change model or thinking level\."/);
     assert.match(surface, /const open = \(\) => vscode\.postMessage\(\{ type: "chooseModelOrEffort" \}\)/);
@@ -554,7 +565,7 @@ describe("webview contract", () => {
     assert.match(html, /Persistent full-native consent is still required/);
     assert.match(html, /The human independently judges the revealed evidence/);
     assert.match(html, /Results never change permissions, approvals, builder assignment, speaking order, safety policy, or orchestration authority/);
-    assert.match(html, /id="agentDuelMode"[^>]*>Agent challenges: enabled<\/span>/);
+    assert.match(html, /id="agentDuelMode"[^>]*>Agent challenges: checking<\/span>/);
     assert.doesNotMatch(html, /id="createDuelBtn"|>New Duel<\/button>/);
     assert.match(html, /id="openDuelAuditBtn"[^>]*>Open Audit<\/button>/);
     assert.match(html, /id="correctDuelResultBtn"[^>]*>Correct Result<\/button>/);
@@ -567,7 +578,8 @@ describe("webview contract", () => {
     assert.match(scriptBody, /data && data\.automationRunning/);
     assert.match(scriptBody, /data && data\.automationQueued/);
     assert.match(scriptBody, /"Agent challenges: running"/);
-    assert.match(scriptBody, /"Agent challenges: enabled"/);
+    assert.match(scriptBody, /"Agent challenges: ready"/);
+    assert.match(scriptBody, /"Agent challenges: blocked"/);
     assert.match(scriptBody, /"Agent challenges: paused"/);
     const standingsRenderer = scriptBody.slice(
       scriptBody.indexOf("function renderStandings(data)"),

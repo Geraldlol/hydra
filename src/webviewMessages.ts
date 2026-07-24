@@ -62,6 +62,7 @@ export type WebviewMessage =
   | { type: "reverseScoreVerdict" }
   | { type: "adjudicatePendingScoreClaim" }
   | { type: "openDuels" }
+  | { type: "runDuelReadinessSmokeTest" }
   | { type: "advanceDuel"; duelId?: string }
   | { type: "cancelDuel"; duelId?: string }
   | { type: "openDuelAudit" }

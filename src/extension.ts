@@ -563,6 +563,13 @@ export function activate(context: vscode.ExtensionContext): void {
       })
     ),
     vscode.commands.registerCommand(
+      "hydraRoom.runDuelReadinessSmokeTest",
+      withErrorReporting(async () => {
+        const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
+        await panel.runDuelReadinessSmokeTest();
+      })
+    ),
+    vscode.commands.registerCommand(
       "hydraRoom.advanceDuel",
       withErrorReporting(async () => {
         const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);

@@ -1,6 +1,6 @@
 import { describe, test } from "node:test";
 import { strict as assert } from "node:assert";
-import { renderDuelMotivationContext } from "../src/duelMotivation";
+import { renderDuelMotivationContext, withDuelRatingBaselines } from "../src/duelMotivation";
 
 const ratings = [
   { agentId: "codex", domain: "security", rating: 1036, ratedMatches: 5, provisional: false },
@@ -11,6 +11,20 @@ const ratings = [
 ];
 
 describe("duel motivation prompt context", () => {
+  test("materializes a visible zero-match 1000-Elo baseline without replacing replayed ratings", () => {
+    const rows = withDuelRatingBaselines(
+      ratings.filter((rating) => rating.domain === "security"),
+      ["codex", "claude", "gemini"],
+      ["security", "runtime"],
+    );
+    assert.equal(rows.length, 6);
+    assert.equal(rows.find((row) => row.agentId === "codex" && row.domain === "security")?.rating, 1036);
+    assert.deepEqual(
+      rows.find((row) => row.agentId === "gemini" && row.domain === "runtime"),
+      { agentId: "gemini", domain: "runtime", rating: 1000, ratedMatches: 0, provisional: true },
+    );
+  });
+
   test("shows lower-ranked heads the exact evidence-based chase gap", () => {
     const text = renderDuelMotivationContext("gemini", ratings, title);
     assert.match(text, /security: #3 988 Elo — 48 Elo behind #1 Codex/);
