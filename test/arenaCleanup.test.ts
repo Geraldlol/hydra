@@ -1,10 +1,13 @@
+import { createHash } from "node:crypto";
 import { describe, test } from "node:test";
 import { strict as assert } from "node:assert";
 import {
   ARENA_CLEANUP_RETRY_DELAYS_MS,
   ARENA_CLEANUP_STEPS,
   ArenaCleanupValidationError,
+  arenaCleanupPostconditionSha256,
   arenaCleanupRetryDelayMs,
+  arenaCleanupStepReceiptSha256,
   evaluateArenaCleanupStart,
   isArenaCleanupRetryableFailure,
   parseArenaCleanupStepPayload,
@@ -14,7 +17,55 @@ import {
   type ArenaCleanupOutcome,
   type ArenaCleanupStep,
   type ArenaCleanupStepPayload,
+  type ArenaCleanupPostcondition,
 } from "../src/arenaCleanup";
+
+const RUN_ID = "arena-cleanup-run";
+const SHA = (value: string) =>
+  createHash("sha256").update(value, "utf8").digest("hex");
+
+function successfulPostcondition(
+  step: ArenaCleanupStep,
+): ArenaCleanupPostcondition {
+  const worktreePathSha256 = SHA("worktree-path");
+  if (step === "quiesceProcesses") {
+    return {
+      kind: "processQuiescence",
+      processOwnerSha256: SHA("process-owner"),
+      terminationConfirmed: true,
+      activeProcessCount: 0,
+    };
+  }
+  if (step === "verifyTarget") {
+    return {
+      kind: "ownedTarget",
+      worktreePathSha256,
+      directoryIdentitySha256: SHA("directory"),
+      gitRegistrationSha256: SHA("git-registration"),
+    };
+  }
+  if (step === "unlockGitWorktree") {
+    return {
+      kind: "gitLockState",
+      worktreePathSha256,
+      gitRegistrationSha256: SHA("git-registration"),
+      locked: false,
+      registryEntrySha256: SHA("registry-entry"),
+    };
+  }
+  if (step === "removeGitWorktree") {
+    return { kind: "gitRemoval", worktreePathSha256, registryAbsent: true };
+  }
+  if (step === "verifyGitRegistrationGone") {
+    return {
+      kind: "gitRegistryAbsence",
+      worktreePathSha256,
+      registrySha256: SHA("registry"),
+      absent: true,
+    };
+  }
+  return { kind: "pathAbsence", worktreePathSha256, absent: true };
+}
 
 function record(
   step: ArenaCleanupStep,
@@ -24,49 +75,73 @@ function record(
   retryDelayMs: number | null = null,
   overrides: Partial<ArenaCleanupStepPayload> = {},
 ): ArenaCleanupStepPayload {
-  return {
-    payloadType: "cleanupStepRecorded",
+  const postcondition = overrides.postcondition ?? (
+    outcome === "retryableFailure" || outcome === "blocked"
+      ? {
+          kind: "cleanupFailure" as const,
+          failureCode: failureCode!,
+          observedStateSha256: SHA("observed-failure"),
+        }
+      : successfulPostcondition(step)
+  );
+  const draft = {
+    payloadType: "cleanupStepRecorded" as const,
+    runId: RUN_ID,
     cleanupId: "cleanup-one",
     contestantId: "contestant-codex",
+    registrationSha256: SHA("registration"),
+    evidenceEventSha256: SHA("evidence"),
     step,
     attempt,
     outcome,
     failureCode,
     retryDelayMs,
+    postcondition,
+    postconditionSha256:
+      overrides.postconditionSha256
+      ?? arenaCleanupPostconditionSha256(postcondition),
     ...overrides,
+  };
+  return {
+    ...draft,
+    stepReceiptSha256:
+      overrides.stepReceiptSha256
+      ?? arenaCleanupStepReceiptSha256(
+        draft as Omit<ArenaCleanupStepPayload, "stepReceiptSha256">,
+      ),
   };
 }
 
 describe("Arena cleanup protocol", () => {
-  test("requires a valid finalized manifest, provisioned worktree, and durable evidence", () => {
+  test("requires a valid finalized manifest, registered worktree, and durable evidence", () => {
     assert.deepEqual(evaluateArenaCleanupStart({
       manifestValid: true,
       runFinalized: true,
-      worktreeProvisioned: true,
+      worktreeRegistered: true,
       evidencePreserved: true,
     }), { allowed: true });
     assert.deepEqual(evaluateArenaCleanupStart({
       manifestValid: false,
       runFinalized: true,
-      worktreeProvisioned: true,
+      worktreeRegistered: true,
       evidencePreserved: true,
     }), { allowed: false, reason: "invalidManifest" });
     assert.deepEqual(evaluateArenaCleanupStart({
       manifestValid: true,
       runFinalized: false,
-      worktreeProvisioned: true,
+      worktreeRegistered: true,
       evidencePreserved: true,
     }), { allowed: false, reason: "runNotFinalized" });
     assert.deepEqual(evaluateArenaCleanupStart({
       manifestValid: true,
       runFinalized: true,
-      worktreeProvisioned: false,
+      worktreeRegistered: false,
       evidencePreserved: true,
-    }), { allowed: false, reason: "worktreeNotProvisioned" });
+    }), { allowed: false, reason: "worktreeNotRegistered" });
     assert.deepEqual(evaluateArenaCleanupStart({
       manifestValid: true,
       runFinalized: true,
-      worktreeProvisioned: true,
+      worktreeRegistered: true,
       evidencePreserved: false,
     }), { allowed: false, reason: "evidenceNotPreserved" });
   });
@@ -97,7 +172,7 @@ describe("Arena cleanup protocol", () => {
       record("verifyGitRegistrationGone", 1, "succeeded"),
       record("removeResidualDirectory", 1, "notNeeded"),
     ];
-    const replay = replayArenaCleanupSteps("contestant-codex", records);
+    const replay = replayArenaCleanupSteps(RUN_ID, "contestant-codex", records);
     assert.equal(replay.status, "complete");
     assert.equal(replay.cleanupId, "cleanup-one");
     assert.deepEqual(replay.completedSteps, ARENA_CLEANUP_STEPS);
@@ -108,7 +183,7 @@ describe("Arena cleanup protocol", () => {
   });
 
   test("reports the next exact step and attempt for crash recovery", () => {
-    const replay = replayArenaCleanupSteps("contestant-codex", [
+    const replay = replayArenaCleanupSteps(RUN_ID, "contestant-codex", [
       record("quiesceProcesses", 1, "succeeded"),
       record("verifyTarget", 1, "retryableFailure", "pathBusy", 50),
     ]);
@@ -123,12 +198,12 @@ describe("Arena cleanup protocol", () => {
       record("quiesceProcesses", 1, "succeeded"),
       record("verifyTarget", 1, "blocked", "symlinkDetected"),
     ];
-    const replay = replayArenaCleanupSteps("contestant-codex", blocked);
+    const replay = replayArenaCleanupSteps(RUN_ID, "contestant-codex", blocked);
     assert.equal(replay.status, "blocked");
     assert.equal(replay.blockedFailureCode, "symlinkDetected");
     assert.equal(replay.nextStep, null);
     assert.throws(
-      () => replayArenaCleanupSteps("contestant-codex", [
+      () => replayArenaCleanupSteps(RUN_ID, "contestant-codex", [
         ...blocked,
         record("verifyTarget", 2, "succeeded"),
       ]),
@@ -146,7 +221,7 @@ describe("Arena cleanup protocol", () => {
         delay,
       ));
     attempts.push(record("quiesceProcesses", 7, "blocked", "retryExhausted"));
-    const replay = replayArenaCleanupSteps("contestant-codex", attempts);
+    const replay = replayArenaCleanupSteps(RUN_ID, "contestant-codex", attempts);
     assert.equal(replay.status, "blocked");
     assert.equal(replay.blockedFailureCode, "retryExhausted");
 
@@ -169,20 +244,20 @@ describe("Arena cleanup protocol", () => {
 
   test("rejects wrong order, gaps, cross-target records, and cleanup-id changes", () => {
     assert.throws(
-      () => replayArenaCleanupSteps("contestant-codex", [
+      () => replayArenaCleanupSteps(RUN_ID, "contestant-codex", [
         record("verifyTarget", 1, "succeeded"),
       ]),
       /must be quiesceProcesses/,
     );
     assert.throws(
-      () => replayArenaCleanupSteps("contestant-codex", [
+      () => replayArenaCleanupSteps(RUN_ID, "contestant-codex", [
         record("quiesceProcesses", 1, "retryableFailure", "pathBusy", 50),
         record("quiesceProcesses", 3, "succeeded"),
       ]),
       /must be 2/,
     );
     assert.throws(
-      () => replayArenaCleanupSteps("contestant-codex", [
+      () => replayArenaCleanupSteps(RUN_ID, "contestant-codex", [
         record("quiesceProcesses", 1, "succeeded", null, null, {
           contestantId: "contestant-claude",
         }),
@@ -190,7 +265,7 @@ describe("Arena cleanup protocol", () => {
       /crosses cleanup target identities/,
     );
     assert.throws(
-      () => replayArenaCleanupSteps("contestant-codex", [
+      () => replayArenaCleanupSteps(RUN_ID, "contestant-codex", [
         record("quiesceProcesses", 1, "succeeded"),
         record("verifyTarget", 1, "succeeded", null, null, {
           cleanupId: "cleanup-two",
@@ -241,14 +316,14 @@ describe("Arena cleanup protocol", () => {
   });
 
   test("returns stable validation issues instead of accepting malformed history", () => {
-    const issues = validateArenaCleanupSteps("contestant-codex", [
+    const issues = validateArenaCleanupSteps(RUN_ID, "contestant-codex", [
       record("quiesceProcesses", 1, "succeeded"),
       record("removeGitWorktree", 1, "succeeded"),
     ]);
     assert.equal(issues.length, 1);
     assert.match(issues[0]!, /must be verifyTarget/);
     assert.throws(
-      () => replayArenaCleanupSteps("bad contestant", []),
+      () => replayArenaCleanupSteps(RUN_ID, "bad contestant", []),
       ArenaCleanupValidationError,
     );
   });

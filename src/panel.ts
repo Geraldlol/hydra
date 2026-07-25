@@ -333,6 +333,11 @@ import {
   formatMissionFlightSmokeReport,
   runMissionFlightSmokeTest as runIsolatedMissionFlightSmokeTest,
 } from "./missionFlightSmoke";
+import {
+  formatArenaSmokeReport,
+  runArenaSmokeTest as runIsolatedArenaSmokeTest,
+} from "./arenaSmoke";
+import { ArenaGitError } from "./arenaGit";
 import type { WebviewMessage } from "./webviewMessages";
 import {
   attachmentDisplaySummary,
@@ -822,6 +827,8 @@ export class HydraRoomPanel {
   private drainingQueuedUserMessages = false;
   private verificationRunning = false;
   private missionFlightSmokeRunning = false;
+  private arenaSmokeRunning = false;
+  private arenaSmokeAbort: AbortController | undefined;
   private autopilotRunning = false;
   private autopilotSummary = "Not run";
   private terminalPokeInFlight = false;
@@ -1059,6 +1066,7 @@ export class HydraRoomPanel {
       this.autopilotStartTimer = undefined;
     }
     this.currentAbort?.abort();
+    this.arenaSmokeAbort?.abort();
     this.wikiMaintenanceAbort?.abort();
     this.duelCommitmentAbort?.abort();
     this.telegram.dispose();
@@ -1351,6 +1359,13 @@ export class HydraRoomPanel {
       this.postState();
       return;
     }
+    if (this.arenaSmokeRunning) {
+      await this.appendSystemMessage(
+        "Hydra did not send this message because the Arena worktree lifecycle smoke test is active. Retry after it finishes or Stop it first.",
+      );
+      this.postState();
+      return;
+    }
     if (this.agentDuelAdmissionRunning || this.agentDuelAutomationRunning || this.duelCommitmentAbort) {
       const queued = this.appendUserMessageToUi(prepared.displayText);
       this.queuedUserMessages.push({ ...prepared, opener: selectedOpener, timestamp: queued.timestamp, telegramChatId: options.telegramChatId });
@@ -1455,6 +1470,7 @@ export class HydraRoomPanel {
     if (
       !this.workspaceReady ||
       this.unconfirmedNativeTermination ||
+      this.arenaSmokeRunning ||
       this.terminalPokeInFlight ||
       this.agentDuelAdmissionRunning ||
       this.agentDuelAutomationRunning ||
@@ -1611,6 +1627,7 @@ export class HydraRoomPanel {
     // (a no-op when nothing is running) before the early return.
     this.wikiMaintenanceAbort?.abort();
     this.duelCommitmentAbort?.abort();
+    this.arenaSmokeAbort?.abort();
     const activeFlightTurn = this.activeFlightTurns.at(-1);
     const activeFlightPending =
       activeFlightTurn !== undefined && !activeFlightTurn.terminalized;
@@ -1618,6 +1635,7 @@ export class HydraRoomPanel {
       !isInFlight(this.state) &&
       !this.terminalPokeInFlight &&
       !this.verificationRunning &&
+      !this.arenaSmokeRunning &&
       !this.autopilotRunning &&
       !this.agentDuelAutomationRunning &&
       !this.duelCommitmentAbort &&
@@ -1674,7 +1692,7 @@ export class HydraRoomPanel {
       this.postState();
       return;
     }
-    if (this.flightTransitionReservationInFlight || this.state.name !== "AwaitingUser") return;
+    if (this.arenaSmokeRunning || this.flightTransitionReservationInFlight || this.state.name !== "AwaitingUser") return;
     // Reserve the build synchronously. A double-click (or duplicate webview
     // message) must not pass the AwaitingUser guard twice while the transcript
     // append below is pending.
@@ -1728,7 +1746,7 @@ export class HydraRoomPanel {
       this.postState();
       return;
     }
-    if (this.flightTransitionReservationInFlight || this.state.name !== "AwaitingUser") return;
+    if (this.arenaSmokeRunning || this.flightTransitionReservationInFlight || this.state.name !== "AwaitingUser") return;
     const agents = this.roster();
     const preparedFlight = await this.prepareInitiatingFlightTurn(
       this.autoAdvanceInProgress ? "system" : "localUser",
@@ -1783,6 +1801,7 @@ export class HydraRoomPanel {
     }
     if (
       this.flightTransitionReservationInFlight
+      || this.arenaSmokeRunning
       || (this.state.name !== "BuildDone" && this.state.name !== "ParallelBuildDone")
     ) return;
     const preparedFlight = await this.prepareInitiatingFlightTurn(
@@ -1876,6 +1895,7 @@ export class HydraRoomPanel {
       this.flightTransitionReservationInFlight
       || isInFlight(this.state)
       || this.terminalPokeInFlight
+      || this.arenaSmokeRunning
       || this.verificationRunning
     ) {
       await this.appendSystemMessage("Verification is paused because Hydra is already running work.");
@@ -2090,7 +2110,7 @@ export class HydraRoomPanel {
 
   async acceptDefaultDecision(): Promise<void> {
     await this.ready();
-    if (!this.workspaceReady || isInFlight(this.state)) return;
+    if (!this.workspaceReady || this.arenaSmokeRunning || isInFlight(this.state)) return;
     const action = this.currentDecisionAction();
     if (action.kind === "none") return;
 
@@ -2146,6 +2166,7 @@ export class HydraRoomPanel {
     if (!this.workspaceReady) return;
     if (
       this.flightTransitionReservationInFlight
+      || this.arenaSmokeRunning
       || (this.state.name !== "ReviewDone" && this.state.name !== "ParallelReviewDone")
     ) return;
     const preparedFlight = await this.prepareInitiatingFlightTurn(
@@ -2188,6 +2209,7 @@ export class HydraRoomPanel {
         this.queuedUserMessages.length > 0 &&
         this.workspaceReady &&
         !this.terminalPokeInFlight &&
+        !this.arenaSmokeRunning &&
         !this.agentDuelAdmissionRunning &&
         !this.agentDuelAutomationRunning &&
         !this.duelCommitmentAbort &&
@@ -2232,6 +2254,7 @@ export class HydraRoomPanel {
       this.flightTransitionReservationInFlight ||
       isInFlight(this.state) ||
       this.terminalPokeInFlight ||
+      this.arenaSmokeRunning ||
       this.verificationRunning ||
       this.autopilotRunning ||
       this.agentDuelAdmissionRunning ||
@@ -3126,6 +3149,7 @@ export class HydraRoomPanel {
       !agentInitiatedDuels()
       || !this.workspaceReady
       || this.currentAbort
+      || this.arenaSmokeRunning
       || isInFlight(this.state)
       || this.terminalPokeInFlight
       || this.verificationRunning
@@ -3142,6 +3166,7 @@ export class HydraRoomPanel {
         agentInitiatedDuels()
         && this.agentDuelAdmissionQueue.length > 0
         && !this.currentAbort
+        && !this.arenaSmokeRunning
         && !isInFlight(this.state)
         && this.queuedUserMessages.length === 0
       ) {
@@ -3176,6 +3201,7 @@ export class HydraRoomPanel {
       || this.drainingAgentDuelAdmissions
       || this.unconfirmedNativeTermination
       || this.terminalPokeInFlight
+      || this.arenaSmokeRunning
       || isInFlight(this.state)
       || this.queuedUserMessages.length > 0
       || this.verificationRunning
@@ -3190,6 +3216,7 @@ export class HydraRoomPanel {
         agentInitiatedDuels()
         && this.agentDuelAutomationQueue.length > 0
         && this.queuedUserMessages.length === 0
+        && !this.arenaSmokeRunning
         && !isInFlight(this.state)
       ) {
         const duelId = this.agentDuelAutomationQueue.shift();
@@ -4290,13 +4317,13 @@ export class HydraRoomPanel {
 
   async captureNativeCapabilities(): Promise<void> {
     await this.ready();
-    if (!this.workspaceReady) return;
+    if (!this.workspaceReady || this.arenaSmokeRunning) return;
     if (this.unconfirmedNativeTermination) {
       this.appendSystemMessageToUi(this.unconfirmedTerminationMessage());
       this.postState();
       return;
     }
-    if (isInFlight(this.state) || this.terminalPokeInFlight) return;
+    if (isInFlight(this.state) || this.arenaSmokeRunning || this.terminalPokeInFlight) return;
     const ctrl = new AbortController();
     this.currentAbort = ctrl;
     this.terminalPokeInFlight = true;
@@ -4364,7 +4391,7 @@ export class HydraRoomPanel {
 
   async captureNativeDataSnapshot(): Promise<void> {
     await this.ready();
-    if (!this.workspaceReady) return;
+    if (!this.workspaceReady || this.arenaSmokeRunning) return;
     if (isInFlight(this.state) || this.terminalPokeInFlight) return;
     this.terminalPokeInFlight = true;
     this.postState();
@@ -4384,6 +4411,7 @@ export class HydraRoomPanel {
 
   async refreshCodexModels(): Promise<void> {
     await this.ready();
+    if (this.arenaSmokeRunning) return;
     if (this.unconfirmedNativeTermination) {
       this.appendSystemMessageToUi(this.unconfirmedTerminationMessage());
       this.postState();
@@ -4394,6 +4422,7 @@ export class HydraRoomPanel {
 
   async chooseModel(): Promise<void> {
     await this.ready();
+    if (this.arenaSmokeRunning) return;
     await chooseModelInteractively(this.modelChooserDeps());
   }
 
@@ -4473,6 +4502,7 @@ export class HydraRoomPanel {
     if (!this.workspaceReady) return;
     if (
       this.missionFlightSmokeRunning
+      || this.arenaSmokeRunning
       || this.flightTransitionReservationInFlight
       || isInFlight(this.state)
       || this.terminalPokeInFlight
@@ -4481,6 +4511,7 @@ export class HydraRoomPanel {
       || this.agentDuelAdmissionRunning
       || this.agentDuelAutomationRunning
       || !!this.duelCommitmentAbort
+      || this.queuedUserMessages.length > 0
     ) {
       await this.appendSystemMessage(
         "Mission/Flight smoke test skipped because Hydra is already running work.",
@@ -4521,6 +4552,103 @@ export class HydraRoomPanel {
     }
   }
 
+  async runArenaSmokeTest(): Promise<void> {
+    await this.ready();
+    if (!this.workspaceReady) return;
+    if (vscode.workspace.isTrusted !== true) {
+      await this.appendSystemMessage(
+        "Arena worktree smoke test requires a trusted workspace.",
+      );
+      this.postState();
+      return;
+    }
+    if (this.unconfirmedNativeTermination) {
+      this.appendSystemMessageToUi(this.unconfirmedTerminationMessage());
+      this.postState();
+      return;
+    }
+    if (
+      this.arenaSmokeRunning
+      || this.missionFlightSmokeRunning
+      || this.flightTransitionReservationInFlight
+      || isInFlight(this.state)
+      || this.terminalPokeInFlight
+      || this.verificationRunning
+      || this.autopilotRunning
+      || this.agentDuelAdmissionRunning
+      || this.agentDuelAutomationRunning
+      || !!this.duelCommitmentAbort
+      || this.queuedUserMessages.length > 0
+    ) {
+      await this.appendSystemMessage(
+        "Arena worktree smoke test skipped because Hydra is already running work.",
+      );
+      this.postState();
+      return;
+    }
+
+    this.arenaSmokeRunning = true;
+    const ctrl = new AbortController();
+    this.arenaSmokeAbort = ctrl;
+    this.postState();
+    try {
+      const report = await runIsolatedArenaSmokeTest({
+        privateWorkspaceRoot: this.arenaSmokePrivateStorageRoot(),
+        repositoryLeaseRoot: path.join(
+          this.context.globalStorageUri.fsPath,
+          "arena-repository-leases",
+        ),
+        gitResolutionRoot: this.workspaceRoot,
+        signal: ctrl.signal,
+        onProgress: (stage) => this.appendSystemMessage(
+          `Arena worktree lifecycle smoke: ${stage}.`,
+        ),
+      });
+      const formatted = formatArenaSmokeReport(report);
+      await this.appendSystemMessage(formatted);
+      await this.recordEvent(
+        "commandInvoked",
+        `Arena worktree smoke test ${report.passed ? "passed" : "failed"}.`,
+        {
+          passed: report.passed,
+          contestants: report.observed.contestants,
+          manifestEvents: report.observed.manifestEvents,
+          cleanupState: report.observed.cleanupState,
+        },
+      );
+      if (report.passed) {
+        void vscode.window.showInformationMessage(
+          "Hydra Arena worktree smoke test passed.",
+        );
+      } else {
+        void vscode.window.showWarningMessage(
+          "Hydra Arena worktree smoke test failed. See the room transcript for bounded diagnostics.",
+        );
+      }
+    } catch (error) {
+      await this.appendSystemMessage(
+        `Arena worktree lifecycle smoke failed: ${
+          sanitizeWebhookError(
+            error instanceof Error ? error.message : String(error),
+          )
+        }`,
+      );
+      if (hasArenaTerminationUnconfirmed(error)) {
+        this.latchUnconfirmedNativeTermination(
+          { terminationFailed: true },
+          "Arena worktree lifecycle smoke",
+        );
+      }
+      throw error;
+    } finally {
+      if (this.arenaSmokeAbort === ctrl) {
+        this.arenaSmokeAbort = undefined;
+      }
+      this.arenaSmokeRunning = false;
+      this.postState();
+    }
+  }
+
   async runManyHeadsSmokeTest(): Promise<void> {
     await this.ready();
     if (!this.workspaceReady) return;
@@ -4529,7 +4657,7 @@ export class HydraRoomPanel {
       this.postState();
       return;
     }
-    if (isInFlight(this.state) || this.terminalPokeInFlight || this.verificationRunning || this.autopilotRunning) {
+    if (this.arenaSmokeRunning || isInFlight(this.state) || this.terminalPokeInFlight || this.verificationRunning || this.autopilotRunning) {
       await this.appendSystemMessage("Claude Worker Fanout smoke test skipped because Hydra is already running work.");
       this.postState();
       return;
@@ -4735,7 +4863,9 @@ export class HydraRoomPanel {
       }
     }
     const phaseAdmissionReady =
-      this.workspaceReady && !this.flightTransitionReservationInFlight;
+      this.workspaceReady
+      && !this.arenaSmokeRunning
+      && !this.flightTransitionReservationInFlight;
     const actions = buildCommandCenterActions({
       workspaceReady: this.workspaceReady,
       isWorkspaceTrusted: vscode.workspace.isTrusted === true,
@@ -4744,6 +4874,7 @@ export class HydraRoomPanel {
         || this.activeFlightTurns.some((turn) => !turn.terminalized)
         || isInFlight(this.state)
         || this.terminalPokeInFlight
+        || this.arenaSmokeRunning
         || this.verificationRunning
         || this.autopilotRunning,
       canAcceptDefault: phaseAdmissionReady && !isInFlight(this.state) && !this.terminalPokeInFlight && this.currentDecisionAction().kind !== "none",
@@ -4751,12 +4882,13 @@ export class HydraRoomPanel {
       canAssignBuilder: phaseAdmissionReady && this.state.name === "AwaitingUser",
       canRequestReview: phaseAdmissionReady && (this.state.name === "BuildDone" || this.state.name === "ParallelBuildDone") && this.gitAvailable,
       canHandBack: phaseAdmissionReady && (this.state.name === "ReviewDone" || this.state.name === "ParallelReviewDone") && !this.state.approved,
-      canRunVerification: phaseAdmissionReady && !isInFlight(this.state) && !this.terminalPokeInFlight && !this.verificationRunning,
+      canRunVerification: phaseAdmissionReady && !isInFlight(this.state) && !this.terminalPokeInFlight && !this.arenaSmokeRunning && !this.verificationRunning,
       canRunWikiWrapup: this.canRunManualWikiWrapup(),
       canPokeNativeTerminals:
         phaseAdmissionReady
         && !isInFlight(this.state)
         && !this.terminalPokeInFlight
+        && !this.arenaSmokeRunning
         && !this.verificationRunning,
       needsCodexPath: checkFailed(this.latestDoctorReport, "codex-command"),
       needsClaudePath: checkFailed(this.latestDoctorReport, "claude-command"),
@@ -4950,6 +5082,7 @@ export class HydraRoomPanel {
     await this.ready();
     if (
       !this.workspaceReady
+      || this.arenaSmokeRunning
       || this.flightTransitionReservationInFlight
       || isInFlight(this.state)
     ) return;
@@ -5023,7 +5156,7 @@ export class HydraRoomPanel {
 
   async attachFiles(): Promise<void> {
     await this.ready();
-    if (!this.workspaceReady) return;
+    if (!this.workspaceReady || this.arenaSmokeRunning) return;
     const picks = await vscode.window.showOpenDialog({
       title: "Hydra: Attach Files",
       canSelectFiles: true,
@@ -5115,7 +5248,7 @@ export class HydraRoomPanel {
 
   async openNativeTerminals(): Promise<void> {
     await this.ready();
-    if (!this.workspaceReady) return;
+    if (!this.workspaceReady || this.arenaSmokeRunning) return;
     if (this.unconfirmedNativeTermination) {
       this.appendSystemMessageToUi(this.unconfirmedTerminationMessage());
       this.postState();
@@ -5150,6 +5283,7 @@ export class HydraRoomPanel {
     if (
       this.flightTransitionReservationInFlight
       || isInFlight(this.state)
+      || this.arenaSmokeRunning
       || this.verificationRunning
       || this.terminalPokeInFlight
     ) return;
@@ -5275,6 +5409,7 @@ export class HydraRoomPanel {
     if (
       this.flightTransitionReservationInFlight
       || isInFlight(this.state)
+      || this.arenaSmokeRunning
       || this.verificationRunning
       || this.terminalPokeInFlight
     ) return;
@@ -5391,6 +5526,7 @@ export class HydraRoomPanel {
     if (
       this.flightTransitionReservationInFlight
       || isInFlight(this.state)
+      || this.arenaSmokeRunning
       || this.verificationRunning
       || this.terminalPokeInFlight
     ) return;
@@ -5783,7 +5919,7 @@ export class HydraRoomPanel {
 
   async useTerminalBridge(): Promise<void> {
     await this.ready();
-    if (!this.workspaceReady) return;
+    if (!this.workspaceReady || this.arenaSmokeRunning) return;
     if (this.unconfirmedNativeTermination) {
       this.appendSystemMessageToUi(this.unconfirmedTerminationMessage());
       this.postState();
@@ -5807,7 +5943,7 @@ export class HydraRoomPanel {
 
   async runTerminalBridgeSelfTest(): Promise<void> {
     await this.ready();
-    if (!this.workspaceReady) return;
+    if (!this.workspaceReady || this.arenaSmokeRunning) return;
     if (this.unconfirmedNativeTermination) {
       this.appendSystemMessageToUi(this.unconfirmedTerminationMessage());
       this.postState();
@@ -5904,7 +6040,7 @@ export class HydraRoomPanel {
 
   async useOneShotTransport(): Promise<void> {
     await this.ready();
-    if (!this.workspaceReady) return;
+    if (!this.workspaceReady || this.arenaSmokeRunning) return;
     if (this.terminalBridgeDispatchInFlight > 0) {
       await this.appendSystemMessage("Safe one-shot switching is paused until the active terminal-bridge call finishes or is stopped.");
       this.postState();
@@ -5924,7 +6060,7 @@ export class HydraRoomPanel {
 
   async runAutopilotStart(): Promise<void> {
     await this.ready();
-    if (!this.workspaceReady || this.autopilotRunning) return;
+    if (!this.workspaceReady || this.arenaSmokeRunning || this.autopilotRunning) return;
     if (isInFlight(this.state)) {
       await this.appendSystemMessage("Hydra Autopilot skipped because a turn is already running.");
       this.postState();
@@ -5991,8 +6127,8 @@ export class HydraRoomPanel {
       );
       return;
     }
-    if (isInFlight(this.state)) {
-      await this.appendSystemMessage("Hydra Doctor is paused because a turn is running. Stop or reset the turn, then run Doctor again.");
+    if (this.arenaSmokeRunning || isInFlight(this.state)) {
+      await this.appendSystemMessage("Hydra Doctor is paused because room or Arena lifecycle work is running. Stop it or wait for completion, then run Doctor again.");
       this.postState();
       return;
     }
@@ -11259,6 +11395,7 @@ export class HydraRoomPanel {
     const automationReady =
       this.workspaceReady
       && !this.unconfirmedNativeTermination
+      && !this.arenaSmokeRunning
       && !this.flightTransitionReservationInFlight;
     const duelCommitmentBusy = this.agentDuelAutomationRunning || !!this.duelCommitmentAbort;
     const duelAutomationBusy = this.agentDuelAdmissionRunning || duelCommitmentBusy;
@@ -11267,6 +11404,7 @@ export class HydraRoomPanel {
       this.activeFlightTurns.some((turn) => !turn.terminalized) ||
       isInFlight(this.state) ||
       this.terminalPokeInFlight ||
+      this.arenaSmokeRunning ||
       this.verificationRunning ||
       this.autopilotRunning ||
       duelCommitmentBusy;
@@ -11444,7 +11582,7 @@ export class HydraRoomPanel {
   }
 
   private canRunManualWikiWrapup(): boolean {
-    if (!this.workspaceReady || this.unconfirmedNativeTermination || isInFlight(this.state) || this.terminalPokeInFlight || this.verificationRunning || this.autopilotRunning || this.wikiWrapupInFlight) {
+    if (!this.workspaceReady || this.unconfirmedNativeTermination || isInFlight(this.state) || this.terminalPokeInFlight || this.arenaSmokeRunning || this.verificationRunning || this.autopilotRunning || this.wikiWrapupInFlight) {
       return false;
     }
     return !!hydraWikiWrapupSourceFromMessages(this.messages, wikiWrapupMaxSourceChars());
@@ -11504,6 +11642,17 @@ export class HydraRoomPanel {
       this.context.globalStorageUri.fsPath,
       "workspaces",
       crypto.createHash("sha256").update(this.workspaceRoot).digest("hex").slice(0, 24),
+    );
+  }
+
+  private arenaSmokePrivateStorageRoot(): string {
+    return path.join(
+      this.context.globalStorageUri.fsPath,
+      "as",
+      crypto.createHash("sha256")
+        .update(this.workspaceRoot)
+        .digest("hex")
+        .slice(0, 24),
     );
   }
 
@@ -12117,6 +12266,27 @@ export async function synthesizeUntrackedFileDiff(
 
 function omittedUntrackedDiff(gitPath: string, reason: string): string {
   return `diff --git a/${gitPath} b/${gitPath}\nnew file mode 100644\n--- /dev/null\n+++ b/${gitPath}\n@@\n+[Hydra omitted untracked file: ${reason}]`;
+}
+
+function hasArenaTerminationUnconfirmed(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current = error;
+  for (let depth = 0; depth < 8 && current !== undefined; depth += 1) {
+    if (current instanceof ArenaGitError
+      && current.code === "terminationUnconfirmed") {
+      return true;
+    }
+    if (!current
+      || (typeof current !== "object" && typeof current !== "function")
+      || seen.has(current)) {
+      return false;
+    }
+    seen.add(current);
+    current = "cause" in current
+      ? (current as { readonly cause?: unknown }).cause
+      : undefined;
+  }
+  return false;
 }
 
 function isPathInsideRoot(candidate: string, root: string): boolean {

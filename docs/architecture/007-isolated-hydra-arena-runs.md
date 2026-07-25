@@ -44,9 +44,12 @@ Arena MVP admits a run only when all of these preconditions hold:
    deleted, renamed, or untracked workspace changes.
 4. No merge, rebase, cherry-pick, revert, bisect, or other sequencer operation
    is active.
-5. Sparse checkout, submodules, `skip-worktree`, and `assume-unchanged` index
-   entries are absent. They remain unsupported in the MVP because they make
-   clean-state and candidate-content equivalence ambiguous.
+5. Sparse checkout, submodules, unmerged index stages, `skip-worktree`, and
+   `assume-unchanged` index entries are absent. Repository-local filters,
+   `include`/`includeIf` directives, prunable or duplicate worktree rows, and
+   active Git lock files are also rejected. They remain unsupported in the MVP
+   because they make clean-state and candidate-content equivalence ambiguous or
+   can execute helpers during an otherwise administrative Git operation.
 6. Hydra can resolve one trusted absolute Git executable.
 7. An active confirmed Mission Contract authorizes the requested mutations and
    acceptance evidence.
@@ -103,6 +106,8 @@ storage:
 <storageUri>/arena/runs/<runId>/manifest.v1.jsonl
 <storageUri>/arena/artifacts/<runId>/<contestantId>/...
 <storageUri>/arena/worktrees/<runId>/<contestantId>/...
+<storageUri>/arena/registrations/<runId>/<contestantId>/intent.v1.json
+<storageUri>/arena/registrations/<runId>/<contestantId>/receipt.v1.json
 ```
 
 Run manifests and retained artifacts are physically separate from disposable
@@ -120,10 +125,41 @@ hard record/byte bounds.
 The run index is a rebuildable discovery cache only. A stale or forged index
 cannot create, hide, complete, or authorize a run.
 
+Repository ownership is a separate extension-global authority record:
+
+```text
+<globalStorageUri>/arena-repository-leases/
+  <repositoryIdentitySha256>.owner.v1.jsonl
+```
+
+The filename key is derived from the Git common-directory filesystem identity
+and object format, not a workspace path, so two VS Code windows and path aliases
+converge on one owner. The append-only, hash-chained ledger binds the run,
+source-directory identity, private-storage identity, locked repository
+controls, base revision, and exact manifest-lock event hash. It never stores
+raw source or private paths.
+
+The cross-process file mutex is short-lived serialization only. The repository
+owner claim is durable and has no TTL, heartbeat expiry, force-release, or
+steal operation. A different run remains blocked until the active run appends a
+release that is independently proven from the private manifest, immutable
+registration receipts, complete cleanup replay, Git registry absence, and
+exact target-path absence. Run IDs cannot be reused after release, and an old
+claim receipt cannot regain authority after recovery or release.
+
+Restart takeover additionally requires a private, typed, run- and
+process-generation-bound quiescence receipt. Stage 2 has no such process
+supervisor, so it deliberately rejects restart takeover rather than inferring
+quiescence from a dead extension-host PID. The `claimRecovered` ledger shape is
+reserved, but no current controller can produce its required proof. This means
+an interrupted stage-2 owner can remain blocked for explicit recovery; it must
+not be silently expired.
+
 The v1 event vocabulary is:
 
 - `arenaRunLocked`;
 - `arenaMainWorkspaceObserved`;
+- `arenaWorktreeRegistered`;
 - `arenaWorktreeProvisioned`;
 - `arenaContestantStarted`;
 - `arenaContestantFinished`;
@@ -140,12 +176,15 @@ canonical event matches; a same-ID collision fails closed.
 
 ### Disposable detached worktrees
 
-Each contestant gets one exact private direct-child directory created with an
-argument-vector spawn equivalent to:
+Before any Git side effect, Hydra exclusively creates and flushes one immutable
+registration intent. It binds the run, contestant, derived private path, exact
+base, source/repository identity, pre-run worktree registry, static ref/config
+controls, and opaque Git lock reason. Only then does Hydra create one exact
+private direct-child directory with an argument-vector spawn equivalent to:
 
 ```text
 git worktree add --detach --lock --reason <opaque-run-binding> \
-  --no-relative-paths <exact-private-path> <locked-base-object>
+  --no-relative-paths -- <exact-private-path> <locked-base-object>
 ```
 
 Hydra does not invoke a shell, derive a branch name, use `-b` or `-B`, inherit
@@ -154,26 +193,48 @@ or revision. The executor sanitizes Git environment overrides and disables
 optional locks, fsmonitor, external diff, textconv, and other configured helper
 surfaces where the operation permits it. After creation Hydra verifies:
 
+On Windows the executor also supplies its own `core.longpaths=true` override.
+That removes the legacy Win32 checkout limit, but Git still has a separate
+internal linked-worktree `$GIT_DIR` path budget. Stage 2 therefore places its
+synthetic physical worktrees under a short, workspace-keyed child of
+`globalStorageUri` rather than the longer per-workspace `storageUri`. The
+private manifest still binds the exact derived path and directory identity.
+A future real-run controller must enforce a conservative pre-Git path budget
+and fail before intent publication if its configured extension-private root
+cannot satisfy that budget.
+
 - the logical and real path remain inside the expected private Arena worktree
   parent and no parent or target is a symbolic link or reparse-point escape;
 - Git's stable `worktree list --porcelain -z` output lists the exact path as a
-  locked linked worktree with Hydra's exact opaque lock reason;
+  locked linked worktree with Hydra's exact opaque lock reason and no prunable
+  or duplicate registration;
 - `HEAD` is detached at the locked base object; and
 - the initial content fingerprint matches the locked canonical base content.
+
+Hydra then exclusively creates and flushes an immutable registration receipt
+binding the intent hash, real-path hash, directory identity, Git registration,
+detached `HEAD`, and initial fingerprint. `arenaWorktreeRegistered` binds that
+receipt hash into the manifest before preparation. A crash before `git
+worktree add` leaves only a harmless intent; a crash after Git registration but
+before the receipt or manifest event is recovered by re-reading the intent and
+strict `worktree list --porcelain -z` state. An unregistered directory at the
+derived target, a different lock reason, a changed identity, or an unrelated
+registry delta fails closed. Hydra never retries with a different target.
 
 If dependencies or generated prerequisites are needed, Hydra runs only the
 separately confirmed preparation plan with the same resolved executable,
 arguments, environment policy, limits, and base controls in every contestant
-worktree. One `arenaWorktreeProvisioned` event records successful Git
-registration plus the explicit preparation outcome (`succeeded`, `failed`,
+worktree. One `arenaWorktreeProvisioned` event repeats the durable registration
+hash and records the explicit preparation outcome (`succeeded`, `failed`,
 `cancelled`, or `timedOut`), receipt, and post-attempt fingerprint. No hidden
 per-head install or setup command is allowed. Every locked worktree must be
-provisioned before the first contestant dispatch; dispatch additionally
+registered and provisioned before the first contestant dispatch; dispatch additionally
 requires every preparation outcome to be `succeeded` and every
 post-preparation fingerprint to be identical. A mismatch permanently latches
 `preparationStateMismatch` and prevents all dispatch. A failed preparation is
-never called dispatch-ready, but its provisioned worktree can enter the
-`beforeDispatch` terminal/evidence/cleanup path.
+never called dispatch-ready, but its registered worktree can enter the
+`beforeDispatch` terminal/evidence/cleanup path. Registration that succeeded
+before preparation began has the same recovery path.
 
 Worktree paths and provider session identifiers remain private. The manifest
 uses opaque worktree IDs plus hashes of preparation receipts.
@@ -230,7 +291,7 @@ bounded status, and private receipt hash. A retry is a new ordered attempt; a
 passing attempt is terminal for that check.
 
 Before any destructive cleanup, Hydra preserves a bounded artifact set per
-provisioned contestant:
+durably registered contestant:
 
 - a binary/full-index patch against the locked base, including file modes and
   deletions;
@@ -292,17 +353,28 @@ does not run broad `git worktree prune`, `git worktree repair`, Git GC, edit
 `$GIT_COMMON_DIR/worktrees` directly, or delete a directory while Git still
 reports it registered.
 
+Stage 2 records `removeResidualDirectory` as `notNeeded` only when the exact
+path is already absent. If Git removes its registry row but a directory
+survives, the stage-2 executor blocks cleanup; it does not issue a recursive
+path deletion vulnerable to a same-user path swap. A later cleanup broker must
+quarantine and authenticate the exact filesystem object with crash-replayable
+receipts before this step may remove a residual tree.
+
 The pure cleanup protocol permits bounded retries only for
 `processStillRunning`, `sharingViolation`, `pathBusy`, and
 `directoryNotEmpty`, using the fixed delays 50, 100, 250, 500, 1000, and
 2000 ms. Other failures block immediately. Exhausting the schedule records
 `retryExhausted`; it does not fall through to recursive deletion.
 
-If a process crashes after an external side effect but before its receipt
-append, recovery probes the exact target again and records `notNeeded` when
-the intended postcondition is already true. Completed steps never execute
-again. A blocked cleanup remains visible and leaves retained evidence and any
-unverified target in place for explicit recovery.
+If a process crashes after an external side effect but before its complete,
+flushed receipt append, recovery probes the exact target again and records
+`notNeeded` when the intended postcondition is already true. Completed steps
+never execute again. A blocked cleanup remains visible and leaves retained
+evidence and any unverified target in place for explicit recovery. Stage 2
+deliberately fails closed on a torn manifest or owner-ledger tail; it does not
+truncate or infer the missing authority record. Crash-atomic per-sequence
+authority records (or an equivalently replay-safe repair protocol) are a
+stage-3 prerequisite before Arena may admit a real workspace repository.
 
 ### Reveal, winner selection, promotion, and synthesis remain human gates
 
@@ -327,8 +399,9 @@ Arena result.
 ### Positive
 
 - Contestant edits are attributable and reversible without branch creation.
-- Locked mission, base, controls, evidence, and cleanup history survive crashes
-  and cross-window replay.
+- Complete flushed mission, base, control, evidence, and cleanup records
+  survive crashes and cross-window replay; a torn authoritative tail blocks
+  stage 2 rather than being guessed or silently repaired.
 - Main-workspace interference and incomplete capture remain visible instead of
   being repaired into false comparability.
 - Windows handle failures cannot trigger an unsafe broad deletion.
@@ -343,6 +416,8 @@ Arena result.
 - Full fingerprints, patches, untracked archives, and identical verification
   multiply I/O, storage, latency, and cost by contestant count.
 - Strict cleanup can leave a blocked private worktree for manual recovery.
+- Stage 2 has no restart-takeover proof or torn-tail repair, so a crashed owner
+  can remain blocked until a later explicit recovery broker exists.
 - Requiring a clean main worktree narrows the MVP but prevents ambiguous
   attribution and promotion.
 
@@ -383,15 +458,25 @@ transient/non-transient failure classification, retry exhaustion, terminal
 blocking, crash recovery through `notNeeded`, duplicate successful steps, and
 refusal to start without durable evidence.
 
-Later store/worktree tests must cover invalid UTF-8, torn and oversized rows,
+Store/worktree tests must cover invalid UTF-8, torn and oversized rows,
 concurrent append/idempotency collisions, private-root and realpath
 containment, links and path swaps, spaces and Unicode, dirty/bare/non-main
 workspace rejection, configured Git helper suppression, locked Windows
 handles, crash points around `git worktree add/remove`, unrelated linked
-worktree preservation, and artifact retention after cleanup. An
-`hydraRoom.runArenaSmokeTest` extension-host scenario must create two bounded
-fake contestants, preserve patches/receipts, replay the matrix, clean exact
-targets, and prove the source workspace and unrelated worktrees are unchanged.
+worktree preservation, owner-ledger races/release/restart fencing, and artifact
+retention after cleanup. The stage-2
+`hydraRoom.runArenaSmokeTest` command is specifically a synthetic worktree
+lifecycle smoke: it creates two detached targets, reconciles the
+receipt-to-manifest crash window, records bounded pre-dispatch cancellation
+evidence, cleans exact targets, and proves the source workspace and an
+unrelated worktree are unchanged. It does not claim comparable head execution,
+verification, browser evidence, a fresh post-evidence monitor observation, or
+an evidence matrix. Before its first Git side effect it publishes an immutable
+private recovery catalog naming only the exact synthetic roots; confirmed
+cleanup removes that catalog, while a hard host death leaves it for a future
+bounded startup recovery scan. Stage 2 does not perform that scan or regain
+repository-owner authority. Those capabilities, plus crash-atomic authority
+history, become mandatory in the stage-3 controller smoke.
 
 Arena patch and untracked artifacts contain source content and therefore stay
 in the separate private Arena artifact store; they are never copied into
@@ -403,7 +488,8 @@ v1 kinds must not be relabeled dishonestly.
 Roll out in stages:
 
 1. pure run-manifest and cleanup protocols;
-2. private manifest/artifact store plus hardened Git worktree executor;
+2. private manifest/artifact store plus hardened Git worktree executor and
+   synthetic lifecycle smoke only (no real-workspace Arena admission);
 3. Arena controller with main-workspace monitor and fake-head smoke;
 4. locked verification/browser execution and the compatible Flight schema
    revision/projection;

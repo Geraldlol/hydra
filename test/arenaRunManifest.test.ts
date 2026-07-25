@@ -30,11 +30,15 @@ import {
   type ArenaRunLockedPayload,
   type ArenaPreparationStatus,
   type ArenaVerificationRecordedPayload,
+  type ArenaWorktreeRegisteredPayload,
   type ArenaWorktreeProvisionedPayload,
 } from "../src/arenaRunManifest";
 import {
   ARENA_CLEANUP_STEPS,
+  arenaCleanupPostconditionSha256,
+  arenaCleanupStepReceiptSha256,
   type ArenaCleanupOutcome,
+  type ArenaCleanupPostcondition,
   type ArenaCleanupStep,
   type ArenaCleanupStepPayload,
 } from "../src/arenaCleanup";
@@ -176,6 +180,33 @@ function ensureAllWorktreesPrepared(
   } = {},
 ): ReadonlyMap<string, ArenaManifestEvent> {
   ensureMonitorStarted(builder);
+  const registered = new Map(
+    builder.records
+      .filter((event) => event.type === "arenaWorktreeRegistered")
+      .map((event) => [
+        (event.payload as ArenaWorktreeRegisteredPayload).contestantId,
+        event,
+      ]),
+  );
+  for (const contestant of builder.lock.contestants) {
+    if (registered.has(contestant.contestantId)) continue;
+    const payload: ArenaWorktreeRegisteredPayload = {
+      payloadType: "worktreeRegistered",
+      contestantId: contestant.contestantId,
+      worktreeId: contestant.worktreeId,
+      baseRevision: builder.lock.base.revision,
+      registrationSha256: digest(`registration-${contestant.contestantId}`),
+      initialFingerprintSha256: builder.lock.base.baseContentSha256,
+    };
+    registered.set(
+      contestant.contestantId,
+      builder.append(
+        "arenaWorktreeRegistered",
+        payload,
+        `event-registered-${contestant.contestantId}`,
+      ),
+    );
+  }
   const existing = new Map(
     builder.records
       .filter((event) => event.type === "arenaWorktreeProvisioned")
@@ -194,7 +225,10 @@ function ensureAllWorktreesPrepared(
       contestantId: contestant.contestantId,
       worktreeId: contestant.worktreeId,
       baseRevision: builder.lock.base.revision,
-      registrationSha256: digest(`registration-${contestant.contestantId}`),
+      registrationSha256: (
+        registered.get(contestant.contestantId)!
+          .payload as ArenaWorktreeRegisteredPayload
+      ).registrationSha256,
       initialFingerprintSha256: builder.lock.base.baseContentSha256,
       preparationPlanSha256: builder.lock.preparationPlanSha256,
       preparationStatus:
@@ -325,6 +359,8 @@ function completeContestant(
     untrackedArchiveSha256: null,
     untrackedArchiveBytes: 0,
     inventorySha256: digest(`inventory-${contestantId}`),
+    quiescenceReceiptSha256: null,
+    quiescenceWorkspaceFingerprintSha256: null,
     finalHead,
     finalWorkspaceFingerprintSha256: options.evidenceFingerprint ?? candidateFingerprint,
   };
@@ -446,6 +482,7 @@ function completeComparableRun(builder = new ManifestBuilder()): ManifestBuilder
 }
 
 function cleanupPayload(
+  builder: ManifestBuilder,
   contestantId: string,
   step: ArenaCleanupStep,
   overrides: {
@@ -454,16 +491,82 @@ function cleanupPayload(
     cleanupId?: string;
   } = {},
 ): ArenaCleanupStepPayload {
-  return {
-    payloadType: "cleanupStepRecorded",
+  const registration = builder.records.find((event) =>
+    event.type === "arenaWorktreeRegistered"
+    && (event.payload as ArenaWorktreeRegisteredPayload).contestantId
+      === contestantId);
+  const evidence = builder.records.find((event) =>
+    event.type === "arenaEvidencePreserved"
+    && (event.payload as ArenaEvidencePreservedPayload).contestantId
+      === contestantId);
+  const postcondition = cleanupPostcondition(step);
+  const draft = {
+    payloadType: "cleanupStepRecorded" as const,
+    runId: builder.runId,
     cleanupId: overrides.cleanupId ?? `cleanup-${contestantId}`,
     contestantId,
+    registrationSha256:
+      registration
+        ? (registration.payload as ArenaWorktreeRegisteredPayload)
+          .registrationSha256
+        : digest(`missing-registration-${contestantId}`),
+    evidenceEventSha256:
+      evidence?.eventSha256 ?? digest(`missing-evidence-${contestantId}`),
     step,
     attempt: overrides.attempt ?? 1,
     outcome: overrides.outcome ?? "succeeded",
     failureCode: null,
     retryDelayMs: null,
+    postcondition,
+    postconditionSha256: arenaCleanupPostconditionSha256(postcondition),
   };
+  return {
+    ...draft,
+    stepReceiptSha256: arenaCleanupStepReceiptSha256(draft),
+  };
+}
+
+function cleanupPostcondition(
+  step: ArenaCleanupStep,
+): ArenaCleanupPostcondition {
+  const worktreePathSha256 = digest("cleanup-worktree-path");
+  if (step === "quiesceProcesses") {
+    return {
+      kind: "processQuiescence",
+      processOwnerSha256: digest("cleanup-process-owner"),
+      terminationConfirmed: true,
+      activeProcessCount: 0,
+    };
+  }
+  if (step === "verifyTarget") {
+    return {
+      kind: "ownedTarget",
+      worktreePathSha256,
+      directoryIdentitySha256: digest("cleanup-directory"),
+      gitRegistrationSha256: digest("cleanup-registration"),
+    };
+  }
+  if (step === "unlockGitWorktree") {
+    return {
+      kind: "gitLockState",
+      worktreePathSha256,
+      gitRegistrationSha256: digest("cleanup-registration"),
+      locked: false,
+      registryEntrySha256: digest("cleanup-registry-entry"),
+    };
+  }
+  if (step === "removeGitWorktree") {
+    return { kind: "gitRemoval", worktreePathSha256, registryAbsent: true };
+  }
+  if (step === "verifyGitRegistrationGone") {
+    return {
+      kind: "gitRegistryAbsence",
+      worktreePathSha256,
+      registrySha256: digest("cleanup-registry"),
+      absent: true,
+    };
+  }
+  return { kind: "pathAbsence", worktreePathSha256, absent: true };
 }
 
 describe("Hydra Arena run manifest", () => {
@@ -506,7 +609,7 @@ describe("Hydra Arena run manifest", () => {
       for (const step of ARENA_CLEANUP_STEPS) {
         builder.append(
           "arenaCleanupStepRecorded",
-          cleanupPayload(contestant.contestantId, step),
+          cleanupPayload(builder, contestant.contestantId, step),
           `event-cleanup-${contestant.contestantId}-${step}`,
         );
       }
@@ -861,15 +964,55 @@ describe("Hydra Arena run manifest", () => {
     );
   });
 
+  test("requires a unique durable registration before provisioning", () => {
+    const missing = new ManifestBuilder();
+    const contestant = missing.lock.contestants[0]!;
+    ensureMonitorStarted(missing);
+    missing.append("arenaWorktreeProvisioned", {
+      payloadType: "worktreeProvisioned",
+      contestantId: contestant.contestantId,
+      worktreeId: contestant.worktreeId,
+      baseRevision: missing.lock.base.revision,
+      registrationSha256: digest("missing-registration"),
+      initialFingerprintSha256: missing.lock.base.baseContentSha256,
+      preparationPlanSha256: null,
+      preparationStatus: "succeeded",
+      preparationReceiptSha256: null,
+      preparedFingerprintSha256: missing.lock.base.baseContentSha256,
+    }, "event-provision-without-registration");
+    assert.throws(
+      () => replayArenaManifest(missing.records),
+      /requires a durable worktree registration/,
+    );
+
+    const duplicate = new ManifestBuilder();
+    ensureMonitorStarted(duplicate);
+    const sharedRegistration = digest("shared-registration");
+    for (const locked of duplicate.lock.contestants) {
+      duplicate.append("arenaWorktreeRegistered", {
+        payloadType: "worktreeRegistered",
+        contestantId: locked.contestantId,
+        worktreeId: locked.worktreeId,
+        baseRevision: duplicate.lock.base.revision,
+        registrationSha256: sharedRegistration,
+        initialFingerprintSha256: duplicate.lock.base.baseContentSha256,
+      }, `event-registration-${locked.contestantId}`);
+    }
+    assert.throws(
+      () => replayArenaManifest(duplicate.records),
+      /duplicates a worktree registration/,
+    );
+  });
+
   test("requires every worktree to share one prepared state before dispatch", () => {
     const partial = new ManifestBuilder();
     const prepared = ensureAllWorktreesPrepared(partial);
     const firstPrepared = prepared.get("contestant-codex")!;
-    const partialRecords = rechain([
-      partial.records[0]!,
-      partial.records[1]!,
-      firstPrepared,
-    ]);
+    const partialRecords = rechain(partial.records.filter((event) =>
+      event.type === "arenaRunLocked"
+      || event.type === "arenaMainWorkspaceObserved"
+      || event.type === "arenaWorktreeRegistered"
+      || event.eventId === firstPrepared.eventId));
     partialRecords.push(createArenaManifestEvent({
       eventId: "event-start-before-all-prepared",
       runId: partial.runId,
@@ -1008,6 +1151,8 @@ describe("Hydra Arena run manifest", () => {
         untrackedArchiveSha256: null,
         untrackedArchiveBytes: 0,
         inventorySha256: digest(`cancelled-inventory-${contestant.contestantId}`),
+        quiescenceReceiptSha256: null,
+        quiescenceWorkspaceFingerprintSha256: null,
         finalHead: builder.lock.base.revision,
         finalWorkspaceFingerprintSha256:
           preparedPayload.preparedFingerprintSha256,
@@ -1022,7 +1167,7 @@ describe("Hydra Arena run manifest", () => {
     }, "event-cancelled-finalized");
     builder.append(
       "arenaCleanupStepRecorded",
-      cleanupPayload("contestant-codex", "quiesceProcesses"),
+      cleanupPayload(builder, "contestant-codex", "quiesceProcesses"),
       "event-cancelled-cleanup",
     );
     const replay = replayArenaManifest(builder.records);
@@ -1030,6 +1175,70 @@ describe("Hydra Arena run manifest", () => {
     assert.equal(replay.promotionEligible, false);
     assert.ok(replay.contestants.every((candidate) =>
       candidate.evidencePreserved !== undefined));
+  });
+
+  test("recovers a registered worktree when provisioning never completed", () => {
+    const builder = new ManifestBuilder();
+    ensureMonitorStarted(builder);
+    const contestant = builder.lock.contestants[0]!;
+    builder.append("arenaWorktreeRegistered", {
+      payloadType: "worktreeRegistered",
+      contestantId: contestant.contestantId,
+      worktreeId: contestant.worktreeId,
+      baseRevision: builder.lock.base.revision,
+      registrationSha256: digest("recovered-registration"),
+      initialFingerprintSha256: builder.lock.base.baseContentSha256,
+    }, "event-recovered-registration");
+    const finished = builder.append("arenaContestantFinished", {
+      payloadType: "contestantFinished",
+      contestantId: contestant.contestantId,
+      stage: "beforeDispatch",
+      traceId: null,
+      status: "failed",
+      failureCode: "unknown",
+      finalHead: builder.lock.base.revision,
+      finalWorkspaceFingerprintSha256: builder.lock.base.baseContentSha256,
+      outputSha256: digest("recovered-output"),
+      outputBytes: 0,
+    }, "event-recovered-finish");
+    builder.append("arenaEvidencePreserved", {
+      payloadType: "evidencePreserved",
+      contestantId: contestant.contestantId,
+      artifactSetSha256: digest("recovered-artifacts"),
+      receiptsRootSha256: arenaReceiptsRootSha256({
+        finished,
+        verifications: new Map(),
+        browserJourneys: new Map(),
+      }),
+      patchSha256: digest("recovered-patch"),
+      patchBytes: 0,
+      untrackedArchiveSha256: null,
+      untrackedArchiveBytes: 0,
+      inventorySha256: digest("recovered-inventory"),
+      quiescenceReceiptSha256: null,
+      quiescenceWorkspaceFingerprintSha256: null,
+      finalHead: builder.lock.base.revision,
+      finalWorkspaceFingerprintSha256: builder.lock.base.baseContentSha256,
+    }, "event-recovered-evidence");
+    builder.append("arenaRunFinalized", {
+      payloadType: "runFinalized",
+      outcome: "failed",
+      comparison: "incomplete",
+      reasonCode: "provisioningFailed",
+      evidenceMatrixSha256: null,
+    }, "event-recovered-finalized");
+    builder.append(
+      "arenaCleanupStepRecorded",
+      cleanupPayload(builder, contestant.contestantId, "quiesceProcesses"),
+      "event-recovered-cleanup",
+    );
+    const replay = replayArenaManifest(builder.records);
+    assert.equal(replay.state, "finalized");
+    assert.equal(
+      replay.contestants[0]?.worktreeProvisioned,
+      undefined,
+    );
+    assert.ok(replay.contestants[0]?.worktreeRegistered);
   });
 
   test("treats uncertain termination as a control compromise and stops checks", () => {
@@ -1076,6 +1285,54 @@ describe("Hydra Arena run manifest", () => {
     );
   });
 
+  test("rejects uncertain-termination evidence until typed quiescence replay exists", () => {
+    const builder = new ManifestBuilder();
+    ensureAllWorktreesPrepared(builder);
+    const contestant = builder.lock.contestants[0]!;
+    const started = builder.append(
+      "arenaContestantStarted",
+      contestantStartedPayload(builder, contestant.contestantId),
+      "event-uncertain-evidence-start",
+    );
+    const startedPayload = started.payload as ArenaContestantStartedPayload;
+    const fingerprint = digest("uncertain-evidence-fingerprint");
+    const finished = builder.append("arenaContestantFinished", {
+      payloadType: "contestantFinished",
+      contestantId: contestant.contestantId,
+      stage: "execution",
+      traceId: startedPayload.traceId,
+      status: "deliveryUnknown",
+      failureCode: "terminationUnconfirmed",
+      finalHead: builder.lock.base.revision,
+      finalWorkspaceFingerprintSha256: fingerprint,
+      outputSha256: digest("uncertain-evidence-output"),
+      outputBytes: 0,
+    }, "event-uncertain-evidence-finish");
+    builder.append("arenaEvidencePreserved", {
+      payloadType: "evidencePreserved",
+      contestantId: contestant.contestantId,
+      artifactSetSha256: digest("uncertain-artifacts"),
+      receiptsRootSha256: arenaReceiptsRootSha256({
+        finished,
+        verifications: new Map(),
+        browserJourneys: new Map(),
+      }),
+      patchSha256: digest("uncertain-patch"),
+      patchBytes: 0,
+      untrackedArchiveSha256: null,
+      untrackedArchiveBytes: 0,
+      inventorySha256: digest("uncertain-inventory"),
+      quiescenceReceiptSha256: digest("caller-supplied-quiescence"),
+      quiescenceWorkspaceFingerprintSha256: fingerprint,
+      finalHead: builder.lock.base.revision,
+      finalWorkspaceFingerprintSha256: fingerprint,
+    }, "event-uncertain-evidence");
+    assert.throws(
+      () => replayArenaManifest(builder.records),
+      /typed private process-quiescence receipt/,
+    );
+  });
+
   test("permits partial preservation but requires the exact available receipt root", () => {
     const builder = new ManifestBuilder();
     const contestant = builder.lock.contestants[0]!;
@@ -1117,6 +1374,8 @@ describe("Hydra Arena run manifest", () => {
       untrackedArchiveSha256: null,
       untrackedArchiveBytes: 0,
       inventorySha256: digest("inventory"),
+      quiescenceReceiptSha256: null,
+      quiescenceWorkspaceFingerprintSha256: null,
       finalHead: builder.lock.base.revision,
       finalWorkspaceFingerprintSha256: fingerprint,
     }, "event-evidence");
@@ -1153,7 +1412,20 @@ describe("Hydra Arena run manifest", () => {
     );
   });
 
-  test("allows honest incomplete failure but blocks cleanup without preserved evidence", () => {
+  test("allows only one final postEvidence observation", () => {
+    const builder = new ManifestBuilder();
+    for (const contestant of builder.lock.contestants) {
+      completeContestant(builder, contestant.contestantId);
+    }
+    appendUnchangedObservation(builder, "postEvidence");
+    appendUnchangedObservation(builder, "postEvidence");
+    assert.throws(
+      () => replayArenaManifest(builder.records),
+      /duplicates the single final postEvidence observation/,
+    );
+  });
+
+  test("allows pre-registration failure but refuses to strand a registered target", () => {
     const failed = new ManifestBuilder();
     failed.append("arenaRunFinalized", {
       payloadType: "runFinalized",
@@ -1167,12 +1439,36 @@ describe("Hydra Arena run manifest", () => {
     assert.equal(replay.promotionEligible, false);
 
     failed.append("arenaCleanupStepRecorded", cleanupPayload(
+      failed,
       "contestant-codex",
       "quiesceProcesses",
     ), "event-cleanup");
     assert.throws(
       () => replayArenaManifest(failed.records),
-      /cleanup start rejected: worktreeNotProvisioned/,
+      /cleanup start rejected: worktreeNotRegistered/,
+    );
+
+    const stranded = new ManifestBuilder();
+    ensureMonitorStarted(stranded);
+    const contestant = stranded.lock.contestants[0]!;
+    stranded.append("arenaWorktreeRegistered", {
+      payloadType: "worktreeRegistered",
+      contestantId: contestant.contestantId,
+      worktreeId: contestant.worktreeId,
+      baseRevision: stranded.lock.base.revision,
+      registrationSha256: digest("stranded-registration"),
+      initialFingerprintSha256: stranded.lock.base.baseContentSha256,
+    }, "event-stranded-registration");
+    stranded.append("arenaRunFinalized", {
+      payloadType: "runFinalized",
+      outcome: "failed",
+      comparison: "incomplete",
+      reasonCode: "provisioningFailed",
+      evidenceMatrixSha256: null,
+    }, "event-stranded-finalized");
+    assert.throws(
+      () => replayArenaManifest(stranded.records),
+      /require terminal evidence for every registered cleanup target/,
     );
   });
 
@@ -1200,7 +1496,7 @@ describe("Hydra Arena run manifest", () => {
     completeContestant(beforeFinal, "contestant-codex");
     beforeFinal.append(
       "arenaCleanupStepRecorded",
-      cleanupPayload("contestant-codex", "quiesceProcesses"),
+      cleanupPayload(builder, "contestant-codex", "quiesceProcesses"),
       "event-cleanup-early",
     );
     assert.throws(() => replayArenaManifest(beforeFinal.records), /before run finalization/);
@@ -1210,14 +1506,14 @@ describe("Hydra Arena run manifest", () => {
     const builder = completeComparableRun();
     builder.append(
       "arenaCleanupStepRecorded",
-      cleanupPayload("contestant-codex", "quiesceProcesses", {
+      cleanupPayload(builder, "contestant-codex", "quiesceProcesses", {
         cleanupId: "shared-cleanup",
       }),
       "event-cleanup-codex",
     );
     builder.append(
       "arenaCleanupStepRecorded",
-      cleanupPayload("contestant-claude", "quiesceProcesses", {
+      cleanupPayload(builder, "contestant-claude", "quiesceProcesses", {
         cleanupId: "shared-cleanup",
       }),
       "event-cleanup-claude",
@@ -1251,17 +1547,13 @@ describe("Hydra Arena run manifest", () => {
     const wrongBase = new ManifestBuilder();
     const wrongBaseContestant = wrongBase.lock.contestants[0]!;
     ensureMonitorStarted(wrongBase);
-    wrongBase.append("arenaWorktreeProvisioned", {
-      payloadType: "worktreeProvisioned",
+    wrongBase.append("arenaWorktreeRegistered", {
+      payloadType: "worktreeRegistered",
       contestantId: wrongBaseContestant.contestantId,
       worktreeId: wrongBaseContestant.worktreeId,
       baseRevision: wrongBase.lock.base.revision,
       registrationSha256: digest("wrong-base-registration"),
       initialFingerprintSha256: digest("not-the-base"),
-      preparationPlanSha256: null,
-      preparationStatus: "succeeded",
-      preparationReceiptSha256: null,
-      preparedFingerprintSha256: digest("not-the-base"),
     }, "event-wrong-base");
     assert.throws(
       () => replayArenaManifest(wrongBase.records),

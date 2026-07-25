@@ -12,12 +12,15 @@ suite("Hydra extension host", () => {
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     assert.ok(workspaceRoot, "extension-host test workspace was not opened");
     hydraDir = path.join(workspaceRoot, ".hydra");
-    await fs.rm(hydraDir, { recursive: true, force: true });
+    await vscode.workspace
+      .getConfiguration("hydraRoom")
+      .update("autopilotOnStart", false, vscode.ConfigurationTarget.Global);
+    await removeHydraDir(hydraDir);
   });
 
   suiteTeardown(async () => {
     await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
-    if (hydraDir) await fs.rm(hydraDir, { recursive: true, force: true });
+    if (hydraDir) await removeHydraDir(hydraDir);
   });
 
   test("activates and registers the public command surface", async () => {
@@ -40,6 +43,7 @@ suite("Hydra extension host", () => {
       "hydraRoom.openDuelAudit",
       "hydraRoom.correctDuelResult",
       "hydraRoom.runMissionFlightSmokeTest",
+      "hydraRoom.runArenaSmokeTest",
     ]) {
       assert.ok(commands.has(command), `${command} was not registered`);
     }
@@ -58,6 +62,19 @@ suite("Hydra extension host", () => {
     await vscode.commands.executeCommand("hydraRoom.runMissionFlightSmokeTest");
     await waitForText(transcript, /Mission\/Flight smoke test passed\./);
   });
+
+  test("runs the isolated Arena worktree smoke command in the extension host", async function () {
+    this.timeout(180_000);
+    const transcript = path.join(hydraDir, "transcript.md");
+    await vscode.commands.executeCommand(
+      "hydraRoom.runArenaSmokeTest",
+    );
+    await waitForText(
+      transcript,
+      /Arena worktree smoke test passed\./,
+      150_000,
+    );
+  });
 });
 
 async function waitForFile(filePath) {
@@ -73,16 +90,31 @@ async function waitForFile(filePath) {
   assert.fail(`timed out waiting for ${filePath}`);
 }
 
-async function waitForText(filePath, pattern) {
-  const deadline = Date.now() + 15_000;
+async function removeHydraDir(directory) {
+  await fs.rm(directory, {
+    recursive: true,
+    force: true,
+    maxRetries: 20,
+    retryDelay: 100,
+  });
+}
+
+async function waitForText(filePath, pattern, timeoutMs = 15_000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastContent = "";
   while (Date.now() < deadline) {
     try {
       const content = await fs.readFile(filePath, "utf8");
+      lastContent = content;
       if (pattern.test(content)) return;
     } catch {
       // The room may still be replacing its transcript atomically.
     }
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  assert.fail(`timed out waiting for ${pattern} in ${filePath}`);
+  assert.fail(
+    `timed out waiting for ${pattern} in ${filePath}; last transcript tail: ${
+      lastContent.slice(-2_000)
+    }`,
+  );
 }

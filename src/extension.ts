@@ -612,6 +612,19 @@ export function activate(context: vscode.ExtensionContext): void {
       })
     ),
     vscode.commands.registerCommand(
+      "hydraRoom.runArenaSmokeTest",
+      withErrorReporting(async () => {
+        if (vscode.workspace.isTrusted !== true) {
+          await vscode.window.showWarningMessage(
+            "Hydra Arena worktree smoke test requires a trusted workspace.",
+          );
+          return;
+        }
+        const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
+        await panel.runArenaSmokeTest();
+      })
+    ),
+    vscode.commands.registerCommand(
       "hydraRoom.runManyHeadsSmokeTest",
       withErrorReporting(async () => {
         if (vscode.workspace.isTrusted !== true) {

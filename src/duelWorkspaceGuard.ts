@@ -49,7 +49,25 @@ export interface DuelWorkspaceFingerprintOptions {
   maxTotalFileBytes?: number;
   maxGitOutputBytes?: number;
   gitTimeoutMs?: number;
+  /**
+   * Optional broker-owned Git runner. Arena supplies its hardened runner so
+   * fingerprint capture cannot silently spawn through a weaker process path.
+   */
+  gitRunner?: DuelWorkspaceGitRunner;
 }
+
+export interface DuelWorkspaceGitRunnerResult {
+  readonly stdout: Buffer;
+}
+
+export type DuelWorkspaceGitRunner = (
+  cwd: string,
+  args: readonly string[],
+  options: {
+    readonly maxStdoutBytes: number;
+    readonly timeoutMs: number;
+  },
+) => Promise<DuelWorkspaceGitRunnerResult>;
 
 export interface DuelWorkspaceFingerprint {
   version: typeof DUEL_WORKSPACE_FINGERPRINT_VERSION;
@@ -120,8 +138,10 @@ export async function captureDuelWorkspaceFingerprint(
   const root = path.resolve(workspaceRoot);
   await assertUnlinkedWorkspaceRoot(root);
 
-  const gitExecutable = await resolveGitExecutable(root);
-  if (!gitExecutable) {
+  const gitExecutable = options.gitRunner
+    ? undefined
+    : await resolveGitExecutable(root);
+  if (!gitExecutable && !options.gitRunner) {
     throw new DuelWorkspaceIntegrityError(
       "gitUnavailable",
       "Git is unavailable or workspace Git execution is not trusted.",
@@ -136,6 +156,7 @@ export async function captureDuelWorkspaceFingerprint(
     limits,
     budget,
     256,
+    options.gitRunner,
   );
   const head = headOutput.toString("ascii").trim();
   if (!/^[0-9a-f]{40,64}$/.test(head)) {
@@ -148,6 +169,7 @@ export async function captureDuelWorkspaceFingerprint(
     ["ls-files", "--cached", "--stage", "-z", "--"],
     limits,
     budget,
+    options.gitRunner,
   );
   const indexEntries = indexRecords.map(parseIndexEntry);
   const trackedPaths = uniqueSortedPaths(indexEntries.map((entry) => entry.gitPath));
@@ -158,6 +180,7 @@ export async function captureDuelWorkspaceFingerprint(
     ["ls-files", "--others", "--exclude-standard", "-z", "--"],
     limits,
     budget,
+    options.gitRunner,
   );
   const untrackedPaths = uniqueSortedPaths(untrackedRecords.map(decodeGitPath));
   if (trackedPaths.length + untrackedPaths.length > limits.maxFiles) {
@@ -186,6 +209,7 @@ export async function captureDuelWorkspaceFingerprint(
         ["diff", "--name-only", "--no-ext-diff", "--no-textconv", "-z", "HEAD", "--"],
         limits,
         budget,
+        options.gitRunner,
       )).map(decodeGitPath))
     : trackedPaths;
   if (options.hashOnlyChangedTrackedFiles) {
@@ -449,12 +473,13 @@ function sanitizedGitEnvironment(): NodeJS.ProcessEnv {
 }
 
 async function runGitBounded(
-  gitExecutable: string,
+  gitExecutable: string | undefined,
   cwd: string,
   args: readonly string[],
   limits: RequiredFingerprintOptions,
   budget: CaptureBudget,
   commandOutputLimit: number,
+  gitRunner?: DuelWorkspaceGitRunner,
 ): Promise<Buffer> {
   const chunks: Buffer[] = [];
   let outputBytes = 0;
@@ -467,16 +492,17 @@ async function runGitBounded(
       );
     }
     chunks.push(Buffer.from(chunk));
-  });
+  }, gitRunner);
   return Buffer.concat(chunks, outputBytes);
 }
 
 async function runGitNulRecords(
-  gitExecutable: string,
+  gitExecutable: string | undefined,
   cwd: string,
   args: readonly string[],
   limits: RequiredFingerprintOptions,
   budget: CaptureBudget,
+  gitRunner?: DuelWorkspaceGitRunner,
 ): Promise<Buffer[]> {
   const records: Buffer[] = [];
   let parts: Buffer[] = [];
@@ -503,7 +529,7 @@ async function runGitNulRecords(
       recordBytes = 0;
       offset = nul + 1;
     }
-  });
+  }, gitRunner);
   if (recordBytes !== 0 || parts.length !== 0) {
     throw new DuelWorkspaceIntegrityError("gitFailed", "Git emitted an unterminated path record.");
   }
@@ -511,13 +537,35 @@ async function runGitNulRecords(
 }
 
 async function runGitStreaming(
-  gitExecutable: string,
+  gitExecutable: string | undefined,
   cwd: string,
   args: readonly string[],
   limits: RequiredFingerprintOptions,
   budget: CaptureBudget,
   onStdout: (chunk: Buffer) => void,
+  gitRunner?: DuelWorkspaceGitRunner,
 ): Promise<void> {
+  if (gitRunner) {
+    const result = await gitRunner(cwd, args, {
+      maxStdoutBytes: limits.maxGitOutputBytes - budget.gitOutputBytes,
+      timeoutMs: limits.gitTimeoutMs,
+    });
+    budget.gitOutputBytes += result.stdout.length;
+    if (budget.gitOutputBytes > limits.maxGitOutputBytes) {
+      throw new DuelWorkspaceIntegrityError(
+        "gitOutputTooLarge",
+        `Git output exceeded ${limits.maxGitOutputBytes} bytes.`,
+      );
+    }
+    onStdout(result.stdout);
+    return;
+  }
+  if (!gitExecutable) {
+    throw new DuelWorkspaceIntegrityError(
+      "gitUnavailable",
+      "Git is unavailable for fingerprint capture.",
+    );
+  }
   await new Promise<void>((resolve, reject) => {
     const child = cp.spawn(gitExecutable, [...SAFE_GIT_PREFIX, ...args], {
       cwd,

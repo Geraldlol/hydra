@@ -129,6 +129,15 @@ export type ArenaPreparationStatus =
   | "cancelled"
   | "timedOut";
 
+export interface ArenaWorktreeRegisteredPayload {
+  readonly payloadType: "worktreeRegistered";
+  readonly contestantId: string;
+  readonly worktreeId: string;
+  readonly baseRevision: ArenaGitObjectId;
+  readonly registrationSha256: string;
+  readonly initialFingerprintSha256: string;
+}
+
 export interface ArenaWorktreeProvisionedPayload {
   readonly payloadType: "worktreeProvisioned";
   readonly contestantId: string;
@@ -242,6 +251,8 @@ export interface ArenaEvidencePreservedPayload {
   readonly untrackedArchiveSha256: string | null;
   readonly untrackedArchiveBytes: number;
   readonly inventorySha256: string;
+  readonly quiescenceReceiptSha256: string | null;
+  readonly quiescenceWorkspaceFingerprintSha256: string | null;
   readonly finalHead: ArenaGitObjectId;
   readonly finalWorkspaceFingerprintSha256: string;
 }
@@ -292,6 +303,7 @@ export interface ArenaRunFinalizedPayload {
 export type ArenaManifestEventType =
   | "arenaRunLocked"
   | "arenaMainWorkspaceObserved"
+  | "arenaWorktreeRegistered"
   | "arenaWorktreeProvisioned"
   | "arenaContestantStarted"
   | "arenaContestantFinished"
@@ -304,6 +316,7 @@ export type ArenaManifestEventType =
 export type ArenaManifestPayload =
   | ArenaRunLockedPayload
   | ArenaMainWorkspaceObservedPayload
+  | ArenaWorktreeRegisteredPayload
   | ArenaWorktreeProvisionedPayload
   | ArenaContestantStartedPayload
   | ArenaContestantFinishedPayload
@@ -340,6 +353,7 @@ export interface ArenaBrowserJourneyReplay {
 
 export interface ArenaContestantReplay {
   readonly lock: ArenaContestantLock;
+  readonly worktreeRegistered?: ArenaManifestEvent;
   readonly worktreeProvisioned?: ArenaManifestEvent;
   readonly started?: ArenaManifestEvent;
   readonly finished?: ArenaManifestEvent;
@@ -380,6 +394,7 @@ const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const EVENT_TYPES = new Set<ArenaManifestEventType>([
   "arenaRunLocked",
   "arenaMainWorkspaceObserved",
+  "arenaWorktreeRegistered",
   "arenaWorktreeProvisioned",
   "arenaContestantStarted",
   "arenaContestantFinished",
@@ -480,6 +495,7 @@ const FINALIZATION_REASONS = new Set<ArenaFinalizationReason>([
 
 interface MutableContestantReplay {
   readonly lock: ArenaContestantLock;
+  worktreeRegistered?: ArenaManifestEvent;
   worktreeProvisioned?: ArenaManifestEvent;
   started?: ArenaManifestEvent;
   finished?: ArenaManifestEvent;
@@ -679,6 +695,7 @@ export function replayArenaManifest(values: readonly unknown[]): ArenaManifestRe
   let latestEvidenceSequence = 0;
   let monitorEpochId: string | undefined;
   let preparedFingerprintSha256: string | undefined;
+  let postEvidenceObservation: ArenaManifestEvent | undefined;
 
   records.slice(1).forEach((record, offset) => {
     const index = offset + 1;
@@ -717,6 +734,12 @@ export function replayArenaManifest(values: readonly unknown[]): ArenaManifestRe
             || record.sequence <= latestEvidenceSequence)) {
           invalid(label, "postEvidence requires durable evidence recorded earlier");
         }
+        if (payload.observationKind === "postEvidence") {
+          if (postEvidenceObservation) {
+            invalid(label, "duplicates the single final postEvidence observation");
+          }
+          postEvidenceObservation = record;
+        }
       }
       mainWorkspaceObservations.push(record);
       if (payload.status === "unchanged") {
@@ -739,13 +762,20 @@ export function replayArenaManifest(values: readonly unknown[]): ArenaManifestRe
       const comparisonComplete = [...contestants.values()].every((contestant) =>
         hasComparableContestantEvidence(lock, contestant));
       const finalObservation = mainWorkspaceObservations.at(-1);
-      const finalObservationIsFresh = finalObservation !== undefined
-        && finalObservation.sequence > latestEvidenceSequence
-        && (finalObservation.payload as ArenaMainWorkspaceObservedPayload)
-          .observationKind === "postEvidence";
-      const finalObservationUnchanged = finalObservationIsFresh
-        && (finalObservation.payload as ArenaMainWorkspaceObservedPayload).status === "unchanged";
+      const postEvidenceIsFresh = postEvidenceObservation !== undefined
+        && postEvidenceObservation.sequence > latestEvidenceSequence;
+      const finalObservationUnchanged =
+        postEvidenceObservation !== undefined
+        && finalObservation === postEvidenceObservation
+        && postEvidenceIsFresh
+        && (postEvidenceObservation.payload as ArenaMainWorkspaceObservedPayload)
+          .status === "unchanged";
       const compromised = compromiseReasons.size > 0;
+      const registeredRecoveryComplete = [...contestants.values()]
+        .every((contestant) =>
+          contestant.worktreeRegistered === undefined
+          || (contestant.finished !== undefined
+            && contestant.evidencePreserved !== undefined));
 
       if (payload.outcome === "completed") {
         if (!comparisonComplete) {
@@ -754,7 +784,7 @@ export function replayArenaManifest(values: readonly unknown[]): ArenaManifestRe
             "completed requires successful executions and durable complete evidence",
           );
         }
-        if (!finalObservationIsFresh) {
+        if (!postEvidenceIsFresh) {
           invalid(
             label,
             "completed requires a postEvidence source observation after durable evidence",
@@ -765,7 +795,7 @@ export function replayArenaManifest(values: readonly unknown[]): ArenaManifestRe
         }
         const expectedMatrixSha256 = evidenceMatrixSha256ForReplay(
           first,
-          finalObservation!,
+          postEvidenceObservation!,
           lock,
           contestants,
         );
@@ -779,6 +809,12 @@ export function replayArenaManifest(values: readonly unknown[]): ArenaManifestRe
           invalid(`${label}.payload.comparison`, "completed cannot be incomplete");
         }
       } else {
+        if (!registeredRecoveryComplete) {
+          invalid(
+            label,
+            "cancelled/failed runs require terminal evidence for every registered cleanup target",
+          );
+        }
         if (payload.comparison !== "incomplete"
           || payload.reasonCode === null
           || payload.evidenceMatrixSha256 !== null) {
@@ -817,11 +853,23 @@ export function replayArenaManifest(values: readonly unknown[]): ArenaManifestRe
       const start = evaluateArenaCleanupStart({
         manifestValid: true,
         runFinalized: true,
-        worktreeProvisioned: contestant.worktreeProvisioned !== undefined,
+        worktreeRegistered: contestant.worktreeRegistered !== undefined,
         evidencePreserved: contestant.evidencePreserved !== undefined,
       });
       if (!start.allowed) {
         invalid(label, `cleanup start rejected: ${start.reason}`);
+      }
+      const registration = contestant.worktreeRegistered!.payload as
+        ArenaWorktreeRegisteredPayload;
+      if (payload.runId !== record.runId
+        || payload.registrationSha256
+          !== registration.registrationSha256
+        || payload.evidenceEventSha256
+          !== contestant.evidencePreserved!.eventSha256) {
+        invalid(
+          label,
+          "cleanup receipt does not bind the run registration and preserved evidence",
+        );
       }
       const priorOwner = cleanupOwners.get(payload.cleanupId);
       if (priorOwner !== undefined && priorOwner !== payload.contestantId) {
@@ -830,7 +878,11 @@ export function replayArenaManifest(values: readonly unknown[]): ArenaManifestRe
       cleanupOwners.set(payload.cleanupId, payload.contestantId);
       contestant.cleanupRecords.push(payload);
       try {
-        replayArenaCleanupSteps(payload.contestantId, contestant.cleanupRecords);
+        replayArenaCleanupSteps(
+          record.runId,
+          payload.contestantId,
+          contestant.cleanupRecords,
+        );
       } catch (error) {
         invalid(
           label,
@@ -846,21 +898,21 @@ export function replayArenaManifest(values: readonly unknown[]): ArenaManifestRe
       invalid(label, "contestant records cannot follow durable evidence preservation");
     }
 
-    if (record.type === "arenaWorktreeProvisioned") {
+    if (record.type === "arenaWorktreeRegistered") {
       if (monitorEpochId === undefined) {
         invalid(label, "requires a pre-provision monitor start");
       }
-      if (compromiseReasons.size > 0) {
-        invalid(label, "cannot provision after a control compromise is latched");
-      }
-      if ([...contestants.values()].some((candidate) =>
-        candidate.started !== undefined || candidate.finished !== undefined)) {
-        invalid(label, "all worktrees must be prepared before any contestant dispatch");
+      // A durable registration receipt can precede this manifest event across
+      // a crash. Permit exact cleanup-target reconciliation any time before
+      // finalization, including after another contestant terminalized or a
+      // compromise latched. Provision/dispatch rules below remain strict.
+      if (contestant.worktreeRegistered) {
+        invalid(label, "duplicates worktree registration");
       }
       if (contestant.worktreeProvisioned) {
         invalid(label, "duplicates worktree provisioning");
       }
-      const payload = record.payload as ArenaWorktreeProvisionedPayload;
+      const payload = record.payload as ArenaWorktreeRegisteredPayload;
       if (payload.worktreeId !== contestant.lock.worktreeId) {
         invalid(`${label}.payload.worktreeId`, "does not match the locked worktree");
       }
@@ -873,13 +925,55 @@ export function replayArenaManifest(values: readonly unknown[]): ArenaManifestRe
           "does not match the locked base content",
         );
       }
-      if (payload.preparationPlanSha256 !== lock.preparationPlanSha256) {
-        invalid(`${label}.payload.preparationPlanSha256`, "does not match the locked plan");
-      }
       if (registrationHashes.has(payload.registrationSha256)) {
         invalid(`${label}.payload.registrationSha256`, "duplicates a worktree registration");
       }
       registrationHashes.add(payload.registrationSha256);
+      contestant.worktreeRegistered = record;
+      return;
+    }
+
+    if (record.type === "arenaWorktreeProvisioned") {
+      if (monitorEpochId === undefined) {
+        invalid(label, "requires a pre-provision monitor start");
+      }
+      if (compromiseReasons.size > 0) {
+        invalid(label, "cannot provision after a control compromise is latched");
+      }
+      if ([...contestants.values()].some((candidate) =>
+        candidate.started !== undefined || candidate.finished !== undefined)) {
+        invalid(label, "all worktrees must be prepared before any contestant dispatch");
+      }
+      if (!contestant.worktreeRegistered) {
+        invalid(label, "requires a durable worktree registration");
+      }
+      if (contestant.worktreeProvisioned) {
+        invalid(label, "duplicates worktree provisioning");
+      }
+      const payload = record.payload as ArenaWorktreeProvisionedPayload;
+      const registered = contestant.worktreeRegistered
+        .payload as ArenaWorktreeRegisteredPayload;
+      if (payload.worktreeId !== contestant.lock.worktreeId
+        || payload.worktreeId !== registered.worktreeId) {
+        invalid(`${label}.payload.worktreeId`, "does not match the registered worktree");
+      }
+      if (!sameGitObject(payload.baseRevision, lock.base.revision)
+        || !sameGitObject(payload.baseRevision, registered.baseRevision)) {
+        invalid(`${label}.payload.baseRevision`, "does not match the registered base");
+      }
+      if (payload.registrationSha256 !== registered.registrationSha256) {
+        invalid(`${label}.payload.registrationSha256`, "does not match durable registration");
+      }
+      if (payload.initialFingerprintSha256
+        !== registered.initialFingerprintSha256) {
+        invalid(
+          `${label}.payload.initialFingerprintSha256`,
+          "does not match the registered initial fingerprint",
+        );
+      }
+      if (payload.preparationPlanSha256 !== lock.preparationPlanSha256) {
+        invalid(`${label}.payload.preparationPlanSha256`, "does not match the locked plan");
+      }
       if (payload.preparationStatus === "succeeded") {
         preparedFingerprintSha256 ??= payload.preparedFingerprintSha256;
         if (payload.preparedFingerprintSha256 !== preparedFingerprintSha256) {
@@ -936,28 +1030,30 @@ export function replayArenaManifest(values: readonly unknown[]): ArenaManifestRe
       if (contestant.finished) invalid(label, "duplicates contestant finish");
       const payload = record.payload as ArenaContestantFinishedPayload;
       if (payload.stage === "beforeDispatch") {
-        if (!contestant.worktreeProvisioned) {
-          invalid(label, "beforeDispatch requires a provisioned worktree");
+        if (!contestant.worktreeRegistered) {
+          invalid(label, "beforeDispatch requires a registered worktree");
         }
         if (contestant.started) {
           invalid(label, "beforeDispatch cannot follow a contestant start");
         }
-        const provisioned = contestant.worktreeProvisioned
-          .payload as ArenaWorktreeProvisionedPayload;
-        if (provisioned.preparationStatus === "failed"
-          && (payload.status !== "failed"
-            || payload.failureCode !== "preparationFailed")) {
-          invalid(label, "failed preparation requires a preparationFailed terminal");
-        }
-        if (provisioned.preparationStatus === "cancelled"
-          && (payload.status !== "cancelled"
-            || payload.failureCode !== "cancelled")) {
-          invalid(label, "cancelled preparation requires a cancelled terminal");
-        }
-        if (provisioned.preparationStatus === "timedOut"
-          && (payload.status !== "timedOut"
-            || payload.failureCode !== "timeout")) {
-          invalid(label, "timed-out preparation requires a timedOut terminal");
+        if (contestant.worktreeProvisioned) {
+          const provisioned = contestant.worktreeProvisioned
+            .payload as ArenaWorktreeProvisionedPayload;
+          if (provisioned.preparationStatus === "failed"
+            && (payload.status !== "failed"
+              || payload.failureCode !== "preparationFailed")) {
+            invalid(label, "failed preparation requires a preparationFailed terminal");
+          }
+          if (provisioned.preparationStatus === "cancelled"
+            && (payload.status !== "cancelled"
+              || payload.failureCode !== "cancelled")) {
+            invalid(label, "cancelled preparation requires a cancelled terminal");
+          }
+          if (provisioned.preparationStatus === "timedOut"
+            && (payload.status !== "timedOut"
+              || payload.failureCode !== "timeout")) {
+            invalid(label, "timed-out preparation requires a timedOut terminal");
+          }
         }
       } else {
         if (!contestant.started) invalid(label, "execution requires a contestant start");
@@ -968,6 +1064,11 @@ export function replayArenaManifest(values: readonly unknown[]): ArenaManifestRe
       }
       if (!sameGitObject(payload.finalHead, lock.base.revision)) {
         compromiseReasons.add("contestantHeadChanged");
+      }
+      if (payload.stage === "beforeDispatch"
+        && payload.finalWorkspaceFingerprintSha256
+          !== lock.base.baseContentSha256) {
+        compromiseReasons.add("preparationStateMismatch");
       }
       if (payload.status === "deliveryUnknown"
         || payload.failureCode === "terminationUnconfirmed") {
@@ -1048,20 +1149,38 @@ export function replayArenaManifest(values: readonly unknown[]): ArenaManifestRe
     if (!sameGitObject(payload.finalHead, lock.base.revision)) {
       compromiseReasons.add("contestantHeadChanged");
     }
+    const terminal = finished;
+    const uncertainTermination = terminal.status === "deliveryUnknown"
+      || terminal.failureCode === "terminationUnconfirmed"
+      || terminal.failureCode === "deliveryUnknown";
+    if (uncertainTermination) {
+      invalid(
+        label,
+        "uncertain termination evidence remains disabled until a typed private process-quiescence receipt is replay-validated",
+      );
+    } else if ((payload.quiescenceReceiptSha256 === null)
+      !== (payload.quiescenceWorkspaceFingerprintSha256 === null)) {
+      invalid(
+        label,
+        "quiescence receipt and fingerprint must both be present or both be null",
+      );
+    }
     contestant.evidencePreserved = record;
     latestEvidenceSequence = Math.max(latestEvidenceSequence, record.sequence);
   });
 
   const contestantReplays = [...contestants.values()].map((contestant) =>
-    freezeContestantReplay(lock, contestant));
+    freezeContestantReplay(runId!, lock, contestant));
   const cleanupTargets = contestantReplays
-    .filter((contestant) => contestant.worktreeProvisioned !== undefined);
+    .filter((contestant) => contestant.worktreeRegistered !== undefined);
   const cleanupBlocked = cleanupTargets.some((contestant) =>
     contestant.cleanup.status === "blocked");
   const cleanupComplete = cleanupTargets.length > 0
     && cleanupTargets.every((contestant) => contestant.cleanup.status === "complete");
   const anyStarted = contestantReplays.some((contestant) =>
-    contestant.worktreeProvisioned !== undefined || contestant.started !== undefined);
+    contestant.worktreeRegistered !== undefined
+      || contestant.worktreeProvisioned !== undefined
+      || contestant.started !== undefined);
   const state: ArenaManifestReplay["state"] = finalization
     ? cleanupBlocked
       ? "cleanupBlocked"
@@ -1197,6 +1316,8 @@ function parsePayload(
       return parseRunLocked(value, label);
     case "arenaMainWorkspaceObserved":
       return parseMainWorkspaceObserved(value, label);
+    case "arenaWorktreeRegistered":
+      return parseWorktreeRegistered(value, label);
     case "arenaWorktreeProvisioned":
       return parseWorktreeProvisioned(value, label);
     case "arenaContestantStarted":
@@ -1507,6 +1628,35 @@ function parseWorktreeProvisioned(
   });
 }
 
+function parseWorktreeRegistered(
+  value: unknown,
+  label: string,
+): ArenaWorktreeRegisteredPayload {
+  const row = exactRecord(value, [
+    "payloadType",
+    "contestantId",
+    "worktreeId",
+    "baseRevision",
+    "registrationSha256",
+    "initialFingerprintSha256",
+  ], label);
+  literal(row.payloadType, "worktreeRegistered", `${label}.payloadType`);
+  return deepFreeze({
+    payloadType: "worktreeRegistered",
+    contestantId: identifier(row.contestantId, `${label}.contestantId`),
+    worktreeId: identifier(row.worktreeId, `${label}.worktreeId`),
+    baseRevision: parseGitObject(row.baseRevision, `${label}.baseRevision`),
+    registrationSha256: sha256(
+      row.registrationSha256,
+      `${label}.registrationSha256`,
+    ),
+    initialFingerprintSha256: sha256(
+      row.initialFingerprintSha256,
+      `${label}.initialFingerprintSha256`,
+    ),
+  });
+}
+
 function parseContestantStarted(
   value: unknown,
   label: string,
@@ -1741,6 +1891,8 @@ function parseEvidencePreserved(
     "untrackedArchiveSha256",
     "untrackedArchiveBytes",
     "inventorySha256",
+    "quiescenceReceiptSha256",
+    "quiescenceWorkspaceFingerprintSha256",
     "finalHead",
     "finalWorkspaceFingerprintSha256",
   ], label);
@@ -1756,6 +1908,18 @@ function parseEvidencePreserved(
   if ((untrackedArchiveSha256 === null) !== (untrackedArchiveBytes === 0)) {
     invalid(label, "untracked archive hash is null exactly when its byte count is zero");
   }
+  const quiescenceReceiptSha256 = nullableSha256(
+    row.quiescenceReceiptSha256,
+    `${label}.quiescenceReceiptSha256`,
+  );
+  const quiescenceWorkspaceFingerprintSha256 = nullableSha256(
+    row.quiescenceWorkspaceFingerprintSha256,
+    `${label}.quiescenceWorkspaceFingerprintSha256`,
+  );
+  if ((quiescenceReceiptSha256 === null)
+    !== (quiescenceWorkspaceFingerprintSha256 === null)) {
+    invalid(label, "quiescence receipt and fingerprint must both be present or both be null");
+  }
   return deepFreeze({
     payloadType: "evidencePreserved",
     contestantId: identifier(row.contestantId, `${label}.contestantId`),
@@ -1766,6 +1930,8 @@ function parseEvidencePreserved(
     untrackedArchiveSha256,
     untrackedArchiveBytes,
     inventorySha256: sha256(row.inventorySha256, `${label}.inventorySha256`),
+    quiescenceReceiptSha256,
+    quiescenceWorkspaceFingerprintSha256,
     finalHead: parseGitObject(row.finalHead, `${label}.finalHead`),
     finalWorkspaceFingerprintSha256: sha256(
       row.finalWorkspaceFingerprintSha256,
@@ -2003,15 +2169,20 @@ function allowedFinalizationReasons(
 }
 
 function freezeContestantReplay(
+  runId: string,
   lock: ArenaRunLockedPayload,
   contestant: MutableContestantReplay,
 ): ArenaContestantReplay {
   const cleanup = replayArenaCleanupSteps(
+    runId,
     contestant.lock.contestantId,
     contestant.cleanupRecords,
   );
   return deepFreeze({
     lock: contestant.lock,
+    ...(contestant.worktreeRegistered
+      ? { worktreeRegistered: contestant.worktreeRegistered }
+      : {}),
     ...(contestant.worktreeProvisioned
       ? { worktreeProvisioned: contestant.worktreeProvisioned }
       : {}),

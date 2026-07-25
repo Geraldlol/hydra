@@ -287,6 +287,11 @@
         "title": "Hydra: Advanced: Run Mission + Flight Recorder Smoke Test"
       },
       {
+        "command": "hydraRoom.runArenaSmokeTest",
+        "title": "Hydra: Advanced: Run Arena Worktree Smoke Test",
+        "enablement": "isWorkspaceTrusted"
+      },
+      {
         "command": "hydraRoom.runManyHeadsSmokeTest",
         "title": "Hydra: Advanced: Run Claude Worker Fanout Smoke Test",
         "enablement": "isWorkspaceTrusted"
