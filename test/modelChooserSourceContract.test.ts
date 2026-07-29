@@ -15,7 +15,7 @@ describe("model chooser source contract", () => {
     const source = modelChooser();
     assert.match(source, /label:\s*"claude-fable-5"/, "Fable 5 missing from Claude presets");
     assert.match(source, /label:\s*"claude-sonnet-5"/, "Sonnet 5 missing from Claude presets");
-    assert.match(source, /label:\s*"claude-opus-4-8"/, "Opus 4.8 missing from Claude presets");
+    assert.match(source, /label:\s*"claude-opus-5"/, "Opus 5 missing from Claude presets");
   });
 
   test("Claude presets expose the never-stale family aliases", () => {

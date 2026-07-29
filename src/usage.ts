@@ -124,6 +124,7 @@ export const DEFAULT_MODEL_PRICES: Record<string, ModelPrices> = {
   "claude-sonnet-4-6": { inputPerMTok: 3, outputPerMTok: 15, cacheReadPerMTok: 0.3, cacheCreatePerMTok: 3.75 },
   "claude-sonnet-4-5": { inputPerMTok: 3, outputPerMTok: 15, cacheReadPerMTok: 0.3, cacheCreatePerMTok: 3.75 },
   opus: { inputPerMTok: 5, outputPerMTok: 25, cacheReadPerMTok: 0.5, cacheCreatePerMTok: 6.25 },
+  "claude-opus-5": { inputPerMTok: 5, outputPerMTok: 25, cacheReadPerMTok: 0.5, cacheCreatePerMTok: 6.25 },
   "claude-opus-4-8": { inputPerMTok: 5, outputPerMTok: 25, cacheReadPerMTok: 0.5, cacheCreatePerMTok: 6.25 },
   "claude-opus-4-7": { inputPerMTok: 5, outputPerMTok: 25, cacheReadPerMTok: 0.5, cacheCreatePerMTok: 6.25 },
   "claude-opus-4-6": { inputPerMTok: 5, outputPerMTok: 25, cacheReadPerMTok: 0.5, cacheCreatePerMTok: 6.25 },
