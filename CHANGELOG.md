@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.2
+
+- Adds Claude **Opus 5** (`claude-opus-5`) to `Hydra: Choose Model` and the cost-meter defaults; the `opus` family alias remains available for the current Claude Code default.
+
 ## 0.7.0
 
 - Adds a visible, native in-editor browser through VS Code's Integrated Browser, with a room button and command-palette entry plus Simple Browser fallback.
