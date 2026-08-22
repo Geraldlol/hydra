@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentId } from "./phases";
+import type { ArenaLongPathDiagnostics } from "./arenaLongPaths";
 
 export type DoctorStatus = "pass" | "warn" | "fail";
 
@@ -49,6 +50,7 @@ export interface DoctorInput {
   trustWarnings: string[];
   terminalBridge?: TerminalBridgeDoctorResult;
   argsValidation?: DoctorArgsValidation[];
+  arenaLongPaths?: ArenaLongPathDiagnostics;
 }
 
 export interface TrustedSettingInspection {
@@ -134,6 +136,10 @@ export async function runHydraDoctor(input: DoctorInput): Promise<DoctorReport> 
     detail: workspaceRoot || "No workspace folder is available.",
   });
 
+  if (input.arenaLongPaths) {
+    checks.push(arenaLongPathsCheck(input.arenaLongPaths));
+  }
+
   if (workspaceRoot) {
     checks.push(await checkHydraWritable(workspaceRoot));
   } else {
@@ -199,6 +205,39 @@ export async function runHydraDoctor(input: DoctorInput): Promise<DoctorReport> 
     createdAt: new Date().toISOString(),
     summary,
     checks,
+  };
+}
+
+function arenaLongPathsCheck(
+  diagnostics: ArenaLongPathDiagnostics,
+): DoctorCheck {
+  if (diagnostics.platform !== "win32") {
+    return {
+      id: "arena-long-paths",
+      label: "Arena Windows path budget",
+      status: "pass",
+      detail:
+        "Legacy Windows MAX_PATH is not applicable; Arena still validates tracked-path budgets before provisioning.",
+    };
+  }
+  const ready = diagnostics.windowsRegistryEnabled === true
+    && diagnostics.gitCoreLongpathsEnabled === true;
+  const registry = diagnostics.windowsRegistryEnabled === null
+    ? "unknown"
+    : diagnostics.windowsRegistryEnabled
+      ? "enabled"
+      : "disabled";
+  const git = diagnostics.gitCoreLongpathsEnabled === null
+    ? "unset/unknown"
+    : diagnostics.gitCoreLongpathsEnabled
+      ? "enabled"
+      : "disabled";
+  return {
+    id: "arena-long-paths",
+    label: "Arena Windows path budget",
+    status: ready ? "pass" : "warn",
+    detail:
+      `Windows LongPathsEnabled is ${registry}; Git core.longpaths is ${git}. Hydra still supplies a per-command long-path override and fails closed before worktree creation when its conservative tracked-path budget does not fit.`,
   };
 }
 
