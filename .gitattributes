@@ -1,0 +1,10 @@
+# Why: the repository had no line-ending policy, so checkout behaviour depended
+# on each machine's core.autocrlf. Files committed as LF were checked out as
+# CRLF on Windows, which broke contract tests that match on "\n" — they passed
+# in a working tree that predated the conversion and failed on any fresh clone.
+# Pinning eol=lf makes every checkout match what is stored, on every platform.
+* text=auto eol=lf
+
+# The only binary content tracked here. Declared explicitly so no future
+# text=auto misdetection can corrupt it.
+*.png binary

@@ -3,10 +3,17 @@ import { strict as assert } from "node:assert";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-const panel = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
-const extension = fs.readFileSync(path.join(process.cwd(), "src", "extension.ts"), "utf8");
-const manifest = fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8");
-const motivation = fs.readFileSync(path.join(process.cwd(), "src", "duelMotivation.ts"), "utf8");
+// Line endings are a checkout artifact, not a property of the source: for the
+// same committed bytes git hands a Windows clone CRLF and a Linux one LF. These
+// contract patterns contain literal "\\n", so normalize on read and let the
+// assertions describe the code rather than the clone.
+function readSource(...segments: string[]): string {
+  return fs.readFileSync(path.join(process.cwd(), ...segments), "utf8").replace(/\r\n/g, "\n");
+}
+const panel = readSource("src", "panel.ts");
+const extension = readSource("src", "extension.ts");
+const manifest = readSource("package.json");
+const motivation = readSource("src", "duelMotivation.ts");
 
 function methodSource(startToken: string, endToken: string): string {
   const start = panel.indexOf(startToken);
@@ -208,7 +215,7 @@ describe("formal duel host contracts", () => {
   });
 
   test("shows baseline Elo and exposes a deterministic readiness check without creating a duel", () => {
-    const baselines = fs.readFileSync(path.join(process.cwd(), "src", "duelMotivation.ts"), "utf8");
+    const baselines = readSource("src", "duelMotivation.ts");
     assert.match(baselines, /export function withDuelRatingBaselines\(/);
     assert.match(baselines, /rating: initialRating/);
     assert.match(baselines, /ratedMatches: 0/);

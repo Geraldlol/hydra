@@ -7,7 +7,9 @@ import { HANDOFF_ACTIONS } from "../src/handoffInbox";
 const skillPath = path.join(__dirname, "..", "..", "skills", "hydra-handoff", "SKILL.md");
 
 describe("hydra-handoff skill contract", () => {
-  const skill = fs.readFileSync(skillPath, "utf8");
+  // Same checkout-artifact reasoning as duelPanelSourceContract: the frontmatter
+  // pattern below is anchored on newlines, so normalize CRLF away on read.
+  const skill = fs.readFileSync(skillPath, "utf8").replace(/\r\n/g, "\n");
 
   test("has name + description frontmatter", () => {
     // Why: the literal brief regex required a "\n" immediately before "name:",
