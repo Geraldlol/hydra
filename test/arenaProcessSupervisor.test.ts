@@ -22,6 +22,7 @@ import {
   superviseArenaProcess,
   type ArenaProcessSupervisorInput,
 } from "../src/arenaProcessSupervisor";
+import { HANG_NET_TIMEOUT_MS } from "./testBudgets";
 
 const REGISTRATION_SHA256 = digest("registration");
 const INVOCATION_SHA256 = digest("invocation");
@@ -720,7 +721,7 @@ async function supervisorInput(
     environmentPolicySha256:
       arenaProcessEnvironmentPolicySha256(process.env, true),
     invocationSha256: INVOCATION_SHA256,
-    timeoutMs: 5_000,
+    timeoutMs: HANG_NET_TIMEOUT_MS,
     signal: new AbortController().signal,
     processGenerationId: request.processGenerationId,
     bundledHelper: { scriptPath: helper, scriptFileIdentitySha256 },

@@ -32,6 +32,7 @@ import {
   FileArenaWorktreeRegistrationStore,
   type ArenaWorktreeRegistrationIntent,
 } from "../src/arenaWorktreeRegistration";
+import { HANG_NET_TIMEOUT_MS } from "./testBudgets";
 
 const RUN_ID = "arena-git-run";
 const FIRST_CONTESTANT = "contestant-one";
@@ -1001,7 +1002,7 @@ describe("Arena bounded process runner", () => {
       {
         maxStdoutBytes: 64,
         maxStderrBytes: 64,
-        timeoutMs: 5_000,
+        timeoutMs: HANG_NET_TIMEOUT_MS,
       },
     );
     assert.equal(successful.stdout.toString("utf8"), "arena-ok");
@@ -1033,7 +1034,7 @@ describe("Arena bounded process runner", () => {
         {
           maxStdoutBytes: 32,
           maxStderrBytes: 64,
-          timeoutMs: 5_000,
+          timeoutMs: HANG_NET_TIMEOUT_MS,
         },
       ),
       gitError("gitOutputTooLarge"),

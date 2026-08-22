@@ -24,6 +24,7 @@ import {
   verificationPassed,
   verificationSummary,
 } from "../src/verification";
+import { HANG_NET_TIMEOUT_MS } from "./testBudgets";
 
 async function packageManagerFixture(managers: readonly string[]): Promise<{
   readonly bin: string;
@@ -454,7 +455,7 @@ describe("verification process lifecycle", () => {
       const result = await runVerificationCommand({
         cwd: dir,
         command: `"${process.execPath}" "${script}"`,
-        timeoutMs: 5_000,
+        timeoutMs: HANG_NET_TIMEOUT_MS,
         maxOutputChars: 24,
       });
 
@@ -510,7 +511,7 @@ describe("verification process lifecycle", () => {
       const result = await runVerificationCommand({
         cwd: dir,
         command: `"${process.execPath}" "${script}"`,
-        timeoutMs: 5_000,
+        timeoutMs: HANG_NET_TIMEOUT_MS,
         maxOutputChars: 1_000,
       });
 
@@ -546,7 +547,7 @@ describe("verification process lifecycle", () => {
       const result = await runVerificationCommand({
         cwd: dir,
         command: `"${process.execPath}" "${script}"`,
-        timeoutMs: 5_000,
+        timeoutMs: HANG_NET_TIMEOUT_MS,
         maxOutputChars: 1_000,
         signal: ctrl.signal,
       });

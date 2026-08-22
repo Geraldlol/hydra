@@ -32,6 +32,7 @@ import {
   MissionSubmissionRejectedError,
   type MissionSubmissionGate,
 } from "../src/missionDispatch";
+import { HANG_NET_TIMEOUT_MS } from "./testBudgets";
 
 const WORKSPACE_ROOT = path.resolve(__dirname, "..", "..");
 const FIXTURE = path.join(__dirname, "fixtures", "mock-claude-session-cli.js");
@@ -177,7 +178,7 @@ describe("Claude persistent-session provider contract", () => {
     const result = await runClaudeSession({
       plan: fixturePlan("normal"),
       prompt: "possibly accepted",
-      timeoutMs: 2_000,
+      timeoutMs: HANG_NET_TIMEOUT_MS,
       signal: new AbortController().signal,
       binding: BINDING,
       onChunk: () => undefined,
@@ -234,7 +235,7 @@ describe("Claude persistent-session provider contract", () => {
       runClaudeSession({
         plan: fixturePlan("normal"),
         prompt: "must not be written",
-        timeoutMs: 2_000,
+        timeoutMs: HANG_NET_TIMEOUT_MS,
         signal: new AbortController().signal,
         binding: BINDING,
         submissionGate,
@@ -391,7 +392,7 @@ describe("Claude persistent-session provider contract", () => {
     const result = await runClaudeSession({
       plan: fixturePlan("old-version"),
       prompt: "old runtime",
-      timeoutMs: 2_000,
+      timeoutMs: HANG_NET_TIMEOUT_MS,
       signal: new AbortController().signal,
       binding: BINDING,
       onChunk: () => undefined,
@@ -500,7 +501,7 @@ describe("Claude persistent-session provider contract", () => {
         const result = await runClaudeSession({
           plan: fixturePlan(scenario),
           prompt: "adversarial output",
-          timeoutMs: 3_000,
+          timeoutMs: HANG_NET_TIMEOUT_MS,
           signal: new AbortController().signal,
           binding: BINDING,
           onChunk: () => undefined,
@@ -565,7 +566,7 @@ function startFixtureSession(
   const result = runClaudeSession({
     plan: fixturePlan(scenario),
     prompt,
-    timeoutMs: 3_000,
+    timeoutMs: HANG_NET_TIMEOUT_MS,
     signal: new AbortController().signal,
     binding: BINDING,
     ...(submissionGate ? { submissionGate } : {}),
@@ -736,7 +737,7 @@ function startInMemoryEpipeSession(onWrite: () => void): {
   const result = runClaudeSession({
     plan: planned.plan,
     prompt: "initial in-memory",
-    timeoutMs: 2_000,
+    timeoutMs: HANG_NET_TIMEOUT_MS,
     signal: new AbortController().signal,
     binding: BINDING,
     onChunk: () => undefined,

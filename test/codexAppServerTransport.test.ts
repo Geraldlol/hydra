@@ -23,6 +23,7 @@ import {
   MissionSubmissionRejectedError,
   type MissionSubmissionGate,
 } from "../src/missionDispatch";
+import { HANG_NET_TIMEOUT_MS } from "./testBudgets";
 
 const FAKE_APP_SERVER = path.join(__dirname, "fixtures", "fake-codex-app-server.js");
 const SHA_A = "a".repeat(64);
@@ -229,7 +230,7 @@ describe("runCodexAppServerTurn", () => {
         runCodexAppServerTurn({
           plan: fakePlan(directory, "normal", logPath),
           prompt: "must never cross turn/start",
-          timeoutMs: 2_000,
+          timeoutMs: HANG_NET_TIMEOUT_MS,
           signal: new AbortController().signal,
           binding: binding(),
           submissionGate,
@@ -269,7 +270,7 @@ describe("runCodexAppServerTurn", () => {
       const run = runCodexAppServerTurn({
         plan: fakePlan(directory, "normal", logPath),
         prompt: "initial prompt",
-        timeoutMs: 5_000,
+        timeoutMs: HANG_NET_TIMEOUT_MS,
         signal: new AbortController().signal,
         binding: binding(),
         submissionGate: allowGate,
@@ -309,7 +310,7 @@ describe("runCodexAppServerTurn", () => {
       const result = await runCodexAppServerTurn({
         plan: fakePlan(directory, "many-deltas"),
         prompt: "initial prompt",
-        timeoutMs: 5_000,
+        timeoutMs: HANG_NET_TIMEOUT_MS,
         signal: new AbortController().signal,
         binding: binding(),
         onChunk: (chunk) => {
@@ -345,7 +346,7 @@ describe("runCodexAppServerTurn", () => {
       const runPromise = runCodexAppServerTurn({
         plan: fakePlan(directory, "normal", logPath),
         prompt: "initial prompt",
-        timeoutMs: 5_000,
+        timeoutMs: HANG_NET_TIMEOUT_MS,
         signal: new AbortController().signal,
         binding: binding(),
         onChunk: (chunk) => chunks.push(chunk),
@@ -435,7 +436,7 @@ describe("runCodexAppServerTurn", () => {
         runCodexAppServerTurn({
           plan: fakePlan(directory, "mismatched-cwd", logPath),
           prompt: "must not be submitted",
-          timeoutMs: 5_000,
+          timeoutMs: HANG_NET_TIMEOUT_MS,
           signal: new AbortController().signal,
           binding: binding(),
           onChunk: () => undefined,
@@ -460,7 +461,7 @@ describe("runCodexAppServerTurn", () => {
         runCodexAppServerTurn({
           plan: fakePlan(directory, "old-version", logPath),
           prompt: "must not be submitted",
-          timeoutMs: 5_000,
+          timeoutMs: HANG_NET_TIMEOUT_MS,
           signal: new AbortController().signal,
           binding: binding(),
           onChunk: () => undefined,
@@ -483,7 +484,7 @@ describe("runCodexAppServerTurn", () => {
       const result = await runCodexAppServerTurn({
         plan: fakePlan(directory, "batched-start-and-complete"),
         prompt: "initial prompt",
-        timeoutMs: 2_000,
+        timeoutMs: HANG_NET_TIMEOUT_MS,
         signal: new AbortController().signal,
         binding: binding(),
         onChunk: () => undefined,
@@ -505,7 +506,7 @@ describe("runCodexAppServerTurn", () => {
       const dropped = await runCodexAppServerTurn({
         plan: fakePlan(directory, "oversized-frame"),
         prompt: "initial prompt",
-        timeoutMs: 20_000,
+        timeoutMs: HANG_NET_TIMEOUT_MS,
         signal: new AbortController().signal,
         binding: binding(),
         onChunk: () => undefined,
@@ -524,7 +525,7 @@ describe("runCodexAppServerTurn", () => {
       const kept = await runCodexAppServerTurn({
         plan: fakePlan(directory, "large-frame"),
         prompt: "initial prompt",
-        timeoutMs: 20_000,
+        timeoutMs: HANG_NET_TIMEOUT_MS,
         signal: new AbortController().signal,
         binding: binding(),
         onChunk: () => undefined,
@@ -542,7 +543,7 @@ describe("runCodexAppServerTurn", () => {
       const result = await runCodexAppServerTurn({
         plan: fakePlan(directory, "blank-line-framing"),
         prompt: "initial prompt",
-        timeoutMs: 2_000,
+        timeoutMs: HANG_NET_TIMEOUT_MS,
         signal: new AbortController().signal,
         binding: binding(),
         onChunk: () => undefined,
@@ -572,7 +573,7 @@ describe("runCodexAppServerTurn", () => {
           // exhaust under load stops testing the post-submission classification and
           // starts testing the timeout instead. None of these modes needs the time;
           // the budget is only a hang net.
-          timeoutMs: 20_000,
+          timeoutMs: HANG_NET_TIMEOUT_MS,
           signal: new AbortController().signal,
           binding: binding(),
           onChunk: () => undefined,
@@ -601,7 +602,7 @@ describe("runCodexAppServerTurn", () => {
       const result = await runCodexAppServerTurn({
         plan: fakePlan(directory, "string-server-request", logPath),
         prompt: "do not prompt interactively",
-        timeoutMs: 2_000,
+        timeoutMs: HANG_NET_TIMEOUT_MS,
         signal: new AbortController().signal,
         binding: binding(),
         onChunk: () => undefined,

@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { test } from "node:test";
 import { persistArenaDispatchReceipt } from "../src/arenaDispatchReceipts";
 import { createArenaProcessIntent } from "../src/arenaProcessSupervisor";
+import { HANG_NET_TIMEOUT_MS } from "./testBudgets";
 
 test("Arena dispatch intent persists metadata only and retries exactly", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-arena-dispatch-"));
@@ -24,7 +25,7 @@ test("Arena dispatch intent persists metadata only and retries exactly", async (
     stdin: "secret prompt",
     environmentPolicySha256: "b".repeat(64),
     invocationSha256: "c".repeat(64),
-    timeoutMs: 1_000,
+    timeoutMs: HANG_NET_TIMEOUT_MS,
   });
   const first = await persistArenaDispatchReceipt(root, intent);
   const retry = await persistArenaDispatchReceipt(root, intent);
