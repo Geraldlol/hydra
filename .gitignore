@@ -17,3 +17,6 @@ out/
 *.vsix
 *.log
 npm-debug.log
+
+# Salesforce CLI local state; unrelated to this extension.
+.sf/
