@@ -338,6 +338,7 @@ import {
   runArenaSmokeTest as runIsolatedArenaSmokeTest,
 } from "./arenaSmoke";
 import { ArenaGitError } from "./arenaGit";
+import { probeArenaLongPaths } from "./arenaLongPaths";
 import type { WebviewMessage } from "./webviewMessages";
 import {
   attachmentDisplaySummary,
@@ -450,6 +451,7 @@ import {
 import type { HydraStatusBarSnapshot } from "./statusBar";
 import { renderHtml, type HydraHeadAssets } from "./webview.html";
 import {
+  collapseRepeatedLogLines,
   createRunFailureCard,
   isSafeRunFailureRequestPath,
   type RunFailureCard,
@@ -10159,9 +10161,10 @@ export class HydraRoomPanel {
         return undefined;
       }
     };
-    const [codexResolvedCommand, claudeResolvedCommand] = await Promise.all([
+    const [codexResolvedCommand, claudeResolvedCommand, arenaLongPaths] = await Promise.all([
       resolveForDoctor("codex", codexSpawn),
       resolveForDoctor("claude", claudeSpawn),
+      probeArenaLongPaths(this.workspaceRoot),
     ]);
     const bridgeResult = includeTerminalBridge && !this.unconfirmedNativeTermination && this.terminalBridge
       ? await this.terminalBridge.selfTest(terminalBridgeTimeoutMs())
@@ -10180,6 +10183,7 @@ export class HydraRoomPanel {
       trustWarnings: this.collectTrustScopeWarnings(),
       terminalBridge: bridgeResult ? { ok: bridgeResult.ok, message: bridgeResult.message } : undefined,
       argsValidation,
+      arenaLongPaths,
     });
     return { report, bridgeOk: bridgeResult?.ok ?? false };
   }
@@ -11838,7 +11842,11 @@ function completedAgentCallTrace(
     stdoutChars: result.stdout.length,
     stdoutSha256: sha256(result.stdout),
     stderrChars: result.stderr.length,
-    stderrPreview: result.stderr ? truncateForTrace(result.stderr, 1200) : undefined,
+    // Collapse timestamp-only-differing repeats first, or a CLI that logs one
+    // line every few seconds spends the whole preview budget on noise.
+    stderrPreview: result.stderr
+      ? truncateForTrace(collapseRepeatedLogLines(result.stderr), 1200)
+      : undefined,
   };
 }
 
