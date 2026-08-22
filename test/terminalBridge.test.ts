@@ -17,6 +17,10 @@ import {
   waitForReply,
 } from "../src/terminalBridge";
 import { HYDRA_SYNTHETIC_ECHO_COMMAND } from "../src/terminalProtocol";
+import {
+  MissionSubmissionRejectedError,
+  type MissionSubmissionGate,
+} from "../src/missionDispatch";
 
 const vscodeRuntime = require("vscode") as {
   window: Record<string, unknown>;
@@ -275,20 +279,51 @@ describe("terminal bridge artifact storage", () => {
 });
 
 describe("terminal bridge lifecycle fences", () => {
-  function installTerminalWindowStub(): { created: unknown[] } {
+  function installTerminalWindowStub(): { created: unknown[]; sent: string[] } {
     const created: unknown[] = [];
+    const sent: string[] = [];
     vscodeRuntime.window.onDidCloseTerminal = () => ({ dispose() {} });
     vscodeRuntime.window.createTerminal = () => {
       const terminal = {
-        sendText() {},
+        sendText(line: string) {
+          sent.push(line);
+        },
         show() {},
         dispose() {},
       };
       created.push(terminal);
       return terminal;
     };
-    return { created };
+    return { created, sent };
   }
+
+  test("a stale Mission gate sends no raw terminal line", async (t) => {
+    const { sent } = installTerminalWindowStub();
+    const workspace = await tempDir();
+    const storage = await tempDir();
+    const bridge = new TerminalBridge(workspace, { artifactRoot: storage });
+    t.after(() => bridge.dispose());
+    const gate: MissionSubmissionGate = {
+      write: async (point) => {
+        assert.equal(point, "terminal.rawLine");
+        throw new MissionSubmissionRejectedError("Mission binding changed");
+      },
+    };
+
+    await assert.rejects(
+      bridge.sendRawLine(
+        "codex",
+        "hydra-must-not-cross-the-gate",
+        gate,
+        new AbortController().signal,
+      ),
+      MissionSubmissionRejectedError,
+    );
+    assert.equal(
+      sent.some((line) => line.includes("hydra-must-not-cross-the-gate")),
+      false,
+    );
+  });
 
   test("an already-aborted call creates no request artifacts or terminal", async (t) => {
     const { created } = installTerminalWindowStub();

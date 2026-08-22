@@ -1,11 +1,58 @@
 import * as cp from "node:child_process";
+import { createHash } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { resolveGitExecutable } from "./gitExecutable";
-import { windowsSystemExecutable } from "./executablePath";
-import { stripAnsi } from "./agents";
+import { findExecutableOnPath, windowsSystemExecutable } from "./executablePath";
+import {
+  quoteForCmd,
+  stripAnsi,
+  terminateProcessTree,
+  TERMINATION_CONFIRM_WINDOW_MS,
+  TERMINATION_FORCE_GRACE_MS,
+} from "./agents";
 import { appendFileSafely, ensureFile, readFileHead, readJsonlGuarded, serializePerFile } from "./fileQueue";
 
 const MAX_VERIFICATION_PACKAGE_JSON_BYTES = 1024 * 1024;
+const VERIFICATION_SCORING_PLAN_VERSION = "hydra-verification-scoring-plan-v1";
+const VERIFICATION_CONTROL_FINGERPRINT_VERSION = "hydra-verification-controls-sha256-v1";
+const MAX_VERIFICATION_CONTROL_ENTRIES = 50_000;
+const MAX_VERIFICATION_CONTROL_FILES = 5_000;
+const MAX_VERIFICATION_CONTROL_FILE_BYTES = 16 * 1024 * 1024;
+const MAX_VERIFICATION_CONTROL_TOTAL_BYTES = 128 * 1024 * 1024;
+const SKIPPED_VERIFICATION_CONTROL_DIRECTORIES = new Set([
+  ".git",
+  ".hydra",
+  ".next",
+  ".nuxt",
+  ".cache",
+  ".pnpm-store",
+  ".turbo",
+  ".venv",
+  ".vscode-test",
+  "build",
+  "coverage",
+  "dist",
+  "node_modules",
+  "out",
+  "target",
+  "vendor",
+  "venv",
+]);
+const VERIFICATION_CONTROL_DIRECTORIES = new Set([
+  ".github",
+  ".vscode",
+  ".yarn",
+  "__tests__",
+  "config",
+  "scripts",
+  "spec",
+  "specs",
+  "test",
+  "tests",
+  "tools",
+]);
 
 export interface VerificationResult {
   timestamp: string;
@@ -16,6 +63,11 @@ export interface VerificationResult {
   durationMs: number;
   stdout: string;
   stderr: string;
+  /** Full raw stream metadata, computed before decoding and the retained tail cap. */
+  stdoutBytes?: number;
+  stdoutSha256?: string;
+  stderrBytes?: number;
+  stderrSha256?: string;
   /** True when Hydra could not observe the spawned process closing after cancellation. */
   terminationFailed?: boolean;
   // Git HEAD at the moment verification ran. Captured so reviewers can
@@ -45,8 +97,15 @@ export async function ensureVerificationFile(filePath: string): Promise<void> {
 }
 
 export async function appendVerification(filePath: string, result: VerificationResult): Promise<void> {
+  const {
+    stdoutBytes: _stdoutBytes,
+    stdoutSha256: _stdoutSha256,
+    stderrBytes: _stderrBytes,
+    stderrSha256: _stderrSha256,
+    ...workspaceRecord
+  } = result;
   await serializePerFile(filePath, async () => {
-    await appendFileSafely(filePath, `${JSON.stringify(result)}\n`);
+    await appendFileSafely(filePath, `${JSON.stringify(workspaceRecord)}\n`);
   });
 }
 
@@ -86,6 +145,31 @@ export type VerificationCommandResolution =
   | { kind: "refusedUntrustedInference" }
   | { kind: "missing" };
 
+export type ResolvedVerificationCommand = Extract<
+  VerificationCommandResolution,
+  { kind: "explicit" | "inferred" }
+>;
+
+export interface VerificationControlFingerprint {
+  readonly sha256: string;
+  readonly fileCount: number;
+}
+
+export interface VerificationScoringPlan {
+  readonly command: string;
+  readonly resolutionKind: ResolvedVerificationCommand["kind"];
+  readonly planSha256: string;
+  readonly eligible: boolean;
+  readonly controlSha256?: string;
+  readonly controlFileCount?: number;
+  readonly ineligibleReason?: string;
+}
+
+export interface VerificationScoringPlanOptions {
+  readonly env?: NodeJS.ProcessEnv;
+  readonly platform?: NodeJS.Platform;
+}
+
 export async function resolveVerificationCommand(input: {
   configured: string;
   isWorkspaceTrusted: boolean;
@@ -101,12 +185,254 @@ export async function resolveVerificationCommand(input: {
   return inferred ? { kind: "inferred", command: inferred } : { kind: "missing" };
 }
 
+/**
+ * Latch the exact command and capture a bounded conventional verifier-control
+ * surface before a builder receives write access.
+ *
+ * Hydra still permits arbitrary application-scoped verification commands, but
+ * only a deliberately small package-runner grammar is eligible for automatic
+ * scoring. Static dependency discovery for an arbitrary shell program is not
+ * reliable enough to support a deterministic standings claim.
+ */
+export async function createVerificationScoringPlan(
+  workspaceRoot: string,
+  resolution: ResolvedVerificationCommand,
+  options: VerificationScoringPlanOptions = {},
+): Promise<VerificationScoringPlan> {
+  const parsed = parseAutomaticScoringCommand(resolution.command);
+  if (!parsed) {
+    return {
+      command: resolution.command,
+      resolutionKind: resolution.kind,
+      planSha256: verificationScoringPlanSha256(resolution.kind, resolution.command),
+      eligible: false,
+      ineligibleReason: "the configured command is dynamic or outside Hydra's bounded package-script scoring grammar",
+    };
+  }
+  const platform = options.platform ?? process.platform;
+  const resolvedManagers = new Map<string, string>();
+  for (const invocation of parsed) {
+    if (resolvedManagers.has(invocation.manager)) continue;
+    const executable = await findExecutableOnPath(invocation.manager, {
+      env: options.env,
+      platform,
+      forbiddenRoots: [workspaceRoot],
+    });
+    const quoted = executable ? quoteVerificationExecutableForShell(executable, platform) : undefined;
+    if (!quoted) {
+      return {
+        command: resolution.command,
+        resolutionKind: resolution.kind,
+        planSha256: verificationScoringPlanSha256(resolution.kind, resolution.command),
+        eligible: false,
+        ineligibleReason: `package manager '${invocation.manager}' could not be resolved safely outside the workspace`,
+      };
+    }
+    resolvedManagers.set(invocation.manager, quoted);
+  }
+  const command = parsed
+    .map((invocation) => `${resolvedManagers.get(invocation.manager)} ${invocation.arguments}`)
+    .join(" && ");
+  const planSha256 = verificationScoringPlanSha256(resolution.kind, command);
+  try {
+    const controls = await captureVerificationControlFingerprint(workspaceRoot);
+    return {
+      command,
+      resolutionKind: resolution.kind,
+      planSha256,
+      eligible: true,
+      controlSha256: controls.sha256,
+      controlFileCount: controls.fileCount,
+    };
+  } catch (error) {
+    return {
+      command,
+      resolutionKind: resolution.kind,
+      planSha256,
+      eligible: false,
+      ineligibleReason: `the verification control surface could not be captured safely: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
+export function verificationScoringPlanSha256(
+  resolutionKind: ResolvedVerificationCommand["kind"],
+  command: string,
+): string {
+  return createHash("sha256").update(JSON.stringify([
+    VERIFICATION_SCORING_PLAN_VERSION,
+    resolutionKind,
+    command,
+  ]), "utf8").digest("hex");
+}
+
+export async function captureVerificationControlFingerprint(
+  workspaceRoot: string,
+): Promise<VerificationControlFingerprint> {
+  const root = path.resolve(workspaceRoot);
+  const digest = createHash("sha256");
+  digest.update(VERIFICATION_CONTROL_FINGERPRINT_VERSION, "utf8");
+  let entryCount = 0;
+  let fileCount = 0;
+  let totalBytes = 0;
+
+  const walk = async (directory: string, segments: readonly string[]): Promise<void> => {
+    const entries = await fs.readdir(directory, { withFileTypes: true });
+    entries.sort((left, right) => Buffer.compare(Buffer.from(left.name, "utf8"), Buffer.from(right.name, "utf8")));
+    for (const entry of entries) {
+      entryCount += 1;
+      if (entryCount > MAX_VERIFICATION_CONTROL_ENTRIES) {
+        throw new Error(`workspace enumeration exceeded ${MAX_VERIFICATION_CONTROL_ENTRIES} entries`);
+      }
+      if (!entry.name || entry.name.includes("\0") || entry.name.includes("/") || (process.platform === "win32" && entry.name.includes("\\"))) {
+        throw new Error("workspace contains an unsafe verification-control path");
+      }
+      const nextSegments = [...segments, entry.name];
+      const relativePath = nextSegments.join("/");
+      if (entry.isDirectory()) {
+        if (!shouldSkipVerificationControlDirectory(nextSegments)) {
+          await walk(path.join(directory, entry.name), nextSegments);
+        }
+        continue;
+      }
+      if (!isVerificationControlPath(nextSegments)) continue;
+      if (!entry.isFile() || entry.isSymbolicLink()) {
+        throw new Error(`verification control is not a regular file: ${relativePath}`);
+      }
+      fileCount += 1;
+      if (fileCount > MAX_VERIFICATION_CONTROL_FILES) {
+        throw new Error(`verification control inventory exceeded ${MAX_VERIFICATION_CONTROL_FILES} files`);
+      }
+      const fullPath = path.join(directory, entry.name);
+      const before = await fs.lstat(fullPath);
+      if (!before.isFile() || before.isSymbolicLink()) {
+        throw new Error(`verification control is not a stable regular file: ${relativePath}`);
+      }
+      if (before.size > MAX_VERIFICATION_CONTROL_FILE_BYTES) {
+        throw new Error(`verification control exceeds ${MAX_VERIFICATION_CONTROL_FILE_BYTES} bytes: ${relativePath}`);
+      }
+      totalBytes += before.size;
+      if (totalBytes > MAX_VERIFICATION_CONTROL_TOTAL_BYTES) {
+        throw new Error(`verification controls exceed ${MAX_VERIFICATION_CONTROL_TOTAL_BYTES} total bytes`);
+      }
+      const handle = await fs.open(fullPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+      let bytes: Buffer;
+      try {
+        const opened = await handle.stat();
+        if (!opened.isFile() || !sameVerificationControlIdentity(before, opened)) {
+          throw new Error(`verification control changed before capture: ${relativePath}`);
+        }
+        bytes = await handle.readFile();
+        const after = await handle.stat();
+        if (!sameVerificationControlIdentity(opened, after) || bytes.length !== opened.size) {
+          throw new Error(`verification control changed during capture: ${relativePath}`);
+        }
+      } finally {
+        await handle.close().catch(() => undefined);
+      }
+      const pathBytes = Buffer.from(relativePath, "utf8");
+      const header = Buffer.allocUnsafe(8);
+      header.writeUInt32BE(pathBytes.length, 0);
+      header.writeUInt32BE(bytes.length, 4);
+      digest.update(header);
+      digest.update(pathBytes);
+      digest.update(bytes);
+    }
+  };
+
+  await walk(root, []);
+  return { sha256: digest.digest("hex"), fileCount };
+}
+
+interface ParsedAutomaticScoringInvocation {
+  readonly manager: "npm" | "pnpm" | "yarn";
+  readonly arguments: string;
+}
+
+function parseAutomaticScoringCommand(command: string): ParsedAutomaticScoringInvocation[] | undefined {
+  const invocations = command.split(/\s*&&\s*/);
+  if (invocations.length === 0) return undefined;
+  const parsed: ParsedAutomaticScoringInvocation[] = [];
+  for (const invocation of invocations) {
+    const match = /^(npm|pnpm|yarn)(?:\.cmd)?\s+(run\s+[A-Za-z0-9:_-]+|test)$/i.exec(invocation);
+    if (!match?.[1] || !match[2]) return undefined;
+    parsed.push({
+      manager: match[1].toLowerCase() as ParsedAutomaticScoringInvocation["manager"],
+      arguments: match[2],
+    });
+  }
+  return parsed;
+}
+
+export function quoteVerificationExecutableForShell(executable: string, platform: NodeJS.Platform): string | undefined {
+  const pathApi = platform === "win32" ? path.win32 : path.posix;
+  if (!pathApi.isAbsolute(executable) || /[\0\r\n]/.test(executable)) return undefined;
+  if (platform === "win32") {
+    // cmd.exe expands percent variables and delayed-exclamation variables even
+    // inside ordinary quotes. Reject those rare paths instead of pretending a
+    // quoted batch-shim invocation is stable.
+    if (/[%!]/.test(executable)) return undefined;
+    return quoteForCmd(executable);
+  }
+  return `'${executable.replace(/'/g, `'"'"'`)}'`;
+}
+
+function shouldSkipVerificationControlDirectory(segments: readonly string[]): boolean {
+  const basename = segments.at(-1)?.toLowerCase() ?? "";
+  if (SKIPPED_VERIFICATION_CONTROL_DIRECTORIES.has(basename)) return true;
+  return segments.length >= 2
+    && segments.at(-2)?.toLowerCase() === ".yarn"
+    && (basename === "cache" || basename === "unplugged");
+}
+
+function isVerificationControlPath(segments: readonly string[]): boolean {
+  const lowerSegments = segments.map((segment) => segment.toLowerCase());
+  if (lowerSegments.some((segment) => VERIFICATION_CONTROL_DIRECTORIES.has(segment))) return true;
+  const basename = lowerSegments.at(-1) ?? "";
+  if (/^(?:package(?:-lock)?\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock)$/.test(basename)) return true;
+  if (/^(?:\.npmrc|\.yarnrc(?:\..+)?|\.pnp\..+|pnpm-workspace\.ya?ml|\.pnpmfile(?:\..+)?)$/.test(basename)) return true;
+  if (/^(?:makefile|justfile|taskfile(?:\.ya?ml)?)$/.test(basename)) return true;
+  if (/\.(?:cmd|bat|ps1|sh)$/.test(basename)) return true;
+  if (/(?:^|[._-])(?:test|tests|spec|specs)(?:[._-]|$)/.test(basename)) return true;
+  if (/(?:^|[._-])(?:verify|verifier|verification|check|lint)(?:[._-]|$)/.test(basename)) return true;
+  return /^(?:tsconfig|jsconfig|vitest|vite|jest|playwright|cypress|eslint|prettier|babel|webpack|rollup|ava|mocha|nyc|tap)(?:\..+)?$/.test(basename)
+    || /^\.(?:eslintrc|prettierrc|babelrc)(?:\..+)?$/.test(basename)
+    || /^(?:turbo|nx)\.json$/.test(basename);
+}
+
+function sameVerificationControlIdentity(left: { dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number }, right: { dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number }): boolean {
+  return left.dev === right.dev
+    && left.ino === right.ino
+    && left.size === right.size
+    && left.mtimeMs === right.mtimeMs
+    && left.ctimeMs === right.ctimeMs;
+}
+
 export interface VerificationResultWithCancel extends VerificationResult {
   cancelled?: boolean;
 }
 
 export async function runVerificationCommand(options: VerificationRunOptions): Promise<VerificationResultWithCancel> {
   const started = Date.now();
+  if (options.signal?.aborted) {
+    const emptySha256 = createHash("sha256").update(Buffer.alloc(0)).digest("hex");
+    return withPrivateVerificationOutputMetadata({
+      timestamp: new Date().toISOString(),
+      command: options.command,
+      cwd: options.cwd,
+      exitCode: null,
+      timedOut: false,
+      durationMs: Date.now() - started,
+      stdout: "",
+      stderr: "",
+      cancelled: true,
+    }, {
+      stdoutBytes: 0,
+      stdoutSha256: emptySha256,
+      stderrBytes: 0,
+      stderrSha256: emptySha256,
+    });
+  }
   return new Promise<VerificationResultWithCancel>((resolve) => {
     const processSpec = verificationProcessForCommand(options.command);
     const child = cp.spawn(processSpec.command, processSpec.args, {
@@ -118,6 +444,10 @@ export async function runVerificationCommand(options: VerificationRunOptions): P
     });
     let stdout = "";
     let stderr = "";
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    const stdoutHash = createHash("sha256");
+    const stderrHash = createHash("sha256");
     let timedOut = false;
     let cancelled = false;
     let settled = false;
@@ -126,10 +456,26 @@ export async function runVerificationCommand(options: VerificationRunOptions): P
     let terminationStarted = false;
     let terminationFailed = false;
     const signal = options.signal;
-    const appendStdout = (text: string) => {
+    const appendStdout = (chunk: Buffer | string) => {
+      const bytes = typeof chunk === "string"
+        ? Buffer.from(chunk, "utf8")
+        : chunk;
+      const text = typeof chunk === "string"
+        ? chunk
+        : stripAnsi(chunk.toString("utf8"));
+      stdoutBytes += bytes.length;
+      stdoutHash.update(bytes);
       stdout = truncateTail(stdout + text, options.maxOutputChars);
     };
-    const appendStderr = (text: string) => {
+    const appendStderr = (chunk: Buffer | string) => {
+      const bytes = typeof chunk === "string"
+        ? Buffer.from(chunk, "utf8")
+        : chunk;
+      const text = typeof chunk === "string"
+        ? chunk
+        : stripAnsi(chunk.toString("utf8"));
+      stderrBytes += bytes.length;
+      stderrHash.update(bytes);
       stderr = truncateTail(stderr + text, options.maxOutputChars);
     };
     const finish = (exitCode: number | null) => {
@@ -139,7 +485,7 @@ export async function runVerificationCommand(options: VerificationRunOptions): P
       if (forceBackstop) clearTimeout(forceBackstop);
       if (failureBackstop) clearTimeout(failureBackstop);
       if (signal && abortHandler) signal.removeEventListener("abort", abortHandler);
-      resolve({
+      resolve(withPrivateVerificationOutputMetadata({
         timestamp: new Date().toISOString(),
         command: options.command,
         cwd: options.cwd,
@@ -150,7 +496,12 @@ export async function runVerificationCommand(options: VerificationRunOptions): P
         stderr: stderr.trimEnd(),
         ...(cancelled ? { cancelled: true } : {}),
         ...(terminationFailed ? { terminationFailed: true } : {}),
-      });
+      }, {
+        stdoutBytes,
+        stdoutSha256: stdoutHash.digest("hex"),
+        stderrBytes,
+        stderrSha256: stderrHash.digest("hex"),
+      }));
     };
     const beginTermination = () => {
       if (terminationStarted || settled) return;
@@ -173,8 +524,8 @@ export async function runVerificationCommand(options: VerificationRunOptions): P
           terminationFailed = true;
           appendStderr("\n[Hydra did not observe the verification process close; it may still be running.]\n");
           finish(null);
-        }, 1_000);
-      }, 1_000);
+        }, TERMINATION_CONFIRM_WINDOW_MS);
+      }, TERMINATION_FORCE_GRACE_MS);
     };
     const timer = setTimeout(() => {
       timedOut = true;
@@ -194,14 +545,34 @@ export async function runVerificationCommand(options: VerificationRunOptions): P
       else signal.addEventListener("abort", abortHandler, { once: true });
     }
 
-    child.stdout?.on("data", (chunk: Buffer) => appendStdout(stripAnsi(chunk.toString("utf8"))));
-    child.stderr?.on("data", (chunk: Buffer) => appendStderr(stripAnsi(chunk.toString("utf8"))));
+    child.stdout?.on("data", (chunk: Buffer) => appendStdout(chunk));
+    child.stderr?.on("data", (chunk: Buffer) => appendStderr(chunk));
     child.on("error", (err) => {
       appendStderr(err instanceof Error ? err.message : String(err));
       finish(null);
     });
     child.on("close", (exitCode) => finish(exitCode));
   });
+}
+
+function withPrivateVerificationOutputMetadata<
+  T extends VerificationResult,
+>(
+  result: T,
+  metadata: Required<
+    Pick<
+      VerificationResult,
+      "stdoutBytes" | "stdoutSha256" | "stderrBytes" | "stderrSha256"
+    >
+  >,
+): T {
+  Object.defineProperties(result, {
+    stdoutBytes: { value: metadata.stdoutBytes, enumerable: false },
+    stdoutSha256: { value: metadata.stdoutSha256, enumerable: false },
+    stderrBytes: { value: metadata.stderrBytes, enumerable: false },
+    stderrSha256: { value: metadata.stderrSha256, enumerable: false },
+  });
+  return result;
 }
 
 export function verificationProcessForCommand(
@@ -232,16 +603,27 @@ function isPowerShellInterpolatedCommand(command: string): boolean {
   );
 }
 
-export async function captureGitHead(cwd: string): Promise<string | undefined> {
+export async function captureGitHead(
+  cwd: string,
+  timeoutMs = 30_000,
+): Promise<string | undefined> {
   const gitExecutable = await resolveGitExecutable(cwd);
   if (!gitExecutable) return undefined;
   return new Promise<string | undefined>((resolve) => {
     const child = cp.spawn(gitExecutable, ["rev-parse", "HEAD"], { cwd, windowsHide: true, env: process.env });
     let out = "";
     let settled = false;
+    const boundedTimeoutMs = Number.isFinite(timeoutMs)
+      ? Math.max(1, Math.floor(timeoutMs))
+      : 30_000;
+    const timer = setTimeout(() => {
+      void terminateProcessTree(child, true).catch(() => undefined);
+      finish(undefined);
+    }, boundedTimeoutMs);
     const finish = (sha: string | undefined) => {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
       resolve(sha);
     };
     child.stdout?.on("data", (chunk: Buffer) => (out += chunk.toString("utf8")));
@@ -303,6 +685,22 @@ function isVerificationResult(value: unknown): value is VerificationResult {
     typeof result.durationMs === "number" &&
     typeof result.stdout === "string" &&
     typeof result.stderr === "string" &&
+    ((result.stdoutBytes === undefined && result.stdoutSha256 === undefined)
+      || (
+        typeof result.stdoutBytes === "number"
+        && Number.isSafeInteger(result.stdoutBytes)
+        && result.stdoutBytes >= 0
+        && typeof result.stdoutSha256 === "string"
+        && /^[0-9a-f]{64}$/i.test(result.stdoutSha256)
+      )) &&
+    ((result.stderrBytes === undefined && result.stderrSha256 === undefined)
+      || (
+        typeof result.stderrBytes === "number"
+        && Number.isSafeInteger(result.stderrBytes)
+        && result.stderrBytes >= 0
+        && typeof result.stderrSha256 === "string"
+        && /^[0-9a-f]{64}$/i.test(result.stderrSha256)
+      )) &&
     (result.terminationFailed === undefined || typeof result.terminationFailed === "boolean")
   );
 }
@@ -318,43 +716,4 @@ function formatDuration(ms: number): string {
   const minutes = Math.floor(seconds / 60);
   const rest = seconds % 60;
   return `${minutes}m ${rest.toString().padStart(2, "0")}s`;
-}
-
-async function terminateProcessTree(child: cp.ChildProcess, force: boolean): Promise<boolean> {
-  const signal: NodeJS.Signals = force ? "SIGKILL" : "SIGTERM";
-  if (!child.pid) {
-    return child.kill(signal);
-  }
-  if (process.platform === "win32") {
-    return new Promise<boolean>((resolve) => {
-      const killer = cp.spawn(
-        windowsSystemExecutable("taskkill.exe"),
-        ["/PID", String(child.pid), "/T", "/F"],
-        { windowsHide: true },
-      );
-      let done = false;
-      const finish = (requested: boolean) => {
-        if (done) return;
-        done = true;
-        clearTimeout(killerTimeout);
-        resolve(requested);
-      };
-      const killerTimeout = setTimeout(() => {
-        killer.kill();
-        const fallback = child.kill(signal);
-        finish(fallback);
-      }, 750);
-      killer.on("error", () => finish(child.kill(signal)));
-      killer.on("close", (code) => {
-        if (code === 0) finish(true);
-        else finish(child.kill(signal));
-      });
-    });
-  }
-  try {
-    process.kill(-child.pid, signal);
-    return true;
-  } catch {
-    return child.kill(signal);
-  }
 }

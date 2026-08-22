@@ -1,4 +1,5 @@
 import type { AgentId } from "./phases";
+import type { HandoffAction } from "./handoffInbox";
 
 /**
  * Discriminated union of every message the Hydra webview sends to the
@@ -49,6 +50,9 @@ export type WebviewMessage =
   | { type: "acceptDefaultDecision" }
   | { type: "toggleAutoAdvanceActionableDefaults" }
   | { type: "handBack" }
+  | { type: "confirmHandoff"; action?: HandoffAction }
+  | { type: "dismissHandoff" }
+  | { type: "previewHandoff" }
   | { type: "openTranscript" }
   | { type: "archiveAndClearRoom" }
   | { type: "openDecisions" }
@@ -58,6 +62,7 @@ export type WebviewMessage =
   | { type: "reverseScoreVerdict" }
   | { type: "adjudicatePendingScoreClaim" }
   | { type: "openDuels" }
+  | { type: "runDuelReadinessSmokeTest" }
   | { type: "advanceDuel"; duelId?: string }
   | { type: "cancelDuel"; duelId?: string }
   | { type: "openDuelAudit" }

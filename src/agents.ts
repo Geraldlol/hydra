@@ -17,6 +17,18 @@ export const MAX_AGENT_STDOUT_BYTES = 16 * 1024 * 1024;
 // char accounting as the stdout cap above.
 export const MAX_AGENT_STDERR_BYTES = 1 * 1024 * 1024;
 
+// Grace between asking a process tree to die and force-killing it. Short on
+// purpose: a cooperative child exits well inside this, and escalating quickly
+// is what actually reclaims the inherited pipes.
+export const TERMINATION_FORCE_GRACE_MS = 1_000;
+// Why 10s and not 1s: `close` fires only once every inherited stdio handle in
+// the tree is released. A Windows agent CLI runs behind a cmd.exe shim over a
+// deep child tree (powershell, subagent threads), and after taskkill /F /T those
+// handles can take seconds to drain. A 1s window declared such runs "termination
+// unconfirmed", which latches a host-wide automation block that only a window
+// reload clears - so a merely slow reap bricked the room.
+export const TERMINATION_CONFIRM_WINDOW_MS = 10_000;
+
 export interface BoundedStreamState {
   text: string;
   truncated: boolean;
@@ -56,6 +68,9 @@ export interface RunResult {
   // without observing the child process close. Another turn must not start in
   // this extension host because the native CLI may still be running.
   terminationFailed?: boolean;
+  // A provider-bound write may have crossed the transport boundary, but Hydra
+  // cannot prove whether the provider accepted or completed it. Never retry.
+  deliveryUnknown?: boolean;
 }
 
 export interface AgentSpawn {
@@ -224,20 +239,22 @@ export async function runAgent(
             "[Hydra did not observe the native agent process close; it may still be running. Restart VS Code before starting more Hydra work.]"
           );
           finish(null);
-        }, 1_000);
-      }, 1_000);
+        }, TERMINATION_CONFIRM_WINDOW_MS);
+      }, TERMINATION_FORCE_GRACE_MS);
     };
 
     const hasTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0;
     const timer = hasTimeout
       ? setTimeout(() => {
-          timedOut = true;
-          beginTermination();
+          if (!settled && !terminationStarted) {
+            timedOut = true;
+            beginTermination();
+          }
         }, timeoutMs)
       : undefined;
 
     const abortHandler = () => {
-      if (!settled) {
+      if (!settled && !terminationStarted) {
         cancelled = true;
         beginTermination();
       }
@@ -367,6 +384,12 @@ export async function terminateProcessTree(child: cp.ChildProcess, force: boolea
     }
   }
   if (process.platform === "win32") {
+    // taskkill /T can lose descendants when a .cmd shim exits as its tree is
+    // being terminated (the child is re-parented before taskkill walks it).
+    // Snapshot the numeric PID tree first and stop it leaf-first. Keep the
+    // existing taskkill path as a bounded fallback for systems where CIM or
+    // Windows PowerShell is unavailable.
+    if (await terminateWindowsProcessTreeSnapshot(child.pid)) return true;
     return new Promise<boolean>((resolve) => {
       let killer: cp.ChildProcess;
       try {
@@ -424,4 +447,67 @@ export async function terminateProcessTree(child: cp.ChildProcess, force: boolea
       return false;
     }
   }
+}
+
+/** @internal — exported for focused fail-closed helper tests. */
+export async function terminateWindowsProcessTreeSnapshot(
+  rootPid: number,
+  spawnProcess: typeof cp.spawn = cp.spawn,
+): Promise<boolean> {
+  const script = [
+    "$ErrorActionPreference='Stop'",
+    "try {",
+    `  $rootProcessId=${rootPid}`,
+    "  $known=[System.Collections.Generic.HashSet[int]]::new()",
+    "  $ordered=[System.Collections.Generic.List[int]]::new()",
+    "  [void]$known.Add($rootProcessId)",
+    "  [void]$ordered.Add($rootProcessId)",
+    "  function Add-HydraDescendants($rows){$added=$true;while($added){$added=$false;foreach($row in $rows){$childProcessId=[int]$row.ProcessId;$parentProcessId=[int]$row.ParentProcessId;if($known.Contains($parentProcessId)-and $known.Add($childProcessId)){[void]$ordered.Add($childProcessId);$added=$true}}}}",
+    "  function Stop-HydraProcess([int]$targetProcessId){try{Stop-Process -Id $targetProcessId -Force -ErrorAction Stop}catch{if(Get-Process -Id $targetProcessId -ErrorAction SilentlyContinue){throw}}}",
+    "  $maxPasses=4",
+    "  $processes=@(Get-CimInstance Win32_Process -ErrorAction Stop)",
+    "  for($pass=0;$pass -lt $maxPasses;$pass++){",
+    "    Add-HydraDescendants $processes",
+    "    for($index=$ordered.Count-1;$index -ge 0;$index--){Stop-HydraProcess $ordered[$index]}",
+    "    $knownCountBeforeRefresh=$known.Count",
+    "    $processes=@(Get-CimInstance Win32_Process -ErrorAction Stop)",
+    "    Add-HydraDescendants $processes",
+    "    $alive=@($processes | Where-Object { $known.Contains([int]$_.ProcessId) })",
+    "    if($known.Count -eq $knownCountBeforeRefresh -and $alive.Count -eq 0){exit 0}",
+    "  }",
+    "  exit 1",
+    "} catch {",
+    "  exit 1",
+    "}",
+  ].join("\n");
+  return new Promise<boolean>((resolve) => {
+    let killer: cp.ChildProcess;
+    try {
+      killer = spawnProcess(
+        windowsSystemExecutable("powershell.exe"),
+        ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+        { windowsHide: true, stdio: "ignore" },
+      );
+    } catch {
+      resolve(false);
+      return;
+    }
+    let done = false;
+    const finish = (requested: boolean) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timeout);
+      resolve(requested);
+    };
+    const timeout = setTimeout(() => {
+      try {
+        killer.kill();
+      } catch {
+        // The helper may have exited between the timeout and this kill.
+      }
+      finish(false);
+    }, 3_000);
+    killer.on("error", () => finish(false));
+    killer.on("close", (code) => finish(code === 0));
+  });
 }

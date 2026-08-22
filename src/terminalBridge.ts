@@ -15,6 +15,11 @@ import {
 import type { AgentSpawn } from "./agents";
 import type { AgentId } from "./phases";
 import type { Phase } from "./prompts";
+import {
+  MISSION_SUBMISSION_WRITTEN,
+  SubmissionCancelledBeforeWriteError,
+  type MissionSubmissionGate,
+} from "./missionDispatch";
 import { effectiveSpawnEnvironment, expandRequestFileSpawn, resolveAgentCommand } from "./cli";
 import { appendHydraEvent, createHydraEvent } from "./events";
 import {
@@ -156,12 +161,29 @@ export class TerminalBridge {
     await Promise.all([this.ensureTerminal("codex"), this.ensureTerminal("claude")]);
   }
 
-  async sendRawLine(agent: AgentId, line: string): Promise<void> {
+  async sendRawLine(
+    agent: AgentId,
+    line: string,
+    submissionGate?: MissionSubmissionGate,
+    signal?: AbortSignal,
+  ): Promise<void> {
     this.assertNotDisposed();
     const terminal = await this.ensureTerminal(agent);
     this.assertNotDisposed();
     const expanded = expandTerminalCommand(line, this.workspaceRoot);
-    terminal.sendText(expanded, true);
+    if (submissionGate) {
+      await submissionGate.write("terminal.rawLine", () => {
+        if (signal?.aborted) {
+          throw new SubmissionCancelledBeforeWriteError(
+            "Raw terminal line was cancelled before submission.",
+          );
+        }
+        terminal.sendText(expanded, true);
+        return MISSION_SUBMISSION_WRITTEN;
+      });
+    } else {
+      terminal.sendText(expanded, true);
+    }
     await this.setSession(agent, {
       state: "ready",
       detail: "Raw terminal line sent",
@@ -183,9 +205,20 @@ export class TerminalBridge {
     prompt: string,
     timeoutMs: number,
     signal: AbortSignal,
-    onChunk?: (chunk: string) => void
+    onChunk?: (chunk: string) => void,
+    submissionGate?: MissionSubmissionGate,
   ): Promise<TerminalBridgeRunResult> {
-    const { result, paths } = await this.callAgentWithPaths(agent, phase, spawn, prompt, timeoutMs, signal, onChunk);
+    const { result, paths } = await this.callAgentWithPaths(
+      agent,
+      phase,
+      spawn,
+      prompt,
+      timeoutMs,
+      signal,
+      onChunk,
+      false,
+      submissionGate,
+    );
     return { ...result, promptPath: paths.promptPath, logPath: paths.logPath, replyPath: paths.replyPath };
   }
 
@@ -256,7 +289,8 @@ export class TerminalBridge {
     timeoutMs: number,
     signal: AbortSignal,
     onChunk?: (chunk: string) => void,
-    allowSyntheticSelfTest = false
+    allowSyntheticSelfTest = false,
+    submissionGate?: MissionSubmissionGate,
   ): Promise<{ result: RunResult; paths: TerminalProtocolPaths }> {
     this.assertNotDisposed();
     if (signal.aborted) return this.cancelledCall(agent, phase);
@@ -283,7 +317,8 @@ export class TerminalBridge {
         timeoutMs,
         signal,
         onChunk,
-        allowSyntheticSelfTest
+        allowSyntheticSelfTest,
+        submissionGate,
       );
     } finally {
       release();
@@ -298,7 +333,8 @@ export class TerminalBridge {
     timeoutMs: number,
     signal: AbortSignal,
     onChunk?: (chunk: string) => void,
-    allowSyntheticSelfTest = false
+    allowSyntheticSelfTest = false,
+    submissionGate?: MissionSubmissionGate,
   ): Promise<{ result: RunResult; paths: TerminalProtocolPaths }> {
     // Time prefix is monotonic for ordering; UUID v4 is the collision guard.
     // Math.random's 24-bit hex tail had a real collision risk under rapid
@@ -421,10 +457,22 @@ export class TerminalBridge {
       if (signal.aborted) {
         return { result: cancelledTerminalResult(), paths };
       }
-      terminal.sendText(
+      const dispatch = () => terminal.sendText(
         buildPowerShellDispatchInvocation(paths.dispatchPath, replyNonce, sha256(dispatchScript)),
-        true
+        true,
       );
+      if (submissionGate) {
+        await submissionGate.write("terminal.dispatch", () => {
+          if (signal.aborted) {
+            throw new SubmissionCancelledBeforeWriteError(
+              "Terminal dispatch was cancelled before submission.",
+            );
+          }
+          dispatch();
+          return MISSION_SUBMISSION_WRITTEN;
+        });
+      }
+      else dispatch();
       const chunkHandler = onChunk
         ? (chunk: string) => {
             void this.setSession(agent, {

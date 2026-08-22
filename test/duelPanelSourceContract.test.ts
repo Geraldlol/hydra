@@ -20,6 +20,7 @@ describe("formal duel host contracts", () => {
   test("keeps duel creation agent-initiated while routing observer and adjudication actions", () => {
     for (const command of [
       "openDuels",
+      "runDuelReadinessSmokeTest",
       "advanceDuel",
       "cancelDuel",
       "openDuelAudit",
@@ -66,11 +67,12 @@ describe("formal duel host contracts", () => {
       "private oneShotWorkspaceInstructionsMaxChars(",
     );
     assert.match(context, /if \(agent && use === "room" && agentInitiatedDuels\(\)\)/);
-    assert.match(context, /renderDuelMotivationContext\(agent, this\.duels\.ratings, displayNameFor\)/);
+    assert.match(context, /renderDuelMotivationContext\(agent, this\.duelRatingsWithBaselines\(\), displayNameFor\)/);
     assert.match(context, /Ratings are a visible motivation signal only/);
     assert.doesNotMatch(context, /suggestedBuilder\s*=|assignBuilder\(|applyEvent\(/);
     assert.match(panel, /active: this\.duels\.activeDuels\.slice\(0, 50\)/);
-    assert.match(panel, /ratings: this\.duels\.ratings\.slice\(0, 200\)/);
+    assert.match(panel, /const duelRatings = this\.duelRatingsWithBaselines\(\)/);
+    assert.match(panel, /ratings: duelRatings\.slice\(0, 200\)/);
     assert.match(panel, /recent: this\.duels\.recentDuels\.slice\(0, 20\)/);
     assert.match(panel, /ratedDuelCount: Math\.floor\(this\.duels\.ratings\.reduce/);
     assert.match(panel, /watchFileSystem\(this\.duelEventsUri\.fsPath/);
@@ -178,6 +180,10 @@ describe("formal duel host contracts", () => {
     assert.match(finalization, /const sourceTraceId = this\.pendingAgentTraceIds\.get\(messageId\)/);
     assert.match(finalization, /sourceTraceId,/);
     assert.match(finalization, /sourceMessageText: rawAgentReplyText/);
+    assert.match(finalization, /hasReservedAgentDuelChallengePrefix\(m\.text\)/);
+    assert.match(finalization, /duelContext\.duelProtocolExpected/);
+    assert.match(finalization, /parseDecisionPacket\(m\.text/);
+    assert.match(finalization, /omitted the required HYDRA_DUEL_CHALLENGE_V1 control record/);
     assert.match(finalization, /await this\.persistTranscriptMessage\(\{/);
     assert.match(finalization, /this\.enqueueAgentDuelAdmission\(agentDuelRequest\)/);
     assert.ok(
@@ -186,13 +192,47 @@ describe("formal duel host contracts", () => {
       "normal message persistence must complete before autonomous duel admission is queued",
     );
     const turn = methodSource("private async runTurn(", "private async runDiscussionTurn(");
-    assert.match(turn, /this\.currentAbort = undefined/);
+    assert.match(turn, /activeFlightEntry\.abortController = undefined/);
+    assert.match(turn, /this\.currentAbort = previousAbort/);
     assert.match(turn, /this\.drainAgentDuelAdmissions\(\)/);
     assert.ok(
-      turn.indexOf("this.currentAbort = undefined") < turn.indexOf("this.drainAgentDuelAdmissions()"),
+      turn.indexOf("this.currentAbort = previousAbort") < turn.indexOf("this.drainAgentDuelAdmissions()"),
       "heavy admission must be deferred until the complete room turn is idle",
     );
     assert.match(panel, /stdoutSha256: sha256\(result\.stdout\)/);
+    assert.match(panel, /const duelProtocolExpected = agentInitiatedDuels\(\)[\s\S]*input\.phase === "reactor"[\s\S]*input\.phase === "closer"/);
+    assert.match(panel, /allowAgentDuelChallenge: duelProtocolExpected/);
+    assert.match(panel, /reactorEnvelope\.duelProtocolExpected/);
+    assert.match(panel, /closerEnvelope\.duelProtocolExpected/);
+    assert.doesNotMatch(panel, /renderedPrompt\.includes\(AGENT_DUEL_CHALLENGE_MARKER\)/);
+  });
+
+  test("shows baseline Elo and exposes a deterministic readiness check without creating a duel", () => {
+    const baselines = fs.readFileSync(path.join(process.cwd(), "src", "duelMotivation.ts"), "utf8");
+    assert.match(baselines, /export function withDuelRatingBaselines\(/);
+    assert.match(baselines, /rating: initialRating/);
+    assert.match(baselines, /ratedMatches: 0/);
+    assert.match(baselines, /provisional: true/);
+
+    const readiness = methodSource(
+      "private duelReadinessSnapshot(",
+      "/**\n   * Deterministic host-side smoke test.",
+    );
+    assert.match(readiness, /Open a workspace folder/);
+    assert.match(readiness, /Trust this workspace/);
+    assert.match(readiness, /agentInitiatedDuels\(\)/);
+    assert.match(readiness, /fullNativeConsentKey\(agent\)/);
+    assert.match(readiness, /session cost cap has been reached/i);
+    assert.match(readiness, /formal challenges require a serial reactor or closer/);
+
+    const smoke = methodSource(
+      "async runDuelReadinessSmokeTest(",
+      "async openDuelAudit(",
+    );
+    assert.match(smoke, /parseAgentDuelIntent\(syntheticReply, challenged\)/);
+    assert.match(smoke, /AGENT_DUEL_CHALLENGE_MARKER/);
+    assert.match(smoke, /no duel event was created and Elo is unchanged/i);
+    assert.doesNotMatch(smoke, /appendDuelEvents|appendDuelEventFromUi|enqueueAgentDuelAdmission/);
   });
 
   test("keeps head-generated commitments out of the room and live-channel paths", () => {

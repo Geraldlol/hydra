@@ -2,7 +2,7 @@
   "name": "vscode-hydra-room",
   "displayName": "Hydra Agents",
   "description": "A multi-head AI collaboration room with evidence-backed decisions, build/review handoffs, and native CLI workflows inside VS Code.",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "packageManager": "pnpm@11.1.3",
   "publisher": "geraldlol",
   "license": "MIT",
@@ -155,6 +155,10 @@
         "title": "Hydra: Open Formal Duels"
       },
       {
+        "command": "hydraRoom.runDuelReadinessSmokeTest",
+        "title": "Hydra: Run Duel Readiness Test"
+      },
+      {
         "command": "hydraRoom.advanceDuel",
         "title": "Hydra: Advance Formal Duel"
       },
@@ -209,6 +213,10 @@
       {
         "command": "hydraRoom.openObjective",
         "title": "Hydra: Open Room Objective"
+      },
+      {
+        "command": "hydraRoom.openMissionContract",
+        "title": "Hydra: Open Mission Contract"
       },
       {
         "command": "hydraRoom.openNativeTerminals",
@@ -273,6 +281,15 @@
       {
         "command": "hydraRoom.runTerminalBridgeSelfTest",
         "title": "Hydra: Advanced: Run Terminal Bridge Self-Test"
+      },
+      {
+        "command": "hydraRoom.runMissionFlightSmokeTest",
+        "title": "Hydra: Advanced: Run Mission + Flight Recorder Smoke Test"
+      },
+      {
+        "command": "hydraRoom.runArenaSmokeTest",
+        "title": "Hydra: Advanced: Run Arena Worktree Smoke Test",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "hydraRoom.runManyHeadsSmokeTest",
@@ -1135,6 +1152,12 @@
           "default": true,
           "markdownDescription": "Automatically run Hydra verification after a successful Build phase."
         },
+        "hydraRoom.autoScorePassingBuilds": {
+          "scope": "application",
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Automatically add deterministic passive-score evidence when a serial builder changes the Git-visible workspace and Hydra verifies that exact post-build state under an unchanged eligible package-script plan and bounded verifier-control inventory captured before dispatch. Eligible package-manager executables are resolved outside the workspace; repeated receipts under one plan/control regime share a correlated round. Unsupported/dynamic commands may still verify but do not score. No-op, parallel, failed, cancelled, timed-out, unconfirmed, control-changing, or state-changing runs are never scored. Standings never change agent authority."
+        },
         "hydraRoom.autoAdvanceActionableDefaults": {
           "scope": "application",
           "type": "boolean",
@@ -1556,6 +1579,7 @@
         "hydraRoom.preferTerminalBridgeOnStart",
         "hydraRoom.verifyCommand",
         "hydraRoom.autoVerifyAfterBuild",
+        "hydraRoom.autoScorePassingBuilds",
         "hydraRoom.autoAdvanceActionableDefaults",
         "hydraRoom.autoSkipCloserOnAgreement",
         "hydraRoom.autoRequestReviewAfterPassingVerification",
@@ -1594,11 +1618,12 @@
     "prepackage:pre-release": "pnpm test",
     "package:pre-release": "pnpm exec vsce package --no-dependencies --pre-release",
     "install:local": "node scripts/install-local.js",
-    "install:local:existing": "node scripts/install-local.js --skip-package"
+    "install:local:existing": "node scripts/install-local.js --skip-package",
+    "install:handoff-skill": "node scripts/install-handoff-skill.js"
   },
   "devDependencies": {
     "@types/node": "^22.18.10",
-    "@types/vscode": "1.125.0",
+    "@types/vscode": "1.120.0",
     "@vscode/test-cli": "0.0.15",
     "@vscode/test-electron": "3.0.0",
     "@vscode/vsce": "^3.9.2",

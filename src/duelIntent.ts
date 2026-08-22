@@ -138,10 +138,20 @@ export function renderAgentDuelChallengeInstructions(opponentId: string, opponen
     "Agent-initiated formal duels:",
     `You may challenge only the specific head you are directly answering: ${opponentName} (durable id \`${opponentId}\`).`,
     "Challenge only a consequential disagreement that affects the active objective, can be expressed as one falsifiable proposition, and can be settled by objective evidence. Ordinary dissent, style preferences, rank farming, and safety/authority disputes are not duel material.",
-    "If and only if you are willing to make a sealed independent commitment, add exactly one unindented line immediately before the Decision Packet:",
+    "Except when the user explicitly requested an exact or minimal reply, the visible `Challenge:` prefix is reserved for that formal commitment. If your reply starts with `Challenge:`, you MUST add exactly one unindented challenge line immediately before the Decision Packet. If you disagree but do not intend a sealed formal duel, start with `Amend:` instead.",
+    "When the disagreement meets the criteria and you are willing to defend it independently, use the formal challenge rather than leaving a consequential `Challenge:` as ordinary prose:",
     `${AGENT_DUEL_CHALLENGE_MARKER} {\"opponentId\":\"${opponentId}\",\"domain\":\"runtime|architecture|security|ux|requirements|research\",\"proposition\":\"one falsifiable claim\",\"evidenceContract\":\"objective evidence and decision rule\",\"rationale\":\"why this disagreement matters now\"}`,
     "A valid request is policy-checked and, if admitted, Hydra automatically runs both sealed commitments. The user judges the revealed evidence. Do not emit the line when the user requested an exact or minimal reply.",
   ].join("\n");
+}
+
+/**
+ * A top-level `Challenge:` is a deliberate visible commitment only while the
+ * formal-duel prompt is enabled. Keep this separate from parsing so quoted,
+ * fenced, indented, or disabled-mode prose can never mint a duel by itself.
+ */
+export function hasReservedAgentDuelChallengePrefix(text: string): boolean {
+  return text.startsWith("Challenge:");
 }
 
 export interface AgentDuelEvidenceInput {

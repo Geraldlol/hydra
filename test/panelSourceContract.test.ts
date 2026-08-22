@@ -111,6 +111,77 @@ describe("passive standings source contracts", () => {
     assert.ok(record.indexOf("await appendScoreboardEvents(") < record.indexOf("await this.refreshScoreboardMirror()"));
     assert.match(record, /Hydra could not record the verdict:[\s\S]*return;[\s\S]*const mirrorOk = await this\.refreshScoreboardMirror\(\)/);
   });
+
+  test("auto-scores only evidence-bound changed serial builds and refreshes across windows", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    assert.match(source, /watchFileSystem\(this\.scoreEventsUri\.fsPath/);
+    assert.match(source, /private async drainScoreboardRefreshRequests\(\): Promise<void>/);
+    assert.match(source, /private async refreshScoreboardFromLedgerWatcher\(failureMessage: string\): Promise<void>/);
+    assert.match(source, /cross-window scores were hidden/);
+    const initializeStart = source.indexOf("private async initialize(): Promise<void>");
+    const initializeEnd = source.indexOf("private async migrateLegacyAgentTimeoutDefaults", initializeStart);
+    const initialize = source.slice(initializeStart, initializeEnd);
+    assert.ok(initialize.indexOf("this.startScoreboardLedgerWatcher()") < initialize.indexOf("await this.requestScoreboardRefreshFromLedger("));
+    assert.match(source, /while \(this\.scoreboardRefreshRequested && !this\.disposed\)/);
+    assert.match(source, /includeWorkspaceMetadata: false/);
+    assert.match(source, /context\.beforeFingerprintSha256 === context\.postFingerprintSha256/);
+    assert.match(source, /verifiedFingerprintSha256 !== context\.postFingerprintSha256/);
+    assert.match(source, /verificationResolution\?: ResolvedVerificationCommand/);
+    assert.match(source, /verificationScoringPlan\?: VerificationScoringPlan/);
+    assert.match(source, /createVerificationScoringPlan\(this\.workspaceRoot, preBuildResolution\)/);
+    assert.match(
+      source,
+      /runVerificationInternal\(\s*"afterBuild",\s*scoreContext\?\.verificationResolution,/,
+    );
+    assert.match(source, /context\.preVerificationControlSha256 !== plan\.controlSha256/);
+    assert.match(source, /postVerificationControlSha256 !== plan\.controlSha256/);
+    assert.match(source, /verification-plan-sha256|planSha256: plan\.planSha256/);
+    assert.match(source, /scoreboardEventsForVerifiedBuild\(\{/);
+    assert.match(source, /appendScoreboardEventsIfAbsent\(this\.scoreEventsUri\.fsPath, events\)/);
+
+    const automaticStart = source.indexOf("private async recordAutomaticVerifiedBuildScore(");
+    const automaticEnd = source.indexOf("private enqueueWikiMaintenanceAfterTurn", automaticStart);
+    const automatic = source.slice(automaticStart, automaticEnd);
+    assert.match(automatic, /const validScoreboardBeforeAppend = this\.scoreboard/);
+    assert.match(automatic, /this\.scoreboard = validScoreboardBeforeAppend/);
+    assert.match(automatic, /current valid standings were preserved/);
+    assert.doesNotMatch(automatic, /failed validation; automatic score evidence/);
+
+    const serialBuildStart = source.indexOf("private async runBuildPhase(");
+    const serialBuildEnd = source.indexOf("private async runParallelBuildPhase(", serialBuildStart);
+    const serialBuild = source.slice(serialBuildStart, serialBuildEnd);
+    assert.ok(serialBuild.indexOf("await this.captureSerialBuildScoreContext(builder)") < serialBuild.indexOf("await this.callAgent(builder"));
+
+    const scoreContextStart = source.indexOf("private async captureSerialBuildScoreContext(");
+    const scoreContextEnd = source.indexOf("private async captureCurrentVerificationControlSha256", scoreContextStart);
+    const scoreContextSource = source.slice(scoreContextStart, scoreContextEnd);
+    assert.match(scoreContextSource, /preBuildResolution\.kind === "explicit" \|\| preBuildResolution\.kind === "inferred"/);
+    assert.match(scoreContextSource, /: undefined;/);
+    assert.match(scoreContextSource, /command: verificationScoringPlan\?\.eligible[\s\S]*verificationScoringPlan\.command[\s\S]*preBuildResolution\.command/);
+
+    const parallelStart = source.indexOf("private async runParallelBuildPhase(");
+    const parallelEnd = source.indexOf("private async afterSuccessfulBuild(", parallelStart);
+    assert.ok(parallelStart >= 0 && parallelEnd > parallelStart);
+    assert.doesNotMatch(source.slice(parallelStart, parallelEnd), /builder:|captureScorableWorkspaceFingerprint/);
+  });
+
+  test("live-resolves post-build verification when no command existed before dispatch", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    const captureStart = source.indexOf("private async captureSerialBuildScoreContext(");
+    const captureEnd = source.indexOf("private async captureCurrentVerificationControlSha256", captureStart);
+    const capture = source.slice(captureStart, captureEnd);
+    assert.match(capture, /verificationResolution\?: ResolvedVerificationCommand|const verificationResolution/);
+    assert.match(capture, /preBuildResolution\.kind === "explicit" \|\| preBuildResolution\.kind === "inferred"[\s\S]*: undefined/);
+
+    const runStart = source.indexOf("private async runVerificationInternal(");
+    const runEnd = source.indexOf("async acceptDefaultDecision(", runStart);
+    const run = source.slice(runStart, runEnd);
+    assert.match(run, /latchedResolution \?\? await resolveVerificationCommand\(/);
+    assert.match(
+      source,
+      /runVerificationInternal\(\s*"afterBuild",\s*scoreContext\?\.verificationResolution,/,
+    );
+  });
 });
 
 describe("terminal bridge usage source contracts", () => {
@@ -205,7 +276,10 @@ describe("terminal bridge usage source contracts", () => {
     assert.match(source, /effectivePhasedNumberSetting\(raw, scope, fallback\)/);
     assert.match(source, /wikiContextRefreshTranscriptMaxChars/);
     assert.match(source, /ONE_SHOT_WORKSPACE_INSTRUCTIONS_MAX_CHARS_DEFAULTS/);
-    assert.match(source, /roomContext: this\.buildPromptContext\(phase, "terminalBridge", agent, "terminalPoke"\)/);
+    assert.match(
+      source,
+      /const roomContext = this\.buildPromptContext\(\s*phase,\s*"terminalBridge",\s*agent,\s*"terminalPoke",\s*missionBinding,\s*\);[\s\S]*buildDirectTerminalPokePrompt\(\{[\s\S]*roomContext,/,
+    );
   });
 
   test("model and effort choosers write application-scoped settings globally", () => {
@@ -265,9 +339,20 @@ describe("terminal bridge usage source contracts", () => {
     const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
 
     const assign = source.slice(source.indexOf("async assignBuilder("), source.indexOf("async assignParallelBuilders("));
-    const assignReservation = assign.indexOf('this.applyEvent({ type: "assignBuilder", builder })');
-    const assignedMessage = assign.indexOf("assigned as builder", assignReservation);
-    assert.ok(assignReservation >= 0 && assignedMessage > assignReservation);
+    const assignReservation = assign.indexOf("await this.prepareInitiatingFlightTurn(");
+    const assignTransition = assign.indexOf('type: "assignBuilder"', assignReservation);
+    const assignedMessage = assign.indexOf("assigned as builder", assignTransition);
+    assert.ok(assignReservation >= 0 && assignTransition > assignReservation);
+    assert.ok(assignedMessage > assignTransition);
+
+    const reservationHelper = source.slice(
+      source.indexOf("private async prepareInitiatingFlightTurn("),
+      source.indexOf("private releaseInitiatingFlightTurnReservation("),
+    );
+    assert.ok(
+      reservationHelper.indexOf("this.flightTransitionReservationInFlight = true")
+        < reservationHelper.indexOf("await this.prepareFlightTurn("),
+    );
 
     const verify = source.slice(source.indexOf("private async runVerificationInternal("), source.indexOf("async acceptDefaultDecision("));
     assert.ok(verify.indexOf("this.verificationRunning = true") < verify.indexOf("await resolveVerificationCommand("));
@@ -284,7 +369,10 @@ describe("terminal bridge usage source contracts", () => {
     const method = source.slice(start, end);
 
     assert.ok(method.indexOf("const previousState = this.state") < method.indexOf("this.applyEvent({"));
-    assert.match(method, /catch \(err\) \{[\s\S]*this\.applyEvent\(\{ type: "reservationFailed", restore: previousState \}\);[\s\S]*this\.postState\(\);[\s\S]*throw err/);
+    assert.match(
+      method,
+      /catch \(err\) \{[\s\S]*type: "reservationFailed", restore: previousState[\s\S]*preparedFlight\.flightTurn[\s\S]*finishPreparedFlightTurn\([\s\S]*this\.postState\(\);[\s\S]*throw err/,
+    );
   });
 
   test("webview builder messages are normalized before dispatch", () => {
@@ -438,7 +526,10 @@ describe("usage tracker source contracts", () => {
     const methodEnd = source.indexOf("private autoAdvanceExplainer(", methodStart);
     assert.ok(methodStart >= 0 && methodEnd > methodStart, "could not bound runOneShotPipeline body");
     const method = source.slice(methodStart, methodEnd);
-    assert.match(method, /await this\.extractAndRecordUsage\(\{ agent, phase, requestId: traceId, result, outputMode: prepared\.outputMode \}\)/);
+    assert.match(
+      method,
+      /await this\.extractAndRecordUsage\(\{\s*agent,\s*phase,\s*requestId: traceId,\s*result,\s*outputMode: prepared\.outputMode,\s*\}\)/,
+    );
     assert.doesNotMatch(method, /usageResult/);
   });
 
@@ -930,5 +1021,22 @@ describe("wiki wrapup source contracts", () => {
     assert.match(method, /transcriptKeptChars: promptTranscriptWindow\?\.keptChars \?\? null/);
     assert.match(method, /transcriptOmittedChars: promptTranscriptWindow\?\.omittedChars \?\? null/);
     assert.doesNotMatch(method, /mentionsWikiContext: telemetry\.mentionsWikiContext/);
+  });
+});
+
+describe("handoff inbox source contract", () => {
+  test("handoff inbox is wired through the single sendUserMessage entry point", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    assert.match(source, /new HandoffInboxController\(/);
+    const start = source.indexOf("private async runHandoff(");
+    assert.ok(start >= 0, "runHandoff method not found");
+    const end = source.indexOf("private ", start + 1);
+    assert.ok(end > start, "could not bound runHandoff body");
+    const body = source.slice(start, end);
+    assert.match(body, /case "askBoth":[\s\S]*?All of you:[\s\S]*?this\.sendUserMessage\(/);
+    assert.match(body, /case "buildClaude":[\s\S]*?this\.sendUserMessage\(/);
+    // runHandoff must NOT reach assignBuilder (needs AwaitingUser; a cold room can't).
+    assert.doesNotMatch(body, /assignBuilder\(/);
+    assert.match(source, /pendingHandoff: this\.handoffInbox/);
   });
 });

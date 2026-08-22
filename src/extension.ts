@@ -351,6 +351,13 @@ export function activate(context: vscode.ExtensionContext): void {
       })
     ),
     vscode.commands.registerCommand(
+      "hydraRoom.openMissionContract",
+      withErrorReporting(async () => {
+        const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
+        await panel.openMissionContract();
+      })
+    ),
+    vscode.commands.registerCommand(
       "hydraRoom.pokeCodexTerminal",
       withErrorReporting(async () => {
         const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
@@ -563,6 +570,13 @@ export function activate(context: vscode.ExtensionContext): void {
       })
     ),
     vscode.commands.registerCommand(
+      "hydraRoom.runDuelReadinessSmokeTest",
+      withErrorReporting(async () => {
+        const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
+        await panel.runDuelReadinessSmokeTest();
+      })
+    ),
+    vscode.commands.registerCommand(
       "hydraRoom.advanceDuel",
       withErrorReporting(async () => {
         const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
@@ -588,6 +602,26 @@ export function activate(context: vscode.ExtensionContext): void {
       withErrorReporting(async () => {
         const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
         await panel.correctDuelResult();
+      })
+    ),
+    vscode.commands.registerCommand(
+      "hydraRoom.runMissionFlightSmokeTest",
+      withErrorReporting(async () => {
+        const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
+        await panel.runMissionFlightSmokeTest();
+      })
+    ),
+    vscode.commands.registerCommand(
+      "hydraRoom.runArenaSmokeTest",
+      withErrorReporting(async () => {
+        if (vscode.workspace.isTrusted !== true) {
+          await vscode.window.showWarningMessage(
+            "Hydra Arena worktree smoke test requires a trusted workspace.",
+          );
+          return;
+        }
+        const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
+        await panel.runArenaSmokeTest();
       })
     ),
     vscode.commands.registerCommand(

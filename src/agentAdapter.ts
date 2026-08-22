@@ -72,6 +72,12 @@ export type AuthorityClass = AuthorityClassification;
  */
 export interface AgentAdapter {
   readonly kind: AgentKind;
+  /**
+   * Optional native session surface used only when its exact argv planner can
+   * preserve the invocation. Absence means Hydra's universal next-turn queue;
+   * it is never inferred from a display name or executable basename.
+   */
+  readonly steeringTransport?: "codexAppServer" | "claudeSession";
   buildInvocation(def: AgentDefinition, ctx: InvocationContext): Invocation;
   parseReply(raw: AdapterRawOutput): string;
   parseUsage(raw: AdapterRawOutput): UsageTokens | undefined;

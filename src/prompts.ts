@@ -132,11 +132,14 @@ export function buildPrompt(input: PromptInput): string {
     parts.push("", "--- Diff to review (git diff HEAD) ---", input.diff);
   }
 
+  parts.push("", PHASE_RULES[input.phase]);
   if (input.allowAgentDuelChallenge && (input.phase === "reactor" || input.phase === "closer")) {
+    // Keep the machine contract after the generic phase prose. The final
+    // reactor rule also mentions `Challenge:` in its ordinary-language sense;
+    // putting the stricter contract last prevents models from treating a
+    // consequential challenge as prose and silently omitting the control line.
     parts.push("", renderAgentDuelChallengeInstructions(input.otherAgent, them));
   }
-
-  parts.push("", PHASE_RULES[input.phase]);
   return parts.join("\n");
 }
 

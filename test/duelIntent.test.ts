@@ -3,6 +3,7 @@ import { describe, test } from "node:test";
 import {
   AGENT_DUEL_CHALLENGE_MARKER,
   buildAgentDuelEvidencePacket,
+  hasReservedAgentDuelChallengePrefix,
   parseAgentDuelIntent,
   renderAgentDuelChallengeInstructions,
   stripAgentDuelChallengeControlLines,
@@ -40,6 +41,14 @@ describe("agent duel intent", () => {
   test("treats ordinary prose as no machine challenge", () => {
     const parsed = parseAgentDuelIntent("Challenge: I disagree with Claude.", "claude");
     assert.equal(parsed.kind, "none");
+  });
+
+  test("detects only an exact top-level reserved Challenge prefix for host diagnostics", () => {
+    assert.equal(hasReservedAgentDuelChallengePrefix("Challenge: the tested claim is false."), true);
+    assert.equal(hasReservedAgentDuelChallengePrefix("Amend: the tested claim is incomplete."), false);
+    assert.equal(hasReservedAgentDuelChallengePrefix("> Challenge: quoted transcript text"), false);
+    assert.equal(hasReservedAgentDuelChallengePrefix("  Challenge: indented example"), false);
+    assert.equal(hasReservedAgentDuelChallengePrefix("Intro\nChallenge: later prose"), false);
   });
 
   test("rejects opponent forgery and strips the control line", () => {
@@ -117,6 +126,9 @@ describe("agent duel intent", () => {
     assert.match(text, /automatically runs both sealed commitments/i);
     assert.match(text, /The user judges/i);
     assert.match(text, /durable id `claude`/);
+    assert.match(text, /visible `Challenge:` prefix is reserved/);
+    assert.match(text, /MUST add exactly one unindented challenge line/);
+    assert.match(text, /start with `Amend:` instead/);
   });
 
   test("strips machine control lines from durable diagnostic text", () => {

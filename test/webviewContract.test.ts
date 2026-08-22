@@ -63,6 +63,13 @@ const boundIds = [
   "fixClaudeBtn",
   "fixCodexBtn",
   "handBackBtn",
+  "handoffStrip",
+  "handoffTitle",
+  "handoffSource",
+  "handoffAction",
+  "handoffConfirmBtn",
+  "handoffPreviewBtn",
+  "handoffDismissBtn",
   "messages",
   "modelRail",
   "nativeActionBoard",
@@ -112,6 +119,7 @@ const boundIds = [
   "ribbonMinimizedSummary",
   "ribbonStack",
   "runVerificationBtn",
+  "runDuelSmokeTestBtn",
   "safeModeBtn",
   "sendBtn",
   "setObjectiveBtn",
@@ -148,8 +156,10 @@ const hostMessages = [
   "chooseModelOrEffort",
   "changeCapabilityProfile",
   "configureManyHeadsWorkers",
+  "confirmHandoff",
   "clearAttachment",
   "clearAttachments",
+  "dismissHandoff",
   "resetObjective",
   "testTelegram",
   "fixClaudePath",
@@ -168,12 +178,14 @@ const hostMessages = [
   "openTranscript",
   "openVerification",
   "previewNextPrompt",
+  "previewHandoff",
   "copyRunFailurePromptSha",
   "requestReview",
   "resetStuckTurn",
   "runDoctor",
   "runNativeCommand",
   "runVerification",
+  "runDuelReadinessSmokeTest",
   "send",
   "sendRawTerminalLine",
   "setObjective",
@@ -430,6 +442,15 @@ describe("webview contract", () => {
     }
   });
 
+  test("shows duel readiness and wires the non-rated protocol test", () => {
+    assert.match(html, /id="runDuelSmokeTestBtn"[^>]*>Run Readiness Test<\/button>/);
+    assert.match(surface, /runDuelSmokeTestBtn\.addEventListener\("click", \(\) => vscode\.postMessage\(\{ type: "runDuelReadinessSmokeTest" \}\)\)/);
+    assert.match(surface, /Agent challenges: ready/);
+    assert.match(surface, /Agent challenges: blocked/);
+    assert.match(surface, /Latest protocol outcome:/);
+    assert.match(surface, /readinessSummary/);
+  });
+
   test("model rail opens model-or-thinking chooser", () => {
     assert.match(html, /id="modelRail"[^>]+title="Click to change model or thinking level\."/);
     assert.match(surface, /const open = \(\) => vscode\.postMessage\(\{ type: "chooseModelOrEffort" \}\)/);
@@ -544,7 +565,7 @@ describe("webview contract", () => {
     assert.match(html, /Persistent full-native consent is still required/);
     assert.match(html, /The human independently judges the revealed evidence/);
     assert.match(html, /Results never change permissions, approvals, builder assignment, speaking order, safety policy, or orchestration authority/);
-    assert.match(html, /id="agentDuelMode"[^>]*>Agent challenges: enabled<\/span>/);
+    assert.match(html, /id="agentDuelMode"[^>]*>Agent challenges: checking<\/span>/);
     assert.doesNotMatch(html, /id="createDuelBtn"|>New Duel<\/button>/);
     assert.match(html, /id="openDuelAuditBtn"[^>]*>Open Audit<\/button>/);
     assert.match(html, /id="correctDuelResultBtn"[^>]*>Correct Result<\/button>/);
@@ -557,7 +578,8 @@ describe("webview contract", () => {
     assert.match(scriptBody, /data && data\.automationRunning/);
     assert.match(scriptBody, /data && data\.automationQueued/);
     assert.match(scriptBody, /"Agent challenges: running"/);
-    assert.match(scriptBody, /"Agent challenges: enabled"/);
+    assert.match(scriptBody, /"Agent challenges: ready"/);
+    assert.match(scriptBody, /"Agent challenges: blocked"/);
     assert.match(scriptBody, /"Agent challenges: paused"/);
     const standingsRenderer = scriptBody.slice(
       scriptBody.indexOf("function renderStandings(data)"),
@@ -668,5 +690,16 @@ describe("webview contract", () => {
     assert.match(surface, /function restoreMessageScroll\(scroll\)[\s\S]*setMessageScrollTop\(messagesEl\.scrollHeight\)/);
     assert.match(html, /#messages \{[\s\S]*scroll-behavior: auto;[\s\S]*overflow-anchor: none;/);
     assert.equal((scriptBody.match(/messagesEl\.scrollTop = messagesEl\.scrollHeight/g) ?? []).length, 0, "bottom snap must go through the scroll restorer");
+  });
+
+  test("renders the handoff confirm chip and wires its controls", () => {
+    assert.match(html, /id="handoffStrip"/);
+    assert.match(html, /<select id="handoffAction"/);
+    assert.match(html, /<button id="handoffConfirmBtn" [^>]*type="button"/);
+    assert.match(html, /<button id="handoffPreviewBtn" [^>]*type="button"/);
+    assert.match(html, /<button id="handoffDismissBtn" [^>]*type="button"/);
+    assert.match(surface, /vscode\.postMessage\(\{ type: "confirmHandoff", action: [^}]+\}\)/);
+    assert.match(surface, /vscode\.postMessage\(\{ type: "dismissHandoff" \}\)/);
+    assert.match(surface, /vscode\.postMessage\(\{ type: "previewHandoff" \}\)/);
   });
 });

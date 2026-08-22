@@ -87,6 +87,21 @@ describe("duel workspace integrity guard", () => {
     assert.ok(after.workspaceEntryCount > before.workspaceEntryCount);
   });
 
+  test("can exclude ignored workspace metadata for reproducible build scoring", async (t) => {
+    const { root } = await createRepository(t);
+    const options = { includeWorkspaceMetadata: false, hashOnlyChangedTrackedFiles: true };
+    const before = await captureDuelWorkspaceFingerprint(root, options);
+    await fs.writeFile(path.join(root, "ignored.log"), "generated test output\n", "utf8");
+    const ignoredAfter = await captureDuelWorkspaceFingerprint(root, options);
+    assert.equal(before.workspaceEntryCount, 0);
+    assert.equal(ignoredAfter.workspaceEntryCount, 0);
+    assert.equal(ignoredAfter.sha256, before.sha256);
+
+    await fs.writeFile(path.join(root, "tracked.txt"), "builder change\n", "utf8");
+    const changedAfter = await captureDuelWorkspaceFingerprint(root, options);
+    assert.notEqual(changedAfter.sha256, before.sha256);
+  });
+
   test("does not invoke configured fsmonitor, external diff, or textconv programs", async (t) => {
     const { root, git } = await createRepository(t);
     const impossible = path.join(root, "must-not-run-hydra-helper");
@@ -122,6 +137,36 @@ describe("duel workspace integrity guard", () => {
     await fs.writeFile(target, "changed secret\n", "utf8");
     const targetChanged = await captureDuelWorkspaceFingerprint(root);
     assert.equal(targetChanged.sha256, linked.sha256);
+  });
+
+  test("binds untracked link targets when workspace metadata is excluded for scoring", async (t) => {
+    const { root } = await createRepository(t);
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-score-workspace-outside-"));
+    t.after(async () => {
+      await fs.rm(outside, { recursive: true, force: true });
+    });
+    const firstTarget = path.join(outside, "first.txt");
+    const secondTarget = path.join(outside, "second.txt");
+    await fs.writeFile(firstTarget, "first outside value\n", "utf8");
+    await fs.writeFile(secondTarget, "second outside value\n", "utf8");
+    const link = path.join(root, "untracked-link.txt");
+    try {
+      await fs.symlink(firstTarget, link, "file");
+    } catch (error) {
+      t.skip(`symbolic-link creation unavailable: ${String(error)}`);
+      return;
+    }
+
+    const options = { includeWorkspaceMetadata: false, hashOnlyChangedTrackedFiles: true };
+    const first = await captureDuelWorkspaceFingerprint(root, options);
+    await fs.unlink(link);
+    await fs.symlink(secondTarget, link, "file");
+    const retargeted = await captureDuelWorkspaceFingerprint(root, options);
+    assert.notEqual(retargeted.sha256, first.sha256);
+
+    await fs.writeFile(secondTarget, "changed outside value\n", "utf8");
+    const targetContentChanged = await captureDuelWorkspaceFingerprint(root, options);
+    assert.equal(targetContentChanged.sha256, retargeted.sha256);
   });
 
   test("live monitor catches write-then-revert activity while exempting Hydra state", async (t) => {

@@ -6,6 +6,34 @@ export interface DuelMotivationRating {
   readonly provisional: boolean;
 }
 
+/**
+ * Materialize the documented 1000-Elo starting line without writing synthetic
+ * matches into the authoritative duel ledger. Existing replayed ratings always
+ * win; only missing agent/domain pairs receive a zero-match provisional row.
+ */
+export function withDuelRatingBaselines(
+  ratings: readonly DuelMotivationRating[],
+  agentIds: readonly string[],
+  domains: readonly string[],
+  initialRating = 1000,
+): DuelMotivationRating[] {
+  const rows = ratings.map((rating) => ({ ...rating }));
+  const seen = new Set(rows.map((rating) => `${rating.agentId}\0${rating.domain}`));
+  for (const domain of domains) {
+    for (const agentId of agentIds) {
+      const key = `${agentId}\0${domain}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rows.push({ agentId, domain, rating: initialRating, ratedMatches: 0, provisional: true });
+    }
+  }
+  return rows.sort((left, right) =>
+    left.domain.localeCompare(right.domain)
+      || right.rating - left.rating
+      || left.agentId.localeCompare(right.agentId)
+  );
+}
+
 const MAX_PROMPT_RATING_DOMAINS = 8;
 
 /**

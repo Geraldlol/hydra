@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://marketplace.visualstudio.com/items?itemName=geraldlol.vscode-hydra-room">Install from the Visual Studio Marketplace</a>
-  &nbsp;·&nbsp; Preview 0.7.2
+  &nbsp;·&nbsp; Preview 0.7.3
   &nbsp;·&nbsp; <a href="CHANGELOG.md">Changelog</a>
 </p>
 
@@ -25,7 +25,7 @@ Hydra drives the native CLIs you already installed, using their existing logins 
 
 - **Durable N-head rooms** - `hydraRoom.roomRoster` now drives seated identities, discussion roles, all-head build/review handoffs, status rails, and per-head usage.
 - **Equal maximum native authority** - Codex and Claude default to the same consent-gated Full Native posture for Discussion, Build, and Review. Hydra does not intentionally weaken either head, while vendor tools and provider capabilities can still differ.
-- **Evidence scoreboard** - falsifiable claims can be resolved against deterministic verification or human evidence, producing conservative passive standings without granting operational authority.
+- **Evidence scoreboard** - changed serial builds are automatically scored when Hydra verifies the exact post-build Git-visible state under an unchanged verifier plan captured before dispatch; other falsifiable claims can be resolved against deterministic verification or human evidence, producing conservative passive standings without granting operational authority.
 - **Agent-initiated rated duels** - a serial reactor or closer can challenge the head it just examined. Hydra either rejects the challenge under policy or runs sealed paired commitments followed by independent human adjudication. There is no human Create Duel action and no exhibition fallback.
 - **Domain Elo and competitive pressure** - every domain starts at 1000 Elo. Lower-ranked heads see the gap to #1; the Supreme Head is pressed to defend an established lead. Rank is motivational only and never changes permissions, approvals, builder assignment, speaking order, or safety policy.
 - **Current models and safer Telegram input** - the model chooser/cost catalog is refreshed, inbound sender names are sanitized, and an optional sender-ID allowlist can restrict who may drive a room remotely.
@@ -71,7 +71,7 @@ Node.js 22.13 or newer and pnpm 11.1.3 are required for local extension developm
 
 Use the in-room **Browser** button or run `Hydra: Open Integrated Browser` to open a visible page in VS Code's editor-native Integrated Browser. Where that is unavailable, Hydra falls back to Simple Browser or finally the system browser. Manual tabs opened while control is off are never silently inherited by an agent.
 
-Agent control requires VS Code 1.127 or newer with compatible browser chat tools available. Run `Hydra: Toggle Agent Browser Control` and approve the session modal. While control is on, a globe status item remains visible as a kill switch. Hydra attaches structured `hydra_vscode_browser` MCP tools to Codex and Claude turns; Node-equipped custom heads can use the packaged CLI. Agent-created pages are isolated per head. A page is shared with all heads only when you open it through Hydra's Browser command while control is already on.
+Agent control requires VS Code 1.127 or newer with compatible browser chat tools available. After every extension-host reload, run `Hydra: Toggle Agent Browser Control`, approve the session modal, and start a new turn; already-running turns cannot receive the connection. While control is on, a globe status item remains visible as a kill switch. Hydra attaches structured `hydra_vscode_browser` MCP tools to Codex and Claude turns; Node-equipped custom heads can use the packaged CLI adapter. When a browser surface is not named, Hydra's Integrated Browser is the default: an unavailable connection is reported instead of silently switching to Chrome, while an explicit request for Chrome or another browser is still honored. Agent-created pages are isolated per head. A page is shared with all heads only when you open it through Hydra's Browser command while control is already on.
 
 Browser text and screenshots are untrusted input, not instructions. Hydra asks you to approve each agent open, navigation, click, type, drag, hover, or dialog response once and shows the destination/target (including the full length of long text, since only a prefix is displayed); raw Playwright/CDP and local-file uploads are not exposed. Link-local and cloud-metadata addresses and credential-bearing URLs are refused, while loopback and LAN dev servers stay browsable. VS Code's browser policy still applies underneath. The browser grant is separate from filesystem authority, so a `read-only` head can observe pages but needs your one-time action approval to mutate a website.
 
@@ -320,7 +320,11 @@ Hydra stores those packets in `.hydra/decisions.jsonl`, shows the latest decisio
 
 ### Passive evidence standings
 
-The scoreboard tracks which heads make falsifiable claims that later hold up. A typical flow is:
+The scoreboard tracks which heads make falsifiable claims that later hold up. By default, a successful serial Build that changes Git-visible project state is automatically registered when Hydra's post-build verification passes and the same state is re-confirmed afterward. Before dispatch, Hydra resolves the eligible package-manager executable to an absolute path outside the workspace, latches that exact package-script command, and fingerprints a bounded conventional control surface: package manifests and lockfiles, package-manager runtime configuration, tests/specs, scripts, and common test/build/lint configuration. Those controls must match immediately before and after verification. Unsupported or dynamic commands still run as ordinary verification but do not create standings evidence. The receipt, command-plan hash, control hash, and workspace fingerprint become the deterministic evidence.
+
+No-op builds, parallel builds, unavailable fingerprints, changed verifier controls, and failed, cancelled, timed-out, unconfirmed, or state-changing verification runs are not scored. Repeated passing receipts under the same command plan and verifier-control hash share one correlated round, so trivial edits cannot manufacture evidence maturity. This inventory is a conservative integrity check, not proof that tests are complete or independent, and it does not defend against a malicious same-user process that changes and restores controls between snapshots. The generated claim says only that the recorded state passed the recorded command, and standings never grant authority. Set `hydraRoom.autoScorePassingBuilds` to `false` in User Settings to disable this automatic path.
+
+For manual evidence, a typical flow is:
 
 1. Run `Hydra: Run Verification` when deterministic evidence is available.
 2. Run `Hydra: Record Evidence Verdict` and choose the head, domain, outcome, evidence source, and evidence note.
@@ -329,7 +333,7 @@ The scoreboard tracks which heads make falsifiable claims that later hold up. A 
 
 Deterministic scoring creates its claim from the exact passing verification receipt instead of attaching an unrelated green check to free-form text. Human adjudication can resolve other falsifiable claims. Peer opinions remain visible but have zero score weight. Repeated claims in one round cannot inflate maturity.
 
-The board shows a source-weighted Wilson lower-bound score, a W/P/L record, and independent resolved rounds. A standing remains provisional until five independently resolved rounds. The authoritative append-only ledger lives in VS Code's private per-workspace extension storage; `.hydra/scoreboard.md` and `.hydra/score-evidence.md` are disposable human-readable mirrors.
+The board shows a source-weighted Wilson lower-bound score, a W/P/L record, and independent resolved rounds. A standing remains provisional until five independently resolved rounds. The authoritative append-only ledger lives in VS Code's private per-workspace extension storage; already-open windows watch that ledger for cross-window updates. `.hydra/scoreboard.md` and `.hydra/score-evidence.md` are disposable human-readable mirrors.
 
 <p align="center">
   <a href="media/screenshots/evidence-scoreboard.png"><img src="media/screenshots/evidence-scoreboard.png" width="900" alt="Hydra evidence scoreboard ranking Codex, Gemini, and Claude using resolved falsifiable claims"></a>
@@ -344,7 +348,7 @@ Prerequisites and trigger:
 
 - The workspace must be trusted, `hydraRoom.agentInitiatedDuels` must be enabled, and both participants need persistent Full Native consent.
 - Rated commitments currently require heads backed by supported local Codex or Claude adapters; Gemini, HTTP-only, and generic CLI-template participants are not admitted by the v3 commitment policy.
-- Only a successful **serial reactor or closer** can challenge the head whose immediately preceding reply it examined. The challenge must name a falsifiable proposition, domain, evidence contract, and rationale. Openers, parallel replies, quoted markers, and user wording cannot create a duel.
+- Only a successful **serial reactor or closer** can challenge the head whose immediately preceding reply it examined. In those prompts, a top-level `Challenge:` is reserved for a formal request and must include Hydra's exact `HYDRA_DUEL_CHALLENGE_V1` control record; ordinary disagreement uses `Amend:`. The challenge must name a falsifiable proposition, domain, evidence contract, and rationale. Missing or malformed control records fail visibly without creating a duel or changing Elo. Openers, parallel replies, quoted markers, exact/minimal user replies, and user wording cannot create a duel.
 
 Flow:
 
@@ -369,6 +373,10 @@ Domain Elo starts at 1000 with K=24. Decisive results move winner and loser by e
 ## Work Queue
 
 Hydra computes a live Work Queue from existing durable state: actionable decision defaults, failing verification, and failed or cancelled native actions. Queue items appear in the room with one-click actions such as Accept, Discuss, or Rerun. Use Dismiss to hide an item until its underlying source changes, or Snooze to hide it for one hour. The queue items themselves are the current attention view over `.hydra/decisions.jsonl`, `.hydra/verification.jsonl`, and `.hydra/native-actions.jsonl`; only dismiss/snooze state is stored separately in `.hydra/work-queue.jsonl`.
+
+## Handing off from the Codex / Claude CLI
+
+Run `/hydra-handoff [discuss|askBoth|buildCodex|buildClaude] [notes]` inside a Codex or Claude Code session to package the current work into a handoff. It writes a packet to `.hydra/handoff-inbox/`; the Hydra room (open or next opened in that workspace) shows a confirm chip where you Preview, override the action, and Confirm to run it — or Dismiss. Install the skill once with `pnpm run install:handoff-skill`.
 
 ## Session Brief
 

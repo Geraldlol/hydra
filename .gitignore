@@ -13,6 +13,7 @@ out/
 .vscode-test/
 
 # Local package/test artifacts.
+.pnpm-store/
 *.vsix
 *.log
 npm-debug.log

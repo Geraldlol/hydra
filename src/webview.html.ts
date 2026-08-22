@@ -893,6 +893,22 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     #decisionStrip .decision-actions {
       align-self: center;
     }
+    .handoff-action-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--text-muted);
+      font-size: 11px;
+    }
+    .handoff-action-select {
+      min-height: 24px;
+      padding: 3px 8px;
+      color: var(--text-muted);
+      background: var(--abyss-raised);
+      border: 1px solid var(--border);
+      border-radius: var(--r-chip);
+      font-size: 11px;
+    }
     @media (max-width: 880px) {
       #decisionStrip { grid-template-columns: minmax(0, 1fr) auto; }
       #decisionStrip .decision-needed,
@@ -1648,6 +1664,23 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
             <div class="decision-field"><strong>Blockers</strong><span id="decisionBlockers">None</span></div>
           </div>
         </div>
+        <div id="handoffStrip" class="decision-strip hidden">
+          <div class="decision-title">Handoff<span id="handoffSource" class="decision-count"></span><button class="secondary ribbon-collapse-btn" type="button" data-ribbon-toggle="handoffStrip" data-ribbon-label="Handoff" aria-label="Collapse Handoff" title="Collapse Handoff" aria-expanded="true">&#8722;</button></div>
+          <div class="decision-field decision-needed"><strong>Queued handoff</strong><span id="handoffTitle">None</span></div>
+          <div class="decision-actions">
+            <label class="handoff-action-label">Run as
+              <select id="handoffAction" class="handoff-action-select">
+                <option value="discuss">Discuss</option>
+                <option value="askBoth">Ask all heads</option>
+                <option value="buildCodex">Build (Codex)</option>
+                <option value="buildClaude">Build (Claude)</option>
+              </select>
+            </label>
+            <button id="handoffConfirmBtn" class="suggested" type="button">Confirm</button>
+            <button id="handoffPreviewBtn" class="secondary" type="button">Preview</button>
+            <button id="handoffDismissBtn" class="secondary" type="button">Dismiss</button>
+          </div>
+        </div>
       </div>
 
       <footer class="composer">
@@ -1767,7 +1800,7 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
           <div class="insp-head"><h3>Formal Duels</h3><span class="count" id="duelsPanelCount"></span><button class="secondary close" type="button">Close</button></div>
           <div class="insp-body">
             <p class="duel-policy">Heads initiate their own formal duels from consequential, falsifiable disagreements in serial discussion. Hydra admits or rejects each challenge by policy, then automatically runs both sealed commitments—the human does not create, accept, or author either answer. No duel is downgraded to an exhibition. Both heads receive equal maximum Hydra-granted permissions and the same host-built evidence brief. Hydra locks each effective command, model, arguments, working directory, and environment digest; vendor-native tool catalogs and provider capabilities can still differ. The project is read-only by duel contract, with bounded content and entry-metadata checks plus live mutation monitoring outside <code>.git</code> and Hydra-owned <code>.hydra</code>. A detected or unverifiable change cancels without Elo; this is not an absolute defense against a malicious same-user process. Persistent full-native consent is still required. The human independently judges the revealed evidence. Results never change permissions, approvals, builder assignment, speaking order, safety policy, or orchestration authority.</p>
-            <div class="duel-actions"><span id="agentDuelMode" class="duel-status">Agent challenges: enabled</span><button id="openDuelAuditBtn" class="secondary" type="button">Open Audit</button><button id="correctDuelResultBtn" class="secondary" type="button">Correct Result</button></div>
+            <div class="duel-actions"><span id="agentDuelMode" class="duel-status">Agent challenges: checking</span><button id="runDuelSmokeTestBtn" class="secondary" type="button">Run Readiness Test</button><button id="openDuelAuditBtn" class="secondary" type="button">Open Audit</button><button id="correctDuelResultBtn" class="secondary" type="button">Correct Result</button></div>
             <div id="duelsBoard" class="duels-board"></div>
           </div>
         </section>

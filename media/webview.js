@@ -46,6 +46,13 @@ const decisionNeeded = document.getElementById("decisionNeeded");
 const decisionBlockers = document.getElementById("decisionBlockers");
 const decisionBoard = document.getElementById("decisionBoard");
 const acceptDefaultBtn = document.getElementById("acceptDefaultBtn");
+const handoffStrip = document.getElementById("handoffStrip");
+const handoffTitle = document.getElementById("handoffTitle");
+const handoffSource = document.getElementById("handoffSource");
+const handoffAction = document.getElementById("handoffAction");
+const handoffConfirmBtn = document.getElementById("handoffConfirmBtn");
+const handoffPreviewBtn = document.getElementById("handoffPreviewBtn");
+const handoffDismissBtn = document.getElementById("handoffDismissBtn");
 const autoAdvanceDefaultsBtn = document.getElementById("autoAdvanceDefaultsBtn");
 const openerBtn = document.getElementById("openerBtn");
 const commandCenterBtn = document.getElementById("commandCenterBtn");
@@ -142,6 +149,7 @@ const duelsRail = document.getElementById("duelsRail");
 const duelsPanelCount = document.getElementById("duelsPanelCount");
 const duelsBoard = document.getElementById("duelsBoard");
 const agentDuelMode = document.getElementById("agentDuelMode");
+const runDuelSmokeTestBtn = document.getElementById("runDuelSmokeTestBtn");
 const openDuelAuditBtn = document.getElementById("openDuelAuditBtn");
 const correctDuelResultBtn = document.getElementById("correctDuelResultBtn");
 if (usageRail) {
@@ -185,6 +193,7 @@ let lastFilteredNativeActions = [];
 let defaultOpener = "codex";
 let selectedOpener = "codex";
 let hasOpenerOverride = false;
+let lastHandoffKey = null;
 let transport = "oneShot";
 let lastNativeActions = [];
 let lastState = {};
@@ -343,6 +352,11 @@ stopBtn.addEventListener("click", () => vscode.postMessage({ type: "stop" }));
 assignBothBtn.addEventListener("click", () => vscode.postMessage({ type: "assignParallelBuilders" }));
 reviewBtn.addEventListener("click", () => vscode.postMessage({ type: "requestReview" }));
 acceptDefaultBtn.addEventListener("click", () => vscode.postMessage({ type: "acceptDefaultDecision" }));
+handoffConfirmBtn.addEventListener("click", () => {
+  vscode.postMessage({ type: "confirmHandoff", action: handoffAction.value });
+});
+handoffPreviewBtn.addEventListener("click", () => vscode.postMessage({ type: "previewHandoff" }));
+handoffDismissBtn.addEventListener("click", () => vscode.postMessage({ type: "dismissHandoff" }));
 autoAdvanceDefaultsBtn.addEventListener("click", () => vscode.postMessage({ type: "toggleAutoAdvanceActionableDefaults" }));
 handBackBtn.addEventListener("click", () => vscode.postMessage({ type: "handBack" }));
 nativeTerminalsBtn.addEventListener("click", () => vscode.postMessage({ type: transport === "terminalBridge" ? "useOneShotTransport" : "useTerminalBridge" }));
@@ -390,6 +404,7 @@ if (openEvidenceBtn) openEvidenceBtn.addEventListener("click", () => vscode.post
 if (reverseVerdictBtn) reverseVerdictBtn.addEventListener("click", () => vscode.postMessage({ type: "reverseScoreVerdict" }));
 if (openStandingsBtn) openStandingsBtn.addEventListener("click", () => vscode.postMessage({ type: "openStandings" }));
 if (openDuelAuditBtn) openDuelAuditBtn.addEventListener("click", () => vscode.postMessage({ type: "openDuelAudit" }));
+if (runDuelSmokeTestBtn) runDuelSmokeTestBtn.addEventListener("click", () => vscode.postMessage({ type: "runDuelReadinessSmokeTest" }));
 if (correctDuelResultBtn) correctDuelResultBtn.addEventListener("click", () => vscode.postMessage({ type: "correctDuelResult" }));
 nativeAgentFilter.addEventListener("change", () => renderNativeActions(lastState));
 nativeStatusFilter.addEventListener("change", () => renderNativeActions(lastState));
@@ -600,6 +615,7 @@ function renderState(state) {
   renderNativeActions(state);
   renderWorkQueue(state);
   renderDecision(state.latestDecision, state.decisionsCount || 0, state.latestDecisionRisky, !!state.latestDecisionAccepted);
+  renderHandoff(state.pendingHandoff);
   renderAutoAdvanceDefaults(!!state.autoAdvanceActionableDefaults);
   renderDecisionAction(state.decisionAction, !!state.canAcceptDefault, !!state.latestDecisionAccepted, !!state.canStop);
   renderStandings(state.standings || {});
@@ -611,10 +627,18 @@ function renderState(state) {
   renderAttachmentTray(state.pendingAttachments || []);
   const hasAttachments = Array.isArray(state.pendingAttachments) && state.pendingAttachments.length > 0;
   sendBtn.disabled = !state.canSend;
-  sendBtn.textContent = state.canStop ? "QUEUE" : "SEND";
-  sendBtn.title = state.canStop
-    ? "Queue this follow-up and send it after the active turn finishes"
-    : "Send message";
+  const liveSteeringTargetCount = Number.isFinite(state.liveSteeringTargetCount)
+    ? Math.max(0, Math.floor(state.liveSteeringTargetCount))
+    : 0;
+  const canSteerLive = !!state.canStop && liveSteeringTargetCount > 0;
+  sendBtn.textContent = canSteerLive
+    ? `STEER (${liveSteeringTargetCount})`
+    : state.canStop ? "QUEUE" : "SEND";
+  sendBtn.title = canSteerLive
+    ? `Send non-interrupting steering to ${liveSteeringTargetCount} active native head${liveSteeringTargetCount === 1 ? "" : "s"}`
+    : state.canStop
+      ? "Queue this follow-up and send it after the active turn finishes"
+      : "Send message";
   openerBtn.disabled = !state.canSend || currentRoster.length < 2;
   attachFilesBtn.disabled = !state.canAttachFiles;
   clearAttachmentsBtn.disabled = !hasAttachments;
@@ -681,6 +705,7 @@ function renderState(state) {
   if (reverseVerdictBtn) reverseVerdictBtn.disabled = !!state.canOpenFolder;
   if (openStandingsBtn) openStandingsBtn.disabled = !!state.canOpenFolder;
   if (openDuelAuditBtn) openDuelAuditBtn.disabled = !!state.canOpenFolder;
+  if (runDuelSmokeTestBtn) runDuelSmokeTestBtn.disabled = !!state.canOpenFolder;
   if (correctDuelResultBtn) correctDuelResultBtn.disabled = !!state.canOpenFolder;
   renderOpenerButton();
   renderPalette(paletteInput.value || "");
@@ -792,7 +817,7 @@ function persistWebviewState(extra) {
 }
 
 function updateRibbonMinimizedSummary(state) {
-  const ribbonIds = ["setupStrip", "verificationStrip", "nativeActionStrip", "workQueueStrip", "decisionStrip"];
+  const ribbonIds = ["setupStrip", "verificationStrip", "nativeActionStrip", "workQueueStrip", "decisionStrip", "handoffStrip"];
   const hasVisibleRibbon = ribbonIds.some((id) => {
     const el = document.getElementById(id);
     return el && !el.classList.contains("hidden");
@@ -1708,6 +1733,11 @@ function renderDuels(data) {
   const recentTotal = Math.max(recent.length, Number(data && data.recentTotal) || 0);
   const error = data && typeof data.error === "string" ? data.error.trim() : "";
   const mirrorError = data && typeof data.mirrorError === "string" ? data.mirrorError.trim() : "";
+  const readiness = data && data.readiness && typeof data.readiness === "object" ? data.readiness : {};
+  const readinessReady = !!readiness.ready;
+  const readinessSummary = typeof readiness.summary === "string" ? readiness.summary.trim() : "Duel readiness has not been evaluated.";
+  const readinessNotes = Array.isArray(readiness.notes) ? readiness.notes.filter((note) => typeof note === "string" && note.trim()) : [];
+  const protocolStatus = data && typeof data.protocolStatus === "string" ? data.protocolStatus.trim() : "";
   if (agentDuelMode) {
     const enabled = !!(data && data.agentInitiatedEnabled);
     const running = !!(data && data.automationRunning);
@@ -1716,10 +1746,13 @@ function renderDuels(data) {
       ? "Agent challenges: running"
       : queued > 0
         ? "Agent challenges: " + queued + " queued"
-        : enabled
-          ? "Agent challenges: enabled"
+        : enabled && readinessReady
+          ? "Agent challenges: ready"
+          : enabled
+            ? "Agent challenges: blocked"
           : "Agent challenges: paused";
-    agentDuelMode.className = "duel-status" + (!enabled ? " warn" : "");
+    agentDuelMode.className = "duel-status" + (!enabled || !readinessReady ? " warn" : "");
+    agentDuelMode.title = readinessSummary;
   }
   // Every rated duel increments both participants, so the ratings table's
   // match total is exactly twice the number of rated duels.
@@ -1761,6 +1794,17 @@ function renderDuels(data) {
     warning.className = "standing-policy";
     warning.textContent = mirrorError + " The private duel ledger and in-room ratings remain valid.";
     duelsBoard.append(warning);
+  }
+
+  const readinessMessage = document.createElement("p");
+  readinessMessage.className = "standing-policy";
+  readinessMessage.textContent = readinessSummary + (readinessNotes.length ? " " + readinessNotes.join(" ") : "");
+  duelsBoard.append(readinessMessage);
+  if (protocolStatus) {
+    const protocolMessage = document.createElement("p");
+    protocolMessage.className = "standing-policy";
+    protocolMessage.textContent = "Latest protocol outcome: " + protocolStatus;
+    duelsBoard.append(protocolMessage);
   }
 
   const activeSection = duelSection("Active duels", active.length + " requiring attention");
@@ -2261,6 +2305,23 @@ function renderDecision(decision, count, risky, accepted) {
   decisionRecommendation.textContent = decision.recommendation || "None";
   decisionNeeded.textContent = accepted ? "Decision accepted" : hasUserQuestion ? needed : "No user decision requested";
   decisionBlockers.textContent = decision.blockers || "none";
+}
+function renderHandoff(pending) {
+  handoffStrip.classList.toggle("hidden", !pending);
+  if (!pending) {
+    lastHandoffKey = null;
+    return;
+  }
+  handoffTitle.textContent = pending.title || "Untitled handoff";
+  handoffSource.textContent = pending.source ? " (" + pending.source + ")" : "";
+  // Why: only seed the select on a NEW packet -- re-renders (Telegram poll, git
+  // refresh, watch events, the turn interval) must not clobber a user override
+  // made after the packet arrived but before Confirm.
+  const key = [pending.title, pending.source, pending.suggestedAction].join(" ");
+  if (key !== lastHandoffKey) {
+    lastHandoffKey = key;
+    if (pending.suggestedAction) handoffAction.value = pending.suggestedAction;
+  }
 }
 function renderDecisionAction(action, canAccept, accepted, running) {
   const label = accepted ? (running ? "Default Running" : "Default Accepted") : action && action.label ? action.label : "Accept Default";

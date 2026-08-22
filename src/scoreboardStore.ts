@@ -72,24 +72,61 @@ export async function appendScoreboardEvents(
   if (additions.length === 0) return aggregateScoreboard(await loadScoreboardEvents(filePath));
   return serializePerFileAcrossProcesses(filePath, async () => {
     const current = await loadScoreboardEvents(filePath);
-    const next = [...current, ...additions];
-    if (next.length > MAX_SCOREBOARD_EVENTS) {
-      throw new Error(`Hydra standings ledger cannot exceed ${MAX_SCOREBOARD_EVENTS} events.`);
-    }
-    const issues = validateScoreboardEvents(next);
-    if (issues.length > 0) throw new ScoreboardValidationError(issues);
-    const rows = additions.map((event) => JSON.stringify(event));
-    if (rows.some((row) => row.length > MAX_SCOREBOARD_LINE_CHARS || Buffer.byteLength(row, "utf8") > MAX_SCOREBOARD_LINE_CHARS)) {
-      throw new Error(`Hydra standings ledger rows cannot exceed ${MAX_SCOREBOARD_LINE_CHARS} bytes.`);
-    }
-    const body = rows.join("\n") + "\n";
-    const stat = await fs.stat(filePath);
-    if (stat.size + Buffer.byteLength(body, "utf8") > MAX_SCOREBOARD_LEDGER_BYTES) {
-      throw new Error(`Hydra standings ledger cannot exceed ${MAX_SCOREBOARD_LEDGER_BYTES} bytes.`);
-    }
-    await appendFileSafely(filePath, body);
-    return aggregateScoreboard(next);
+    return appendValidatedScoreboardRows(filePath, current, additions);
   });
+}
+
+/**
+ * Idempotent append for events derived from durable receipts. Exact retries
+ * are no-ops; an event-id collision with different content still fails closed.
+ */
+export async function appendScoreboardEventsIfAbsent(
+  filePath: string,
+  additions: readonly ScoreboardEvent[],
+): Promise<ScoreboardAggregate> {
+  if (additions.length === 0) return aggregateScoreboard(await loadScoreboardEvents(filePath));
+  return serializePerFileAcrossProcesses(filePath, async () => {
+    const current = await loadScoreboardEvents(filePath);
+    const byEventId = new Map(current.map((event) => [event.eventId, event]));
+    const missing: ScoreboardEvent[] = [];
+    for (const addition of additions) {
+      const existing = byEventId.get(addition.eventId);
+      if (existing) {
+        if (JSON.stringify(existing) !== JSON.stringify(addition)) {
+          throw new Error(`Hydra standings event id collision for ${addition.eventId}.`);
+        }
+        continue;
+      }
+      byEventId.set(addition.eventId, addition);
+      missing.push(addition);
+    }
+    if (missing.length === 0) return aggregateScoreboard(current);
+    return appendValidatedScoreboardRows(filePath, current, missing);
+  });
+}
+
+async function appendValidatedScoreboardRows(
+  filePath: string,
+  current: readonly ScoreboardEvent[],
+  additions: readonly ScoreboardEvent[],
+): Promise<ScoreboardAggregate> {
+  const next = [...current, ...additions];
+  if (next.length > MAX_SCOREBOARD_EVENTS) {
+    throw new Error(`Hydra standings ledger cannot exceed ${MAX_SCOREBOARD_EVENTS} events.`);
+  }
+  const issues = validateScoreboardEvents(next);
+  if (issues.length > 0) throw new ScoreboardValidationError(issues);
+  const rows = additions.map((event) => JSON.stringify(event));
+  if (rows.some((row) => row.length > MAX_SCOREBOARD_LINE_CHARS || Buffer.byteLength(row, "utf8") > MAX_SCOREBOARD_LINE_CHARS)) {
+    throw new Error(`Hydra standings ledger rows cannot exceed ${MAX_SCOREBOARD_LINE_CHARS} bytes.`);
+  }
+  const body = rows.join("\n") + "\n";
+  const stat = await fs.stat(filePath);
+  if (stat.size + Buffer.byteLength(body, "utf8") > MAX_SCOREBOARD_LEDGER_BYTES) {
+    throw new Error(`Hydra standings ledger cannot exceed ${MAX_SCOREBOARD_LEDGER_BYTES} bytes.`);
+  }
+  await appendFileSafely(filePath, body);
+  return aggregateScoreboard(next);
 }
 
 export async function writeScoreboardMirror(

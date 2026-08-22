@@ -8,6 +8,7 @@ import { parseClaudeEventStream, summarizeClaudeEvents } from "./claudeEvents";
 
 export const claudeAdapter: AgentAdapter = {
   kind: "claude",
+  steeringTransport: "claudeSession",
   buildInvocation(def: AgentDefinition, ctx: InvocationContext): Invocation {
     // Why: no withCodexSkipGitRepoCheckArgs step here -- that guard is
     // codex-only (it lives in codexAdapter.buildInvocation).

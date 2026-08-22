@@ -1,10 +1,32 @@
 # Changelog
 
+## 0.7.3
+
+- Stops a single blank line on the Codex App Server's stdout from failing an entire in-flight turn; the RPC reader now skips empty frame separators the way every other JSONL reader in the room already did.
+- Gives a terminating native process ten seconds rather than one to confirm that its tree closed, so a slow reap on a Windows CLI behind a `cmd.exe` shim no longer latches the host-wide automation block that only a window reload clears.
+- Fails a run closed and names the line cap when an oversized App Server frame is dropped, instead of silently stranding the turn until its timeout with no stated cause.
+- Collapses stderr lines that differ only in a leading timestamp before building a failure-card preview, so a chatty CLI can no longer push the real diagnostic out of the preview window.
+
 ## 0.7.2
 
 - Adds Claude **Opus 5** (`claude-opus-5`) to `Hydra: Choose Model` and the cost-meter defaults; the `opus` family alias remains available for the current Claude Code default.
 
+## 0.7.1
+
+- Makes an empty duel ledger visible as a real 1000-Elo, zero-match provisional baseline for every seated head and supported duel domain, while preserving replayed ratings as the sole source of ranked Elo changes.
+- Adds live duel readiness and blocker reporting for workspace trust, configuration, equal full-native profiles, persistent consent, cost caps, and serial discussion eligibility.
+- Adds `Hydra: Run Duel Readiness Test` and an in-panel readiness button. The deterministic host-side check validates the exact hidden challenge protocol without calling an agent, creating a duel event, or changing Elo.
+- Records the latest eligible duel-protocol outcome, including valid requests, rejected requests, and eligible reactor/closer replies that intentionally emitted no consequential challenge.
+
 ## 0.7.0
+
+- Adds a `/hydra-handoff` skill for the Codex CLI and Claude Code that packages the current CLI session into a handoff packet written to `.hydra/handoff-inbox/`, so work can be continued in the Hydra room. One canonical `SKILL.md` installs to both agents via `pnpm run install:handoff-skill`.
+- Ingests handoff packets in the room as a one-click confirm chip with Confirm, an action override (discuss / ask all heads / build), Preview, and Dismiss; confirmation routes through the existing room turn with no new spawn path. Packets are treated as untrusted: nothing runs without an explicit confirmation, ingest is gated on a ready and trusted workspace, only prompt text and a re-validated action enum reach the room, and oversized (over 256 KB) or malformed packets are quarantined instead of ingested.
+
+- Makes Integrated Browser routing fail closed: turns without the Hydra browser connection now report the unavailable in-app surface instead of silently substituting Chrome or another browser, while the enable flow makes clear that only newly started turns receive the session-scoped connection.
+- Makes agent-initiated duels observable in real rooms by reserving top-level `Challenge:` for the strict source-bound control record, placing that protocol after generic phase prose, and reporting missing markers without guessing duel fields from prose.
+- Makes the passive scoreboard active by default for evidence-bound changed serial builds. Hydra latches an absolute eligible package-script verifier and its bounded conventional control surface before dispatch, withholds points if either changes or cannot be frozen safely, correlates repeated same-plan receipts into one maturity round, skips no-op/parallel/non-clean or state-changing runs, appends receipts idempotently, and refreshes already-open windows from the private ledger.
+- Hardens Windows cancellation by repeatedly discovering and terminating late-spawned descendants before reporting success, while retaining the bounded `taskkill` fallback when PowerShell/CIM cannot confirm cleanup.
 
 - Adds a visible, native in-editor browser through VS Code's Integrated Browser, with a room button and command-palette entry plus Simple Browser fallback.
 - Adds explicit, session-only agent browser control backed by schema-checked VS Code browser tools, per-head page ownership, per-action confirmation, a status-bar kill switch, and quota-limited private screenshots.

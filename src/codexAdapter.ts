@@ -8,6 +8,7 @@ import { usageFromCodexSummary, resolveModelPrices, parseCodexTextTokens, coerce
 
 export const codexAdapter: AgentAdapter = {
   kind: "codex",
+  steeringTransport: "codexAppServer",
   buildInvocation(def: AgentDefinition, ctx: InvocationContext): Invocation {
     let spawn = buildAgentSpawn(def.id, ctx.phase, ctx.command, ctx.rawArgs, ctx.workspaceRoot);
     spawn = withCodexSkipGitRepoCheckArgs(spawn);

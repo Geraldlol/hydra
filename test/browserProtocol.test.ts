@@ -170,6 +170,7 @@ describe("Hydra browser protocol", () => {
     assert.equal(codex.at(-1), "-");
     assert.ok(codex.some((arg) => arg.includes(`url=\"${endpoint}\"`)));
     assert.ok(codex.some((arg) => arg.includes("bearer_token_env_var")));
+    assert.ok(codex.some((arg) => arg.endsWith(".required=true")));
     assert.equal(codex.some((arg) => arg.includes("secret-token-value")), false);
     const codexCollision = withBrowserMcpArgs("codex", [
       "exec",

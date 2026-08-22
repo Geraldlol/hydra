@@ -61,11 +61,13 @@ export function createRunFailureCard(input: {
     timeoutMs: input.result.timeoutMs,
     promptSha256: input.promptSha256,
     stderrChars: input.result.stderr.length,
-    stderrPreview: input.result.stderr ? truncateForRunFailure(input.result.stderr, 1200) : undefined,
+    stderrPreview: input.result.stderr
+      ? truncateForRunFailure(collapseRepeatedLogLines(input.result.stderr), 1200)
+      : undefined,
     ...(diagnostic ? {
       diagnosticPreviewSource: diagnostic.source,
       diagnosticPreviewChars: diagnostic.value.length,
-      diagnosticPreview: truncateForRunFailure(diagnostic.value, 1200),
+      diagnosticPreview: truncateForRunFailure(collapseRepeatedLogLines(diagnostic.value), 1200),
     } : {}),
     requestFiles: requestFilesForCard(input.requestFiles, input.workspaceRoot),
   };
@@ -119,6 +121,55 @@ function workspaceRelativePath(workspaceRoot: string, filePath: string): string 
   return relative.replace(/\\/g, "/");
 }
 
+// Some CLIs prefix every log line with an RFC3339 timestamp, which is why
+// plain identical-line dedup does nothing for them: the noise is a thousand
+// lines that differ only in that prefix. Strip it before comparing.
+const LEADING_LOG_TIMESTAMP =
+  /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?\s*/;
+
+/**
+ * Collapse consecutive log lines that are equal once their leading timestamp
+ * is ignored, keeping the first of each run.
+ *
+ * Why: a preview is the first N characters of stderr, so a CLI that repeats
+ * one line every few seconds spends the entire budget on noise and truncates
+ * away the diagnostic that explains the failure. Collapsing before truncating
+ * spends the budget on distinct content instead. Cosmetic only - the full
+ * stderr is still recorded, and stderrChars still counts the real length.
+ *
+ * Deliberately consecutive-only: it keeps ordering intact and never merges two
+ * distant occurrences that happen to match, which would misrepresent the log.
+ */
+export function collapseRepeatedLogLines(value: string): string {
+  if (!value) return value;
+  const lines = value.split(/\r?\n/);
+  const out: string[] = [];
+  let runFirst: string | undefined;
+  let runKey = "";
+  let runCount = 0;
+  const flush = (): void => {
+    if (runFirst === undefined) return;
+    out.push(runFirst);
+    // One occurrence is not a run; emitting a marker for it would add noise
+    // rather than remove it.
+    if (runCount > 1) out.push(`[previous line repeated ${runCount - 1} more time${runCount === 2 ? "" : "s"}]`);
+    runFirst = undefined;
+    runCount = 0;
+  };
+  for (const line of lines) {
+    const key = line.replace(LEADING_LOG_TIMESTAMP, "");
+    if (runCount > 0 && key === runKey) {
+      runCount++;
+      continue;
+    }
+    flush();
+    runFirst = line;
+    runKey = key;
+    runCount = 1;
+  }
+  flush();
+  return out.join("\n");
+}
 function truncateForRunFailure(value: string, maxChars: number): string {
   return value.length <= maxChars ? value : `${value.slice(0, maxChars)}\n[truncated ${value.length - maxChars} chars]`;
 }

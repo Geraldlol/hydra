@@ -1,7 +1,9 @@
 node_modules/**
+.pnpm-store/**
 src/**
 test/**
 scripts/**
+skills/**
 docs/**
 dist/test/**
 .vscode/**
