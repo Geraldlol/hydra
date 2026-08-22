@@ -77,6 +77,30 @@ function replay(input, index) {
     isReplay: true,
     uuid: input.uuid,
   });
+  if (scenario === "unsolicited-replay") {
+    // A fresh uuid and content the client never wrote: nothing is awaiting
+    // reconciliation and the uuid is unknown, so alreadyReconciled is false.
+    emit({
+      type: "user",
+      message: { role: "user", content: "never written by hydra" },
+      parent_tool_use_id: null,
+      session_id: providerSessionId,
+      isReplay: true,
+      uuid: uuid(),
+    });
+  }
+  if (scenario === "duplicate-replay") {
+    // The same envelope a second time. The client reconciled the first, so
+    // the second finds nothing awaiting and alreadyReconciled must be true.
+    emit({
+      type: "user",
+      message: { role: "user", content },
+      parent_tool_use_id: null,
+      session_id: providerSessionId,
+      isReplay: true,
+      uuid: input.uuid,
+    });
+  }
 }
 
 function enqueueResult(input, index) {

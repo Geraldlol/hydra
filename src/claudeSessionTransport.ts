@@ -691,6 +691,29 @@ class ClaudeSessionProtocol {
     this.providerSessionId = sessionId;
   }
 
+  /**
+   * Discriminators for an unreconcilable replay envelope, safe to surface.
+   *
+   * `alreadyReconciled` is the load-bearing one: true means the provider
+   * re-echoed an input Hydra genuinely wrote and had already accepted, false
+   * means Hydra has no record of writing it at all.
+   */
+  private replayReconciliationDiagnostic(event: Record<string, unknown>): string {
+    const uuid = stringField(event, "uuid");
+    const message = objectField(event, "message");
+    const content = message && typeof message.content === "string" ? message.content : undefined;
+    const parent = event.parent_tool_use_id;
+    return [
+      `uuid=${uuid ?? "absent"}`,
+      `alreadyReconciled=${uuid ? this.replayUuids.has(uuid) : false}`,
+      `reconciledSoFar=${this.replayUuids.size}`,
+      `writesAwaitingReplay=${this.awaitingReplay.length}`,
+      `sessionMatches=${event.session_id === this.providerSessionId}`,
+      `parentToolUseId=${parent === null ? "null" : typeof parent}`,
+      `contentChars=${content?.length ?? "n/a"}`,
+      `contentSha256Prefix=${content ? sha256Utf8(content).slice(0, 12) : "n/a"}`,
+    ].join(", ");
+  }
   private consumeUserReplay(event: Record<string, unknown>): void {
     // Tool-result user envelopes and forwarded subagent traffic are evidence,
     // not acknowledgements of Hydra stdin. Only the exact top-level string
@@ -708,7 +731,19 @@ class ClaudeSessionProtocol {
     }
     const turn = this.awaitingReplay[0];
     if (!turn) {
-      this.fail("Claude replayed a user input that Hydra did not write.", "providerFailure");
+      // Say which of the two very different situations this is. Without the
+      // discriminators the message is indistinguishable between a provider
+      // echoing an input we never sent and a provider re-echoing one we did
+      // send and already reconciled - and the second is not a protocol
+      // violation of the same kind. replayUuids already knows the answer, so
+      // report it rather than making the next reader guess. Content is
+      // summarised by length and digest prefix only; it can carry workspace
+      // text and does not belong in a failure surface.
+      this.fail(
+        "Claude replayed a user input that Hydra did not write "
+          + `(${this.replayReconciliationDiagnostic(event)}).`,
+        "providerFailure",
+      );
       return;
     }
     const replayUuid = stringField(event, "uuid");

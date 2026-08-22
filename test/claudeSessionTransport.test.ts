@@ -430,6 +430,36 @@ describe("Claude persistent-session provider contract", () => {
     assert.equal(asRecord(users[0]?.message)?.content, "binding check");
   });
 
+  test("names whether an unreconcilable replay was already reconciled or never written", async () => {
+    // Both scenarios drive the identical branch - a replay landing with nothing
+    // awaiting reconciliation - and until the diagnostic existed they produced
+    // the same message for two situations that call for different responses.
+    const unsolicited = startFixtureSession("unsolicited-replay", "initial");
+    const unsolicitedResult = await unsolicited.result;
+    assert.match(unsolicitedResult.stderr, /replayed a user input that Hydra did not write/i);
+    assert.match(
+      unsolicitedResult.stderr,
+      /alreadyReconciled=false/,
+      `expected an unknown-uuid diagnostic, got: ${unsolicitedResult.stderr.slice(0, 400)}`,
+    );
+    // The discriminators a reader needs are all present, not just the verdict.
+    assert.match(unsolicitedResult.stderr, /reconciledSoFar=\d+/);
+    assert.match(unsolicitedResult.stderr, /writesAwaitingReplay=0/);
+    assert.match(unsolicitedResult.stderr, /parentToolUseId=null/);
+    // Content is summarised, never echoed: it can carry workspace text.
+    assert.match(unsolicitedResult.stderr, /contentSha256Prefix=[0-9a-f]{12}/);
+    assert.doesNotMatch(unsolicitedResult.stderr, /never written by hydra/);
+
+    const duplicate = startFixtureSession("duplicate-replay", "initial");
+    const duplicateResult = await duplicate.result;
+    assert.match(duplicateResult.stderr, /replayed a user input that Hydra did not write/i);
+    assert.match(
+      duplicateResult.stderr,
+      /alreadyReconciled=true/,
+      `expected a duplicate-of-our-own-write diagnostic, got: ${duplicateResult.stderr.slice(0, 400)}`,
+    );
+  });
+
   test("accepts steering only after an exact replay and never retries an uncertain delivery", async () => {
     const mismatch = startFixtureSession("mismatched-replay", "initial");
     const mismatchHandle = await mismatch.handle;
