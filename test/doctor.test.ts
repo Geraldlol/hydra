@@ -152,6 +152,31 @@ describe("Hydra Doctor", () => {
     assert.equal(report.checks.some((c) => c.id === "args-validation"), false);
   });
 
+  test("surfaces Windows and Git long-path readiness without overstating the override", async () => {
+    const report = await runHydraDoctor({
+      workspaceRoot: undefined,
+      gitAvailable: false,
+      codexCommand: "codex",
+      codexResolvedCommand: undefined,
+      claudeCommand: "claude",
+      claudeResolvedCommand: undefined,
+      trustWarnings: [],
+      arenaLongPaths: {
+        platform: "win32",
+        windowsRegistryEnabled: true,
+        gitCoreLongpathsEnabled: null,
+        hydraGitOverrideEnabled: true,
+        conservativePreflightEnabled: true,
+      },
+    });
+    const check = report.checks.find((candidate) =>
+      candidate.id === "arena-long-paths");
+    assert.equal(check?.status, "warn");
+    assert.match(check?.detail ?? "", /LongPathsEnabled is enabled/u);
+    assert.match(check?.detail ?? "", /core\.longpaths is unset\/unknown/u);
+    assert.match(check?.detail ?? "", /fails closed before worktree creation/u);
+  });
+
   test("warns when sensitive native settings are workspace scoped", () => {
     const warnings = trustScopeWarnings([
       { key: "codexCommand", workspaceValue: "C:\\evil.exe" },
