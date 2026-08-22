@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { describe, test, type TestContext } from "node:test";
 import {
   captureDuelWorkspaceFingerprint,
+  describeWorkspaceLockFailure,
   DuelWorkspaceIntegrityError,
   watchDuelWorkspaceMutations,
 } from "../src/duelWorkspaceGuard";
@@ -208,5 +209,42 @@ describe("duel workspace integrity guard", () => {
       captureDuelWorkspaceFingerprint(root, { maxGitOutputBytes: 10 }),
       (error: unknown) => error instanceof DuelWorkspaceIntegrityError && error.code === "gitOutputTooLarge",
     );
+  });
+});
+
+describe("workspace lock failure description", () => {
+  test("passes an integrity error through and localises anything else", () => {
+    // An integrity error already names its condition; adding a frame would be
+    // noise on a message that is already actionable.
+    const integrity = new DuelWorkspaceIntegrityError(
+      "gitFailed",
+      "Git returned an invalid HEAD object id.",
+    );
+    assert.equal(
+      describeWorkspaceLockFailure(integrity),
+      "Git returned an invalid HEAD object id.",
+    );
+    assert.doesNotMatch(describeWorkspaceLockFailure(integrity), / - at /);
+
+    // The case that motivated this: a bare TypeError message says nothing about
+    // where it came from, so the class and originating frame get appended.
+    let thrown: unknown;
+    try {
+      const missing = undefined as unknown as { toString(): string };
+      missing.toString();
+    } catch (error) {
+      thrown = error;
+    }
+    const described = describeWorkspaceLockFailure(thrown);
+    assert.match(described, /^TypeError: /, described);
+    assert.match(described, /Cannot read propert/, described);
+    assert.match(described, / - at /, `expected an originating frame, got: ${described}`);
+  });
+
+  test("survives a thrown non-Error and an Error with no stack", () => {
+    assert.equal(describeWorkspaceLockFailure("plain string"), "plain string");
+    const stackless = new Error("no stack here");
+    stackless.stack = undefined;
+    assert.equal(describeWorkspaceLockFailure(stackless), "Error: no stack here");
   });
 });

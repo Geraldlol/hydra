@@ -122,6 +122,27 @@ const SAFE_GIT_PREFIX = [
 ] as const;
 
 /**
+ * Describe a workspace-lock failure well enough to localise it from the room.
+ *
+ * A DuelWorkspaceIntegrityError already states its condition, so it is passed
+ * through unchanged. Anything else is a defect rather than a workspace state,
+ * and its bare message is typically unlocalisable - "Cannot read properties of
+ * undefined (reading 'x')" says nothing about where. Those get the error class
+ * and the first stack frame, which is extension code and safe to surface.
+ */
+export function describeWorkspaceLockFailure(error: unknown): string {
+  if (error instanceof DuelWorkspaceIntegrityError) return error.message;
+  if (!(error instanceof Error)) return String(error);
+  const frame = (error.stack ?? "")
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.startsWith("at "));
+  return frame
+    ? `${error.name}: ${error.message} - ${frame}`
+    : `${error.name}: ${error.message}`;
+}
+
+/**
  * Capture a deterministic digest of Git HEAD, the logical index, indexed
  * worktree entries, and non-ignored untracked files/link targets.
  *

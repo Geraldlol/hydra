@@ -243,6 +243,7 @@ import {
 } from "./duelSecrets";
 import { renderDuelMotivationContext, withDuelRatingBaselines } from "./duelMotivation";
 import {
+  describeWorkspaceLockFailure,
   captureDuelWorkspaceFingerprint,
   watchDuelWorkspaceMutations,
   type DuelWorkspaceMutationMonitor,
@@ -3087,7 +3088,15 @@ export class HydraRoomPanel {
     try {
       workspaceFingerprintSha256 = (await captureDuelWorkspaceFingerprint(this.workspaceRoot)).sha256;
     } catch (error) {
-      await reject(`Hydra could not lock one safe shared workspace state (${error instanceof Error ? error.message : String(error)}).`);
+      // A DuelWorkspaceIntegrityError already names the condition, so its
+      // message stands alone. Anything else is unexpected - a TypeError here
+      // reads as "Cannot read properties of undefined" with no indication of
+      // where, which is unlocalisable from the room and was exactly the state
+      // that made one live report cost hours to chase. Name the class and the
+      // originating frame for those.
+      await reject(
+        `Hydra could not lock one safe shared workspace state (${describeWorkspaceLockFailure(error)}).`,
+      );
       return;
     }
     const challenge = makeChallenge(workspaceFingerprintSha256, capabilityLocks);
