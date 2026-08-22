@@ -463,7 +463,12 @@ function runtimeOptions(
 ): NativeSteeringRuntimeOptions {
   return {
     prompt: "initial runtime prompt",
-    timeoutMs: 4_000,
+    // A hang net, not part of any scenario here: every test using this default
+    // asserts timedOut === false, and the one that wants a timeout sets its own
+    // 25ms budget. Four seconds was short enough to race a real process spawn
+    // plus a full protocol handshake under a loaded parallel run, which surfaced
+    // as exitCode null (terminated) where the test expected 0 (exited cleanly).
+    timeoutMs: 30_000,
     signal: new AbortController().signal,
     callId: "call-runtime",
     agentId: overrides.transport === "codexAppServer" ? "codex" : "claude",

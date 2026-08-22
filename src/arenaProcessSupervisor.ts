@@ -35,7 +35,15 @@ export const ARENA_PROCESS_LIMITS = Object.freeze({
   maxStdoutBytes: 4 * 1024 * 1024,
   maxStderrBytes: 1 * 1024 * 1024,
   maxTimeoutMs: 24 * 60 * 60 * 1_000,
+  // Grace between asking a contestant tree to die and force-killing it.
   terminationGraceMs: 1_000,
+  // Why this is separate and ten times longer: `close` arrives only once
+  // every inherited stdio handle in the tree is released, and on a loaded
+  // Windows host that lags well past a second after the force kill. Sharing
+  // one grace for both steps made a slow reap look like unconfirmed
+  // termination, which resolves the run deliveryUnknown and makes the
+  // controller retain it - a scheduling artifact reported as a safety event.
+  terminationConfirmMs: 10_000,
 });
 
 const SAFE_ENVIRONMENT_KEYS = new Set([
@@ -242,6 +250,7 @@ export interface ArenaProcessSupervisorDependencies {
   ) => Promise<boolean>;
   readonly createProcessGenerationId?: () => string;
   readonly terminationGraceMs?: number;
+  readonly terminationConfirmMs?: number;
 }
 
 interface ValidatedSupervisorInput extends ArenaProcessSupervisorInput {
@@ -323,6 +332,9 @@ export async function superviseArenaProcess(
 
   return new Promise<ArenaSupervisedProcessResult>((resolve) => {
     const terminate = dependencies.terminateProcess ?? terminateProcessTree;
+    const terminationConfirmMs = boundedTerminationConfirm(
+      dependencies.terminationConfirmMs,
+    );
     const terminationGraceMs = boundedTerminationGrace(
       dependencies.terminationGraceMs,
     );
@@ -390,7 +402,7 @@ export async function superviseArenaProcess(
       forceTimer = setTimeout(() => {
         if (settled || finalizing) return;
         void terminate(child, true);
-        unconfirmedTimer = setTimeout(resolveUnconfirmed, terminationGraceMs);
+        unconfirmedTimer = setTimeout(resolveUnconfirmed, terminationConfirmMs);
       }, terminationGraceMs);
     };
 
@@ -1169,6 +1181,14 @@ function boundedTerminationGrace(value: number | undefined): number {
   if (value === undefined) return ARENA_PROCESS_LIMITS.terminationGraceMs;
   if (!Number.isSafeInteger(value) || value < 1 || value > 10_000) {
     throw new Error("Arena terminationGraceMs must be an integer from 1 through 10000.");
+  }
+  return value;
+}
+
+function boundedTerminationConfirm(value: number | undefined): number {
+  if (value === undefined) return ARENA_PROCESS_LIMITS.terminationConfirmMs;
+  if (!Number.isSafeInteger(value) || value < 1 || value > 60_000) {
+    throw new Error("Arena terminationConfirmMs must be an integer from 1 through 60000.");
   }
   return value;
 }

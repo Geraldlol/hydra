@@ -567,7 +567,12 @@ describe("runCodexAppServerTurn", () => {
         const result = await runCodexAppServerTurn({
           plan: fakePlan(directory, mode),
           prompt: "possibly accepted",
-          timeoutMs: 2_000,
+          // Generous on purpose: deliveryUnknown is suppressed by timedOut (here
+          // and in claudeSessionTransport), so a budget this scenario can actually
+          // exhaust under load stops testing the post-submission classification and
+          // starts testing the timeout instead. None of these modes needs the time;
+          // the budget is only a hang net.
+          timeoutMs: 20_000,
           signal: new AbortController().signal,
           binding: binding(),
           onChunk: () => undefined,

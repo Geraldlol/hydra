@@ -1,4 +1,8 @@
 import { describe, test } from "node:test";
+import {
+  TERMINATION_CONFIRM_WINDOW_MS,
+  TERMINATION_FORCE_GRACE_MS,
+} from "../src/agents";
 import { strict as assert } from "node:assert";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
@@ -581,7 +585,18 @@ describe("verification process lifecycle", () => {
       });
 
       assert.equal(result.timedOut, true);
-      assert.ok(Date.now() - started < 3_000, "verification should force-settle after timeout");
+      // Bound derived from the escalation ladder rather than a literal, because a
+      // literal silently goes stale the moment the ladder changes - which is exactly
+      // what happened when the confirmation window went from 1s to 10s and left this
+      // assertion asserting a deadline the code could no longer meet. Worst case is
+      // the run timeout, then the force grace, then the confirmation window, and only
+      // then the forced settle; the slack absorbs scheduling noise under a loaded
+      // parallel test run.
+      const settleBudgetMs = 400 + TERMINATION_FORCE_GRACE_MS + TERMINATION_CONFIRM_WINDOW_MS + 4_000;
+      assert.ok(
+        Date.now() - started < settleBudgetMs,
+        `verification should force-settle after timeout, took ${Date.now() - started}ms of ${settleBudgetMs}ms`,
+      );
       pid = Number.parseInt(await fs.readFile(pidFile, "utf8"), 10);
       assert.ok(Number.isSafeInteger(pid) && pid > 0);
       assert.equal(await waitForProcessExit(pid), true, `grandchild ${pid} should be gone`);
