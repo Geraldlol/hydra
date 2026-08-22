@@ -499,6 +499,63 @@ describe("runCodexAppServerTurn", () => {
     }
   });
 
+  test("fails closed on a dropped protocol frame instead of stranding the turn", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-codex-oversized-"));
+    try {
+      const dropped = await runCodexAppServerTurn({
+        plan: fakePlan(directory, "oversized-frame"),
+        prompt: "initial prompt",
+        timeoutMs: 20_000,
+        signal: new AbortController().signal,
+        binding: binding(),
+        onChunk: () => undefined,
+      });
+      if (spawnBlockedBySandbox(dropped.stderr)) return;
+      assert.match(dropped.stderr, /protocol frame was dropped/);
+      assert.notEqual(dropped.exitCode, 0);
+      assert.equal(
+        dropped.deliveryUnknown,
+        true,
+        "a frame dropped after submission cannot claim a trustworthy receipt",
+      );
+
+      // The same run under the cap must still succeed, or the rule is just
+      // "large payloads fail" rather than "dropped frames fail".
+      const kept = await runCodexAppServerTurn({
+        plan: fakePlan(directory, "large-frame"),
+        prompt: "initial prompt",
+        timeoutMs: 20_000,
+        signal: new AbortController().signal,
+        binding: binding(),
+        onChunk: () => undefined,
+      });
+      assert.doesNotMatch(kept.stderr, /protocol frame was dropped/);
+      assert.equal(kept.exitCode, 0);
+      assert.equal(kept.timedOut, false);
+    } finally {
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+  test("treats blank framing lines as framing, not malformed JSONL", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-codex-blank-"));
+    try {
+      const result = await runCodexAppServerTurn({
+        plan: fakePlan(directory, "blank-line-framing"),
+        prompt: "initial prompt",
+        timeoutMs: 2_000,
+        signal: new AbortController().signal,
+        binding: binding(),
+        onChunk: () => undefined,
+      });
+      if (spawnBlockedBySandbox(result.stderr)) return;
+      assert.doesNotMatch(result.stderr, /malformed JSONL/);
+      assert.equal(result.exitCode, 0);
+      assert.equal(result.timedOut, false);
+      assert.match(result.stdout, /"type":"turn.started"/);
+    } finally {
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
   test("never advertises fallback after the model request may have been accepted", async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-codex-post-submit-"));
     try {

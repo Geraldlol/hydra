@@ -17,6 +17,18 @@ export const MAX_AGENT_STDOUT_BYTES = 16 * 1024 * 1024;
 // char accounting as the stdout cap above.
 export const MAX_AGENT_STDERR_BYTES = 1 * 1024 * 1024;
 
+// Grace between asking a process tree to die and force-killing it. Short on
+// purpose: a cooperative child exits well inside this, and escalating quickly
+// is what actually reclaims the inherited pipes.
+export const TERMINATION_FORCE_GRACE_MS = 1_000;
+// Why 10s and not 1s: `close` fires only once every inherited stdio handle in
+// the tree is released. A Windows agent CLI runs behind a cmd.exe shim over a
+// deep child tree (powershell, subagent threads), and after taskkill /F /T those
+// handles can take seconds to drain. A 1s window declared such runs "termination
+// unconfirmed", which latches a host-wide automation block that only a window
+// reload clears - so a merely slow reap bricked the room.
+export const TERMINATION_CONFIRM_WINDOW_MS = 10_000;
+
 export interface BoundedStreamState {
   text: string;
   truncated: boolean;
@@ -227,8 +239,8 @@ export async function runAgent(
             "[Hydra did not observe the native agent process close; it may still be running. Restart VS Code before starting more Hydra work.]"
           );
           finish(null);
-        }, 1_000);
-      }, 1_000);
+        }, TERMINATION_CONFIRM_WINDOW_MS);
+      }, TERMINATION_FORCE_GRACE_MS);
     };
 
     const hasTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0;

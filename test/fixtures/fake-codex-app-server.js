@@ -10,6 +10,19 @@ const mode = process.env.HYDRA_FAKE_CODEX_MODE || "normal";
 const logPath = process.env.HYDRA_FAKE_CODEX_LOG;
 let initialPrompt = "";
 let activeTurnId = "turn-1";
+// Real providers separate frames with blank lines; emitting one empty and
+// one whitespace-only line before every message proves the client treats
+// framing as framing instead of failing the turn as malformed JSONL.
+const blankFraming = mode === "blank-line-framing";
+// Hydra caps a single JSONL frame at 1,000,000 chars. "oversized-frame"
+// lands past that cap so the drop path runs; "large-frame" stays under it
+// so the same test proves the rule discriminates instead of firing on any
+// big payload.
+const frameFillChars = mode === "oversized-frame"
+  ? 1_200_000
+  : mode === "large-frame"
+  ? 200_000
+  : 0;
 
 function record(message) {
   if (!logPath) return;
@@ -17,7 +30,8 @@ function record(message) {
 }
 
 function send(message) {
-  process.stdout.write(`${JSON.stringify(message)}\n`);
+  const framing = blankFraming ? "\n   \n" : "";
+  process.stdout.write(`${framing}${JSON.stringify(message)}\n`);
 }
 
 function sendBatch(messages) {
@@ -245,11 +259,25 @@ input.on("line", (line) => {
           },
         });
       }
-      if (mode === "many-deltas") {
+      if (frameFillChars > 0) {
+        send({
+          method: "item/completed",
+          params: {
+            threadId: "thread-1",
+            turnId: activeTurnId,
+            item: {
+              id: "command-1",
+              type: "commandExecution",
+              aggregatedOutput: "x".repeat(frameFillChars),
+            },
+          },
+        });
+        completeTurn("");
+      } else if (mode === "many-deltas") {
         // Keep the flood outside the turn/start response chunk so the client
         // has established its exact thread/turn binding before deltas arrive.
         setTimeout(() => completeTurn(""), 20);
-      } else if (mode === "complete-without-steer") {
+      } else if (mode === "complete-without-steer" || blankFraming) {
         completeTurn("");
       }
     });

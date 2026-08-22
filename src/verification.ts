@@ -5,7 +5,13 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { resolveGitExecutable } from "./gitExecutable";
 import { findExecutableOnPath, windowsSystemExecutable } from "./executablePath";
-import { quoteForCmd, stripAnsi, terminateProcessTree } from "./agents";
+import {
+  quoteForCmd,
+  stripAnsi,
+  terminateProcessTree,
+  TERMINATION_CONFIRM_WINDOW_MS,
+  TERMINATION_FORCE_GRACE_MS,
+} from "./agents";
 import { appendFileSafely, ensureFile, readFileHead, readJsonlGuarded, serializePerFile } from "./fileQueue";
 
 const MAX_VERIFICATION_PACKAGE_JSON_BYTES = 1024 * 1024;
@@ -518,8 +524,8 @@ export async function runVerificationCommand(options: VerificationRunOptions): P
           terminationFailed = true;
           appendStderr("\n[Hydra did not observe the verification process close; it may still be running.]\n");
           finish(null);
-        }, 1_000);
-      }, 1_000);
+        }, TERMINATION_CONFIRM_WINDOW_MS);
+      }, TERMINATION_FORCE_GRACE_MS);
     };
     const timer = setTimeout(() => {
       timedOut = true;

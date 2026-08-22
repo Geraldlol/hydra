@@ -628,7 +628,27 @@ class JsonLineRpcClient {
   }
 
   push(chunk: string): void {
-    this.scanner.push(chunk, (line) => this.consumeLine(line));
+    this.scanner.push(
+      chunk,
+      (line) => this.consumeLine(line),
+      () => this.failDroppedFrame(),
+    );
+  }
+
+  /**
+   * A dropped line is unrecoverable on a request/response protocol: the
+   * scanner cannot say whether it carried the response a pending request is
+   * awaiting or the notification that ends the turn, so neither outcome can
+   * be assumed. Continuing silently strands the turn until the run timeout
+   * with no stated cause, so fail closed and name the cap instead. If real
+   * frames start hitting this, the lever is MAX_RPC_LINE_CHARS, not a
+   * downgrade to a warning.
+   */
+  private failDroppedFrame(): void {
+    this.failAll(new Error(
+      "Codex App Server output overran Hydra's JSONL scanner limits and a "
+      + `protocol frame was dropped (per-line cap ${MAX_RPC_LINE_CHARS} chars).`,
+    ));
   }
 
   request(
@@ -722,6 +742,11 @@ class JsonLineRpcClient {
   }
 
   private consumeLine(line: string): void {
+    // Blank separator lines are framing, not a protocol violation. Treating one
+    // as malformed would failAll() the whole in-flight turn, so skip it the way
+    // every other JSONL reader here does (codexEvents, claudeEvents,
+    // claudeSessionTransport).
+    if (!line.trim()) return;
     let parsed: unknown;
     try {
       parsed = JSON.parse(line);
