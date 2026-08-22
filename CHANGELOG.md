@@ -7,10 +7,6 @@
 - Fails a run closed and names the line cap when an oversized App Server frame is dropped, instead of silently stranding the turn until its timeout with no stated cause.
 - Collapses stderr lines that differ only in a leading timestamp before building a failure-card preview, so a chatty CLI can no longer push the real diagnostic out of the preview window.
 
-## 0.7.2
-
-- Adds Claude **Opus 5** (`claude-opus-5`) to `Hydra: Choose Model` and the cost-meter defaults; the `opus` family alias remains available for the current Claude Code default.
-
 ## 0.7.1
 
 - Makes an empty duel ledger visible as a real 1000-Elo, zero-match provisional baseline for every seated head and supported duel domain, while preserving replayed ratings as the sole source of ranked Elo changes.
