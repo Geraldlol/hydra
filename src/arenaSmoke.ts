@@ -32,6 +32,7 @@ import {
 } from "./arenaStore";
 import {
   ARENA_POLICY_ID,
+  arenaArtifactSetSha256,
   arenaReceiptsRootSha256,
   type ArenaContestantFinishedPayload,
   type ArenaEvidencePreservedPayload,
@@ -46,6 +47,7 @@ import {
   prepareArenaRepositoryLeaseRoot,
   type ArenaRepositoryLeaseBoundary,
 } from "./arenaRepositoryLease";
+import { runArenaControllerSmokeTest } from "./arenaControllerSmoke";
 
 export const ARENA_SMOKE_SCHEMA_VERSION = 1 as const;
 
@@ -63,6 +65,8 @@ export type ArenaSmokeProgressStage =
   | "manifestFinalized"
   | "cleanupComplete"
   | "claimReleased"
+  | "controllerSmokeStarted"
+  | "controllerSmokeFinished"
   | "failed"
   | "finalCleanupStarted"
   | "provisionedCleanupFinished"
@@ -82,7 +86,10 @@ export interface ArenaSmokeCheck {
     | "manifestReplay"
     | "exactCleanup"
     | "sourceUnchanged"
-    | "unrelatedWorktreePreserved";
+    | "unrelatedWorktreePreserved"
+    | "supervisedHeadDispatch"
+    | "continuousMainTreeMonitor"
+    | "evidenceMatrix";
   readonly passed: boolean;
 }
 
@@ -568,6 +575,32 @@ export async function runArenaSmokeTest(options: {
     await options.onProgress?.("finalCleanupFinished");
   }
 
+  await options.onProgress?.("controllerSmokeStarted");
+  const controllerSmoke = await runArenaControllerSmokeTest({
+    privateWorkspaceRoot: options.privateWorkspaceRoot,
+    repositoryLeaseRoot: options.repositoryLeaseRoot,
+    gitResolutionRoot: options.gitResolutionRoot,
+    signal: options.signal,
+  });
+  await options.onProgress?.("controllerSmokeFinished");
+  checks.set(
+    "supervisedHeadDispatch",
+    controllerSmoke.fakeHeadsSupervised,
+  );
+  checks.set(
+    "continuousMainTreeMonitor",
+    controllerSmoke.sourceUnchanged,
+  );
+  checks.set(
+    "evidenceMatrix",
+    controllerSmoke.comparable && controllerSmoke.cleanupComplete,
+  );
+  manifestEvents += controllerSmoke.manifestEvents;
+  cleanupState = cleanupState === "cleanupComplete"
+      && controllerSmoke.cleanupComplete
+    ? "cleanupComplete"
+    : "incomplete";
+
   const orderedChecks = ([
     "admission",
     "intentBeforeSideEffect",
@@ -577,6 +610,9 @@ export async function runArenaSmokeTest(options: {
     "exactCleanup",
     "sourceUnchanged",
     "unrelatedWorktreePreserved",
+    "supervisedHeadDispatch",
+    "continuousMainTreeMonitor",
+    "evidenceMatrix",
   ] as const).map((id) => Object.freeze({
     id,
     passed: checks.get(id) === true,
@@ -852,12 +888,9 @@ async function preserveSmokeEvidence(
   );
   const patchSha256 = bufferDigest(patch);
   const inventorySha256 = bufferDigest(inventory);
-  const payload: ArenaEvidencePreservedPayload = {
+  const payloadWithoutArtifactSet = {
     payloadType: "evidencePreserved",
     contestantId: worktree.contestantId,
-    artifactSetSha256: digest(
-      `${patchSha256}:${inventorySha256}:no-untracked`,
-    ),
     receiptsRootSha256: arenaReceiptsRootSha256({
       finished,
       verifications: new Map(),
@@ -872,6 +905,10 @@ async function preserveSmokeEvidence(
     quiescenceWorkspaceFingerprintSha256: null,
     finalHead: worktree.head,
     finalWorkspaceFingerprintSha256: worktree.fingerprint.sha256,
+  } satisfies Omit<ArenaEvidencePreservedPayload, "artifactSetSha256">;
+  const payload: ArenaEvidencePreservedPayload = {
+    ...payloadWithoutArtifactSet,
+    artifactSetSha256: arenaArtifactSetSha256(payloadWithoutArtifactSet),
   };
   await store.append({
     eventId: `${runId}-${worktree.contestantId}-evidence`,

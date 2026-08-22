@@ -570,47 +570,96 @@ async function appendLedgerEvent(
         : "Arena repository owner ledger reached its byte bound.",
     );
   }
-  if (replay.events.length === 0) {
-    const handle = await fs.open(ledgerPath, "wx", 0o600);
-    try {
-      const opened = await handle.stat();
-      assertSafeFile(opened, ledgerPath);
-      await handle.writeFile(line, "utf8");
-      await handle.sync();
-      const entry = await fs.lstat(ledgerPath);
-      if (!sameFileIdentity(opened, entry)) {
-        throw new Error("Arena repository owner ledger changed during create.");
-      }
-    } finally {
-      await handle.close();
-    }
-    return event;
-  }
-  const before = await fs.lstat(ledgerPath);
-  assertSafeFile(before, ledgerPath);
-  const noFollow = typeof fsConstants.O_NOFOLLOW === "number"
-    ? fsConstants.O_NOFOLLOW
-    : 0;
-  const handle = await fs.open(
+  const body = `${replay.events
+    .map((candidate) => canonicalJson(candidate))
+    .join("\n")}${replay.events.length > 0 ? "\n" : ""}${line}`;
+  await writeOwnerLedgerAtomically(
     ledgerPath,
-    fsConstants.O_WRONLY | fsConstants.O_APPEND | noFollow,
+    body,
+    boundary,
+    replay.events.length === 0,
   );
+  return event;
+}
+
+async function writeOwnerLedgerAtomically(
+  ledgerPath: string,
+  body: string,
+  boundary: ArenaRepositoryLeaseBoundary,
+  createOnly: boolean,
+): Promise<void> {
+  await assertArenaRepositoryLeaseBoundary(boundary);
+  if (path.dirname(path.resolve(ledgerPath)) !== path.resolve(boundary.realRoot)) {
+    throw new Error("Arena repository owner ledger escaped its exact root.");
+  }
+  let prior: Stats | undefined;
+  try {
+    prior = await fs.lstat(ledgerPath);
+    assertSafeFile(prior, ledgerPath);
+    if (createOnly) {
+      throw Object.assign(
+        new Error("Arena repository owner ledger already exists."),
+        { code: "EEXIST" },
+      );
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if (!createOnly) {
+      throw new Error("Arena repository owner ledger disappeared before replacement.");
+    }
+  }
+
+  const temporaryPath = path.join(
+    boundary.realRoot,
+    `.${path.basename(ledgerPath)}.${process.pid}-${randomUUID()}.tmp`,
+  );
+  const handle = await fs.open(temporaryPath, "wx", 0o600);
   try {
     const opened = await handle.stat();
-    if (!sameFileIdentity(before, opened)) {
-      throw new Error("Arena repository owner ledger changed before append.");
-    }
-    await assertArenaRepositoryLeaseBoundary(boundary);
-    const entry = await fs.lstat(ledgerPath);
+    const entry = await fs.lstat(temporaryPath);
+    assertSafeFile(opened, temporaryPath);
+    assertSafeFile(entry, temporaryPath);
     if (!sameFileIdentity(opened, entry)) {
-      throw new Error("Arena repository owner ledger changed during append.");
+      throw new Error("Arena repository owner temporary ledger changed identity.");
     }
-    await handle.writeFile(line, "utf8");
+    await handle.writeFile(body, "utf8");
     await handle.sync();
-  } finally {
-    await handle.close();
+    await handle.chmod(0o600).catch(() => undefined);
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    await fs.unlink(temporaryPath).catch(() => undefined);
+    throw error;
   }
-  return event;
+  await handle.close();
+
+  try {
+    await assertArenaRepositoryLeaseBoundary(boundary);
+    if (prior) {
+      const current = await fs.lstat(ledgerPath);
+      assertSafeFile(current, ledgerPath);
+      if (!sameFileIdentity(prior, current)) {
+        throw new Error("Arena repository owner ledger changed before replacement.");
+      }
+    }
+    if (createOnly) {
+      // A hard-link commit is an atomic no-replace publication. The temporary
+      // name is removed only after the final entry is durable.
+      await fs.link(temporaryPath, ledgerPath);
+      await fs.unlink(temporaryPath);
+    } else {
+      // The fully fsynced same-directory temporary file atomically replaces
+      // the previous complete history. A crash exposes old-or-new authority.
+      await fs.rename(temporaryPath, ledgerPath);
+    }
+    const published = await fs.lstat(ledgerPath);
+    assertSafeFile(published, ledgerPath);
+    if (published.size !== Buffer.byteLength(body, "utf8")) {
+      throw new Error("Arena repository owner ledger replacement was incomplete.");
+    }
+  } catch (error) {
+    await fs.unlink(temporaryPath).catch(() => undefined);
+    throw error;
+  }
 }
 
 function parseLeaseEvent(value: unknown): ArenaRepositoryLeaseEvent {

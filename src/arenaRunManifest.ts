@@ -23,6 +23,8 @@ export const ARENA_MANIFEST_LIMITS = Object.freeze({
 
 const ARENA_EVENT_HASH_DOMAIN = "hydra.arena.manifest.v1.event\u0000";
 const ARENA_RECEIPTS_HASH_DOMAIN = "hydra.arena.manifest.v1.receipts\u0000";
+const ARENA_ARTIFACT_SET_HASH_DOMAIN =
+  "hydra.arena.manifest.v1.artifact-set\u0000";
 const ARENA_MATRIX_HASH_DOMAIN = "hydra.arena.manifest.v1.matrix\u0000";
 export const ARENA_MANIFEST_GENESIS_SHA256 = createHash("sha256")
   .update("hydra.arena.manifest.v1.genesis\u0000", "utf8")
@@ -750,6 +752,23 @@ export function replayArenaManifest(values: readonly unknown[]): ArenaManifestRe
           || !sameGitObject(payload.head, lock.base.revision)) {
           invalid(label, "claims unchanged while a locked source control differs");
         }
+      } else if (payload.status === "changed") {
+        if (payload.reasonCode === "workspaceFingerprintChanged"
+          && payload.sourceWorkspaceFingerprintSha256
+            === lock.base.sourceWorkspaceFingerprintSha256) {
+          invalid(label, "claims a workspace fingerprint change without one");
+        }
+        if (payload.reasonCode === "headChanged"
+          && payload.head !== null
+          && sameGitObject(payload.head, lock.base.revision)) {
+          invalid(label, "claims a source HEAD change without one");
+        }
+        if (payload.reasonCode === "repositoryControlChanged"
+          && payload.repositoryControlSha256
+            === lock.base.repositoryControlSha256) {
+          invalid(label, "claims a repository-control change without one");
+        }
+        compromiseReasons.add(payload.reasonCode ?? "unknown");
       } else {
         compromiseReasons.add(payload.reasonCode ?? "unknown");
       }
@@ -1142,8 +1161,19 @@ export function replayArenaManifest(values: readonly unknown[]): ArenaManifestRe
     if (payload.receiptsRootSha256 !== expectedReceiptsRoot) {
       invalid(`${label}.payload.receiptsRootSha256`, "does not bind the contestant receipts");
     }
+    if (payload.artifactSetSha256 !== arenaArtifactSetSha256(payload)) {
+      invalid(
+        `${label}.payload.artifactSetSha256`,
+        "does not bind the exact retained artifacts, receipts, quiescence, and final state",
+      );
+    }
     if (!sameGitObject(payload.finalHead, finished.finalHead)
       || payload.finalWorkspaceFingerprintSha256 !== finished.finalWorkspaceFingerprintSha256) {
+      compromiseReasons.add("evidenceStateMismatch");
+    }
+    if (payload.quiescenceWorkspaceFingerprintSha256 !== null
+      && payload.quiescenceWorkspaceFingerprintSha256
+        !== payload.finalWorkspaceFingerprintSha256) {
       compromiseReasons.add("evidenceStateMismatch");
     }
     if (!sameGitObject(payload.finalHead, lock.base.revision)) {
@@ -1239,6 +1269,69 @@ export function arenaReceiptsRootSha256(input: {
   };
   return createHash("sha256")
     .update(ARENA_RECEIPTS_HASH_DOMAIN, "utf8")
+    .update(canonicalArenaManifestJson(canonical), "utf8")
+    .digest("hex");
+}
+
+export function arenaArtifactSetSha256(
+  payload:
+    | Omit<ArenaEvidencePreservedPayload, "artifactSetSha256">
+    | ArenaEvidencePreservedPayload,
+): string {
+  const {
+    artifactSetSha256: _ignored,
+    ...bound
+  } = payload as ArenaEvidencePreservedPayload;
+  const canonical = {
+    contestantId: identifier(bound.contestantId, "artifactSet.contestantId"),
+    receiptsRootSha256: sha256(
+      bound.receiptsRootSha256,
+      "artifactSet.receiptsRootSha256",
+    ),
+    patchSha256: sha256(bound.patchSha256, "artifactSet.patchSha256"),
+    patchBytes: boundedBytes(bound.patchBytes, "artifactSet.patchBytes"),
+    untrackedArchiveSha256: nullableSha256(
+      bound.untrackedArchiveSha256,
+      "artifactSet.untrackedArchiveSha256",
+    ),
+    untrackedArchiveBytes: boundedBytes(
+      bound.untrackedArchiveBytes,
+      "artifactSet.untrackedArchiveBytes",
+    ),
+    inventorySha256: sha256(
+      bound.inventorySha256,
+      "artifactSet.inventorySha256",
+    ),
+    quiescenceReceiptSha256: nullableSha256(
+      bound.quiescenceReceiptSha256,
+      "artifactSet.quiescenceReceiptSha256",
+    ),
+    quiescenceWorkspaceFingerprintSha256: nullableSha256(
+      bound.quiescenceWorkspaceFingerprintSha256,
+      "artifactSet.quiescenceWorkspaceFingerprintSha256",
+    ),
+    finalHead: parseGitObject(bound.finalHead, "artifactSet.finalHead"),
+    finalWorkspaceFingerprintSha256: sha256(
+      bound.finalWorkspaceFingerprintSha256,
+      "artifactSet.finalWorkspaceFingerprintSha256",
+    ),
+  };
+  if ((canonical.untrackedArchiveSha256 === null)
+    !== (canonical.untrackedArchiveBytes === 0)) {
+    invalid(
+      "artifactSet.untrackedArchive",
+      "archive hash must be null exactly when archive bytes are zero",
+    );
+  }
+  if ((canonical.quiescenceReceiptSha256 === null)
+    !== (canonical.quiescenceWorkspaceFingerprintSha256 === null)) {
+    invalid(
+      "artifactSet.quiescence",
+      "receipt and workspace fingerprint must both be present or both be null",
+    );
+  }
+  return createHash("sha256")
+    .update(ARENA_ARTIFACT_SET_HASH_DOMAIN, "utf8")
     .update(canonicalArenaManifestJson(canonical), "utf8")
     .digest("hex");
 }
@@ -1530,6 +1623,12 @@ function parseMainWorkspaceObserved(
   const head = row.head === null ? null : parseGitObject(row.head, `${label}.head`);
   const watcherChanged = row.watcherChanged;
   const reasonCode = row.reasonCode as ArenaWorkspaceObservationReason | null;
+  if (watcherChanged !== (reasonCode === "watcherChanged")) {
+    invalid(
+      label,
+      "watcherChanged must be true exactly when watcherChanged is the reason",
+    );
+  }
   if (status === "unchanged") {
     if (sourceWorkspaceFingerprintSha256 === null
       || repositoryControlSha256 === null
@@ -1540,6 +1639,19 @@ function parseMainWorkspaceObserved(
     }
   } else if (reasonCode === null) {
     invalid(`${label}.reasonCode`, `${status} requires a reason`);
+  }
+  if (status === "changed"
+    && (reasonCode === "monitorFailed"
+      || reasonCode === "fingerprintFailed"
+      || reasonCode === "registryMismatch")) {
+    invalid(label, `${reasonCode} must be recorded as unverifiable`);
+  }
+  if (status === "unverifiable"
+    && reasonCode !== "monitorFailed"
+    && reasonCode !== "fingerprintFailed"
+    && reasonCode !== "registryMismatch"
+    && reasonCode !== "unknown") {
+    invalid(label, "unverifiable requires a capture or monitor failure reason");
   }
   if (status === "changed"
     && (sourceWorkspaceFingerprintSha256 === null
@@ -2135,9 +2247,14 @@ function hasComparableContestantEvidence(
     return false;
   }
   const finished = contestant.finished.payload as ArenaContestantFinishedPayload;
+  const evidence =
+    contestant.evidencePreserved.payload as ArenaEvidencePreservedPayload;
   return finished.stage === "execution"
     && finished.status === "succeeded"
-    && finished.failureCode === null;
+    && finished.failureCode === null
+    && evidence.quiescenceReceiptSha256 !== null
+    && evidence.quiescenceWorkspaceFingerprintSha256
+      === evidence.finalWorkspaceFingerprintSha256;
 }
 
 function allowedFinalizationReasons(

@@ -1,6 +1,8 @@
 import { describe, test } from "node:test";
 import { strict as assert } from "node:assert";
+import type { PathLike, Stats } from "node:fs";
 import * as fs from "node:fs/promises";
+import fsPromises = require("node:fs/promises");
 import * as os from "node:os";
 import * as path from "node:path";
 import {
@@ -13,6 +15,7 @@ import {
   readJsonlGuarded,
   rewriteFileLinesAtomically,
   serializePerFile,
+  serializePerFileAcrossProcesses,
 } from "../src/fileQueue";
 
 // Helper: check whether the host supports creating symlinks. On Windows this
@@ -268,6 +271,104 @@ describe("serializePerFile serialization", () => {
     const value = await serializePerFile(file, async () => 42);
     assert.equal(value, 42);
   });
+
+  test("treats delete-pending lock entries as concurrent disappearance", async (t) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-lock-delete-pending-"));
+    t.after(() => fs.rm(dir, { recursive: true, force: true }));
+    const file = path.join(dir, ".hydra", "events.jsonl");
+    const lock = `${file}.lock`;
+    const controlledMarker = `${lock}.acquire-controlled-replacement`;
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(lock, "stale-owner", "utf8");
+    const expired = new Date(Date.now() - 3 * 60_000);
+    await fs.utimes(lock, expired, expired);
+    await fs.writeFile(controlledMarker, `${process.pid}\n`, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+
+    const originalLstat = fsPromises.lstat.bind(fsPromises);
+    const originalOpen = fsPromises.open.bind(fsPromises);
+    const originalUnlink = fsPromises.unlink.bind(fsPromises);
+    let deleteMarkerOnInspect = false;
+    let deleteLockOnInspect = false;
+    let observedDeletePendingMarker = false;
+    let observedDeletePendingLock = false;
+
+    const deletePendingStat = async (entryPath: string): Promise<Stats> => {
+      const handle = await originalOpen(entryPath, "r");
+      try {
+        await originalUnlink(entryPath);
+        const stat = await handle.stat();
+        assert.equal(stat.isFile(), true);
+        assert.equal(stat.nlink, 0);
+        return stat;
+      } finally {
+        await handle.close();
+      }
+    };
+    const mockedLstat = async (entryPath: PathLike): Promise<Stats> => {
+      const candidate = path.resolve(String(entryPath));
+      if (
+        deleteMarkerOnInspect
+        && !observedDeletePendingMarker
+        && candidate === path.resolve(controlledMarker)
+      ) {
+        observedDeletePendingMarker = true;
+        return deletePendingStat(controlledMarker);
+      }
+      if (
+        deleteLockOnInspect
+        && !observedDeletePendingLock
+        && candidate === path.resolve(lock)
+      ) {
+        observedDeletePendingLock = true;
+        return deletePendingStat(lock);
+      }
+      return originalLstat(entryPath);
+    };
+    t.mock.method(
+      fsPromises,
+      "lstat",
+      mockedLstat as unknown as typeof fsPromises.lstat,
+    );
+
+    let workCalls = 0;
+    const pending = serializePerFileAcrossProcesses(file, async () => {
+      workCalls += 1;
+    });
+    await waitForCondition("recovery marker", async () =>
+      (await fs.readdir(path.dirname(lock))).some(
+        (name) => name.startsWith(`${path.basename(lock)}.recover-`),
+      ),
+    );
+
+    const retiredFixture = `${lock}.fixture-stale`;
+    await fs.rename(lock, retiredFixture);
+    await fs.writeFile(lock, `${JSON.stringify({
+      token: "controlled-replacement-owner",
+      createdAt: new Date().toISOString(),
+    })}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+
+    deleteMarkerOnInspect = true;
+    await waitForCondition(
+      "delete-pending acquisition marker",
+      () => observedDeletePendingMarker,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(workCalls, 0, "the fresh replacement lease must still block work");
+
+    deleteLockOnInspect = true;
+    await waitForCondition(
+      "delete-pending replacement lease",
+      () => observedDeletePendingLock,
+    );
+    await pending;
+
+    assert.equal(workCalls, 1);
+    await fs.unlink(retiredFixture);
+  });
 });
 
 describe("readJsonlGuarded", () => {
@@ -402,3 +503,15 @@ describe("bounded file reads and rewrites", () => {
     assert.deepEqual((await fs.readdir(dir)).sort(), ["data.jsonl"]);
   });
 });
+
+async function waitForCondition(
+  label: string,
+  predicate: () => boolean | Promise<boolean>,
+): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  for (;;) {
+    if (await predicate()) return;
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${label}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}

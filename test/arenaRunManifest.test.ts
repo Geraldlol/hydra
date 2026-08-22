@@ -7,6 +7,7 @@ import {
   ARENA_MANIFEST_SCHEMA_VERSION,
   ARENA_POLICY_ID,
   ArenaManifestValidationError,
+  arenaArtifactSetSha256,
   arenaEvidenceMatrixSha256,
   arenaReceiptsRootSha256,
   canonicalArenaManifestJson,
@@ -55,6 +56,15 @@ type DeepMutable<T> = {
 
 function digest(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function evidenceFixture(
+  payload: Omit<ArenaEvidencePreservedPayload, "artifactSetSha256">,
+): ArenaEvidencePreservedPayload {
+  return {
+    ...payload,
+    artifactSetSha256: arenaArtifactSetSha256(payload),
+  };
 }
 
 function lockFixture(
@@ -349,21 +359,21 @@ function completeContestant(
         (event.payload as ArenaBrowserJourneyRecordedPayload).journeyId === journey.journeyId),
     ])),
   });
-  const evidencePayload: ArenaEvidencePreservedPayload = {
+  const evidencePayload = evidenceFixture({
     payloadType: "evidencePreserved",
     contestantId,
-    artifactSetSha256: digest(`artifacts-${contestantId}`),
     receiptsRootSha256,
     patchSha256: digest(`patch-${contestantId}`),
     patchBytes: 42,
     untrackedArchiveSha256: null,
     untrackedArchiveBytes: 0,
     inventorySha256: digest(`inventory-${contestantId}`),
-    quiescenceReceiptSha256: null,
-    quiescenceWorkspaceFingerprintSha256: null,
+    quiescenceReceiptSha256: digest(`quiescence-${contestantId}`),
+    quiescenceWorkspaceFingerprintSha256:
+      options.evidenceFingerprint ?? candidateFingerprint,
     finalHead,
     finalWorkspaceFingerprintSha256: options.evidenceFingerprint ?? candidateFingerprint,
-  };
+  });
   const evidence = builder.append(
     "arenaEvidencePreserved",
     evidencePayload,
@@ -600,6 +610,37 @@ describe("Hydra Arena run manifest", () => {
     assert.throws(
       () => replayArenaManifest(rechain(forged)),
       /does not bind the locked run and complete contestant evidence/,
+    );
+  });
+
+  test("recomputes artifact-set hashes instead of trusting caller labels", () => {
+    const builder = completeComparableRun();
+    const forged = structuredClone(builder.records) as
+      DeepMutable<ArenaManifestEvent>[];
+    const evidence = forged.filter((event) =>
+      event.type === "arenaEvidencePreserved").at(-1)!;
+    (evidence.payload as DeepMutable<ArenaEvidencePreservedPayload>)
+      .patchBytes += 1;
+    assert.throws(
+      () => replayArenaManifest(rechain(forged)),
+      /does not bind the exact retained artifacts/,
+    );
+  });
+
+  test("never classifies evidence without process-bound quiescence as comparable", () => {
+    const builder = completeComparableRun();
+    const forged = structuredClone(builder.records) as
+      DeepMutable<ArenaManifestEvent>[];
+    const evidence = forged.filter((event) =>
+      event.type === "arenaEvidencePreserved").at(-1)!;
+    const payload =
+      evidence.payload as DeepMutable<ArenaEvidencePreservedPayload>;
+    payload.quiescenceReceiptSha256 = null;
+    payload.quiescenceWorkspaceFingerprintSha256 = null;
+    payload.artifactSetSha256 = arenaArtifactSetSha256(payload);
+    assert.throws(
+      () => replayArenaManifest(rechain(forged)),
+      /completed requires successful executions and durable complete evidence/,
     );
   });
 
@@ -1141,10 +1182,9 @@ describe("Hydra Arena run manifest", () => {
         verifications: new Map(),
         browserJourneys: new Map(),
       });
-      builder.append("arenaEvidencePreserved", {
+      builder.append("arenaEvidencePreserved", evidenceFixture({
         payloadType: "evidencePreserved",
         contestantId: contestant.contestantId,
-        artifactSetSha256: digest(`cancelled-artifacts-${contestant.contestantId}`),
         receiptsRootSha256,
         patchSha256: digest(`cancelled-patch-${contestant.contestantId}`),
         patchBytes: 0,
@@ -1156,7 +1196,7 @@ describe("Hydra Arena run manifest", () => {
         finalHead: builder.lock.base.revision,
         finalWorkspaceFingerprintSha256:
           preparedPayload.preparedFingerprintSha256,
-      }, `event-cancelled-evidence-${contestant.contestantId}`);
+      }), `event-cancelled-evidence-${contestant.contestantId}`);
     }
     builder.append("arenaRunFinalized", {
       payloadType: "runFinalized",
@@ -1201,10 +1241,9 @@ describe("Hydra Arena run manifest", () => {
       outputSha256: digest("recovered-output"),
       outputBytes: 0,
     }, "event-recovered-finish");
-    builder.append("arenaEvidencePreserved", {
+    builder.append("arenaEvidencePreserved", evidenceFixture({
       payloadType: "evidencePreserved",
       contestantId: contestant.contestantId,
-      artifactSetSha256: digest("recovered-artifacts"),
       receiptsRootSha256: arenaReceiptsRootSha256({
         finished,
         verifications: new Map(),
@@ -1219,7 +1258,7 @@ describe("Hydra Arena run manifest", () => {
       quiescenceWorkspaceFingerprintSha256: null,
       finalHead: builder.lock.base.revision,
       finalWorkspaceFingerprintSha256: builder.lock.base.baseContentSha256,
-    }, "event-recovered-evidence");
+    }), "event-recovered-evidence");
     builder.append("arenaRunFinalized", {
       payloadType: "runFinalized",
       outcome: "failed",
@@ -1308,10 +1347,9 @@ describe("Hydra Arena run manifest", () => {
       outputSha256: digest("uncertain-evidence-output"),
       outputBytes: 0,
     }, "event-uncertain-evidence-finish");
-    builder.append("arenaEvidencePreserved", {
+    builder.append("arenaEvidencePreserved", evidenceFixture({
       payloadType: "evidencePreserved",
       contestantId: contestant.contestantId,
-      artifactSetSha256: digest("uncertain-artifacts"),
       receiptsRootSha256: arenaReceiptsRootSha256({
         finished,
         verifications: new Map(),
@@ -1326,7 +1364,7 @@ describe("Hydra Arena run manifest", () => {
       quiescenceWorkspaceFingerprintSha256: fingerprint,
       finalHead: builder.lock.base.revision,
       finalWorkspaceFingerprintSha256: fingerprint,
-    }, "event-uncertain-evidence");
+    }), "event-uncertain-evidence");
     assert.throws(
       () => replayArenaManifest(builder.records),
       /typed private process-quiescence receipt/,
@@ -1364,10 +1402,9 @@ describe("Hydra Arena run manifest", () => {
       outputSha256: digest("output"),
       outputBytes: 0,
     }, "event-finished");
-    builder.append("arenaEvidencePreserved", {
+    builder.append("arenaEvidencePreserved", evidenceFixture({
       payloadType: "evidencePreserved",
       contestantId: contestant.contestantId,
-      artifactSetSha256: digest("artifacts"),
       receiptsRootSha256: digest("forged-root"),
       patchSha256: digest("patch"),
       patchBytes: 0,
@@ -1378,7 +1415,7 @@ describe("Hydra Arena run manifest", () => {
       quiescenceWorkspaceFingerprintSha256: null,
       finalHead: builder.lock.base.revision,
       finalWorkspaceFingerprintSha256: fingerprint,
-    }, "event-evidence");
+    }), "event-evidence");
     assert.throws(
       () => replayArenaManifest(builder.records),
       /does not bind the contestant receipts/,

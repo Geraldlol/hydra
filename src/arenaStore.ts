@@ -11,7 +11,6 @@ import {
   ARENA_CLEANUP_STEPS,
 } from "./arenaCleanup";
 import {
-  appendArenaPrivateFile,
   assertArenaPrivateDirectory,
   assertArenaPrivateParent,
   createArenaPrivateFile,
@@ -21,6 +20,7 @@ import {
   writeArenaPrivateFileAtomically,
   type ArenaPrivateStorageBoundary,
 } from "./arenaPrivateStorage";
+import { arenaPhysicalWorktreeSegment } from "./arenaPathBudget";
 import {
   ARENA_MANIFEST_GENESIS_SHA256,
   ARENA_MANIFEST_LIMITS,
@@ -173,7 +173,12 @@ export function arenaRunPaths(
     runPath,
     manifestPath: path.join(runPath, "manifest.v1.jsonl"),
     artifactPath: exactChild(store.artifactsPath, runId),
-    worktreePath: exactChild(store.worktreesPath, runId),
+    // Logical run and contestant IDs never become physical worktree path
+    // material. Besides avoiding accidental disclosure, the shared short
+    // parent leaves substantially more of Windows' legacy MAX_PATH budget for
+    // tracked repository paths. The manifest and registration stores retain
+    // the full logical identities.
+    worktreePath: exactChild(store.worktreesPath, "p"),
   };
 }
 
@@ -197,7 +202,7 @@ export function arenaContestantWorktreePath(
   assertArenaIdentifier(contestantId, "contestant ID");
   return exactChild(
     arenaRunPaths(privateWorkspaceRoot, runId).worktreePath,
-    contestantId,
+    arenaPhysicalWorktreeSegment(runId, contestantId),
   );
 }
 
@@ -288,10 +293,19 @@ export class FileArenaManifestStore implements ArenaManifestStore {
         }
         throw error;
       }
+      // Publish the complete validated history as one atomic replacement.
+      // Appending directly can leave a syntactically torn final authority row
+      // after an extension-host or machine crash. Arena real-run admission
+      // therefore relies on the old-or-new property of same-directory rename:
+      // replay observes either the prior complete chain or this complete chain,
+      // never a partially written next sequence.
+      const body = `${current.events
+        .map((event) => canonicalArenaManifestJson(event))
+        .join("\n")}${current.events.length > 0 ? "\n" : ""}${line}`;
       if (current.events.length === 0) {
-        await createArenaPrivateFile(filePath, line, boundary);
+        await createArenaPrivateFile(filePath, body, boundary);
       } else {
-        await appendArenaPrivateFile(filePath, line, boundary);
+        await writeArenaPrivateFileAtomically(filePath, body, boundary);
       }
       return candidate;
     });

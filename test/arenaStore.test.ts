@@ -17,6 +17,7 @@ import {
   openFileArenaManifestStore,
   rebuildArenaRunIndex,
 } from "../src/arenaStore";
+import { arenaPhysicalWorktreeSegment } from "../src/arenaPathBudget";
 import {
   ARENA_MANIFEST_LIMITS,
   ARENA_POLICY_ID,
@@ -144,7 +145,11 @@ describe("Arena private manifest store", () => {
     );
     assert.equal(
       arenaContestantWorktreePath(root, RUN_ID, "contestant-one"),
-      path.join(paths.worktreesPath, RUN_ID, "contestant-one"),
+      path.join(
+        paths.worktreesPath,
+        "p",
+        arenaPhysicalWorktreeSegment(RUN_ID, "contestant-one"),
+      ),
     );
     assert.throws(() => arenaRunPaths(root, "../escape"), /not safe/);
     assert.throws(

@@ -105,7 +105,7 @@ storage:
 ```text
 <storageUri>/arena/runs/<runId>/manifest.v1.jsonl
 <storageUri>/arena/artifacts/<runId>/<contestantId>/...
-<storageUri>/arena/worktrees/<runId>/<contestantId>/...
+<globalStorageUri>/as/<workspaceHash>/arena/worktrees/p/<opaque128>/...
 <storageUri>/arena/registrations/<runId>/<contestantId>/intent.v1.json
 <storageUri>/arena/registrations/<runId>/<contestantId>/receipt.v1.json
 ```
@@ -147,13 +147,13 @@ registration receipts, complete cleanup replay, Git registry absence, and
 exact target-path absence. Run IDs cannot be reused after release, and an old
 claim receipt cannot regain authority after recovery or release.
 
-Restart takeover additionally requires a private, typed, run- and
-process-generation-bound quiescence receipt. Stage 2 has no such process
-supervisor, so it deliberately rejects restart takeover rather than inferring
-quiescence from a dead extension-host PID. The `claimRecovered` ledger shape is
-reserved, but no current controller can produce its required proof. This means
-an interrupted stage-2 owner can remain blocked for explicit recovery; it must
-not be silently expired.
+Restart takeover additionally requires private, typed, run- and
+process-generation-bound quiescence for every submitted generation. Stage 3
+records that proof only for its exact bundled fake helper, but deliberately
+does not implement repository-claim takeover. It never infers quiescence from a
+dead extension-host PID. The `claimRecovered` ledger shape remains reserved,
+so an interrupted owner can stay blocked for explicit recovery and is never
+silently expired.
 
 The v1 event vocabulary is:
 
@@ -169,8 +169,10 @@ The v1 event vocabulary is:
 - `arenaRunFinalized`; and
 - `arenaCleanupStepRecorded`.
 
-Sequence, not wall-clock time, establishes causality. A future file store must
-reload and fully replay under a cross-process per-run lease before each append.
+Sequence, not wall-clock time, establishes causality. The file store reloads
+and fully replays under a cross-process per-run lease before each append, then
+publishes the complete validated history by same-directory atomic replacement.
+The repository-owner history uses the same crash-atomic old-or-new rule.
 An exact retry of an existing event ID is idempotent only when the complete
 canonical event matches; a same-ID collision fails closed.
 
@@ -199,9 +201,12 @@ internal linked-worktree `$GIT_DIR` path budget. Stage 2 therefore places its
 synthetic physical worktrees under a short, workspace-keyed child of
 `globalStorageUri` rather than the longer per-workspace `storageUri`. The
 private manifest still binds the exact derived path and directory identity.
-A future real-run controller must enforce a conservative pre-Git path budget
-and fail before intent publication if its configured extension-private root
-cannot satisfy that budget.
+The stage-3 controller maps logical run/head IDs to one fixed-length opaque
+physical segment, parses bounded `git ls-files -z` output, and enforces a
+conservative UTF-16 budget for both `<target>/.git` and the longest tracked
+path. It fails before parent creation or intent publication when that budget
+does not fit. Doctor reports the OS `LongPathsEnabled` and Git
+`core.longpaths` state without treating either as a substitute for preflight.
 
 - the logical and real path remain inside the expected private Arena worktree
   parent and no parent or target is a symbolic link or reparse-point escape;
@@ -246,6 +251,33 @@ other contestant directories. Those instructions narrow intended behavior but
 do not turn linked worktrees into a sandbox; native authority and user consent
 remain the real security boundary.
 
+Stage 3 dispatch is intentionally limited to Hydra's installed, identity-bound
+fake-head helper. The controller writes a metadata-only process intent before
+spawn, rechecks the Mission binding, executable, helper, worktree directory,
+and sanitized environment policy, then awaits durable submission publication
+before writing stdin. Only that broker-owned no-descendants helper can produce
+a process-generation-bound quiescence receipt. Native Codex, Claude, ACP, and
+other head dispatch remains disabled until their adapters can prove descendant
+quiescence rather than inferring it from a direct child's `close` event.
+Steering and Terminal Bridge are structurally absent from this path.
+
+All process factories are provider-write-free and ready before the first spawn.
+Hydra repeats the source check after those factories finish, then serializes a
+fresh source receipt immediately before each contestant intent and again after
+intent publication immediately before spawn. Once the operating system accepts
+the child, that contestant's start event and submission receipt become durable
+inside one supervisor gate before stdin; a contestant rejected or cancelled
+before acceptance remains truthfully `beforeDispatch` and unstarted. Execution
+becomes parallel only after that contestant's durable submission boundary. The
+first rejected or unsafe dispatch aborts its siblings, but the controller
+awaits every supervisor's confirmed or explicitly unconfirmed terminal result
+before closing the monitor or returning. A receipt publication failure is
+classified before sibling cancellation and can never be relabeled as a user
+Stop. Because Node filesystem promises cannot be cancelled safely, the
+broker-owned start/submission callback is awaited to actual settlement; Hydra
+never abandons an authority write behind a timer and then returns while it can
+still mutate the run.
+
 ### Source-workspace integrity is latched
 
 Hydra captures the source-workspace fingerprint before lock, starts the
@@ -254,6 +286,8 @@ records a private monitor-start receipt with one opaque epoch ID. Provisioning
 is rejected until that `monitorStarted` event replays successfully. Every later
 checkpoint and post-evidence observation must bind the same epoch and a unique
 receipt; a crash or restart does not silently replace the monitor epoch.
+Checkpoint calls are serialized because observation counts are authority data,
+and every receipt is privately durable before its manifest reference.
 Hydra captures a final `postEvidence` fingerprint after all contestant evidence
 is durable.
 `.git` changes needed for linked-worktree administration and Hydra-owned
@@ -300,6 +334,25 @@ durably registered contestant:
 - agent, verification, browser, cost, timing, and Flight receipt references;
   and
 - a canonical artifact-set hash used by the comparison matrix.
+
+Replay recomputes that artifact-set hash from the patch, untracked archive,
+inventory, receipts root, typed quiescence, final `HEAD`, and final workspace
+fingerprint. Stage 3 also re-fingerprints the worktree after private
+publication and refuses to append the evidence event if state changed during
+capture.
+
+A user Stop remains the cancellation signal for live providers. Only after the
+bundled helper has confirmed close does Hydra switch to a fresh bounded
+non-user-cancellable signal for quiescence fingerprints, artifact preservation,
+the final source receipt, and exact cleanup. A contestant cancelled before
+spawn has a typed `beforeDispatch` result with no submission and therefore no
+quiescence receipt; Hydra fresh-captures its unchanged worktree, preserves the
+partial artifact set with both quiescence fields null, finalizes the run as
+cancelled/incomplete, and cleans it. Internal transport or receipt failures
+remain failed even when their fail-fast signal cancels sibling heads.
+A later user Stop cannot overwrite an already observed provider failure,
+timeout, or delivery uncertainty; `userCancelled` is causal only when at least
+one result is cancelled and every other result is succeeded or cancelled.
 
 Files are opened without following links, content and entry counts are bounded,
 and an unsafe artifact capture blocks Hydra-managed cleanup. Preservation binds
@@ -370,11 +423,10 @@ If a process crashes after an external side effect but before its complete,
 flushed receipt append, recovery probes the exact target again and records
 `notNeeded` when the intended postcondition is already true. Completed steps
 never execute again. A blocked cleanup remains visible and leaves retained
-evidence and any unverified target in place for explicit recovery. Stage 2
-deliberately fails closed on a torn manifest or owner-ledger tail; it does not
-truncate or infer the missing authority record. Crash-atomic per-sequence
-authority records (or an equivalently replay-safe repair protocol) are a
-stage-3 prerequisite before Arena may admit a real workspace repository.
+evidence and any unverified target in place for explicit recovery. Stage 3
+drives only the next operation authorized by replay, follows the fixed retry
+schedule, and uses crash-atomic manifest and owner-ledger histories. It never
+truncates, repairs, or infers missing authority.
 
 ### Reveal, winner selection, promotion, and synthesis remain human gates
 
@@ -400,8 +452,8 @@ Arena result.
 
 - Contestant edits are attributable and reversible without branch creation.
 - Complete flushed mission, base, control, evidence, and cleanup records
-  survive crashes and cross-window replay; a torn authoritative tail blocks
-  stage 2 rather than being guessed or silently repaired.
+  survive crashes and cross-window replay; each authoritative history exposes
+  the complete old or new sequence rather than a torn append.
 - Main-workspace interference and incomplete capture remain visible instead of
   being repaired into false comparability.
 - Windows handle failures cannot trigger an unsafe broad deletion.
@@ -416,8 +468,10 @@ Arena result.
 - Full fingerprints, patches, untracked archives, and identical verification
   multiply I/O, storage, latency, and cost by contestant count.
 - Strict cleanup can leave a blocked private worktree for manual recovery.
-- Stage 2 has no restart-takeover proof or torn-tail repair, so a crashed owner
-  can remain blocked until a later explicit recovery broker exists.
+- Stage 3 still has no restart-takeover broker, so a crashed owner can remain
+  blocked until a later explicit recovery flow proves every generation
+  quiescent. Crash-atomic history prevents torn authority but does not grant
+  takeover.
 - Requiring a clean main worktree narrows the MVP but prevents ambiguous
   attribution and promotion.
 
@@ -464,19 +518,34 @@ containment, links and path swaps, spaces and Unicode, dirty/bare/non-main
 workspace rejection, configured Git helper suppression, locked Windows
 handles, crash points around `git worktree add/remove`, unrelated linked
 worktree preservation, owner-ledger races/release/restart fencing, and artifact
-retention after cleanup. The stage-2
-`hydraRoom.runArenaSmokeTest` command is specifically a synthetic worktree
-lifecycle smoke: it creates two detached targets, reconciles the
+retention after cleanup. The `hydraRoom.runArenaSmokeTest` command first
+retains the stage-2 synthetic lifecycle coverage: it creates two detached
+targets, reconciles the
 receipt-to-manifest crash window, records bounded pre-dispatch cancellation
 evidence, cleans exact targets, and proves the source workspace and an
-unrelated worktree are unchanged. It does not claim comparable head execution,
-verification, browser evidence, a fresh post-evidence monitor observation, or
-an evidence matrix. Before its first Git side effect it publishes an immutable
+unrelated worktree are unchanged. Before its first Git side effect it publishes an immutable
 private recovery catalog naming only the exact synthetic roots; confirmed
 cleanup removes that catalog, while a hard host death leaves it for a future
 bounded startup recovery scan. Stage 2 does not perform that scan or regain
-repository-owner authority. Those capabilities, plus crash-atomic authority
-history, become mandatory in the stage-3 controller smoke.
+repository-owner authority.
+
+The command then runs the stage-3 controller against two supervised fake
+heads. It exercises continuous source monitoring, durable process
+intent/submission/quiescence receipts, parallel tracked and untracked edits,
+binary/full-index artifact preservation, a recomputed comparable evidence
+matrix, replay-driven exact cleanup, repository-owner release, and unchanged
+source proof in a real extension host. It does not execute a native model,
+verification plan, browser journey, UI reveal, promotion, or recovery
+takeover.
+
+Adversarial controller tests mutate the source during provider-free process
+preparation and prove that no submission or stdin follows. Separate cancellation
+tests stop before the first spawn and after submitted fake heads begin work;
+they pin typed pre-dispatch cancellation, sibling drain, fresh post-close
+quiescence, partial/full evidence preservation, exact cleanup, source
+immutability, and lease release. The pure batch test proves the primary error
+is retained while a slower sibling drains and that internal fail-fast never
+aborts the caller's parent signal.
 
 Arena patch and untracked artifacts contain source content and therefore stay
 in the separate private Arena artifact store; they are never copied into
@@ -490,7 +559,8 @@ Roll out in stages:
 1. pure run-manifest and cleanup protocols;
 2. private manifest/artifact store plus hardened Git worktree executor and
    synthetic lifecycle smoke only (no real-workspace Arena admission);
-3. Arena controller with main-workspace monitor and fake-head smoke;
+3. Arena controller with main-workspace monitor and fake-head smoke
+   (implemented; native-head admission remains closed);
 4. locked verification/browser execution and the compatible Flight schema
    revision/projection;
 5. reveal matrix and explicit winner/synthesis controls; and

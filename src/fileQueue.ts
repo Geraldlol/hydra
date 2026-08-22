@@ -314,11 +314,17 @@ async function inspectCrossProcessLock(
   lockPath: string,
 ): Promise<{ stat: Stats; record?: CrossProcessLockRecord }> {
   const before = await fs.lstat(lockPath);
+  if (isDisappearingCrossProcessLockEntry(before)) {
+    throw crossProcessLockEntryDisappeared(lockPath);
+  }
   assertSafeArtifactFile(before, lockPath);
   const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
   const handle = await fs.open(lockPath, fsConstants.O_RDONLY | noFollow);
   try {
     const opened = await handle.stat();
+    if (isDisappearingCrossProcessLockEntry(opened)) {
+      throw crossProcessLockEntryDisappeared(lockPath);
+    }
     assertSafeArtifactFile(opened, lockPath);
     if (!sameFileIdentity(before, opened)) {
       throw new Error(`Hydra artifact writer lock changed while opening: ${lockPath}`);
@@ -389,6 +395,10 @@ async function hasLiveCrossProcessLockMarkers(
       if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
       throw err;
     }
+    // Windows can expose an otherwise regular file with nlink=0 while an
+    // overlapping unlink is completing. For ephemeral intent markers that is
+    // the same protocol state as ENOENT, not evidence of an unsafe hard link.
+    if (isDisappearingCrossProcessLockEntry(stat)) continue;
     assertSafeArtifactFile(stat, markerPath);
     if (Date.now() - stat.mtimeMs > CROSS_PROCESS_MARKER_TTL_MS) {
       await removeCrossProcessLockEntry(markerPath);
@@ -406,11 +416,24 @@ async function removeCrossProcessLockMarker(markerPath: string): Promise<void> {
 async function removeCrossProcessLockEntry(entryPath: string): Promise<void> {
   try {
     const stat = await fs.lstat(entryPath);
+    if (isDisappearingCrossProcessLockEntry(stat)) return;
     assertSafeArtifactFile(stat, entryPath);
     await fs.unlink(entryPath);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
+}
+
+function isDisappearingCrossProcessLockEntry(stat: Stats): boolean {
+  return stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 0;
+}
+
+function crossProcessLockEntryDisappeared(entryPath: string): NodeJS.ErrnoException {
+  const error = new Error(
+    `Hydra artifact writer lock disappeared while being inspected: ${entryPath}`,
+  ) as NodeJS.ErrnoException;
+  error.code = "ENOENT";
+  return error;
 }
 
 async function moveCrossProcessLockIfIdentityMatches(

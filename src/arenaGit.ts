@@ -47,12 +47,19 @@ import type {
   ArenaCleanupPostcondition,
   ArenaCleanupStep,
 } from "./arenaCleanup";
+import {
+  ARENA_TRACKED_PATHS_MAX_BYTES,
+  ArenaPathBudgetError,
+  preflightArenaWorktreePathBudget,
+} from "./arenaPathBudget";
 
 export const ARENA_GIT_POLICY_VERSION = "hydra-arena-git-v1" as const;
 
 const DEFAULT_GIT_TIMEOUT_MS = 30_000;
 const DEFAULT_GIT_STDOUT_BYTES = 16 * 1024 * 1024;
 const DEFAULT_GIT_STDERR_BYTES = 64 * 1024;
+const MAX_ARENA_PATCH_BYTES = 64 * 1024 * 1024;
+const MAX_ARENA_UNTRACKED_PATH_BYTES = 16 * 1024 * 1024;
 const MAX_WORKTREE_FIELDS = 100_000;
 const MAX_WORKTREE_FIELD_BYTES = 64 * 1024;
 const MAX_GIT_CONTROL_SCAN_ENTRIES = 20_000;
@@ -87,6 +94,7 @@ export type ArenaGitErrorCode =
   | "submodules"
   | "indexFlags"
   | "configuredHelpers"
+  | "pathBudget"
   | "worktreeExists"
   | "registrationMismatch"
   | "worktreeStateMismatch";
@@ -162,6 +170,13 @@ export interface ArenaVerifiedWorktree {
   readonly fingerprint: DuelWorkspaceFingerprint;
 }
 
+export interface ArenaOwnedEvidenceState {
+  readonly finalHead: ArenaGitObjectId;
+  readonly fingerprint: DuelWorkspaceFingerprint;
+  readonly patch: Buffer;
+  readonly untrackedPathsZ: Buffer;
+}
+
 export interface ArenaProvisionWorktreeInput {
   readonly runId: string;
   readonly contestantId: string;
@@ -204,6 +219,7 @@ export class ArenaGitExecutor {
     readonly workspaceRoot: string,
     readonly privateWorkspaceRoot: string,
     readonly gitExecutable: string,
+    private readonly gitExecutableIdentitySha256: string,
     private readonly gitResolutionRoot: string,
     private readonly boundary: ArenaPrivateStorageBoundary,
     private readonly emptyHooksPath: string,
@@ -286,6 +302,7 @@ export class ArenaGitExecutor {
       realWorkspace,
       path.resolve(privateWorkspaceRoot),
       realGitExecutable,
+      executableIdentitySha256(realGitExecutable, gitStat),
       realResolutionRoot,
       boundary,
       emptyHooksPath,
@@ -565,6 +582,10 @@ export class ArenaGitExecutor {
       );
     }
     await assertRealDirectory(realCommonDirectory, "Git common directory");
+    const [workspaceStatAtStart, commonStatAtStart] = await Promise.all([
+      fs.lstat(realWorkspace),
+      fs.lstat(realCommonDirectory),
+    ]);
     const expectedGitDirectory = path.join(realWorkspace, ".git");
     const expectedGitStat = await fs.lstat(expectedGitDirectory);
     if (!expectedGitStat.isDirectory()
@@ -660,8 +681,29 @@ export class ArenaGitExecutor {
         "Source workspace HEAD changed during Arena admission.",
       );
     }
-    const commonStat = await fs.lstat(realCommonDirectory);
-    const workspaceStat = await fs.lstat(realWorkspace);
+    const [commonStat, workspaceStat] = await Promise.all([
+      fs.lstat(realCommonDirectory),
+      fs.lstat(realWorkspace),
+    ]);
+    if (hashCanonical(
+      "hydra.arena.git.admission-common-identity.v1\u0000",
+      statIdentity(commonStatAtStart),
+    ) !== hashCanonical(
+      "hydra.arena.git.admission-common-identity.v1\u0000",
+      statIdentity(commonStat),
+    )
+      || hashCanonical(
+        "hydra.arena.git.admission-source-identity.v1\u0000",
+        statIdentity(workspaceStatAtStart),
+      ) !== hashCanonical(
+        "hydra.arena.git.admission-source-identity.v1\u0000",
+        statIdentity(workspaceStat),
+      )) {
+      throw new ArenaGitError(
+        "worktreeStateMismatch",
+        "Arena source or Git common-directory identity changed during admission.",
+      );
+    }
     const commonDirectoryIdentity = statIdentity(commonStat);
     if (commonDirectoryIdentity.dev === "0"
       || commonDirectoryIdentity.ino === "0") {
@@ -754,11 +796,24 @@ export class ArenaGitExecutor {
       baseRevision.oid,
       "Arena base revision",
     );
+    const runId = input.contestants[0]?.runId;
+    if (!runId
+      || input.contestants.some((contestant) => contestant.runId !== runId)) {
+      throw new ArenaGitError(
+        "registrationMismatch",
+        "One Arena worktree plan cannot cross run identities.",
+      );
+    }
     const seenContestants = new Set<string>();
     const seenWorktrees = new Set<string>();
+    const seenTargets = new Set<string>();
     const drafts: Parameters<
       FileArenaWorktreeRegistrationStore["planMany"]
     >[0][number][] = [];
+    const targets: {
+      readonly contestant: ArenaPlanWorktreesInput["contestants"][number];
+      readonly target: string;
+    }[] = [];
     for (const contestant of input.contestants) {
       if (seenContestants.has(contestant.contestantId)
         || seenWorktrees.has(contestant.worktreeId)) {
@@ -774,10 +829,62 @@ export class ArenaGitExecutor {
         contestant.runId,
         contestant.contestantId,
       );
-      const parent = await ensureArenaPrivateDirectory(
-        this.boundary,
-        ["worktrees", contestant.runId],
+      const targetKey = canonicalPath(target);
+      if (seenTargets.has(targetKey)) {
+        throw new ArenaGitError(
+          "registrationMismatch",
+          "Arena physical worktree identities collided.",
+        );
+      }
+      seenTargets.add(targetKey);
+      targets.push({ contestant, target });
+    }
+
+    // This must precede parent creation, intent publication, and every Git
+    // worktree side effect. `core.longpaths=true` is not sufficient for all
+    // linked-worktree code paths, so Hydra fails closed using the tracked
+    // repository's worst-case legacy Windows path budget.
+    if (process.platform === "win32") {
+      const tracked = await this.git(
+        this.workspaceRoot,
+        ["ls-files", "--cached", "-z", "--"],
+        { maxStdoutBytes: ARENA_TRACKED_PATHS_MAX_BYTES },
       );
+      for (const { target } of targets) {
+        try {
+          const report = preflightArenaWorktreePathBudget(
+            path.resolve(target),
+            tracked.stdout,
+          );
+          if (!report.accepted) {
+            throw new ArenaGitError(
+              "pathBudget",
+              `Arena worktree path exceeds the conservative Windows budget (${
+                report.worstCaseUtf16UnitsWithMargin
+              } > ${report.maxPathUtf16Units} UTF-16 units, reason ${
+                report.reason
+              }). Use a shorter extension storage location or shorten tracked repository paths.`,
+            );
+          }
+        } catch (error) {
+          if (error instanceof ArenaGitError) throw error;
+          if (error instanceof ArenaPathBudgetError) {
+            throw new ArenaGitError(
+              "pathBudget",
+              `Arena could not validate its Windows worktree path budget (${error.code}).`,
+              { cause: error },
+            );
+          }
+          throw error;
+        }
+      }
+    }
+
+    const parent = await ensureArenaPrivateDirectory(
+      this.boundary,
+      ["worktrees", "p"],
+    );
+    for (const { contestant, target } of targets) {
       if (!sameArenaPath(path.dirname(target), parent)
         || input.admission.worktrees.some((entry) =>
           sameArenaPath(entry.path, target))) {
@@ -805,13 +912,6 @@ export class ArenaGitExecutor {
         worktreePath: target,
         lockReason,
       });
-    }
-    const runId = input.contestants[0]!.runId;
-    if (input.contestants.some((contestant) => contestant.runId !== runId)) {
-      throw new ArenaGitError(
-        "registrationMismatch",
-        "One Arena worktree plan cannot cross run identities.",
-      );
     }
     return this.withRepositoryLease(
       input.admission.repositoryIdentitySha256,
@@ -854,6 +954,127 @@ export class ArenaGitExecutor {
       state.intent.repositoryIdentitySha256,
       runId,
       () => this.bindOwnedReceipt(state.intent, state.receipt!, signal),
+    );
+  }
+
+  /**
+   * Capture the source controls through the same hardened Git runner used for
+   * admission. Once a run owns registrations, repository controls exclude only
+   * that run's authenticated worktrees.
+   */
+  async captureSourceState(
+    admission: ArenaGitAdmission,
+    runId?: string,
+    signal?: AbortSignal,
+  ): Promise<{
+    readonly sourceWorkspaceFingerprintSha256: string;
+    readonly repositoryControlSha256: string;
+    readonly head: ArenaGitObjectId;
+  }> {
+    this.assertAdmissionMatchesExecutor(admission);
+    const sourceStat = await fs.lstat(this.workspaceRoot);
+    const sourceDirectoryIdentitySha256 = hashCanonical(
+      "hydra.arena.git.source-directory.v1\u0000",
+      {
+        sourceWorkspace: canonicalPath(this.workspaceRoot),
+        sourceDirectoryIdentity: statIdentity(sourceStat),
+      },
+    );
+    if (sourceDirectoryIdentitySha256
+        !== admission.sourceDirectoryIdentitySha256) {
+      throw new ArenaGitError(
+        "worktreeStateMismatch",
+        "Arena source workspace directory identity changed after admission.",
+      );
+    }
+    const fingerprint = await this.captureFingerprint(
+      this.workspaceRoot,
+      signal,
+    );
+    const repositoryControlSha256 = runId && this.runClaims.has(runId)
+      ? await this.captureRunRepositoryControlSha256(runId, signal)
+      : await this.captureExactRepositoryControlSha256(signal);
+    return Object.freeze({
+      sourceWorkspaceFingerprintSha256: hashCanonical(
+        "hydra.arena.git.source-workspace.v1\u0000",
+        {
+          baseContentSha256: fingerprint.sha256,
+          sourceDirectoryIdentitySha256,
+        },
+      ),
+      repositoryControlSha256,
+      head: {
+        objectFormat: admission.objectFormat,
+        oid: fingerprint.head,
+      },
+    });
+  }
+
+  /**
+   * Capture comparison artifacts only after the caller's process supervisor
+   * has proven quiescence. The patch is binary/full-index and untracked paths
+   * are NUL framed; no shell, textconv, or external diff is involved.
+   */
+  async captureOwnedEvidenceState(
+    owned: ArenaOwnedWorktree,
+    signal?: AbortSignal,
+  ): Promise<ArenaOwnedEvidenceState> {
+    return this.withRepositoryLease(
+      owned.repositoryIdentitySha256,
+      owned.runId,
+      async () => {
+        await this.authenticateDurableWorktree(owned);
+        await this.assertOwnedRegistration(owned, signal, false);
+        const [headText, fingerprint, patchResult, untrackedResult] =
+          await Promise.all([
+            this.gitText(
+              owned.worktreePath,
+              ["rev-parse", "--verify", "HEAD^{commit}"],
+              signal,
+            ),
+            this.captureFingerprint(owned.worktreePath, signal),
+            this.git(
+              owned.worktreePath,
+              [
+                "diff",
+                "--binary",
+                "--full-index",
+                "--no-ext-diff",
+                "--no-textconv",
+                owned.head.oid,
+                "--",
+              ],
+              {
+                maxStdoutBytes: MAX_ARENA_PATCH_BYTES,
+                signal,
+              },
+            ),
+            this.git(
+              owned.worktreePath,
+              ["ls-files", "--others", "--exclude-standard", "-z", "--"],
+              {
+                maxStdoutBytes: MAX_ARENA_UNTRACKED_PATH_BYTES,
+                signal,
+              },
+            ),
+          ]);
+        assertObjectId(owned.head.objectFormat, headText, "contestant HEAD");
+        if (fingerprint.head !== headText) {
+          throw new ArenaGitError(
+            "worktreeStateMismatch",
+            "Arena contestant HEAD changed during evidence capture.",
+          );
+        }
+        return Object.freeze({
+          finalHead: {
+            objectFormat: owned.head.objectFormat,
+            oid: headText,
+          },
+          fingerprint,
+          patch: Buffer.from(patchResult.stdout),
+          untrackedPathsZ: Buffer.from(untrackedResult.stdout),
+        });
+      },
     );
   }
 
@@ -2438,6 +2659,13 @@ export class ArenaGitExecutor {
         "Arena's resolved Git executable is no longer a real file.",
       );
     }
+    if (executableIdentitySha256(this.gitExecutable, executableStat)
+        !== this.gitExecutableIdentitySha256) {
+      throw new ArenaGitError(
+        "gitUnavailable",
+        "Arena's resolved Git executable identity changed after admission.",
+      );
+    }
     const absoluteCwd = path.resolve(cwd);
     if (!sameArenaPath(absoluteCwd, this.workspaceRoot)) {
       if (!isArenaPathWithin(this.boundary.logicalRoot, absoluteCwd)
@@ -2975,6 +3203,16 @@ function statIdentity(stat: Stats): {
     dev: String(stat.dev),
     ino: String(stat.ino),
   };
+}
+
+function executableIdentitySha256(filePath: string, stat: Stats): string {
+  return hashCanonical("hydra.arena.git.executable-identity.v1\u0000", {
+    path: canonicalPath(filePath),
+    identity: statIdentity(stat),
+    size: stat.size,
+    mtimeMs: stat.mtimeMs,
+    ctimeMs: stat.ctimeMs,
+  });
 }
 
 function canonicalPath(value: string): string {

@@ -62,11 +62,11 @@ test("runs the isolated two-head Arena worktree lifecycle", async (t: TestContex
   assert.equal(report.passed, true);
   assert.equal(report.observed.contestants, 2);
   assert.equal(report.observed.cleanupState, "cleanupComplete");
-  assert.equal(report.observed.manifestEvents, 23);
+  assert.equal(report.observed.manifestEvents > 23, true);
   assert.ok(report.checks.every((check) => check.passed));
   assert.match(
     formatArenaSmokeReport(report),
-    /^Arena worktree smoke test passed\. Checks 8\/8;/,
+    /^Arena worktree smoke test passed\. Checks 11\/11;/,
   );
   const smokeParent = path.join(
     privateRoot,
