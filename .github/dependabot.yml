@@ -8,16 +8,19 @@ updates:
       npm-deps:
         patterns:
           - "*"
-    # Major bumps on these three are deliberate decisions, not auto-PRs:
-    #   @types/node  — pinned to ^22 to match VS Code 1.120's Node 22 runtime
-    #   @types/vscode — pinned exactly to the minimum engines.vscode API
-    #   typescript    — major TS upgrades touch compilation surface
-    # Patch and minor bumps still flow through normally.
+    # Major bumps for @types/node and TypeScript are deliberate decisions.
+    # @types/vscode is pinned exactly to the minimum engines.vscode API, so
+    # every update must be coordinated manually with that compatibility floor.
+    # Patch and minor bumps for the remaining dependencies flow normally.
     ignore:
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
       - dependency-name: "@types/vscode"
-        update-types: ["version-update:semver-major"]
+        # Suppress routine version PRs without suppressing security updates.
+        update-types:
+          - "version-update:semver-patch"
+          - "version-update:semver-minor"
+          - "version-update:semver-major"
       - dependency-name: "typescript"
         update-types: ["version-update:semver-major"]
 
