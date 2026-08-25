@@ -316,11 +316,12 @@ describe("Arena private manifest store", () => {
     await store.append(observationDraft("event-monitor", "monitorStarted"));
     const copiedRunId = "arena-copied-run";
     const copied = arenaRunPaths(root, copiedRunId);
-    await fs.mkdir(copied.runPath, { recursive: true });
+    await fs.mkdir(copied.runPath, { recursive: true, mode: 0o700 });
     await fs.copyFile(
       arenaRunPaths(root, RUN_ID).manifestPath,
       copied.manifestPath,
     );
+    await fs.chmod(copied.manifestPath, 0o600);
     await assert.rejects(
       store.load(copiedRunId),
       /path-mismatched|contains run arena-store-run/,

@@ -482,6 +482,62 @@ describe("Arena Git executor", () => {
     assert.ok(states.every((state) => state.receipt === undefined));
   });
 
+  test("tightens an unreceipted Git-created worktree before crash recovery", async (t) => {
+    if (process.platform === "win32") {
+      t.skip("POSIX private-directory permissions");
+      return;
+    }
+    if (!requireNativeGit(t)) return;
+    const fixture = await repositoryFixture(t);
+    const executor = await ArenaGitExecutor.open(
+      fixture.workspace,
+      fixture.privateRoot,
+      fixture.leaseRoot,
+    );
+    const [intent] = await planTwo(executor, t);
+    await git(fixture.workspace, [
+      "worktree",
+      "add",
+      "--detach",
+      "--lock",
+      "--reason",
+      intent.lockReason,
+      "--no-relative-paths",
+      "--",
+      intent.worktreePath,
+      intent.baseRevision.oid,
+    ]);
+    await fs.chmod(intent.worktreePath, 0o755);
+    const provisioned = await executor.provisionPlannedWorktree(intent);
+
+    const worktree = await fs.lstat(provisioned.worktreePath);
+    assert.equal(worktree.mode & 0o077, 0);
+  });
+
+  test("rejects permission drift after a worktree receipt without repairing it", async (t) => {
+    if (process.platform === "win32") {
+      t.skip("POSIX private-directory permissions");
+      return;
+    }
+    if (!requireNativeGit(t)) return;
+    const fixture = await repositoryFixture(t);
+    const executor = await ArenaGitExecutor.open(
+      fixture.workspace,
+      fixture.privateRoot,
+      fixture.leaseRoot,
+    );
+    const [intent] = await planTwo(executor, t);
+    const provisioned = await executor.provisionPlannedWorktree(intent);
+    await fs.chmod(provisioned.worktreePath, 0o755);
+
+    await assert.rejects(
+      executor.provisionPlannedWorktree(intent),
+      gitError("registrationMismatch"),
+    );
+    const worktree = await fs.lstat(provisioned.worktreePath);
+    assert.equal(worktree.mode & 0o077, 0o055);
+  });
+
   test("provisions detached locked worktrees from the identical base", async (t) => {
     if (!requireNativeGit(t)) return;
     const fixture = await repositoryFixture(t);

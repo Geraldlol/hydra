@@ -23,6 +23,7 @@ import {
   arenaContestantWorktreePath,
   openFileArenaManifestStore,
 } from "./arenaStore";
+import { arenaPhysicalWorktreeSegment } from "./arenaPathBudget";
 import {
   assertArenaPrivateDirectory,
   ensureArenaPrivateDirectory,
@@ -1738,6 +1739,26 @@ export class ArenaGitExecutor {
           );
         }
 
+        if (entries.length === 0 || targetExists) {
+          const privateWorktreePath = await ensureArenaPrivateDirectory(
+            this.boundary,
+            [
+              "worktrees",
+              "p",
+              arenaPhysicalWorktreeSegment(
+                intent.runId,
+                intent.contestantId,
+              ),
+            ],
+          );
+          if (!sameArenaPath(privateWorktreePath, intent.worktreePath)) {
+            throw new ArenaGitError(
+              "registrationMismatch",
+              "Arena worktree target does not match its private directory binding.",
+            );
+          }
+        }
+
         const verified = await this.verifyRegisteredWorktree({
           runId: intent.runId,
           contestantId: intent.contestantId,
@@ -2058,6 +2079,10 @@ export class ArenaGitExecutor {
           "registrationMismatch",
           "Arena must recover an earlier unreceipted worktree before provisioning another contestant.",
         );
+      }
+      if (!state.receipt) {
+        ownedPaths.set(canonicalPath(state.intent.worktreePath), state);
+        continue;
       }
       await this.verifyRegisteredWorktree({
         runId: state.intent.runId,
