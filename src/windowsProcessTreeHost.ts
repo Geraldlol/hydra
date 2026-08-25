@@ -88,50 +88,6 @@ function parseSpec(): HostSpec {
   };
 }
 
-async function captureSelfCreationIdentity(): Promise<string | undefined> {
-  const script = [
-    "$ErrorActionPreference='Stop'",
-    "try {",
-    `  $process=[System.Diagnostics.Process]::GetProcessById(${process.pid})`,
-    "  $identity=$process.StartTime.ToFileTimeUtc()",
-    "  if($identity -le 0){exit 1}",
-    "  [Console]::Out.Write($identity.ToString())",
-    "  exit 0",
-    "} catch { exit 1 }",
-  ].join("\n");
-  return new Promise<string | undefined>((resolve) => {
-    const probe = cp.spawn(
-      windowsSystemExecutable("powershell.exe"),
-      ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
-      { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] },
-    );
-    let output = "";
-    let settled = false;
-    const finish = (identity: string | undefined) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(identity);
-    };
-    probe.stdout.on("data", (chunk: Buffer) => {
-      if (output.length < 64) {
-        output += chunk.toString("ascii").slice(0, 64 - output.length);
-      }
-    });
-    const timer = setTimeout(() => {
-      probe.kill();
-      finish(undefined);
-    }, 2_000);
-    probe.once("error", () => finish(undefined));
-    probe.once("close", (code) => {
-      const identity = output.trim();
-      finish(code === 0 && /^[1-9][0-9]{0,18}$/u.test(identity)
-        ? identity
-        : undefined);
-    });
-  });
-}
-
 /**
  * Put this host into a dedicated Windows Job Object before it can start the
  * requested command. The out-of-job keeper owns the only job handle and
@@ -139,7 +95,7 @@ async function captureSelfCreationIdentity(): Promise<string | undefined> {
  * terminated). KILL_ON_JOB_CLOSE then terminates every inherited descendant,
  * including one created after an external PID snapshot began.
  */
-async function bindSelfToKillOnCloseJob(): Promise<void> {
+async function bindSelfToKillOnCloseJob(): Promise<string> {
   const script = [
     "$ErrorActionPreference='Stop'",
     "Add-Type -TypeDefinition @'",
@@ -149,6 +105,7 @@ async function bindSelfToKillOnCloseJob(): Promise<void> {
     "  private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;",
     "  private const uint PROCESS_TERMINATE = 0x0001;",
     "  private const uint PROCESS_SET_QUOTA = 0x0100;",
+    "  private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;",
     "  private const uint SYNCHRONIZE = 0x00100000;",
     "  private const uint WAIT_OBJECT_0 = 0x00000000;",
     "  private const uint INFINITE = 0xffffffff;",
@@ -161,6 +118,7 @@ async function bindSelfToKillOnCloseJob(): Promise<void> {
     "    public ulong ReadOperationCount; public ulong WriteOperationCount; public ulong OtherOperationCount;",
     "    public ulong ReadTransferCount; public ulong WriteTransferCount; public ulong OtherTransferCount;",
     "  }",
+    "  [StructLayout(LayoutKind.Sequential)] public struct FILETIME { public uint Low; public uint High; }",
     "  [StructLayout(LayoutKind.Sequential)] public struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {",
     "    public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation; public IO_COUNTERS IoInfo;",
     "    public UIntPtr ProcessMemoryLimit; public UIntPtr JobMemoryLimit; public UIntPtr PeakProcessMemoryUsed; public UIntPtr PeakJobMemoryUsed;",
@@ -169,6 +127,7 @@ async function bindSelfToKillOnCloseJob(): Promise<void> {
     "  [DllImport(\"kernel32.dll\", SetLastError = true)] private static extern bool SetInformationJobObject(IntPtr job, int infoClass, ref JOBOBJECT_EXTENDED_LIMIT_INFORMATION info, uint length);",
     "  [DllImport(\"kernel32.dll\", SetLastError = true)] private static extern IntPtr OpenProcess(uint access, bool inheritHandle, int processId);",
     "  [DllImport(\"kernel32.dll\", SetLastError = true)] private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);",
+    "  [DllImport(\"kernel32.dll\", SetLastError = true)] private static extern bool GetProcessTimes(IntPtr process, out FILETIME creation, out FILETIME exit, out FILETIME kernel, out FILETIME user);",
     "  [DllImport(\"kernel32.dll\", SetLastError = true)] private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);",
     "  [DllImport(\"kernel32.dll\")] private static extern bool CloseHandle(IntPtr handle);",
     "  public static int BindAndWait(int processId) {",
@@ -177,11 +136,14 @@ async function bindSelfToKillOnCloseJob(): Promise<void> {
     "      var info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();",
     "      info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;",
     "      if (!SetInformationJobObject(job, 9, ref info, (uint)Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION)))) return 11;",
-    "      IntPtr process = OpenProcess(PROCESS_TERMINATE | PROCESS_SET_QUOTA | SYNCHRONIZE, false, processId);",
+    "      IntPtr process = OpenProcess(PROCESS_TERMINATE | PROCESS_SET_QUOTA | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, false, processId);",
     "      if (process == IntPtr.Zero) return 12;",
     "      try {",
     "        if (!AssignProcessToJobObject(job, process)) return 13;",
-    "        Console.Out.WriteLine(\"READY\"); Console.Out.Flush();",
+    "        FILETIME creation, exit, kernel, user;",
+    "        if (!GetProcessTimes(process, out creation, out exit, out kernel, out user)) return 15;",
+    "        long identity = ((long)creation.High << 32) | creation.Low; if (identity <= 0) return 16;",
+    "        Console.Out.WriteLine(identity.ToString()); Console.Out.WriteLine(\"READY\"); Console.Out.Flush();",
     "        return WaitForSingleObject(process, INFINITE) == WAIT_OBJECT_0 ? 0 : 14;",
     "      } finally { CloseHandle(process); }",
     "    } finally { CloseHandle(job); }",
@@ -191,7 +153,7 @@ async function bindSelfToKillOnCloseJob(): Promise<void> {
     `exit [HydraKillOnCloseJob]::BindAndWait(${process.pid})`,
   ].join("\n");
 
-  await new Promise<void>((resolve, reject) => {
+  return new Promise<string>((resolve, reject) => {
     let keeper: cp.ChildProcess;
     try {
       const keeperExecutable = windowsSystemExecutable("powershell.exe");
@@ -228,8 +190,13 @@ async function bindSelfToKillOnCloseJob(): Promise<void> {
       if (settled || stdout.length >= 64) return;
       stdout += (Buffer.isBuffer(chunk) ? chunk.toString("ascii") : chunk)
         .slice(0, 64 - stdout.length);
-      if (!stdout.includes("\n")) return;
-      if (!/^READY\r?\n/u.test(stdout)) {
+      const lineBreaks = stdout.match(/\n/gu)?.length ?? 0;
+      if (lineBreaks < 2 && stdout.length < 64) return;
+      const lines = stdout.trim().split(/\r?\n/u);
+      const identity = lines[0] ?? "";
+      if (lines.length !== 2
+        || !/^[1-9][0-9]{0,18}$/u.test(identity)
+        || lines[1] !== "READY") {
         finishFailure("received an invalid kill-on-close Job Object receipt");
         return;
       }
@@ -242,7 +209,7 @@ async function bindSelfToKillOnCloseJob(): Promise<void> {
       keeper.stderr?.destroy();
       keeper.on("error", () => {});
       keeper.unref();
-      resolve();
+      resolve(identity);
     });
     keeper.stderr?.on("data", (chunk: Buffer | string) => {
       if (stderr.length >= 512) return;
@@ -276,9 +243,7 @@ function restoreTargetEnvironment(spec: HostSpec): NodeJS.ProcessEnv {
 async function main(): Promise<void> {
   if (process.platform !== "win32") fail("invoked on an unsupported platform");
   const spec = parseSpec();
-  const identity = await captureSelfCreationIdentity();
-  if (!identity) fail("could not capture its own process creation identity");
-  await bindSelfToKillOnCloseJob();
+  const identity = await bindSelfToKillOnCloseJob();
 
   // Descriptor 3 is a private one-shot receipt pipe. The host is necessarily
   // alive while it samples itself, and the kill-on-close job is bound before

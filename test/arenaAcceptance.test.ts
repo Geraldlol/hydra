@@ -20,6 +20,55 @@ const STATE: ArenaAcceptanceWorkspaceState = Object.freeze({
 });
 
 describe("Arena locked acceptance execution", () => {
+  test("rejects a worktree reached through a noncanonical parent alias", async (t) => {
+    const physicalRoot = await fs.mkdtemp(
+      path.join(os.tmpdir(), "hydra-arena-acceptance-alias-"),
+    );
+    const aliasRoot = `${physicalRoot}-alias`;
+    await fs.mkdir(path.join(physicalRoot, "worktree"));
+    try {
+      await fs.symlink(
+        physicalRoot,
+        aliasRoot,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+    } catch (error) {
+      await fs.rm(physicalRoot, { recursive: true, force: true });
+      t.skip(`directory-link creation unavailable: ${String(error)}`);
+      return;
+    }
+    t.after(async () => {
+      await fs.unlink(aliasRoot).catch(() => undefined);
+      await fs.rm(physicalRoot, { recursive: true, force: true });
+    });
+    const plan = createArenaVerificationExecutionPlan({
+      checkId: "canonical-worktree",
+      command: "pnpm test --filter canonical",
+      controlSha256: digest("canonical-controls"),
+      maxOutputChars: 8_192,
+      timeoutMs: 30_000,
+    });
+
+    await assert.rejects(
+      runArenaVerificationAttempt({
+        privateWorkspaceRoot: path.join(physicalRoot, "private"),
+        runId: "run-alias",
+        contestantId: "codex",
+        worktreePath: path.join(aliasRoot, "worktree"),
+        plan,
+        locked: { checkId: plan.checkId, planSha256: plan.planSha256 },
+        attempt: 1,
+        expectedState: STATE,
+        signal: new AbortController().signal,
+        captureState: async () => STATE,
+        execute: async () => {
+          throw new Error("must not execute through an aliased worktree");
+        },
+      }),
+      /canonical target/i,
+    );
+  });
+
   test("runs a locked verifier in the contestant worktree and persists metadata-only replay evidence", async (t) => {
     const fixture = await createFixture(t);
     const plan = createArenaVerificationExecutionPlan({
@@ -184,11 +233,14 @@ describe("Arena locked acceptance execution", () => {
 });
 
 async function createFixture(t: { after(callback: () => Promise<void>): void }) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-arena-acceptance-"));
-  const privateRoot = path.join(root, "private");
+  const logicalRoot = await fs.mkdtemp(
+    path.join(os.tmpdir(), "hydra-arena-acceptance-"),
+  );
+  const root = await fs.realpath(logicalRoot);
+  const privateRoot = path.join(logicalRoot, "private");
   const worktree = path.join(root, "worktree");
   await fs.mkdir(worktree, { recursive: true });
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(logicalRoot, { recursive: true, force: true }));
   return { privateRoot, worktree };
 }
 

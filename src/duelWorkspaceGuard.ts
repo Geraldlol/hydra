@@ -2,6 +2,7 @@ import * as cp from "node:child_process";
 import { createHash, type Hash } from "node:crypto";
 import {
   constants as fsConstants,
+  realpathSync,
   watch as watchFileSystem,
   type BigIntStats,
   type FSWatcher,
@@ -296,7 +297,8 @@ export function watchDuelWorkspaceMutations(
   workspaceRoot: string,
   options: DuelWorkspaceMutationMonitorOptions = {},
 ): DuelWorkspaceMutationMonitor {
-  const root = path.resolve(workspaceRoot);
+  const logicalRoot = path.resolve(workspaceRoot);
+  let root = logicalRoot;
   const excludeHydraState = options.excludeHydraState !== false;
   const maxRetainedChangedPaths = 20;
   const changedPaths = new Set<string>();
@@ -304,14 +306,32 @@ export function watchDuelWorkspaceMutations(
   let watcher: FSWatcher;
   let watcherError: string | undefined;
   try {
+    root = path.resolve(realpathSync.native(logicalRoot));
     watcher = watchFileSystem(root, { recursive: true }, (_eventType, filename) => {
-      const relative = typeof filename === "string" ? filename.replace(/\\/g, "/") : "";
-      if (!relative) {
+      const received = typeof filename === "string" ? filename : "";
+      let relative = "";
+      let top = "";
+      try {
+        const candidate = path.resolve(root, received);
+        const nativeRelative = path.relative(root, candidate);
+        if (!received
+          || !nativeRelative
+          || nativeRelative === ".."
+          || nativeRelative.startsWith(`..${path.sep}`)
+          || path.isAbsolute(nativeRelative)) {
+          changed = true;
+          watcherError ??= "Workspace watcher emitted an event without an in-root path.";
+          return;
+        }
+        top = nativeRelative.split(path.sep, 1)[0]?.toLowerCase() ?? "";
+        relative = process.platform === "win32"
+          ? nativeRelative.replace(/\\/g, "/")
+          : nativeRelative;
+      } catch {
         changed = true;
-        watcherError ??= "Workspace watcher emitted an event without a path.";
+        watcherError ??= "Workspace watcher emitted an invalid path.";
         return;
       }
-      const top = relative.split("/", 1)[0]?.toLowerCase();
       // Git metadata may be refreshed by read-only Git commands, and .hydra
       // is Hydra's own live state/mirror surface. Project evidence elsewhere
       // is never exempt, even when ignored by Git.
@@ -325,7 +345,7 @@ export function watchDuelWorkspaceMutations(
     throw new DuelWorkspaceIntegrityError(
       "fileUnreadable",
       `Could not start the recursive duel workspace mutation monitor${isNodeError(error) && error.code ? ` (${error.code})` : ""}.`,
-      root,
+      logicalRoot,
     );
   }
   watcher.on("error", (error) => {

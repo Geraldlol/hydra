@@ -1,5 +1,7 @@
 import { describe, test } from "node:test";
 import * as assert from "node:assert/strict";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentSpawn, RunResult } from "../src/agents";
 import {
@@ -133,6 +135,57 @@ describe("Claude persistent-session invocation planning", () => {
 });
 
 describe("Claude persistent-session provider contract", () => {
+  test("accepts a provider cwd that is the canonical target of the invocation alias", async (t) => {
+    const physicalRoot = await fs.mkdtemp(
+      path.join(os.tmpdir(), "hydra-claude-cwd-alias-"),
+    );
+    const canonicalRoot = await fs.realpath(physicalRoot);
+    const aliasRoot = `${physicalRoot}-alias`;
+    try {
+      await fs.symlink(
+        physicalRoot,
+        aliasRoot,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+    } catch (error) {
+      await fs.rm(physicalRoot, { recursive: true, force: true });
+      t.skip(`directory-link creation unavailable: ${String(error)}`);
+      return;
+    }
+    t.after(async () => {
+      await fs.unlink(aliasRoot).catch(() => undefined);
+      await fs.rm(physicalRoot, { recursive: true, force: true });
+    });
+    const planned = planClaudeSession({
+      command: process.execPath,
+      args: ["-p"],
+      cwd: aliasRoot,
+    });
+    assert.equal(planned.kind, "supported");
+    if (planned.kind !== "supported") return;
+
+    const result = await runClaudeSession({
+      plan: {
+        spawn: {
+          ...planned.plan.spawn,
+          args: [FIXTURE, ...planned.plan.spawn.args],
+          env: {
+            HYDRA_MOCK_CLAUDE_CWD: canonicalRoot,
+            HYDRA_MOCK_CLAUDE_SCENARIO: "normal",
+          },
+        },
+      },
+      prompt: "canonical cwd alias",
+      timeoutMs: HANG_NET_TIMEOUT_MS,
+      signal: new AbortController().signal,
+      binding: BINDING,
+      onChunk: () => undefined,
+    });
+
+    assert.equal(result.exitCode, 0);
+    assert.doesNotMatch(result.stderr, /did not preserve the invocation working directory/i);
+  });
+
   test("marks an ambiguous initial stdin write as delivery unknown", async () => {
     let writes = 0;
     const startProcess = (

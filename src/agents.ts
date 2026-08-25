@@ -725,8 +725,13 @@ export async function waitForPosixProcessGroupQuiescence(
     try {
       process.kill(-processGroupId, 0);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ESRCH") return true;
-      return false;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ESRCH") return true;
+      // Darwin can report EPERM while a process group contains only zombies:
+      // no member is signalable, but the group has not been reaped yet. Keep
+      // that ambiguity bounded by the existing deadline; never accept it as
+      // proof of quiescence.
+      if (code !== "EPERM") return false;
     }
     if (Date.now() >= deadline) return false;
     await new Promise<void>((resolve) => setTimeout(

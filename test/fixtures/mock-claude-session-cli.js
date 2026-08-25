@@ -3,6 +3,7 @@
 const readline = require("node:readline");
 
 const scenario = process.env.HYDRA_MOCK_CLAUDE_SCENARIO || "normal";
+const reportedCwd = process.env.HYDRA_MOCK_CLAUDE_CWD || process.cwd();
 const argv = process.argv.slice(2);
 const required = [
   ["--input-format", "stream-json"],
@@ -49,7 +50,7 @@ function emitInit() {
   const init = {
     type: "system",
     subtype: "init",
-    cwd: process.cwd(),
+    cwd: reportedCwd,
     session_id: providerSessionId,
     capabilities: scenario === "old-version" ? [] : ["interrupt_receipt_v1", "msg_lifecycle_v1"],
     fixture_args: argv,
@@ -59,7 +60,7 @@ function emitInit() {
     init.claude_code_version = scenario === "old-version" ? "2.1.204" : "2.1.218";
   }
   if (scenario === "malformed-capabilities") init.capabilities = ["msg_lifecycle_v1", "msg_lifecycle_v1"];
-  if (scenario === "wrong-cwd") init.cwd = `${process.cwd()}-other`;
+  if (scenario === "wrong-cwd") init.cwd = `${reportedCwd}-other`;
   emit(init);
 }
 

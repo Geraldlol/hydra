@@ -14,6 +14,7 @@ import {
   stripAnsi,
   terminateProcessTree,
   terminateWindowsProcessTreeSnapshot,
+  waitForPosixProcessGroupQuiescence,
 } from "../src/agents";
 
 const MOCK_CLI = path.join(__dirname, "fixtures", "mock-cli.js");
@@ -332,7 +333,11 @@ describe("runAgent", () => {
     descendantPid = Number(await fs.readFile(pidFile, "utf8"));
     assert.ok(Number.isSafeInteger(descendantPid) && descendantPid > 0);
 
-    assert.equal(host.kill("SIGKILL"), true);
+    assert.equal(
+      await terminateProcessTree(host, true),
+      true,
+      "the host receipt must bind termination to its native creation FILETIME",
+    );
     assert.equal(
       await waitForProcessExit(descendantPid),
       true,
@@ -377,6 +382,54 @@ describe("runAgent", () => {
     assert.equal(result.exitCode, 0);
     assert.equal(result.timedOut, false);
     assert.equal(result.stdout, "slow ok");
+  });
+
+  test("retries a transient POSIX EPERM group probe until ESRCH proves quiescence", async (t) => {
+    let probes = 0;
+    t.mock.method(process, "kill", ((pid: number, signal?: string | number) => {
+      assert.equal(pid, -12345);
+      assert.equal(signal, 0);
+      probes += 1;
+      throw Object.assign(new Error(probes === 1 ? "zombie group" : "gone"), {
+        code: probes === 1 ? "EPERM" : "ESRCH",
+      });
+    }) as typeof process.kill);
+
+    assert.equal(
+      await waitForPosixProcessGroupQuiescence(12345, 50, 1),
+      true,
+    );
+    assert.equal(probes, 2);
+  });
+
+  test("keeps a persistent POSIX EPERM group probe ambiguous at its deadline", async (t) => {
+    let probes = 0;
+    t.mock.method(process, "kill", ((pid: number, signal?: string | number) => {
+      assert.equal(pid, -12346);
+      assert.equal(signal, 0);
+      probes += 1;
+      throw Object.assign(new Error("permission denied"), { code: "EPERM" });
+    }) as typeof process.kill);
+
+    assert.equal(
+      await waitForPosixProcessGroupQuiescence(12346, 10, 1),
+      false,
+    );
+    assert.ok(probes > 1);
+  });
+
+  test("fails a POSIX process-group probe immediately on an unrelated error", async (t) => {
+    let probes = 0;
+    t.mock.method(process, "kill", (() => {
+      probes += 1;
+      throw Object.assign(new Error("invalid group probe"), { code: "EINVAL" });
+    }) as typeof process.kill);
+
+    assert.equal(
+      await waitForPosixProcessGroupQuiescence(12347, 50, 1),
+      false,
+    );
+    assert.equal(probes, 1);
   });
 
   test("missing native command returns a clear spawn failure", async () => {

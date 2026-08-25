@@ -112,7 +112,7 @@ describe("Arena repository owner ledger", () => {
     const { root, store } = await fixture(t);
     const claimInput = input("run-create-directory-sync");
     const leaseRoot = path.join(root, "leases");
-    const sync = mockLeaseRootSyncFailures(t, leaseRoot, 1);
+    const sync = mockLeaseRootSyncFailures(t, store.boundary.realRoot, 1);
 
     await assert.rejects(
       store.claim(claimInput),
@@ -144,7 +144,7 @@ describe("Arena repository owner ledger", () => {
     const claimInput = input("run-replace-directory-sync");
     const claim = await store.claim(claimInput);
     const leaseRoot = path.join(root, "leases");
-    const sync = mockLeaseRootSyncFailures(t, leaseRoot, 2);
+    const sync = mockLeaseRootSyncFailures(t, store.boundary.realRoot, 2);
     let receiptCalls = 0;
 
     await assert.rejects(

@@ -174,21 +174,24 @@ describe("duel workspace integrity guard", () => {
     const { root } = await createRepository(t);
     const projectFile = path.join(root, "ignored.log");
     await fs.writeFile(projectFile, "original\n", "utf8");
+    await fs.mkdir(path.join(root, ".hydra"));
     const monitor = watchDuelWorkspaceMutations(root);
     t.after(() => monitor.close());
+    await monitor.settle();
 
-    await fs.mkdir(path.join(root, ".hydra"));
     await fs.writeFile(path.join(root, ".hydra", "duels.md"), "runtime mirror\n", "utf8");
     await monitor.settle();
     assert.equal(monitor.changed, false);
 
     await fs.writeFile(projectFile, "temporary mutation\n", "utf8");
     await fs.writeFile(projectFile, "original\n", "utf8");
-    await Promise.all(Array.from({ length: 64 }, (_value, index) =>
-      fs.writeFile(path.join(root, `mutation-${index}.txt`), "changed\n", "utf8")));
     await monitor.settle();
     assert.equal(monitor.changed, true);
     assert.ok(monitor.changedPaths.some((entry) => entry === "ignored.log"));
+
+    await Promise.all(Array.from({ length: 64 }, (_value, index) =>
+      fs.writeFile(path.join(root, `mutation-${index}.txt`), "changed\n", "utf8")));
+    await monitor.settle();
     assert.ok(monitor.changedPaths.length <= 20);
   });
 
@@ -210,6 +213,24 @@ describe("duel workspace integrity guard", () => {
     assert.equal(monitor.changed, true);
     assert.ok(monitor.changedPaths.some((entry) =>
       entry.startsWith(".hydra/")));
+  });
+
+  test("does not treat a POSIX backslash filename as Hydra-owned state", async (t) => {
+    if (process.platform === "win32") {
+      t.skip("Windows path separators cannot be literal filename characters");
+      return;
+    }
+    const { root } = await createRepository(t);
+    const monitor = watchDuelWorkspaceMutations(root);
+    t.after(() => monitor.close());
+    await monitor.settle();
+
+    const projectName = String.raw`.hydra\evidence`;
+    await fs.writeFile(path.join(root, projectName), "project evidence\n", "utf8");
+    await monitor.settle();
+
+    assert.equal(monitor.changed, true);
+    assert.ok(monitor.changedPaths.includes(projectName));
   });
 
   test("fails closed when individual, aggregate, file-count, or Git-output bounds are exceeded", async (t) => {

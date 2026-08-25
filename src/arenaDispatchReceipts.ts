@@ -99,7 +99,7 @@ export async function loadArenaDispatchGenerations(
   identifier(runId, "dispatch run ID");
   const boundary = await prepareArenaPrivateStorage(privateWorkspaceRoot);
   const runDirectory = path.resolve(
-    boundary.realRoot,
+    boundary.logicalRoot,
     "support",
     "dispatch",
     runId,

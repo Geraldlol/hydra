@@ -57,6 +57,52 @@ test("Arena dispatch intent persists metadata only and retries exactly", async (
 });
 
 describe("Arena dispatch recovery loading", () => {
+  test("loads receipts through a canonical-equivalent private-root alias", async (t) => {
+    const physicalParent = await fs.mkdtemp(
+      path.join(os.tmpdir(), "hydra-arena-dispatch-alias-"),
+    );
+    const aliasParent = `${physicalParent}-alias`;
+    try {
+      await fs.symlink(
+        physicalParent,
+        aliasParent,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+    } catch (error) {
+      await fs.rm(physicalParent, { recursive: true, force: true });
+      t.skip(`directory-link creation unavailable: ${String(error)}`);
+      return;
+    }
+    t.after(async () => {
+      await fs.unlink(aliasParent).catch(() => undefined);
+      await fs.rm(physicalParent, { recursive: true, force: true });
+    });
+    const privateRoot = path.join(aliasParent, "private-workspace");
+    const command = process.execPath;
+    const intent = createArenaProcessIntent({
+      runId: "run-alias",
+      contestantId: "codex",
+      traceId: "trace-alias",
+      registrationSha256: "a".repeat(64),
+      processGenerationId: "generation-alias",
+      worktreePath: path.join(aliasParent, "secret-worktree"),
+      worktreeDirectoryIdentitySha256: "d".repeat(64),
+      command,
+      commandFileIdentitySha256: "e".repeat(64),
+      args: [],
+      stdin: "secret prompt",
+      environmentPolicySha256: "b".repeat(64),
+      invocationSha256: "c".repeat(64),
+      timeoutMs: HANG_NET_TIMEOUT_MS,
+    });
+
+    await persistArenaDispatchReceipt(privateRoot, intent);
+    const loaded = await loadArenaDispatchGenerations(privateRoot, intent.runId);
+
+    assert.equal(loaded.length, 1);
+    assert.equal(loaded[0]?.generation.state, "intentOnly");
+  });
+
   test("classifies exact intent-only and submitted generations", async (t) => {
     const { root, intent } = await intentFixture(t);
     await persistArenaDispatchReceipt(root, intent);
