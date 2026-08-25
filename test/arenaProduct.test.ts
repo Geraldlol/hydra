@@ -60,6 +60,7 @@ function evidence(contestantId: string): ArenaManifestEvent {
 
 function replay(
   comparison: ArenaRunFinalizedPayload["comparison"] = "comparable",
+  firstHeadId = "codex",
 ): ArenaManifestReplay {
   const lock = {
     payloadType: "runLocked" as const,
@@ -86,15 +87,26 @@ function replay(
       planSha256: digest("unit-plan"),
     }],
     browserJourneys: [],
-    contestants: ["codex", "claude"].map((headId) => ({
-      contestantId: `contestant-${headId}`,
-      headId,
-      agentKind: headId,
-      headConfigSha256: digest(`${headId}-config`),
-      authoritySha256: digest(`${headId}-authority`),
-      invocationSha256: digest(`${headId}-invocation`),
-      worktreeId: `worktree-${headId}`,
-    })),
+    contestants: [
+      {
+        contestantId: "contestant-codex",
+        headId: firstHeadId,
+        agentKind: "codex",
+        headConfigSha256: digest("codex-config"),
+        authoritySha256: digest("codex-authority"),
+        invocationSha256: digest("codex-invocation"),
+        worktreeId: "worktree-codex",
+      },
+      {
+        contestantId: "contestant-claude",
+        headId: "claude",
+        agentKind: "claude",
+        headConfigSha256: digest("claude-config"),
+        authoritySha256: digest("claude-authority"),
+        invocationSha256: digest("claude-invocation"),
+        worktreeId: "worktree-claude",
+      },
+    ],
     steering: "disabled" as const,
     confirmation: {
       actorId: "local-user" as const,
@@ -258,6 +270,13 @@ describe("Arena result reveal", () => {
     assert.match(markdown, /\| Codex \| succeeded \| passed \|/u);
     assert.match(markdown, /Evidence matrix: `[^`]+`/u);
     assert.doesNotMatch(markdown, /worktree-codex/u);
+  });
+
+  test("escapes backslashes before pipes in rendered head labels", () => {
+    const reveal = createArenaReveal(replay("comparable", "codex\\|review"));
+    const markdown = renderArenaRevealMarkdown(reveal);
+
+    assert.ok(markdown.includes(String.raw`| Codex\\\|review |`));
   });
 
   test("records winner selection as preference without granting promotion authority", () => {

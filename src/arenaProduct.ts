@@ -507,6 +507,7 @@ function displayHead(value: string): string {
 function markdownCell(value: string): string {
   return value
     .replace(/[\u0000-\u001f\u007f]/gu, " ")
+    .replace(/\\/gu, "\\\\")
     .replace(/\|/gu, "\\|")
     .trim();
 }
