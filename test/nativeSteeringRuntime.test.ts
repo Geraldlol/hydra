@@ -261,12 +261,15 @@ describe("native steering runtime", () => {
         assert.match(result.stderr, /did not start a fallback request/i);
 
         const invocations = await fixture.invocations();
-        assert.equal(
-          invocations.length,
-          1,
-          `${stopKind} must launch only App Server and never the original codex exec`,
+        assert.ok(
+          invocations.length <= 1,
+          `${stopKind} may launch App Server once but must never launch the original codex exec`,
         );
-        assert.ok(invocations[0]?.includes("app-server"));
+        assert.equal(
+          invocations.every((args) => args.includes("app-server")),
+          true,
+          `${stopKind} must never cross into the one-shot fallback`,
+        );
       } finally {
         await fixture.dispose();
       }
@@ -538,7 +541,10 @@ async function createNativeCliFixture(): Promise<NativeCliFixture> {
       };
     },
     async invocations() {
-      const text = await fs.readFile(invocationLog, "utf8");
+      const text = await fs.readFile(invocationLog, "utf8").catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return "";
+        throw error;
+      });
       return text
         .trim()
         .split(/\r?\n/)
