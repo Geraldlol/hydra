@@ -381,6 +381,42 @@ function porcelainEntry(input: {
 }
 
 describe("Arena Git executor", () => {
+  test("canonicalizes an upstream private-storage alias before registering worktrees", async (t) => {
+    if (!requireNativeGit(t)) return;
+    const fixture = await repositoryFixture(t);
+    const realPrivateParent = path.join(fixture.root, "real-private-parent");
+    const aliasPrivateParent = path.join(fixture.root, "alias-private-parent");
+    await fs.mkdir(realPrivateParent);
+    try {
+      await fs.symlink(
+        realPrivateParent,
+        aliasPrivateParent,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+    } catch (error) {
+      t.skip(`directory-link creation unavailable: ${String(error)}`);
+      return;
+    }
+    const privateAlias = path.join(aliasPrivateParent, "workspace-storage");
+    const executor = await ArenaGitExecutor.open(
+      fixture.workspace,
+      privateAlias,
+      fixture.leaseRoot,
+    );
+    const [firstIntent] = await planTwo(executor, t);
+    const first = await executor.provisionPlannedWorktree(firstIntent);
+
+    assert.equal(
+      first.worktreePath,
+      arenaContestantWorktreePath(
+        await fs.realpath(privateAlias),
+        RUN_ID,
+        FIRST_CONTESTANT,
+      ),
+    );
+    assert.equal(first.realWorktreePath, await fs.realpath(first.worktreePath));
+  });
+
   test("admits an exact trusted clean main worktree and snapshots an unrelated worktree", async (t) => {
     if (!requireNativeGit(t)) return;
     const fixture = await repositoryFixture(t, { unrelatedWorktree: true });
@@ -399,8 +435,9 @@ describe("Arena Git executor", () => {
     assert.match(admission.repositoryControlSha256, /^[0-9a-f]{64}$/);
     assert.equal(admission.sourceWorkspacePath, await fs.realpath(fixture.workspace));
     assert.equal(admission.worktrees.length, 2);
+    const unrelatedRealPath = await fs.realpath(fixture.unrelatedWorktree!);
     assert.ok(admission.worktrees.some((entry) =>
-      entry.path === fixture.unrelatedWorktree));
+      entry.path === unrelatedRealPath));
   });
 
   test("batch-plans two durable intents before creating either worktree", async (t) => {
@@ -417,7 +454,7 @@ describe("Arena Git executor", () => {
     assert.equal(
       first.worktreePath,
       arenaContestantWorktreePath(
-        fixture.privateRoot,
+        executor.privateWorkspaceRoot,
         RUN_ID,
         FIRST_CONTESTANT,
       ),
@@ -425,7 +462,7 @@ describe("Arena Git executor", () => {
     assert.equal(
       second.worktreePath,
       arenaContestantWorktreePath(
-        fixture.privateRoot,
+        executor.privateWorkspaceRoot,
         RUN_ID,
         SECOND_CONTESTANT,
       ),
@@ -433,7 +470,9 @@ describe("Arena Git executor", () => {
     await assert.rejects(fs.lstat(first.worktreePath), { code: "ENOENT" });
     await assert.rejects(fs.lstat(second.worktreePath), { code: "ENOENT" });
 
-    const store = new FileArenaWorktreeRegistrationStore(fixture.privateRoot);
+    const store = new FileArenaWorktreeRegistrationStore(
+      executor.privateWorkspaceRoot,
+    );
     const states = await store.listRun(RUN_ID);
     assert.equal(states.length, 2);
     assert.deepEqual(
@@ -589,8 +628,10 @@ describe("Arena Git executor", () => {
       true,
     );
     assert.ok(fixture.unrelatedWorktree);
+    const unrelatedRealPath = await fs.realpath(fixture.unrelatedWorktree);
     assert.equal(
-      remaining.some((entry) => entry.path === fixture.unrelatedWorktree),
+      remaining.some((entry) =>
+        entry.path === unrelatedRealPath),
       true,
     );
     assert.equal(

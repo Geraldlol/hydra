@@ -293,10 +293,13 @@ async function exactRealDirectory(value: string): Promise<string> {
     throw new Error("cwd must be a real directory");
   }
   const real = await fs.realpath(value);
-  if (!samePath(real, value)) {
-    throw new Error("cwd must contain no linked path components");
+  const realStat = await fs.lstat(real);
+  if (!realStat.isDirectory()
+    || realStat.isSymbolicLink()
+    || !sameIdentity(stat, realStat)) {
+    throw new Error("cwd changed identity while resolving its canonical path");
   }
-  return value;
+  return path.resolve(real);
 }
 
 async function validateExistingFixture(

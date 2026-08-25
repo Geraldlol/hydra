@@ -29,6 +29,42 @@ const INVOCATION_SHA256 = digest("invocation");
 const FINAL_FINGERPRINT_SHA256 = digest("final-fingerprint");
 
 describe("Arena process supervisor", () => {
+  test("canonicalizes upstream directory aliases before binding process paths", async (t) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-arena-process-alias-"));
+    const realParent = path.join(root, "real-parent");
+    const aliasParent = path.join(root, "alias-parent");
+    const realWorktree = path.join(realParent, "worktree");
+    const realExecutable = path.join(realParent, "helper.js");
+    await fs.mkdir(realWorktree, { recursive: true });
+    await fs.writeFile(realExecutable, "process.exit(0);\n", "utf8");
+    t.after(async () => {
+      await fs.rm(root, { recursive: true, force: true });
+    });
+    try {
+      await fs.symlink(
+        realParent,
+        aliasParent,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+    } catch (error) {
+      t.skip(`directory-link creation unavailable: ${String(error)}`);
+      return;
+    }
+
+    assert.equal(
+      await arenaProcessWorktreeDirectoryIdentitySha256(
+        path.join(aliasParent, "worktree"),
+      ),
+      await arenaProcessWorktreeDirectoryIdentitySha256(realWorktree),
+    );
+    assert.equal(
+      await arenaProcessFileIdentitySha256(
+        path.join(aliasParent, "helper.js"),
+      ),
+      await arenaProcessFileIdentitySha256(realExecutable),
+    );
+  });
+
   test("runs the bundled fake head with isolated edits and metadata-only output", async (t) => {
     const fixture = await createFixture(t);
     const request = fakeRequest({
@@ -686,6 +722,38 @@ describe("Arena process supervisor", () => {
       /real, singly-linked regular file|linked components/,
     );
     assert.equal(await fs.readFile(outside, "utf8"), "outside\n");
+  });
+
+  test("fake head canonicalizes an upstream cwd alias before editing", async (t) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-arena-fake-alias-"));
+    const realParent = path.join(root, "real-parent");
+    const aliasParent = path.join(root, "alias-parent");
+    const realWorktree = path.join(realParent, "worktree");
+    await fs.mkdir(realWorktree, { recursive: true });
+    await fs.writeFile(path.join(realWorktree, "fixture.txt"), "base\n", "utf8");
+    t.after(async () => {
+      await fs.rm(root, { recursive: true, force: true });
+    });
+    try {
+      await fs.symlink(
+        realParent,
+        aliasParent,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+    } catch (error) {
+      t.skip(`directory-link creation unavailable: ${String(error)}`);
+      return;
+    }
+
+    const execution = await executeArenaFakeHeadRequest(
+      fakeRequest({ fixtureContent: "through canonical cwd\n" }),
+      path.join(aliasParent, "worktree"),
+    );
+    assert.equal(execution.response.fixtureSha256, digest("through canonical cwd\n"));
+    assert.equal(
+      await fs.readFile(path.join(realWorktree, "fixture.txt"), "utf8"),
+      "through canonical cwd\n",
+    );
   });
 });
 

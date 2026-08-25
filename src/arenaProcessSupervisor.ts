@@ -803,9 +803,10 @@ async function validateSupervisorInput(
       "Arena bundled helper",
       "file",
     );
-    const installedFakeHeadHelper = path.resolve(
-      __dirname,
-      "arenaFakeHeadCli.js",
+    const installedFakeHeadHelper = await validateExactRealPath(
+      path.resolve(__dirname, "arenaFakeHeadCli.js"),
+      "Hydra installed Arena helper",
+      "file",
     );
     if (path.basename(scriptPath).toLowerCase() !== "arenafakeheadcli.js"
       || !samePath(scriptPath, installedFakeHeadHelper)) {
@@ -813,7 +814,12 @@ async function validateSupervisorInput(
         "Arena bundled Electron Node mode is restricted to Hydra's installed arenaFakeHeadCli.js.",
       );
     }
-    if (!samePath(command, path.resolve(process.execPath))) {
+    const extensionHostExecutable = await validateExactRealPath(
+      path.resolve(process.execPath),
+      "Hydra extension-host executable",
+      "file",
+    );
+    if (!samePath(command, extensionHostExecutable)) {
       throw new Error(
         "Arena bundled helper must run under Hydra's exact extension-host executable.",
       );
@@ -827,11 +833,21 @@ async function validateSupervisorInput(
         "Arena bundled helper identity does not match the installed helper.",
       );
     }
-    if (args[0] !== scriptPath) {
+    const firstArg = args[0];
+    if (typeof firstArg !== "string"
+      || !samePath(
+        await validateExactRealPath(
+          firstArg,
+          "Arena bundled helper argument",
+          "file",
+        ),
+        scriptPath,
+      )) {
       throw new Error(
         "Arena bundled helper must be the exact first process argument.",
       );
     }
+    args[0] = scriptPath;
     bundledHelper = Object.freeze({
       scriptPath,
       scriptFileIdentitySha256: actualScriptIdentity,
@@ -880,10 +896,20 @@ async function validateExactRealPath(
     throw new Error(`${label} must be a real ${kind}, not a link.`);
   }
   const real = await fs.realpath(value);
-  if (!samePath(real, value)) {
-    throw new Error(`${label} path must contain no linked path components.`);
+  const realStat = await fs.lstat(real);
+  if (realStat.isSymbolicLink()
+    || (kind === "file" ? !realStat.isFile() : !realStat.isDirectory())
+    || String(stat.dev) !== String(realStat.dev)
+    || String(stat.ino) !== String(realStat.ino)) {
+    throw new Error(
+      `${label} changed identity while resolving its canonical path.`,
+    );
   }
-  return value;
+  // Hosted runners and user profiles can sit below an OS-managed junction.
+  // Bind and spawn through the authenticated canonical target so such an
+  // upstream alias cannot create two path identities for one object. A link
+  // at the final component is still rejected above.
+  return path.resolve(real);
 }
 
 async function revalidateSpawnBoundary(
