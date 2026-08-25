@@ -10,6 +10,7 @@ import {
   escapeTelegramHtml,
   extractTelegramInboundCommand,
   getTelegramUpdates,
+  redactTelegramSecret,
   sendTelegramMessage,
 } from "../src/telegram";
 
@@ -102,6 +103,15 @@ describe("buildDecisionNotificationHtml", () => {
 });
 
 describe("Telegram API transport", () => {
+  test("redacts raw and URL-encoded bot tokens before transport errors can be logged", () => {
+    const token = "123:a/b-secret";
+    const message = `request failed for bot${token} at ${encodeURIComponent(token)}`;
+    const redacted = redactTelegramSecret(message, token);
+    assert.equal(redacted.includes(token), false);
+    assert.equal(redacted.includes(encodeURIComponent(token)), false);
+    assert.match(redacted, /\[telegram credential redacted\]/);
+  });
+
   test("falls back to IPv4 node:https when fetch cannot send a Telegram message", async (t) => {
     t.mock.method(globalThis, "fetch", (async () => {
       throw new TypeError("fetch failed");

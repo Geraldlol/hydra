@@ -10,6 +10,8 @@ const dispatch = fs.readFileSync(path.join(process.cwd(), "src", "missionDispatc
 const codex = fs.readFileSync(path.join(process.cwd(), "src", "codexAppServerTransport.ts"), "utf8");
 const claude = fs.readFileSync(path.join(process.cwd(), "src", "claudeSessionTransport.ts"), "utf8");
 const terminal = fs.readFileSync(path.join(process.cwd(), "src", "terminalBridge.ts"), "utf8");
+const webview = fs.readFileSync(path.join(process.cwd(), "media", "webview.js"), "utf8");
+const webviewMessages = fs.readFileSync(path.join(process.cwd(), "src", "webviewMessages.ts"), "utf8");
 
 describe("Mission Contract panel integration source contract", () => {
   test("opens the private Mission controller before steering persistence", () => {
@@ -93,5 +95,60 @@ describe("Mission Contract panel integration source contract", () => {
     assert.match(extension, /"hydraRoom\.openMissionContract"/);
     assert.match(manifest, /"command": "hydraRoom\.openMissionContract"/);
     assert.match(panel, /async openMissionContract\(\): Promise<void>/);
+  });
+
+  test("contributes and registers the complete local-user lifecycle", () => {
+    const commands = [
+      "manageMissionContract",
+      "proposeMissionContract",
+      "admitMissionProposal",
+      "confirmMissionContract",
+      "dismissMissionContractProposal",
+      "retireMissionContract",
+    ];
+    for (const command of commands) {
+      assert.match(manifest, new RegExp(`"command": "hydraRoom\\.${command}"`));
+      assert.match(extension, new RegExp(`"hydraRoom\\.${command}"`));
+      assert.match(webviewMessages, new RegExp(`type: "${command}"`));
+    }
+    assert.match(panel, /"Confirm Mission Contract"/);
+    assert.match(panel, /"Admit Mission Proposal"/);
+    assert.match(panel, /Admission did not activate it/);
+  });
+
+  test("renders complete active, pending, and ephemeral terms with exact hashes", () => {
+    assert.match(webview, /function renderMissionActive\(binding, ready, error\)/);
+    assert.match(webview, /function renderMissionProposals\(proposals\)/);
+    assert.match(webview, /function renderMissionCandidates\(candidates, ready\)/);
+    assert.match(webview, /Document SHA-256:/);
+    assert.match(webview, /Binding SHA-256:/);
+    assert.match(webview, /Base binding SHA-256:/);
+    assert.match(webview, /terms\.textContent = JSON\.stringify\(contract, null, 2\)/);
+    assert.match(panel, /missionProposalReviewDetail\(selected\)/);
+    assert.match(panel, /requireExactPendingMissionProposal\(snapshot, selectedChoice\)/);
+    assert.match(panel, /requireExactActiveMission\(snapshot, selectedChoice\)/);
+  });
+
+  test("parses successful top-level replies into bounded ephemeral candidates only", () => {
+    const finalizeStart = panel.indexOf("private async finalizePendingMessage(");
+    const finalizeEnd = panel.indexOf("private async recordWikiUsageTelemetry(", finalizeStart);
+    const finalize = panel.slice(finalizeStart, finalizeEnd);
+    assert.match(finalize, /parseMissionContractProposalIntent\(m\.text\)/);
+    assert.match(finalize, /isAgentMessageRole\(m\.role\) && !m\.error && !m\.cancelled/);
+    assert.match(finalize, /pendingAgentMissionBindings\.get\(messageId\)/);
+    assert.match(finalize, /responseSha256 = sha256\(rawAgentReplyText\)/);
+    assert.match(finalize, /boundedMissionCandidates\(/);
+    assert.doesNotMatch(finalize, /admitAgentProposalAfterLocalApproval/);
+    assert.doesNotMatch(finalize, /confirmProposalAfterLocalApproval/);
+  });
+
+  test("keeps legacy unbound Build routed through the normal frozen sentinel authorization", () => {
+    const buildStart = panel.indexOf("private async runBuildPhase(");
+    const buildEnd = panel.indexOf("private async runParallelBuildPhase(", buildStart);
+    const build = panel.slice(buildStart, buildEnd);
+    assert.match(build, /this\.runTurn\(async \(ctrl, registerPending, authorization, flightTurn\)/);
+    assert.match(build, /this\.callAgent\([\s\S]*"build"[\s\S]*authorization/);
+    assert.doesNotMatch(build, /binding\.state\s*!==\s*"active"/);
+    assert.doesNotMatch(build, /requires an active Mission Contract/i);
   });
 });

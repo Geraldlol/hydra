@@ -1,5 +1,12 @@
 import * as cp from "node:child_process";
-import { isWindowsBatchCommand, spawnViaCmdShim, terminateProcessTree } from "./agents";
+import {
+  bindProcessTreeIdentity,
+  isWindowsBatchCommand,
+  spawnIdentityBoundProcess,
+  spawnViaCmdShim,
+  terminateProcessTree,
+  waitForPosixProcessGroupQuiescence,
+} from "./agents";
 import { atomicWriteFile, readFileHead } from "./fileQueue";
 
 export const MAX_CODEX_DEBUG_MODELS_STDOUT_BYTES = 8 * 1024 * 1024;
@@ -112,14 +119,15 @@ export function runCodexDebugModels(command: string, env: NodeJS.ProcessEnv, tim
     let stdoutBytes = 0;
     let stderrBytes = 0;
     let settled = false;
+    let childClosed = false;
     let timer: NodeJS.Timeout | undefined;
-    let forceBackstop: NodeJS.Timeout | undefined;
-    let failureBackstop: NodeJS.Timeout | undefined;
     let pendingTerminationError: Error | undefined;
+    let resolveChildClosed!: () => void;
+    const childCloseObserved = new Promise<void>((resolve) => {
+      resolveChildClosed = resolve;
+    });
     const clearTimers = (): void => {
       if (timer) clearTimeout(timer);
-      if (forceBackstop) clearTimeout(forceBackstop);
-      if (failureBackstop) clearTimeout(failureBackstop);
     };
     const finishWithError = (error: Error): void => {
       if (settled) return;
@@ -127,18 +135,57 @@ export function runCodexDebugModels(command: string, env: NodeJS.ProcessEnv, tim
       clearTimers();
       reject(error);
     };
+    const waitForChildClose = async (waitMs: number): Promise<boolean> => {
+      if (childClosed) return true;
+      let waitTimer: NodeJS.Timeout | undefined;
+      return Promise.race([
+        childCloseObserved.then(() => {
+          if (waitTimer) clearTimeout(waitTimer);
+          return true;
+        }),
+        new Promise<boolean>((resolve) => {
+          waitTimer = setTimeout(() => resolve(childClosed), waitMs);
+        }),
+      ]);
+    };
     const beginTermination = (error: Error): void => {
       if (settled || pendingTerminationError) return;
       pendingTerminationError = error;
-      void terminateProcessTree(child, false);
-      forceBackstop = setTimeout(() => {
-        void terminateProcessTree(child, true);
-        failureBackstop = setTimeout(() => {
-          finishWithError(new CodexModelsTerminationError(
-            `${error.message}; Hydra did not observe the model-discovery process close and it may still be running. Restart VS Code before starting more Hydra work.`
-          ));
-        }, 1_000);
-      }, 1_000);
+      const processGroupId = process.platform === "win32"
+        ? undefined
+        : child.pid;
+      const terminationWork = (async () => {
+        let requested = await terminateProcessTree(child, false)
+          .catch(() => false);
+        let treeQuiescent = processGroupId === undefined
+          ? requested
+          : await waitForPosixProcessGroupQuiescence(
+              processGroupId,
+              1_000,
+            );
+        if (!treeQuiescent) {
+          requested = await terminateProcessTree(child, true)
+            .catch(() => false) || requested;
+          treeQuiescent = processGroupId === undefined
+            ? requested
+            : await waitForPosixProcessGroupQuiescence(
+                processGroupId,
+                1_000,
+              );
+        }
+        const wrapperClosed = await waitForChildClose(1_000);
+        return treeQuiescent && wrapperClosed;
+      })();
+      void terminationWork.then((confirmed) => {
+        if (settled) return;
+        if (confirmed) {
+          finishWithError(error);
+          return;
+        }
+        finishWithError(new CodexModelsTerminationError(
+          `${error.message}; Hydra did not observe a confirmed model-discovery process-tree shutdown and it may still be running. Restart VS Code before starting more Hydra work.`
+        ));
+      });
     };
     const capture = (
       chunk: Buffer | string,
@@ -175,12 +222,16 @@ export function runCodexDebugModels(command: string, env: NodeJS.ProcessEnv, tim
     });
     child.on("close", (code) => {
       if (settled) return;
-      settled = true;
-      clearTimers();
+      childClosed = true;
+      resolveChildClosed();
       if (pendingTerminationError) {
-        reject(pendingTerminationError);
+        // A wrapper can close before the tree-kill helper has finished its
+        // descendant rescan. Wait for that proof before rejecting so callers
+        // never observe completion while a grandchild is still alive.
         return;
       }
+      settled = true;
+      clearTimers();
       const stderr = Buffer.concat(stderrChunks, stderrBytes).toString("utf8");
       if (code !== 0) {
         reject(new Error(`codex debug models exited with code ${code ?? "unknown"}${stderr ? `: ${stderr.trim().slice(0, 500)}` : ""}`));
@@ -207,12 +258,14 @@ function spawnCodexChild(command: string, args: string[], env: NodeJS.ProcessEnv
       windowsHide: true,
     });
   }
-  return cp.spawn(command, args, {
+  const child = spawnIdentityBoundProcess(command, args, {
     env,
     windowsHide: true,
     shell: false,
     detached: process.platform !== "win32",
   });
+  bindProcessTreeIdentity(child);
+  return child;
 }
 
 export async function loadCodexModelsSnapshot(filePath: string): Promise<CodexModelsSnapshot | undefined> {

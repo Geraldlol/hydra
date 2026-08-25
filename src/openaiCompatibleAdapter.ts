@@ -4,6 +4,8 @@ import { numberOr, DEFAULT_PRICES_BY_KIND, coerceModelPrices } from "./usage";
 import { expandWorkspaceValue } from "./cli";
 import { isSafeHttpHeaderName, isSafeHttpHeaderValue } from "./httpHeaders";
 
+export const DEFAULT_OPENAI_COMPATIBLE_MAX_OUTPUT_TOKENS = 4096;
+
 export function openaiHeaders(def: AgentDefinition): Record<string, string> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   for (const [k, v] of Object.entries(def.headers ?? {})) {
@@ -34,6 +36,10 @@ export function buildOpenAiChatBody(def: AgentDefinition, prompt: string): Recor
     messages: [{ role: "user", content: prompt }],
     stream: true,
     stream_options: { include_usage: true },
+    // A transport timeout bounds wall time, not generated tokens or provider
+    // spend. Keep every compatible endpoint bounded even when the user has not
+    // configured Hydra's aggregate session-cost rail.
+    max_tokens: def.maxOutputTokens ?? DEFAULT_OPENAI_COMPATIBLE_MAX_OUTPUT_TOKENS,
   };
 }
 

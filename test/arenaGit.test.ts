@@ -899,6 +899,80 @@ describe("Arena Git executor", () => {
     assert.equal(nextIntent.runId, nextRunId);
     assert.notEqual(nextIntent.intentSha256, intent.intentSha256);
   });
+
+  test("checks and applies exact promotion bytes without changing HEAD or Git controls", async (t) => {
+    if (!requireNativeGit(t)) return;
+    const fixture = await repositoryFixture(t);
+    const executor = await ArenaGitExecutor.open(
+      fixture.workspace,
+      fixture.privateRoot,
+      fixture.leaseRoot,
+    );
+    const admission = await executor.inspectAdmission();
+    await fs.writeFile(
+      path.join(fixture.workspace, "tracked.txt"),
+      "promoted tracked content\n",
+      "utf8",
+    );
+    const patch = (await git(fixture.workspace, [
+      "diff",
+      "--binary",
+      "--full-index",
+      "HEAD",
+      "--",
+    ])).stdout;
+    await fs.writeFile(
+      path.join(fixture.workspace, "tracked.txt"),
+      "locked base content\n",
+      "utf8",
+    );
+    const untracked = Buffer.from("promoted untracked content\n", "utf8");
+    const candidate = Object.freeze({
+      patch,
+      patchSha256: createHash("sha256").update(patch).digest("hex"),
+      artifactSetSha256: testDigest("promotion-artifacts"),
+      untrackedEntries: Object.freeze([Object.freeze({
+        path: "nested/promoted.txt",
+        bytes: untracked.byteLength,
+        sha256: createHash("sha256").update(untracked).digest("hex"),
+        mode: 0o640,
+        content: untracked,
+      })]),
+    });
+
+    const before = await executor.inspectPromotionWorkspace(admission, RUN_ID);
+    assert.equal(before.workspaceClean, true);
+    assert.equal(before.arenaWorktreesAbsent, true);
+    assert.deepEqual(await executor.checkPromotionCandidate(candidate), {
+      applicable: true,
+      conflictPaths: [],
+      untrackedConflictPaths: [],
+    });
+    await executor.applyPromotionCandidate(candidate);
+
+    assert.equal(
+      await fs.readFile(path.join(fixture.workspace, "tracked.txt"), "utf8"),
+      "promoted tracked content\n",
+    );
+    assert.equal(
+      await fs.readFile(
+        path.join(fixture.workspace, "nested", "promoted.txt"),
+        "utf8",
+      ),
+      untracked.toString("utf8"),
+    );
+    const after = await executor.inspectPromotionWorkspace(admission, RUN_ID);
+    assert.equal(after.head.oid, admission.baseRevision.oid);
+    assert.equal(after.repositoryControlSha256, admission.repositoryControlSha256);
+    assert.equal(after.arenaWorktreesAbsent, true);
+    assert.equal(after.workspaceClean, false);
+    assert.notEqual(after.contentFingerprintSha256, admission.baseContentSha256);
+    assert.deepEqual(await executor.checkPromotionCandidate(candidate), {
+      applicable: false,
+      conflictPaths: [],
+      untrackedConflictPaths: ["nested/promoted.txt"],
+    });
+  });
 });
 
 async function assertNoProvisioningSideEffect(
@@ -1078,7 +1152,93 @@ describe("Arena bounded process runner", () => {
           timeoutMs: HANG_NET_TIMEOUT_MS,
         },
       ),
-      gitError("gitOutputTooLarge"),
+      process.platform === "win32"
+        ? (error: unknown) =>
+          error instanceof ArenaGitError
+          && error.code === "terminationUnconfirmed"
+          && error.cause instanceof ArenaGitError
+          && error.cause.code === "gitOutputTooLarge"
+        : gitError("gitOutputTooLarge"),
+    );
+  });
+
+  test("does not settle until a SIGTERM-ignoring descendant is gone", async (t) => {
+    if (process.platform === "win32") {
+      t.skip("POSIX process-group semantics");
+      return;
+    }
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-arena-runner-"));
+    const pidPath = path.join(root, "descendant.pid");
+    let descendantPid: number | undefined;
+    t.after(async () => {
+      if (descendantPid) {
+        try {
+          process.kill(descendantPid, "SIGKILL");
+        } catch {
+          // The expected path already proved the descendant is gone.
+        }
+      }
+      await fs.rm(root, { recursive: true, force: true });
+    });
+    const script = [
+      "const cp=require('node:child_process')",
+      "const fs=require('node:fs')",
+      "const child=cp.spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{});setInterval(()=>{},1000)\"],{stdio:'ignore'})",
+      "fs.writeFileSync(process.argv[1],String(child.pid))",
+      "setInterval(()=>{},1000)",
+    ].join(";");
+
+    await assert.rejects(
+      runArenaGitCommand(
+        process.execPath,
+        root,
+        ["-e", script, pidPath],
+        {
+          maxStdoutBytes: 64,
+          maxStderrBytes: 64,
+          timeoutMs: 250,
+        },
+      ),
+      gitError("gitTimedOut"),
+    );
+    descendantPid = Number(await fs.readFile(pidPath, "utf8"));
+    assert.ok(Number.isSafeInteger(descendantPid) && descendantPid > 0);
+    assert.throws(
+      () => process.kill(descendantPid!, 0),
+      (error: unknown) =>
+        (error as NodeJS.ErrnoException).code === "ESRCH",
+    );
+  });
+
+  test("streams bounded stdout to a backpressured sink without retaining it", async (t) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-arena-runner-"));
+    const outputPath = path.join(root, "evidence.bin");
+    const output = await fs.open(outputPath, "wx");
+    t.after(async () => {
+      await output.close().catch(() => undefined);
+      await fs.rm(root, { recursive: true, force: true });
+    });
+
+    const result = await runArenaGitCommand(
+      process.execPath,
+      root,
+      ["-e", "process.stdout.write(Buffer.alloc(1024*1024, 0x61))"],
+      {
+        maxStdoutBytes: 1024 * 1024,
+        maxStderrBytes: 64,
+        timeoutMs: HANG_NET_TIMEOUT_MS,
+        stdoutSink: async (chunk) => {
+          await output.write(chunk);
+        },
+      },
+    );
+    await output.sync();
+
+    assert.equal(result.stdout.byteLength, 0);
+    assert.equal((await output.stat()).size, 1024 * 1024);
+    assert.deepEqual(
+      (await fs.readFile(outputPath)).subarray(0, 4),
+      Buffer.from("aaaa"),
     );
   });
 });

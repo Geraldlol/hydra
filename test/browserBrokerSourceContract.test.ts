@@ -92,6 +92,26 @@ describe("Hydra browser broker security contract", () => {
     assert.match(issue, /!this\.tokens\.has\(candidate\)/);
   });
 
+  test("projects requested, approval, and terminal browser metadata without changing authorization", () => {
+    assert.match(source, /flightTelemetryByToken/);
+    assert.match(source, /eventType: "requested"/);
+    assert.match(source, /eventType: "approval"/);
+    assert.match(source, /eventType: "finished"/);
+    assert.match(source, /const flightTelemetry = this\.flightTelemetryByToken\.get\(authorizationToken\)/);
+    assert.match(source, /waitForAgentSpawnDrain/);
+    assert.match(source, /flightInvocationsByToken/);
+    assert.match(source, /Flight projection is observational/);
+    assert.match(panelSource, /kind: "browserAction"/);
+    assert.match(panelSource, /parentOperationId: browser\.operationId/);
+    assert.match(panelSource, /observationType: "approvalDecision"/);
+    assert.match(panelSource, /observationType: "browserApproval"/);
+    assert.match(panelSource, /await browserBroker\?\.waitForAgentSpawnDrain\(dispatch\.spawn\)/);
+    const eventStart = source.indexOf("export type BrowserFlightTelemetryEvent");
+    const eventEnd = source.indexOf("export type BrowserFlightTelemetrySink", eventStart);
+    const eventContract = source.slice(eventStart, eventEnd);
+    assert.doesNotMatch(eventContract, /readonly (?:input|url|selector|text):/);
+  });
+
   test("keeps prompt previews non-authorizing and shows the operative action", () => {
     const previewStart = panelSource.indexOf("private async buildPromptEnvelope(");
     const previewEnd = panelSource.indexOf("private async nativeCapabilityPromptContext(", previewStart);

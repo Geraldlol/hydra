@@ -27,6 +27,10 @@ describe("command center", () => {
       "toggleAutoAdvanceActionableDefaults",
       "runDoctor",
     ]);
+    const toggle = actions.find((action) => action.id === "toggleAutoAdvanceActionableDefaults");
+    assert.ok(toggle);
+    assert.equal(toggle.label, "Turn Off Agent-default Auto-advance");
+    assert.match(toggle.detail, /agent-authored Decision Packet defaults/i);
   });
 
   test("surfaces immediate work before general diagnostics", () => {
@@ -81,6 +85,9 @@ describe("command center", () => {
     assert.ok(actions.some((action) => action.id === "captureNativeDataSnapshot"));
     assert.ok(actions.some((action) => action.id === "openObjective"));
     assert.ok(actions.some((action) => action.id === "openLastPrompt"));
+    assert.ok(actions.some((action) => action.id === "manageFlightRecorder"));
+    assert.ok(actions.some((action) => action.id === "replayFlightTrace"));
+    assert.ok(actions.some((action) => action.id === "createFlightEval"));
     assert.ok(actions.some((action) => action.id === "cleanWorkspaceState"));
     assert.ok(actions.some((action) => action.id === "openVerification"));
     assert.ok(actions.some((action) => action.id === "openDecisions"));
@@ -107,6 +114,10 @@ describe("command center", () => {
     assert.ok(manyHeads);
     assert.equal(manyHeads.label, "Turn On Claude Worker Fanout");
     assert.equal(manyHeads.description, "Claude Worker Fanout off");
+    const autoAdvance = actions.find((action) => action.id === "toggleAutoAdvanceActionableDefaults");
+    assert.ok(autoAdvance);
+    assert.equal(autoAdvance.label, "Turn On Agent-default Auto-advance");
+    assert.match(autoAdvance.detail, /explicit modal opt-in/i);
   });
 
   test("labels Many Heads settings with current mode and worker count", () => {
@@ -138,8 +149,8 @@ describe("command center", () => {
     assert.equal(workers.description, "5 Claude workers");
   });
 
-  test("omits automatic execution toggles in an untrusted workspace", () => {
-    const actions = buildCommandCenterActions({
+  test("hides enable-only automation controls but keeps an armed auto-advance opt-in revocable while untrusted", () => {
+    const disabledActions = buildCommandCenterActions({
       workspaceReady: true,
       isWorkspaceTrusted: false,
       canStop: false,
@@ -157,9 +168,32 @@ describe("command center", () => {
       nativeActionsCount: 0,
     });
 
-    assert.equal(actions.some((action) => action.id === "toggleManyHeadsMode"), false);
-    assert.equal(actions.some((action) => action.id === "configureManyHeadsWorkers"), false);
-    assert.equal(actions.some((action) => action.id === "toggleAutoAdvanceActionableDefaults"), false);
+    assert.equal(disabledActions.some((action) => action.id === "toggleManyHeadsMode"), false);
+    assert.equal(disabledActions.some((action) => action.id === "configureManyHeadsWorkers"), false);
+    assert.equal(disabledActions.some((action) => action.id === "toggleAutoAdvanceActionableDefaults"), false);
+
+    const armedActions = buildCommandCenterActions({
+      workspaceReady: true,
+      isWorkspaceTrusted: false,
+      canStop: false,
+      canAcceptDefault: false,
+      autoAdvanceActionableDefaults: true,
+      canAssignBuilder: false,
+      canRequestReview: false,
+      canHandBack: false,
+      canRunVerification: false,
+      canPokeNativeTerminals: false,
+      needsCodexPath: false,
+      needsClaudePath: false,
+      transport: "oneShot",
+      workQueueCount: 0,
+      nativeActionsCount: 0,
+    });
+    const revoke = armedActions.find((action) => action.id === "toggleAutoAdvanceActionableDefaults");
+    assert.ok(revoke);
+    assert.equal(revoke.label, "Turn Off Agent-default Auto-advance");
+    assert.match(revoke.detail, /suspended|untrusted/i);
+    assert.match(revoke.detail, /revoke|turn off/i);
   });
 
   test("shows disabled wiki injection in Command Center status", () => {
@@ -217,13 +251,25 @@ describe("command center", () => {
       "stopCurrentTurn",
       "resetStuckTurn",
     ]);
-    assert.deepEqual(actions.slice(2, 7).map((action) => action.id), [
-      "assignCodex",
-      "assignClaude",
+    assert.deepEqual(actions.slice(2, 6).map((action) => action.id), [
+      "assignBuilder",
       "assignParallelBuilders",
       "requestReview",
       "handBack",
     ]);
+    const assignOne = actions.find((action) => action.id === "assignBuilder");
+    const assignAll = actions.find((action) => action.id === "assignParallelBuilders");
+    const review = actions.find((action) => action.id === "requestReview");
+    const handBack = actions.find((action) => action.id === "handBack");
+    assert.ok(assignOne);
+    assert.ok(assignAll);
+    assert.ok(review);
+    assert.ok(handBack);
+    assert.match(assignOne.detail, /seated head/i);
+    assert.match(assignAll.label, /All Seated Builders/i);
+    assert.match(assignAll.detail, /every seated head/i);
+    assert.match(review.detail, /eligible seated heads/i);
+    assert.match(handBack.detail, /builder or builders/i);
     assert.ok(actions.some((action) => action.id === "fixCodexPath"));
     assert.ok(actions.some((action) => action.id === "fixClaudePath"));
     assert.ok(actions.some((action) => action.id === "useOneShotTransport"));

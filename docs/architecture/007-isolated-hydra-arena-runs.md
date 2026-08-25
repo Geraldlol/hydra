@@ -1,6 +1,6 @@
 # ADR 007: Isolated, evidence-bound Hydra Arena runs
 
-- Status: Accepted for staged implementation
+- Status: Accepted; isolated core and operator workflows implemented, production native admission gated
 - Date: 2026-07-24
 - Owners: Hydra maintainers
 
@@ -104,6 +104,7 @@ storage:
 
 ```text
 <storageUri>/arena/runs/<runId>/manifest.v1.jsonl
+<storageUri>/arena/runs/<runId>/manifest.v1.segments/NNNNNNNN.jsonl
 <storageUri>/arena/artifacts/<runId>/<contestantId>/...
 <globalStorageUri>/as/<workspaceHash>/arena/worktrees/p/<opaque128>/...
 <storageUri>/arena/registrations/<runId>/<contestantId>/intent.v1.json
@@ -115,12 +116,15 @@ worktrees so worktree cleanup cannot erase patches or receipts.
 `.hydra/arena.md` is a bounded, redacted, disposable comparison mirror and is
 never an input to replay, promotion, Jury, or cleanup.
 
-The v1 manifest is an append-only, domain-separated SHA-256 chain. Every exact
-schema event carries a run ID, contiguous sequence, previous-event hash, and
-event hash. Full replay rejects unknown keys or versions, malformed IDs,
-cross-run records, duplicate IDs, invalid hashes, missing references,
-impossible lifecycle order, records after finalization except cleanup, and
-hard record/byte bounds.
+The event schema remains the append-only, domain-separated v1 SHA-256 chain.
+Its physical storage uses a downgrade-safe v2 layout marker in
+`manifest.v1.jsonl`, followed by the first v1 event, with every later event in
+an immutable, sequence-named segment. Older readers therefore reject a new
+run instead of silently replaying only its base event. A legacy single-file v1
+manifest is migrated atomically once before its next append. Full replay
+rejects unknown keys or versions, malformed IDs, cross-run records, duplicate
+IDs, invalid hashes, missing references, impossible lifecycle order, records
+after finalization except cleanup, and cumulative record/byte bounds.
 
 The run index is a rebuildable discovery cache only. A stale or forged index
 cannot create, hide, complete, or authorize a run.
@@ -148,12 +152,14 @@ exact target-path absence. Run IDs cannot be reused after release, and an old
 claim receipt cannot regain authority after recovery or release.
 
 Restart takeover additionally requires private, typed, run- and
-process-generation-bound quiescence for every submitted generation. Stage 3
-records that proof only for its exact bundled fake helper, but deliberately
-does not implement repository-claim takeover. It never infers quiescence from a
-dead extension-host PID. The `claimRecovered` ledger shape remains reserved,
-so an interrupted owner can stay blocked for explicit recovery and is never
-silently expired.
+process-generation-bound quiescence for every submitted generation. Strict
+startup replay classifies intent-only delivery as unknown, submitted work
+without a quiescence receipt as unconfirmed, finalized runs as cleanup-only,
+and interrupted promotion intents as inspection-only. A typed recovery action
+proof binds the run, manifest lock/latest event, and complete generation root.
+Only then may the repository ledger append `claimRecovered`, and only after the
+prior extension-host PID is definitely gone. A dead or ambiguous PID alone
+never proves contestant quiescence and never grants takeover.
 
 The v1 event vocabulary is:
 
@@ -251,15 +257,27 @@ other contestant directories. Those instructions narrow intended behavior but
 do not turn linked worktrees into a sandbox; native authority and user consent
 remain the real security boundary.
 
-Stage 3 dispatch is intentionally limited to Hydra's installed, identity-bound
+The Stage-3 compatibility path remains Hydra's installed, identity-bound
 fake-head helper. The controller writes a metadata-only process intent before
 spawn, rechecks the Mission binding, executable, helper, worktree directory,
 and sanitized environment policy, then awaits durable submission publication
-before writing stdin. Only that broker-owned no-descendants helper can produce
-a process-generation-bound quiescence receipt. Native Codex, Claude, ACP, and
-other head dispatch remains disabled until their adapters can prove descendant
-quiescence rather than inferring it from a direct child's `close` event.
-Steering and Terminal Bridge are structurally absent from this path.
+before writing stdin. Native admission is now an explicit adapter capability:
+the controller requires the locked `agentKind`, and the supervisor requires an
+exact platform and executable-identity-bound broker that owns spawn and returns
+a bounded, process-generation-bound zero-descendant proof. A direct child's
+`close` event never satisfies that contract. Hydra currently ships no such
+native adapter broker, so built-in Codex, Claude, ACP, and other native heads
+remain closed rather than receiving a synthetic proof. Steering and Terminal
+Bridge are structurally absent from this path.
+
+On Windows, the existing identity-bound snapshot killer is useful teardown but
+is not admission proof: a descendant can escape or be reparented between
+snapshots. A native broker needs pre-execution Job Object containment and a
+reliable active-process-zero observation. On POSIX systems, a detached process
+group is also insufficient because a descendant can call `setsid`; a broker
+needs a cgroup/container-style containment boundary or an equivalent primitive
+that it can prove quiescent. These are intentional platform gates, not inferred
+fallbacks.
 
 All process factories are provider-write-free and ready before the first spawn.
 Hydra repeats the source check after those factories finish, then serializes a
@@ -324,6 +342,17 @@ the locked plan hash, contestant ID, worktree fingerprint, exact `HEAD`,
 bounded status, and private receipt hash. A retry is a new ordered attempt; a
 passing attempt is terminal for that check.
 
+The controller requires an exact ordered execution-plan set before admission
+and invokes trusted verifier/browser executors with only the assigned canonical
+worktree, the locked command or journey digest, a timeout, output/count bounds,
+and the run signal. Executors must settle only after their own process or browser
+broker has produced typed quiescence. Receipts retain hashes, counts, status,
+duration, and state bindings, never command output, paths, page content, URLs,
+selectors, screenshots, or source bytes. Manifest append and replay both
+re-open and validate the bounded private receipt. One continuous contestant
+sentinel spans terminal publication, all acceptance attempts, and evidence
+publication; write-then-revert activity fails closed and retains the run.
+
 Before any destructive cleanup, Hydra preserves a bounded artifact set per
 durably registered contestant:
 
@@ -337,7 +366,7 @@ durably registered contestant:
 
 Replay recomputes that artifact-set hash from the patch, untracked archive,
 inventory, receipts root, typed quiescence, final `HEAD`, and final workspace
-fingerprint. Stage 3 also re-fingerprints the worktree after private
+fingerprint. The controller also re-fingerprints the worktree after private
 publication and refuses to append the evidence event if state changed during
 capture.
 
@@ -430,9 +459,12 @@ truncates, repairs, or infers missing authority.
 
 ### Reveal, winner selection, promotion, and synthesis remain human gates
 
-A future Arena controller reveals all contestant outcomes together in a
+The Arena result surface reveals all contestant outcomes together in a
 side-by-side matrix bound to the manifest and artifact-set hashes. It does not
-rank hidden results while contestants are running.
+rank hidden results while contestants are running. Winner and synthesis
+choices are immutable local receipts: winner selection explicitly grants no
+authority, while synthesis binds at least two retained artifact sets and
+requires a new isolated run without source-workspace mutation.
 
 The user may select a winner or request synthesis after reveal. Selection is a
 workflow preference, not a factual verdict and not authority. Promotion
@@ -441,6 +473,17 @@ Mission Contract mutation decision, conflicts, and verification implications,
 followed by an exact local confirmation. MVP promotion is unavailable if the
 source workspace no longer matches its locked state; Hydra offers a new
 isolated synthesis run instead of modifying around concurrent user work.
+
+The operator preview renders the complete retained patch up to its explicit
+1 MiB UI bound plus the exact untracked path/size/mode/digest inventory; larger
+patches are refused by this surface rather than summarized as exact. Execution
+double-verifies retained evidence, rechecks clean source/HEAD/controls and
+untracked conflicts, persists an immutable intent before mutation, sends the
+exact patch bytes to Git over bounded stdin, creates untracked files
+exclusively without following links, and records a post-apply result. Promotion
+holds the repository's cross-process unowned lock and never deletes evidence.
+`retireAfterVerifiedPromotion` is only a recorded Mission postcondition request;
+this workflow does not retire Mission authority.
 
 Hydra never automatically merges, commits, pushes, publishes, deploys, chooses
 a winner, changes builder assignment, or grants permissions because of an
@@ -468,10 +511,13 @@ Arena result.
 - Full fingerprints, patches, untracked archives, and identical verification
   multiply I/O, storage, latency, and cost by contestant count.
 - Strict cleanup can leave a blocked private worktree for manual recovery.
-- Stage 3 still has no restart-takeover broker, so a crashed owner can remain
-  blocked until a later explicit recovery flow proves every generation
-  quiescent. Crash-atomic history prevents torn authority but does not grant
-  takeover.
+- No production native-head adapter currently owns the OS containment needed
+  by the new quiescence-broker contract. Windows requires Job Object-style
+  containment; POSIX process groups alone do not contain `setsid` descendants.
+- Recovery is deliberately fail-closed: corrupt supporting receipts,
+  intent-only delivery, live or ambiguous prior owner PIDs, and incomplete
+  quiescence all remain inspect-only. Startup scanning never resumes, aborts,
+  takes ownership, or reapplies an interrupted promotion automatically.
 - Requiring a clean main worktree narrows the MVP but prevents ambiguous
   attribution and promotion.
 
@@ -525,9 +571,11 @@ receipt-to-manifest crash window, records bounded pre-dispatch cancellation
 evidence, cleans exact targets, and proves the source workspace and an
 unrelated worktree are unchanged. Before its first Git side effect it publishes an immutable
 private recovery catalog naming only the exact synthetic roots; confirmed
-cleanup removes that catalog, while a hard host death leaves it for a future
-bounded startup recovery scan. Stage 2 does not perform that scan or regain
-repository-owner authority.
+cleanup removes that catalog, while a hard host death leaves it for the
+bounded startup recovery scan. The current activation scan also replays the
+authoritative manifest, strict dispatch receipt generations, and promotion
+intent/result pairs. It exposes explicit recovery classifications and proof
+preparation; repository-owner recovery remains a separate typed executor call.
 
 The command then runs the stage-3 controller against two supervised fake
 heads. It exercises continuous source monitoring, durable process
@@ -549,10 +597,13 @@ aborts the caller's parent signal.
 
 Arena patch and untracked artifacts contain source content and therefore stay
 in the separate private Arena artifact store; they are never copied into
-metadata-only Flight records. `hydra.flight.v1` also has no Arena-specific
-operation kind. Arena projection is deferred until a backward-readable Flight
-schema revision or an explicitly compatible extension is designed; existing
-v1 kinds must not be relabeled dishonestly.
+metadata-only Flight records. `hydra.flight.v1` still has no Arena-specific
+operation kind and its readers remain unchanged. Arena now uses the explicitly
+compatible `hydra.flight.arena.v1` sidecar under private Arena support storage.
+It projects the Arena event hash, Mission binding, contestant/status, receipt,
+artifact-set, and matrix hashes into its own bounded immutable hash chain. The
+projection is replay-validated but non-authoritative: its failure marks the
+returned projection incomplete and cannot cancel, retry, or relabel Arena work.
 
 Roll out in stages:
 
@@ -560,11 +611,16 @@ Roll out in stages:
 2. private manifest/artifact store plus hardened Git worktree executor and
    synthetic lifecycle smoke only (no real-workspace Arena admission);
 3. Arena controller with main-workspace monitor and fake-head smoke
-   (implemented; native-head admission remains closed);
-4. locked verification/browser execution and the compatible Flight schema
-   revision/projection;
-5. reveal matrix and explicit winner/synthesis controls; and
-6. previewed, separately confirmed promotion.
+   (implemented; built-in native heads remain closed until an adapter supplies
+   real OS containment proof);
+4. locked verification/browser execution and the compatible Flight extension
+   projection (implemented in Arena core; runtime browser/native adapters remain
+   separately gated);
+5. reveal matrix and explicit winner/synthesis controls (implemented);
+6. exact-previewed, separately confirmed local-workspace promotion
+   (implemented; no commit/push/publish/deploy or Mission retirement); and
+7. strict startup classification, typed recovery-action proof, and dead-owner
+   repository-claim recovery (implemented; no automatic resume or reapply).
 
 Rollback disables new Arena admission and cleanup dispatch while preserving
 private manifests, evidence, and blocked targets. Existing detached worktrees

@@ -3,6 +3,7 @@ import { strict as assert } from "node:assert";
 import * as vscode from "vscode";
 import { claudeAdapter } from "../src/claudeAdapter";
 import type { AgentDefinition, InvocationContext } from "../src/agentAdapter";
+import { argsForCapabilityProfile } from "../src/capabilityProfiles";
 
 // agentArgs.ts's withModelArgs (which claudeAdapter.buildInvocation calls)
 // reads vscode.workspace.getConfiguration("hydraRoom").get(...) at runtime;
@@ -32,6 +33,22 @@ describe("claude adapter", () => {
     assert.ok(!inv.args.includes("--skip-git-repo-check"));
     assert.equal(inv.args[inv.args.length - 1], "-");
     assert.equal(inv.stdin, "do the thing");
+  });
+
+  test("Hydra-isolated ordinary profiles cannot be widened by the optional browser broker", () => {
+    for (const [profile, phase] of [
+      ["safeDiscussion", "opener"],
+      ["nativeDiscussion", "parallel"],
+      ["nativeBuild", "build"],
+      ["nativeReview", "review"],
+    ] as const) {
+      const rawArgs = argsForCapabilityProfile("claude", profile);
+      assert.ok(rawArgs);
+      const inv = claudeAdapter.buildInvocation(claudeDef, ctx({ rawArgs, phase }));
+      assert.equal(inv.transport, "spawn");
+      if (inv.transport !== "spawn") continue;
+      assert.equal(inv.disableBrowserBroker, true, profile);
+    }
   });
 
   test("parseReply returns raw stdout", () => {

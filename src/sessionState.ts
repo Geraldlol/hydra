@@ -39,6 +39,7 @@ export type TerminalSessionPatch = Partial<Omit<TerminalSession, "agent" | "term
 export const TERMINAL_NAMES: Record<AgentId, string> = {
   codex: "Hydra Codex",
   claude: "Hydra Claude",
+  gemini: "Hydra Gemini",
 };
 
 export function createTerminalSession(agent: AgentId, now: Date = new Date()): TerminalSession {

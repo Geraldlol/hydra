@@ -561,4 +561,82 @@ describe("pickReviewers()", () => {
   test("serial policy never returns more than one reviewer (SP1)", () => {
     assert.equal(pickReviewers("codex", ["codex", "claude", "gemini"], "serial").length, 1);
   });
+
+  test("default all policy returns every non-builder in roster order", () => {
+    assert.deepEqual(
+      pickReviewers("codex", ["codex", "claude", "gemini"]),
+      ["claude", "gemini"],
+    );
+  });
+
+  test("a builder absent from the roster does not remove an eligible reviewer", () => {
+    assert.deepEqual(pickReviewers("gemini", ["codex", "claude"]), ["codex", "claude"]);
+  });
+});
+
+describe("N-way review phase transitions", () => {
+  test("a single builder fans out to parallel reviewers and remains the hand-back target", () => {
+    let state = transition(
+      { name: "BuildDone", builder: "codex" },
+      { type: "requestReview", reviewers: ["claude", "gemini"] },
+    );
+    assert.deepEqual(state, {
+      name: "ParallelReview",
+      agents: ["claude", "gemini"],
+      builders: ["codex"],
+    });
+    state = transition(state, {
+      type: "parallelReviewDone",
+      approved: false,
+      resolutionRequired: true,
+    });
+    assert.equal(state.name, "ParallelReviewDone");
+    assert.equal(state.resolutionRequired, true);
+
+    const accepted = transition(state, { type: "resolveReview", approved: true });
+    assert.equal(accepted.name, "ParallelReviewDone");
+    assert.equal(accepted.approved, true);
+    assert.equal(accepted.resolutionRequired, false);
+
+    const handedBack = transition(state, { type: "handBack" });
+    assert.deepEqual(handedBack, { name: "Build", builder: "codex" });
+  });
+
+  test("parallel builders still hand back to the original builder set", () => {
+    let state = transition(
+      { name: "ParallelBuildDone", agents: ["codex", "claude"] },
+      { type: "requestReview", reviewers: ["codex", "claude"] },
+    );
+    state = transition(state, { type: "parallelReviewDone", approved: false });
+    assert.deepEqual(transition(state, { type: "handBack" }), {
+      name: "ParallelBuild",
+      agents: ["codex", "claude"],
+    });
+  });
+
+  test("review resolution is ignored unless human arbitration is pending", () => {
+    const state = {
+      name: "ParallelReviewDone" as const,
+      agents: ["claude", "gemini"],
+      builders: ["codex"],
+      approved: false,
+      resolutionRequired: false,
+    };
+    assert.equal(transition(state, { type: "resolveReview", approved: true }), state);
+  });
+
+  test("an invalid empty builder set fails closed without dispatching a builder", () => {
+    assert.deepEqual(
+      transition(
+        {
+          name: "ParallelReviewDone",
+          agents: ["claude"],
+          builders: [],
+          approved: false,
+        },
+        { type: "handBack" },
+      ),
+      { name: "AwaitingUser" },
+    );
+  });
 });

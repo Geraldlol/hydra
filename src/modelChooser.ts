@@ -197,16 +197,22 @@ const CLAUDE_MODEL_PRESETS: Array<{ label: string; description: string }> = [
   { label: "claude-haiku-4-5", description: "Haiku 4.5 alias" },
 ];
 
-// Curated Gemini model presets for the chooser. Like Claude, the Gemini CLI
-// exposes no "list models" command, so this list is hand-maintained — these
-// IDs are NOT yet confirmed against a live Gemini CLI (no gemini binary was
-// available, so the Task 5 Step 0 verification step was skipped) and should
-// be updated once verified. The chooser also offers a free-text "Custom…"
-// entry, so an ID missing here is never a dead end.
+// Curated Gemini presets checked against the official Gemini CLI model schema
+// on 2026-08-24. Prefer aliases: the CLI resolves them to the current model for
+// the authenticated tier. Concrete IDs remain available for reproducibility,
+// and the chooser's free-text entry covers newer/organization-specific builds.
 // Drift guard: test/modelChooserSourceContract.test.ts pins the current flagship.
 const GEMINI_MODEL_PRESETS: Array<{ label: string; description: string }> = [
-  { label: "gemini-2.5-pro", description: "Gemini 2.5 Pro — most capable" },
-  { label: "gemini-2.5-flash", description: "Gemini 2.5 Flash — faster / cheaper" },
+  { label: "auto", description: "CLI-selected current model (recommended)" },
+  { label: "pro", description: "Alias — current Pro tier" },
+  { label: "flash", description: "Alias — current Flash tier" },
+  { label: "flash-lite", description: "Alias — current Flash-Lite tier" },
+  { label: "gemini-3.1-pro-preview", description: "Gemini 3.1 Pro Preview" },
+  { label: "gemini-3.5-flash", description: "Gemini 3.5 Flash" },
+  { label: "gemini-3.1-flash-lite", description: "Gemini 3.1 Flash-Lite" },
+  { label: "gemini-2.5-pro", description: "Gemini 2.5 Pro (stable fallback)" },
+  { label: "gemini-2.5-flash", description: "Gemini 2.5 Flash (stable fallback)" },
+  { label: "gemini-2.5-flash-lite", description: "Gemini 2.5 Flash-Lite (stable fallback)" },
 ];
 
 function codexPresetsForChooser(

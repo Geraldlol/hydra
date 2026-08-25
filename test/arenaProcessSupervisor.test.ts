@@ -16,11 +16,16 @@ import {
   arenaProcessEnvironmentPolicySha256,
   arenaProcessFileIdentitySha256,
   arenaProcessWorktreeDirectoryIdentitySha256,
+  arenaNativeBrokerCapabilitySha256,
+  createArenaNativeProcessQuiescenceProof,
   createArenaProcessIntent,
+  prepareArenaProcessIntent,
   sanitizedArenaProcessEnvironment,
   sha256ArenaProcessUtf8,
+  supervisePreparedArenaProcess,
   superviseArenaProcess,
   type ArenaProcessSupervisorInput,
+  type ArenaNativeProcessQuiescenceBroker,
 } from "../src/arenaProcessSupervisor";
 import { HANG_NET_TIMEOUT_MS } from "./testBudgets";
 
@@ -113,12 +118,12 @@ describe("Arena process supervisor", () => {
             await arenaProcessFileIdentitySha256(helperAlias),
         },
       };
-      const expectedIntent = createArenaProcessIntent(input);
+      const expectedIntent = await prepareArenaProcessIntent(input);
       const observed = acceptedMockChild();
       let spawnedCommand = "";
       let spawnedArgs: readonly string[] = [];
       let spawnedCwd: string | undefined;
-      const result = await superviseArenaProcess(input, {
+      const result = await supervisePreparedArenaProcess(input, expectedIntent, {
         spawnProcess: (command, args, options) => {
           spawnedCommand = command;
           spawnedArgs = args;
@@ -171,7 +176,8 @@ describe("Arena process supervisor", () => {
     };
     const observed = acceptedMockChild();
     let spawnedCommand = "";
-    const result = await superviseArenaProcess(input, {
+    const expectedIntent = await prepareArenaProcessIntent(input);
+    const result = await supervisePreparedArenaProcess(input, expectedIntent, {
       spawnProcess: (command) => {
         spawnedCommand = command;
         observed.child.stdin?.once("finish", () => {
@@ -184,7 +190,7 @@ describe("Arena process supervisor", () => {
 
     assert.equal(
       result.intentSha256,
-      createArenaProcessIntent(input).intentSha256,
+      expectedIntent.intentSha256,
     );
     assert.equal(spawnedCommand, await fs.realpath(commandAlias));
   });
@@ -200,9 +206,31 @@ describe("Arena process supervisor", () => {
       await supervisorInput(fixture.root, request, {
         postProcessFingerprintSha256: () => FINAL_FINGERPRINT_SHA256,
       }),
+      {
+        spawnProcess: (command, args, options) => {
+          assert.equal(
+            Object.prototype.hasOwnProperty.call(options.env, "NODE_V8_COVERAGE"),
+            true,
+          );
+          assert.equal(options.env?.NODE_V8_COVERAGE, undefined);
+          return cp.spawn(command, [...args], options);
+        },
+      },
     );
 
-    assert.equal(result.status, "succeeded");
+    assert.equal(
+      result.status,
+      "succeeded",
+      JSON.stringify({
+        stage: result.stage,
+        failureCode: result.failureCode,
+        diagnosticCode: result.diagnosticCode,
+        exitCode: result.exitCode,
+        terminationConfirmed: result.terminationConfirmed,
+        stdout: result.stdout,
+        stderr: result.stderr,
+      }),
+    );
     assert.equal(result.failureCode, null);
     assert.equal(result.stage, "execution");
     assert.equal(result.traceId, request.traceId);
@@ -218,6 +246,11 @@ describe("Arena process supervisor", () => {
     );
     assert.equal(result.quiescence?.activeProcessCount, 0);
     assert.equal(result.quiescence?.terminationConfirmed, true);
+    assert.equal("nativeAdapterKind" in result.intent, false);
+    assert.equal("nativeBrokerCapabilitySha256" in result.intent, false);
+    assert.equal("adapterKind" in result.quiescence!, false);
+    assert.equal("brokerCapabilitySha256" in result.quiescence!, false);
+    assert.equal("brokerReceiptSha256" in result.quiescence!, false);
     assert.equal(result.stdout.complete, true);
     assert.equal(result.stdout.exceededLimit, false);
     assert.ok(result.stdout.bytes > 0);
@@ -230,6 +263,201 @@ describe("Arena process supervisor", () => {
       await fs.readFile(path.join(fixture.root, "arena-note.txt"), "utf8"),
       "bounded note\n",
     );
+  });
+
+  test("binds a Windows drive-casing alias to the exact prepared helper intent", async (t) => {
+    if (process.platform !== "win32") {
+      t.skip("Windows drive-casing regression");
+      return;
+    }
+    const fixture = await createFixture(t);
+    const input = await supervisorInput(fixture.root, fakeRequest(), {
+      postProcessFingerprintSha256: () => FINAL_FINGERPRINT_SHA256,
+    });
+    const helper = input.args[0]!;
+    const aliasedHelper = `${helper[0]!.toLowerCase()}${helper.slice(1)}`;
+    assert.notEqual(aliasedHelper, helper);
+    const aliasedInput: ArenaProcessSupervisorInput = {
+      ...input,
+      args: [aliasedHelper],
+      bundledHelper: {
+        scriptPath: aliasedHelper,
+        scriptFileIdentitySha256:
+          input.bundledHelper!.scriptFileIdentitySha256,
+      },
+    };
+    const unprepared = createArenaProcessIntent(aliasedInput);
+    const prepared = await prepareArenaProcessIntent(aliasedInput);
+
+    assert.notEqual(unprepared.intentSha256, prepared.intentSha256);
+    const result = await supervisePreparedArenaProcess(
+      aliasedInput,
+      prepared,
+    );
+
+    assert.equal(result.status, "succeeded");
+    assert.equal(result.intentSha256, prepared.intentSha256);
+    assert.equal(result.intent.argsSha256, prepared.argsSha256);
+  });
+
+  test("refuses a changed input before spawning against its prepared intent", async (t) => {
+    const fixture = await createFixture(t);
+    const input = await supervisorInput(fixture.root, fakeRequest());
+    await assert.rejects(
+      prepareArenaProcessIntent({ ...input, processGenerationId: undefined }),
+      /requires an explicit processGenerationId/u,
+    );
+    const prepared = await prepareArenaProcessIntent(input);
+    let spawnCalled = false;
+
+    await assert.rejects(
+      supervisePreparedArenaProcess(
+        { ...input, stdin: `${input.stdin} ` },
+        prepared,
+        {
+          spawnProcess() {
+            spawnCalled = true;
+            return fakeNeverClosingChild();
+          },
+        },
+      ),
+      /changed after its durable intent was prepared/u,
+    );
+    assert.equal(spawnCalled, false);
+  });
+
+  test("admits a native adapter only through an exact platform and executable-bound process-tree broker", async (t) => {
+    const fixture = await createFixture(t);
+    const command = path.resolve(process.execPath);
+    const commandFileIdentitySha256 =
+      await arenaProcessFileIdentitySha256(command);
+    const capabilitySha256 = arenaNativeBrokerCapabilitySha256({
+      adapterKind: "codex",
+      brokerId: "test-native-broker",
+      commandFileIdentitySha256,
+      platform: process.platform,
+    });
+    const broker: ArenaNativeProcessQuiescenceBroker = {
+      adapterKind: "codex",
+      brokerId: "test-native-broker",
+      capabilitySha256,
+      commandFileIdentitySha256,
+      platform: process.platform,
+      spawn(input) {
+        const child = cp.spawn(input.command, [...input.args], input.options);
+        return {
+          child,
+          proveQuiescence: async (binding) =>
+            createArenaNativeProcessQuiescenceProof({
+              adapterKind: "codex",
+              brokerId: "test-native-broker",
+              capabilitySha256,
+              commandFileIdentitySha256,
+              platform: process.platform,
+              processGenerationId: binding.processGenerationId,
+              processOwnerSha256: binding.processOwnerSha256,
+            }),
+        };
+      },
+    };
+    const input = await supervisorInput(fixture.root, fakeRequest(), {
+      args: ["-e", "process.stdin.resume();process.stdin.on('end',()=>process.exit(0))"],
+      bundledHelper: undefined,
+      command,
+      commandFileIdentitySha256,
+      environmentPolicySha256:
+        arenaProcessEnvironmentPolicySha256(process.env, false),
+      nativeQuiescenceBroker: broker,
+      nativeAdapterKind: "codex",
+      postProcessFingerprintSha256: () => FINAL_FINGERPRINT_SHA256,
+    });
+
+    const result = await superviseArenaProcess(input);
+
+    assert.equal(result.status, "succeeded");
+    assert.equal(result.quiescence?.proof, "nativeAdapterProcessTreeBroker");
+    assert.equal(result.quiescence?.adapterKind, "codex");
+    assert.equal(result.quiescence?.brokerCapabilitySha256, capabilitySha256);
+    assert.equal(result.quiescence?.activeProcessCount, 0);
+  });
+
+  test("rejects native admission when the broker platform or executable binding is stale", async (t) => {
+    const fixture = await createFixture(t);
+    const base = await supervisorInput(fixture.root, fakeRequest(), {
+      bundledHelper: undefined,
+      nativeAdapterKind: "codex",
+      environmentPolicySha256:
+        arenaProcessEnvironmentPolicySha256(process.env, false),
+    });
+    const staleCommandIdentity = digest("stale-command");
+    const broker: ArenaNativeProcessQuiescenceBroker = {
+      adapterKind: "codex",
+      brokerId: "stale-native-broker",
+      capabilitySha256: arenaNativeBrokerCapabilitySha256({
+        adapterKind: "codex",
+        brokerId: "stale-native-broker",
+        commandFileIdentitySha256: staleCommandIdentity,
+        platform: process.platform,
+      }),
+      commandFileIdentitySha256: staleCommandIdentity,
+      platform: process.platform,
+      spawn() {
+        throw new Error("must not spawn");
+      },
+    };
+
+    await assert.rejects(
+      superviseArenaProcess({ ...base, nativeQuiescenceBroker: broker }),
+      /executable identity/i,
+    );
+  });
+
+  test("bounds a native broker that never completes its descendant-quiescence proof", async (t) => {
+    const fixture = await createFixture(t);
+    const command = path.resolve(process.execPath);
+    const commandFileIdentitySha256 =
+      await arenaProcessFileIdentitySha256(command);
+    const capabilitySha256 = arenaNativeBrokerCapabilitySha256({
+      adapterKind: "codex",
+      brokerId: "hung-native-broker",
+      commandFileIdentitySha256,
+      platform: process.platform,
+    });
+    const broker: ArenaNativeProcessQuiescenceBroker = {
+      adapterKind: "codex",
+      brokerId: "hung-native-broker",
+      capabilitySha256,
+      commandFileIdentitySha256,
+      platform: process.platform,
+      spawn(input) {
+        return {
+          child: cp.spawn(input.command, [...input.args], input.options),
+          proveQuiescence: () => new Promise(() => {}),
+        };
+      },
+    };
+    const input = await supervisorInput(fixture.root, fakeRequest(), {
+      args: ["-e", "process.stdin.resume();process.stdin.on('end',()=>process.exit(0))"],
+      bundledHelper: undefined,
+      command,
+      commandFileIdentitySha256,
+      environmentPolicySha256:
+        arenaProcessEnvironmentPolicySha256(process.env, false),
+      nativeQuiescenceBroker: broker,
+      nativeAdapterKind: "codex",
+      postProcessFingerprintSha256: () => FINAL_FINGERPRINT_SHA256,
+    });
+
+    const startedAt = Date.now();
+    const result = await superviseArenaProcess(input, {
+      terminationConfirmMs: 25,
+    });
+
+    assert.equal(result.status, "succeeded");
+    assert.equal(result.quiescence, null);
+    assert.equal(result.quiescenceReceiptSha256, null);
+    assert.equal(result.diagnosticCode, "postProcessFingerprintFailed");
+    assert.ok(Date.now() - startedAt < 5_000);
   });
 
   test("binds process generation, prompt/input, registration, and invocation", async (t) => {

@@ -31,7 +31,7 @@ export interface UsageRecord {
   totalTokens: number;
   costUsd: number;
   costSource: "native" | "computed";
-  source: "claudeStreamJson" | "codexJson" | "codexTextTokens" | "unknown";
+  source: "claudeStreamJson" | "codexJson" | "geminiJson" | "codexTextTokens" | "unknown";
 }
 
 export interface ModelPrices {
@@ -77,7 +77,10 @@ export const UNKNOWN_AGENT_PRICES: ModelPrices = { inputPerMTok: 1.25, outputPer
 export const DEFAULT_PRICES_BY_KIND: Record<AgentKind, ModelPrices> = {
   codex: DEFAULT_PRICES.codex ?? UNKNOWN_AGENT_PRICES,
   claude: DEFAULT_PRICES.claude ?? UNKNOWN_AGENT_PRICES,
-  gemini: { inputPerMTok: 1.25, outputPerMTok: 5, cacheReadPerMTok: 0.3125, cacheCreatePerMTok: 1.25 }, // VERIFY vs Gemini public pricing
+  // Gemini's CLI default/`auto` alias can select the Pro tier. Use the current
+  // >200k standard Developer API rate as the conservative unknown-model
+  // fallback; subscription-backed CLI access can bill differently.
+  gemini: { inputPerMTok: 4, outputPerMTok: 18, cacheReadPerMTok: 0.4, cacheCreatePerMTok: 4 },
   "openai-compatible": DEFAULT_PRICES.codex ?? UNKNOWN_AGENT_PRICES, // SP2 refines
   "cli-template": DEFAULT_PRICES.codex ?? UNKNOWN_AGENT_PRICES,
 };
@@ -154,6 +157,18 @@ export const DEFAULT_MODEL_PRICES: Record<string, ModelPrices> = {
   "o3-mini": { inputPerMTok: 1.1, outputPerMTok: 4.4, cacheReadPerMTok: 0.55, cacheCreatePerMTok: 1.1 },
   "o4-mini": { inputPerMTok: 1.1, outputPerMTok: 4.4, cacheReadPerMTok: 0.275, cacheCreatePerMTok: 1.1 },
   "codex-mini-latest": { inputPerMTok: 1.5, outputPerMTok: 6, cacheReadPerMTok: 0.375, cacheCreatePerMTok: 1.5 },
+  // Gemini Developer API standard pricing checked 2026-08-24. Pro rows use
+  // the >200k tier because this table cannot vary rates by prompt length.
+  "gemini:auto": { inputPerMTok: 4, outputPerMTok: 18, cacheReadPerMTok: 0.4, cacheCreatePerMTok: 4 },
+  "gemini:pro": { inputPerMTok: 4, outputPerMTok: 18, cacheReadPerMTok: 0.4, cacheCreatePerMTok: 4 },
+  "gemini:flash": { inputPerMTok: 1.5, outputPerMTok: 9, cacheReadPerMTok: 0.15, cacheCreatePerMTok: 1.5 },
+  "gemini:flash-lite": { inputPerMTok: 0.25, outputPerMTok: 1.5, cacheReadPerMTok: 0.025, cacheCreatePerMTok: 0.25 },
+  "gemini-3.1-pro-preview": { inputPerMTok: 4, outputPerMTok: 18, cacheReadPerMTok: 0.4, cacheCreatePerMTok: 4 },
+  "gemini-3.5-flash": { inputPerMTok: 1.5, outputPerMTok: 9, cacheReadPerMTok: 0.15, cacheCreatePerMTok: 1.5 },
+  "gemini-3.1-flash-lite": { inputPerMTok: 0.25, outputPerMTok: 1.5, cacheReadPerMTok: 0.025, cacheCreatePerMTok: 0.25 },
+  "gemini-2.5-pro": { inputPerMTok: 2.5, outputPerMTok: 15, cacheReadPerMTok: 0.25, cacheCreatePerMTok: 2.5 },
+  "gemini-2.5-flash": { inputPerMTok: 0.3, outputPerMTok: 2.5, cacheReadPerMTok: 0.03, cacheCreatePerMTok: 0.3 },
+  "gemini-2.5-flash-lite": { inputPerMTok: 0.1, outputPerMTok: 0.4, cacheReadPerMTok: 0.01, cacheCreatePerMTok: 0.1 },
 };
 
 export function resolveModelPrices(
@@ -164,15 +179,16 @@ export function resolveModelPrices(
 ): ModelPrices {
   const key = (model ?? "").trim().toLowerCase();
   const agentBase = agentDefaults[agent] ?? DEFAULT_PRICES[agent] ?? DEFAULT_PRICES_BY_KIND.codex;
+  const builtIn = DEFAULT_MODEL_PRICES[`${agent}:${key}`] ?? DEFAULT_MODEL_PRICES[key];
   if (key && modelOverrides[key]) {
     // Why: merge the partial override over the most specific known base — the
     // built-in per-model rate if we have one, else the per-agent default — so
     // an override that omits e.g. the cache rate inherits the right model's
     // value (a partial Codex override no longer falls through to Claude's).
-    const base = DEFAULT_MODEL_PRICES[key] ?? agentBase;
+    const base = builtIn ?? agentBase;
     return coerceModelPrices(modelOverrides[key], base);
   }
-  if (key && DEFAULT_MODEL_PRICES[key]) return DEFAULT_MODEL_PRICES[key];
+  if (key && builtIn) return builtIn;
   return agentBase;
 }
 

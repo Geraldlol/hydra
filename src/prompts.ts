@@ -7,6 +7,8 @@ export type Phase = "opener" | "reactor" | "closer" | "parallel" | "build" | "re
 export interface PromptInput {
   agent: AgentId;
   otherAgent: AgentId;
+  /** Full peer set for array-based N-way phases. Omit for legacy serial turns. */
+  otherAgents?: ReadonlyArray<AgentId>;
   phase: Phase;
   transcript: string;
   diff?: string;
@@ -97,15 +99,29 @@ const PHASE_RULES: Record<Phase, string> = {
 export function buildPrompt(input: PromptInput): string {
   const me = displayNameFor(input.agent);
   const them = displayNameFor(input.otherAgent);
+  const peerIds = [...new Set(input.otherAgents ?? [])]
+    .filter((agent) => agent !== input.agent);
+  const peers = peerIds.map(displayNameFor);
+  const parallelPeerIds = peerIds.length > 0
+    ? peerIds
+    : input.otherAgent === input.agent ? [] : [input.otherAgent];
+  const legacyCodexClaudeParallel = parallelPeerIds.length === 1 && (
+    (input.agent === "codex" && parallelPeerIds[0] === "claude") ||
+    (input.agent === "claude" && parallelPeerIds[0] === "codex")
+  );
+  const nWay = peers.length > 1;
+  const peerClause = nWay ? `the other heads (${peers.join(", ")})` : them;
   const wikiContext = wikiContextBlock(input.transcript);
   const hasWikiContext = wikiContext !== undefined;
   const hasWikiSourceCitations = wikiContext ? /\[src:[a-f0-9]{12}\]/i.test(wikiContext) : false;
 
   const preamble = [
-    `You are ${me} in Hydra Room — a 3-way collaboration with the user`,
-    `and ${them}. The shared context below is Hydra's active transcript for this turn.`,
+    `You are ${me} in Hydra Room — a ${nWay ? "" : "3-way "}collaboration with the user`,
+    `and ${peerClause}. The shared context below is Hydra's active transcript for this turn.`,
     `Do not invent prior context not in the shared context.`,
-    `You are speaking to both the user and the other agent.`,
+    nWay
+      ? `You are speaking to the user and all of the other heads.`
+      : `You are speaking to both the user and the other agent.`,
     CONTEXT_HYGIENE,
     ...(hasWikiContext ? [WIKI_CONTEXT_GUIDANCE] : []),
     ...(hasWikiContext && hasWikiSourceCitations ? [WIKI_SOURCE_CITATION_GUIDANCE] : []),
@@ -132,7 +148,10 @@ export function buildPrompt(input: PromptInput): string {
     parts.push("", "--- Diff to review (git diff HEAD) ---", input.diff);
   }
 
-  parts.push("", PHASE_RULES[input.phase]);
+  const phaseRules = input.phase === "parallel" && !legacyCodexClaudeParallel
+    ? parallelRulesForHeads([me, ...parallelPeerIds.map(displayNameFor)])
+    : PHASE_RULES[input.phase];
+  parts.push("", phaseRules);
   if (input.allowAgentDuelChallenge && (input.phase === "reactor" || input.phase === "closer")) {
     // Keep the machine contract after the generic phase prose. The final
     // reactor rule also mentions `Challenge:` in its ordinary-language sense;
@@ -141,6 +160,20 @@ export function buildPrompt(input: PromptInput): string {
     parts.push("", renderAgentDuelChallengeInstructions(input.otherAgent, them));
   }
   return parts.join("\n");
+}
+
+function parallelRulesForHeads(heads: ReadonlyArray<string>): string {
+  const names = heads.length <= 2
+    ? heads.join(" and ")
+    : `${heads.slice(0, -1).join(", ")}, and ${heads[heads.length - 1]}`;
+  return (
+    `The user addressed the seated heads, so Hydra is running ${names} in parallel. ` +
+    `Give your independent pass on the latest user request; do not wait for, answer, or claim agreement with ${heads.length === 2 ? "the other head's still-running reply" : "the other heads' still-running replies"}. ` +
+    "If the request is actionable and your native CLI authority is sufficient, inspect, edit, or run commands now before replying. Use concrete evidence and avoid handing off work that you can do yourself. " +
+    "For actionable workspace requests, your reply must either cite the concrete command/file action you performed or name the specific missing authority/input that blocked action. " +
+    "Be concise; after action, summarize what you did and what remains. " +
+    DECISION_PACKET
+  );
 }
 
 export const APPROVED_SENTINEL_RE = /^APPROVED: no blockers\s*$/m;

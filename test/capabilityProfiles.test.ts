@@ -80,17 +80,51 @@ describe("capability profiles", () => {
     const codexBuild = argsForCapabilityProfile("codex", "nativeBuild");
     assert.ok(codexBuild);
     assert.equal(classifyAgentAuthority("codex", "build", codexBuild).level, "workspaceWrite");
-    assert.deepEqual(codexBuild.slice(3, 5), ["-c", "sandbox_workspace_write.network_access=true"]);
+    assert.equal(codexBuild.some((arg) => arg.includes("network_access=true")), false);
 
     const claudeReview = argsForCapabilityProfile("claude", "nativeReview");
     assert.ok(claudeReview);
     assert.equal(classifyAgentAuthority("claude", "review", claudeReview).level, "readOnly");
+    for (const profile of ["safeDiscussion", "nativeReview"] as const) {
+      const args = argsForCapabilityProfile("claude", profile);
+      assert.ok(args);
+      assert.deepEqual(
+        args.slice(args.indexOf("--tools"), args.indexOf("--tools") + 2),
+        ["--tools", "Read,Glob,Grep"],
+      );
+    }
+
+    const claudeBuild = argsForCapabilityProfile("claude", "nativeBuild");
+    assert.ok(claudeBuild);
+    assert.equal(classifyAgentAuthority("claude", "build", claudeBuild).level, "workspaceWrite");
+    assert.deepEqual(
+      claudeBuild.slice(claudeBuild.indexOf("--tools"), claudeBuild.indexOf("--tools") + 2),
+      ["--tools", "Read,Glob,Grep,Edit,Write,NotebookEdit"],
+    );
+    for (const blocked of ["Bash", "WebFetch", "WebSearch", "Task", "Agent"]) {
+      assert.equal(claudeBuild.join(" ").includes(blocked), false, `${blocked} must not be exposed by default`);
+    }
+    assert.ok(claudeBuild.includes("--strict-mcp-config"));
+    assert.ok(claudeBuild.includes("--disable-slash-commands"));
+    assert.ok(claudeBuild.includes("--no-session-persistence"));
+    assert.ok(claudeBuild.includes("--no-chrome"));
+    for (const profile of ["safeDiscussion", "nativeDiscussion", "nativeBuild", "nativeReview"] as const) {
+      const args = argsForCapabilityProfile("claude", profile);
+      assert.ok(args);
+      assert.ok(args.includes("--safe-mode"), `${profile} must disable user/project customizations and hooks`);
+      assert.equal(args.includes("--setting-sources"), false, `${profile} must not re-enable settings sources`);
+      assert.ok(args.includes("--strict-mcp-config"));
+      assert.ok(args.includes("--disable-slash-commands"));
+      assert.ok(args.includes("--no-session-persistence"));
+      assert.ok(args.includes("--no-chrome"));
+    }
 
     const claudeFullNative = argsForCapabilityProfile("claude", "fullNative");
     assert.ok(claudeFullNative);
     assert.equal(classifyAgentAuthority("claude", "build", claudeFullNative).level, "fullNative");
     assert.ok(claudeFullNative.includes("--dangerously-skip-permissions"));
     assert.equal(claudeFullNative.includes("--permission-mode"), false);
+    assert.equal(claudeFullNative.includes("--safe-mode"), false);
 
     const codexFullNative = argsForCapabilityProfile("codex", "fullNative");
     assert.ok(codexFullNative);
@@ -99,23 +133,27 @@ describe("capability profiles", () => {
     assert.equal(argsForCapabilityProfile("codex", "custom"), undefined);
   });
 
-  test("Codex and Claude default every ordinary-room phase to full native parity", () => {
+  test("Codex and Claude default ordinary-room phases to least authority", () => {
     const manifest = JSON.parse(fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8")) as {
       contributes?: { configuration?: { properties?: Record<string, { default?: unknown; markdownDescription?: string }> } };
     };
     const properties = manifest.contributes?.configuration?.properties ?? {};
+    const defaults = {
+      Discussion: { profile: "safeDiscussion", authority: "readOnly", phase: "opener" },
+      Build: { profile: "nativeBuild", authority: "workspaceWrite", phase: "build" },
+      Review: { profile: "nativeReview", authority: "readOnly", phase: "review" },
+    } as const;
     for (const agent of ["codex", "claude"] as const) {
       for (const phase of ["Discussion", "Build", "Review"] as const) {
         const setting = properties[`hydraRoom.${agent}${phase}Profile`];
         assert.ok(setting, `missing ${agent} ${phase} profile setting`);
-        assert.equal(setting.default, "fullNative");
-        assert.match(setting.markdownDescription ?? "", /equal maximum Hydra authority/i);
-        assert.match(setting.markdownDescription ?? "", /per-workspace full-native consent/i);
+        assert.equal(setting.default, defaults[phase].profile);
+        assert.match(setting.markdownDescription ?? "", /default/i);
+        assert.match(setting.markdownDescription ?? "", /fullNative.*opt-in/i);
 
-        const args = argsForCapabilityProfile(agent, "fullNative");
+        const args = argsForCapabilityProfile(agent, defaults[phase].profile);
         assert.ok(args);
-        const authorityPhase = phase === "Discussion" ? "opener" : phase.toLowerCase() as "build" | "review";
-        assert.equal(classifyAgentAuthority(agent, authorityPhase, args).level, "fullNative");
+        assert.equal(classifyAgentAuthority(agent, defaults[phase].phase, args).level, defaults[phase].authority);
       }
     }
   });
@@ -134,6 +172,8 @@ describe("capability profiles", () => {
     assert.ok(denied > consent, "dispatch must honor consent denial");
     assert.ok(oneShot > denied, "one-shot execution must remain behind consent");
     assert.ok(http > denied, "HTTP execution must remain behind consent");
+    assert.match(panel, /commit, push, publish, or deploy/);
+    assert.match(panel, /Prompt instructions are not a technical boundary/);
   });
 
   test("profile presets expose compact rail labels", () => {

@@ -1,5 +1,5 @@
 export type AgentId = string;
-export type ParticipationPolicy = "serial";
+export type ParticipationPolicy = "serial" | "all";
 export type DiscussionMode = "serial" | "parallelOnBoth" | "parallel";
 
 export type State =
@@ -16,7 +16,13 @@ export type State =
   | { name: "Review"; reviewer: AgentId; builder: AgentId }
   | { name: "ParallelReview"; agents: ReadonlyArray<AgentId>; builders: ReadonlyArray<AgentId> }
   | { name: "ReviewDone"; reviewer: AgentId; builder: AgentId; approved: boolean }
-  | { name: "ParallelReviewDone"; agents: ReadonlyArray<AgentId>; builders: ReadonlyArray<AgentId>; approved: boolean };
+  | {
+      name: "ParallelReviewDone";
+      agents: ReadonlyArray<AgentId>;
+      builders: ReadonlyArray<AgentId>;
+      approved: boolean;
+      resolutionRequired?: boolean;
+    };
 
 export type Event =
   | {
@@ -38,7 +44,8 @@ export type Event =
   | { type: "parallelBuildDone" }
   | { type: "requestReview"; reviewers?: ReadonlyArray<AgentId> }
   | { type: "reviewDone"; approved: boolean }
-  | { type: "parallelReviewDone"; approved: boolean }
+  | { type: "parallelReviewDone"; approved: boolean; resolutionRequired?: boolean }
+  | { type: "resolveReview"; approved: boolean }
   | { type: "handBack" }
   | { type: "requestReviewSkipped" }
   | { type: "reservationFailed"; restore: State }
@@ -48,15 +55,17 @@ export const DEFAULT_ROSTER: ReadonlyArray<AgentId> = ["codex", "claude"];
 
 /**
  * Reviewers for a builder's diff, chosen from the rest of the roster.
- * SP1 is serial-only: a two-head roster yields exactly one reviewer, so
- * `transition()` behavior is unchanged. SP3 relaxes this to N reviewers.
+ * The default seats every non-builder reviewer. A two-head roster still
+ * yields one reviewer, preserving the legacy serial sequence. The explicit
+ * serial policy caps larger rooms at their first eligible reviewer.
  */
 export function pickReviewers(
   builder: AgentId,
   roster: ReadonlyArray<AgentId>,
-  _policy: ParticipationPolicy = "serial",
+  policy: ParticipationPolicy = "all",
 ): AgentId[] {
-  return roster.filter((a) => a !== builder).slice(0, 1);
+  const reviewers = roster.filter((agent) => agent !== builder);
+  return policy === "serial" ? reviewers.slice(0, 1) : reviewers;
 }
 
 const defaultPeer = (agent: AgentId): AgentId => pickReviewers(agent, DEFAULT_ROSTER)[0] ?? agent;
@@ -132,8 +141,11 @@ export function transition(state: State, event: Event): State {
     case "BuildDone":
       if (event.type === "userSent") return beginDiscussion(event);
       if (event.type === "requestReview") {
-        const reviewer = requestedReviewers(event)[0] ?? defaultPeer(state.builder);
-        return { name: "Review", reviewer, builder: state.builder };
+        const reviewers = requestedReviewers(event);
+        const selected = reviewers.length ? reviewers : [defaultPeer(state.builder)];
+        return selected.length > 1
+          ? { name: "ParallelReview", agents: [...selected], builders: [state.builder] }
+          : { name: "Review", reviewer: selected[0] ?? defaultPeer(state.builder), builder: state.builder };
       }
       if (event.type === "requestReviewSkipped") return { name: "AwaitingUser" };
       return state;
@@ -160,6 +172,7 @@ export function transition(state: State, event: Event): State {
           agents: state.agents,
           builders: state.builders,
           approved: event.approved,
+          resolutionRequired: event.resolutionRequired,
         };
       return state;
     case "ReviewDone":
@@ -169,8 +182,13 @@ export function transition(state: State, event: Event): State {
       return state;
     case "ParallelReviewDone":
       if (event.type === "userSent") return beginDiscussion(event);
-      if (event.type === "handBack")
-        return { name: "ParallelBuild", agents: state.builders };
+      if (event.type === "resolveReview" && state.resolutionRequired)
+        return { ...state, approved: event.approved, resolutionRequired: false };
+      if (event.type === "handBack") {
+        if (state.builders.length === 1) return { name: "Build", builder: state.builders[0]! };
+        if (state.builders.length > 1) return { name: "ParallelBuild", agents: state.builders };
+        return { name: "AwaitingUser" };
+      }
       return state;
   }
 }

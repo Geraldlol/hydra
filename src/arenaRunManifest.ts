@@ -100,7 +100,8 @@ export type ArenaWorkspaceObservationStatus =
 export type ArenaWorkspaceObservationKind =
   | "monitorStarted"
   | "checkpoint"
-  | "postEvidence";
+  | "postEvidence"
+  | "publicationSeal";
 
 export type ArenaWorkspaceObservationReason =
   | "watcherChanged"
@@ -123,6 +124,10 @@ export interface ArenaMainWorkspaceObservedPayload {
   readonly head: ArenaGitObjectId | null;
   readonly watcherChanged: boolean;
   readonly reasonCode: ArenaWorkspaceObservationReason | null;
+  /** Present only for the terminal publicationSeal observation. */
+  readonly publicationOfEventSha256?: string;
+  /** Binds the seal to the exact receipt published by postEvidence. */
+  readonly publicationOfReceiptSha256?: string;
 }
 
 export type ArenaPreparationStatus =
@@ -415,6 +420,7 @@ const WORKSPACE_OBSERVATION_KINDS = new Set<ArenaWorkspaceObservationKind>([
   "monitorStarted",
   "checkpoint",
   "postEvidence",
+  "publicationSeal",
 ]);
 const WORKSPACE_REASONS = new Set<ArenaWorkspaceObservationReason>([
   "watcherChanged",
@@ -698,6 +704,7 @@ export function replayArenaManifest(values: readonly unknown[]): ArenaManifestRe
   let monitorEpochId: string | undefined;
   let preparedFingerprintSha256: string | undefined;
   let postEvidenceObservation: ArenaManifestEvent | undefined;
+  let publicationSealObservation: ArenaManifestEvent | undefined;
 
   records.slice(1).forEach((record, offset) => {
     const index = offset + 1;
@@ -711,6 +718,9 @@ export function replayArenaManifest(values: readonly unknown[]): ArenaManifestRe
 
     if (record.type === "arenaMainWorkspaceObserved") {
       const payload = record.payload as ArenaMainWorkspaceObservedPayload;
+      if (publicationSealObservation) {
+        invalid(label, "no workspace observation may follow the publication seal");
+      }
       if (monitorReceiptHashes.has(payload.monitorReceiptSha256)) {
         invalid(`${label}.payload.monitorReceiptSha256`, "duplicates a monitor receipt");
       }
@@ -741,6 +751,23 @@ export function replayArenaManifest(values: readonly unknown[]): ArenaManifestRe
             invalid(label, "duplicates the single final postEvidence observation");
           }
           postEvidenceObservation = record;
+        }
+        if (payload.observationKind === "publicationSeal") {
+          if (!postEvidenceObservation) {
+            invalid(label, "publicationSeal requires a published postEvidence observation");
+          }
+          if (record.sequence !== postEvidenceObservation.sequence + 1) {
+            invalid(label, "publicationSeal must immediately follow postEvidence publication");
+          }
+          const published = postEvidenceObservation.payload as
+            ArenaMainWorkspaceObservedPayload;
+          if (payload.publicationOfEventSha256
+                !== postEvidenceObservation.eventSha256
+            || payload.publicationOfReceiptSha256
+                !== published.monitorReceiptSha256) {
+            invalid(label, "publicationSeal does not bind the published postEvidence event and receipt");
+          }
+          publicationSealObservation = record;
         }
       }
       mainWorkspaceObservations.push(record);
@@ -783,11 +810,16 @@ export function replayArenaManifest(values: readonly unknown[]): ArenaManifestRe
       const finalObservation = mainWorkspaceObservations.at(-1);
       const postEvidenceIsFresh = postEvidenceObservation !== undefined
         && postEvidenceObservation.sequence > latestEvidenceSequence;
+      const publicationSealIsFresh = publicationSealObservation !== undefined
+        && postEvidenceObservation !== undefined
+        && publicationSealObservation.sequence
+          === postEvidenceObservation.sequence + 1;
       const finalObservationUnchanged =
-        postEvidenceObservation !== undefined
-        && finalObservation === postEvidenceObservation
+        publicationSealObservation !== undefined
+        && finalObservation === publicationSealObservation
         && postEvidenceIsFresh
-        && (postEvidenceObservation.payload as ArenaMainWorkspaceObservedPayload)
+        && publicationSealIsFresh
+        && (publicationSealObservation.payload as ArenaMainWorkspaceObservedPayload)
           .status === "unchanged";
       const compromised = compromiseReasons.size > 0;
       const registeredRecoveryComplete = [...contestants.values()]
@@ -807,6 +839,12 @@ export function replayArenaManifest(values: readonly unknown[]): ArenaManifestRe
           invalid(
             label,
             "completed requires a postEvidence source observation after durable evidence",
+          );
+        }
+        if (!publicationSealIsFresh) {
+          invalid(
+            label,
+            "completed requires a publication seal after durable postEvidence publication",
           );
         }
         if (payload.evidenceMatrixSha256 === null) {
@@ -1574,6 +1612,8 @@ function parseMainWorkspaceObserved(
   value: unknown,
   label: string,
 ): ArenaMainWorkspaceObservedPayload {
+  const publicationSeal = isPlainRecord(value)
+    && value.observationKind === "publicationSeal";
   const row = exactRecord(value, [
     "payloadType",
     "observationKind",
@@ -1585,6 +1625,9 @@ function parseMainWorkspaceObserved(
     "head",
     "watcherChanged",
     "reasonCode",
+    ...(publicationSeal
+      ? ["publicationOfEventSha256", "publicationOfReceiptSha256"]
+      : []),
   ], label);
   literal(row.payloadType, "mainWorkspaceObserved", `${label}.payloadType`);
   if (typeof row.observationKind !== "string"
@@ -1623,6 +1666,15 @@ function parseMainWorkspaceObserved(
   const head = row.head === null ? null : parseGitObject(row.head, `${label}.head`);
   const watcherChanged = row.watcherChanged;
   const reasonCode = row.reasonCode as ArenaWorkspaceObservationReason | null;
+  const publicationOfEventSha256 = publicationSeal
+    ? sha256(row.publicationOfEventSha256, `${label}.publicationOfEventSha256`)
+    : undefined;
+  const publicationOfReceiptSha256 = publicationSeal
+    ? sha256(
+        row.publicationOfReceiptSha256,
+        `${label}.publicationOfReceiptSha256`,
+      )
+    : undefined;
   if (watcherChanged !== (reasonCode === "watcherChanged")) {
     invalid(
       label,
@@ -1670,6 +1722,9 @@ function parseMainWorkspaceObserved(
     head,
     watcherChanged,
     reasonCode,
+    ...(publicationSeal
+      ? { publicationOfEventSha256, publicationOfReceiptSha256 }
+      : {}),
   });
 }
 

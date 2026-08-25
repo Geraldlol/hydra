@@ -167,7 +167,7 @@ export function renderRoomAttachmentsForPrompt(attachments: PendingRoomAttachmen
   if (attachments.length === 0) return "";
   const lines = [
     "--- Uploaded files ---",
-    "The user attached the following files for this turn. Hydra copied them into the workspace so both native CLIs can inspect them directly. Treat these paths as explicit user-provided attachments even though they live under `.hydra/attachments/`.",
+    "The user attached the following files for this turn. Hydra copied them into the workspace so native CLI heads with filesystem access can inspect them directly; text-capable heads also receive the bounded text previews below. Treat these paths as explicit user-provided attachments even though they live under `.hydra/attachments/`.",
   ];
   for (const attachment of attachments) {
     lines.push(
@@ -190,7 +190,7 @@ export function renderRoomAttachmentsForPrompt(attachments: PendingRoomAttachmen
         "```"
       );
     } else {
-      lines.push("Preview: binary or unsupported text encoding; inspect the copied file path directly.");
+      lines.push("Preview: binary or unsupported text encoding; inspect the copied file path if your runtime has filesystem access, otherwise report that no inline preview is available.");
     }
   }
   return lines.join("\n");

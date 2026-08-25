@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import { once } from "node:events";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -11,6 +13,7 @@ import {
   FileArenaManifestStore,
   arenaContestantArtifactPath,
   arenaContestantWorktreePath,
+  arenaManifestSegmentSnapshotMatches,
   arenaRunPaths,
   arenaStorePaths,
   evaluateArenaManifestAppendCapacity,
@@ -134,11 +137,98 @@ async function tempRoot(t: TestContext): Promise<string> {
 }
 
 describe("Arena private manifest store", () => {
+  test("binds segment entries without treating directory timestamp drift as replacement", () => {
+    const expected = {
+      dev: "1",
+      ino: "2",
+      entries: [
+        {
+          name: "00000002.jsonl",
+          dev: "1",
+          ino: "3",
+          size: 128,
+          mtimeMs: 10,
+          ctimeMs: 11,
+        },
+      ],
+    };
+
+    const metadataDrift = {
+      ...structuredClone(expected),
+      size: 999,
+      mtimeMs: 999,
+      ctimeMs: 999,
+    };
+    assert.equal(
+      arenaManifestSegmentSnapshotMatches(
+        expected,
+        metadataDrift,
+      ),
+      true,
+      "directory metadata is not authority when identity and entries match",
+    );
+    assert.equal(
+      arenaManifestSegmentSnapshotMatches(
+        expected,
+        { ...structuredClone(expected), ino: "replacement" },
+      ),
+      false,
+      "directory replacement is rejected",
+    );
+    assert.equal(
+      arenaManifestSegmentSnapshotMatches(
+        expected,
+        {
+          ...structuredClone(expected),
+          entries: [
+            ...expected.entries,
+            {
+              name: "00000003.jsonl",
+              dev: "1",
+              ino: "4",
+              size: 64,
+              mtimeMs: 12,
+              ctimeMs: 13,
+            },
+          ],
+        },
+      ),
+      false,
+      "entry additions are rejected",
+    );
+    assert.equal(
+      arenaManifestSegmentSnapshotMatches(
+        expected,
+        {
+          ...structuredClone(expected),
+          entries: [{ ...expected.entries[0]!, ino: "replacement" }],
+        },
+      ),
+      false,
+      "same-name entry replacement is rejected",
+    );
+    assert.equal(
+      arenaManifestSegmentSnapshotMatches(
+        expected,
+        {
+          ...structuredClone(expected),
+          entries: [{ ...expected.entries[0]!, ctimeMs: 12 }],
+        },
+      ),
+      false,
+      "same-size in-place entry mutation is rejected",
+    );
+  });
+
   test("constructs exact private paths and rejects path traversal identifiers", async (t) => {
     const root = await tempRoot(t);
     const paths = arenaStorePaths(root);
     const run = arenaRunPaths(root, RUN_ID);
     assert.equal(run.manifestPath, path.join(paths.runsPath, RUN_ID, "manifest.v1.jsonl"));
+    assert.equal(
+      run.manifestSegmentsPath,
+      path.join(paths.runsPath, RUN_ID, "manifest.v1.segments"),
+    );
     assert.equal(
       arenaContestantArtifactPath(root, RUN_ID, "contestant-one"),
       path.join(paths.artifactsPath, RUN_ID, "contestant-one"),
@@ -152,10 +242,28 @@ describe("Arena private manifest store", () => {
       ),
     );
     assert.throws(() => arenaRunPaths(root, "../escape"), /not safe/);
+    assert.doesNotThrow(() => arenaRunPaths(root, "Legacy-Run-A"));
+    for (const unsafe of ["foo.", "con", "nul.txt", "com1"]) {
+      assert.throws(() => arenaRunPaths(root, unsafe), /not safe/);
+    }
     assert.throws(
       () => arenaContestantWorktreePath(root, RUN_ID, ".."),
       /not safe/,
     );
+  });
+
+  test("accepts directory-only timestamp drift while retaining exact segment authority", async (t) => {
+    const root = await tempRoot(t);
+    const store = await openFileArenaManifestStore(root);
+    await store.append(lockDraft());
+    await store.append(observationDraft("event-monitor", "monitorStarted"));
+    const segments = arenaRunPaths(root, RUN_ID).manifestSegmentsPath;
+    const shifted = new Date(Date.now() - 60_000);
+    await fs.utimes(segments, shifted, shifted);
+
+    assert.equal((await store.load(RUN_ID))?.records.length, 2);
+    await store.append(observationDraft("event-checkpoint", "checkpoint"));
+    assert.equal((await store.load(RUN_ID))?.records.length, 3);
   });
 
   test("appends under a cross-process lease, replays, and treats exact retries as idempotent", async (t) => {
@@ -205,6 +313,7 @@ describe("Arena private manifest store", () => {
     const root = await tempRoot(t);
     const store = await openFileArenaManifestStore(root);
     await store.append(lockDraft());
+    await store.append(observationDraft("event-monitor", "monitorStarted"));
     const copiedRunId = "arena-copied-run";
     const copied = arenaRunPaths(root, copiedRunId);
     await fs.mkdir(copied.runPath, { recursive: true });
@@ -214,7 +323,7 @@ describe("Arena private manifest store", () => {
     );
     await assert.rejects(
       store.load(copiedRunId),
-      /contains run arena-store-run/,
+      /path-mismatched|contains run arena-store-run/,
     );
   });
 
@@ -240,6 +349,222 @@ describe("Arena private manifest store", () => {
         "event-checkpoint-right",
       ]),
     );
+  });
+
+  test("keeps append writes bounded in immutable per-event segments", async (t) => {
+    const root = await tempRoot(t);
+    const store = await openFileArenaManifestStore(root);
+    await store.append(lockDraft());
+    const paths = arenaRunPaths(root, RUN_ID);
+    const immutableBase = await fs.readFile(paths.manifestPath);
+    const baseLines = immutableBase.toString("utf8").trimEnd().split("\n");
+    const layout = JSON.parse(baseLines[0]!) as {
+      readonly schemaVersion?: number;
+      readonly recordType?: string;
+      readonly runId?: string;
+    };
+    assert.deepEqual(layout, {
+      eventSchemaVersion: 1,
+      layout: "immutableSegments",
+      recordType: "arenaManifestLayout",
+      runId: RUN_ID,
+      schemaVersion: 2,
+    });
+    assert.equal(baseLines.length, 2);
+    assert.throws(() => {
+      for (const row of baseLines) {
+        const record = JSON.parse(row) as { readonly schemaVersion?: number };
+        if (record.schemaVersion !== 1) {
+          throw new Error("legacy reader rejected an unknown schema version");
+        }
+      }
+    }, /legacy reader rejected/);
+
+    await store.append(observationDraft("event-monitor", "monitorStarted"));
+    await store.append(observationDraft("event-checkpoint", "checkpoint"));
+
+    assert.deepEqual(await fs.readFile(paths.manifestPath), immutableBase);
+    assert.deepEqual(
+      await fs.readdir(paths.manifestSegmentsPath),
+      ["00000002.jsonl", "00000003.jsonl"],
+    );
+    for (const name of await fs.readdir(paths.manifestSegmentsPath)) {
+      const stat = await fs.stat(path.join(paths.manifestSegmentsPath, name));
+      assert.ok(
+        stat.size <= ARENA_MANIFEST_LIMITS.maxEventBytes,
+        `segment ${name} exceeded the one-event write budget`,
+      );
+    }
+    assert.equal((await store.load(RUN_ID))?.records.length, 3);
+  });
+
+  test("refuses to rewind a segmented run when its whole segment root disappears", async (t) => {
+    const root = await tempRoot(t);
+    const store = await openFileArenaManifestStore(root);
+    await store.append(lockDraft());
+    await store.append(observationDraft("event-monitor", "monitorStarted"));
+    const paths = arenaRunPaths(root, RUN_ID);
+    await fs.rename(
+      paths.manifestSegmentsPath,
+      `${paths.manifestSegmentsPath}.lost`,
+    );
+
+    await assert.rejects(
+      store.load(RUN_ID),
+      /missing its mandatory segment root/,
+    );
+    await assert.rejects(
+      store.append(observationDraft("event-must-not-fork", "checkpoint")),
+      /missing its mandatory segment root/,
+    );
+  });
+
+  test("recovers a committed segment whose dead publisher left its temp link", async (t) => {
+    const root = await tempRoot(t);
+    const store = await openFileArenaManifestStore(root);
+    await store.append(lockDraft());
+    await store.append(observationDraft("event-monitor", "monitorStarted"));
+    const paths = arenaRunPaths(root, RUN_ID);
+    const finalPath = path.join(
+      paths.manifestSegmentsPath,
+      "00000002.jsonl",
+    );
+    const publisherPid = await exitedPublisherPid();
+    const temporaryPath = path.join(
+      paths.manifestSegmentsPath,
+      `.00000002.jsonl.${publisherPid}-${randomUUID()}.tmp`,
+    );
+    await fs.link(finalPath, temporaryPath);
+    assert.equal((await fs.lstat(finalPath)).nlink, 2);
+
+    const replay = await store.load(RUN_ID);
+
+    assert.equal(replay?.records.length, 2);
+    assert.equal((await fs.lstat(finalPath)).nlink, 1);
+    assert.deepEqual(
+      await fs.readdir(paths.manifestSegmentsPath),
+      ["00000002.jsonl"],
+    );
+  });
+
+  test("recovers an exact committed pair beyond the generic 4096-entry scan bound", async (t) => {
+    const root = await tempRoot(t);
+    const store = await openFileArenaManifestStore(root);
+    await store.append(lockDraft());
+    await store.append(observationDraft("event-monitor", "monitorStarted"));
+    const paths = arenaRunPaths(root, RUN_ID);
+    const finalPath = path.join(paths.manifestSegmentsPath, "00000002.jsonl");
+    const publisherPid = await exitedPublisherPid();
+    const temporaryPath = path.join(
+      paths.manifestSegmentsPath,
+      `.00000002.jsonl.${publisherPid}-${randomUUID()}.tmp`,
+    );
+    await fs.link(finalPath, temporaryPath);
+    for (let offset = 0; offset < 4_100; offset += 100) {
+      await Promise.all(Array.from({ length: 100 }, (_value, index) =>
+        fs.writeFile(
+          path.join(
+            paths.manifestSegmentsPath,
+            `padding-${String(offset + index).padStart(5, "0")}.bin`,
+          ),
+          "",
+        )));
+    }
+
+    await assert.rejects(store.load(RUN_ID), /segment entry .* is invalid/);
+    assert.equal((await fs.lstat(finalPath)).nlink, 1);
+    await assert.rejects(fs.lstat(temporaryPath), { code: "ENOENT" });
+  });
+
+  test("removes only an uncommitted temp segment from a dead publisher", async (t) => {
+    const root = await tempRoot(t);
+    const store = await openFileArenaManifestStore(root);
+    await store.append(lockDraft());
+    const paths = arenaRunPaths(root, RUN_ID);
+    const publisherPid = await exitedPublisherPid();
+    const temporaryPath = path.join(
+      paths.manifestSegmentsPath,
+      `.00000002.jsonl.${publisherPid}-${randomUUID()}.tmp`,
+    );
+    await fs.writeFile(
+      temporaryPath,
+      "uncommitted and not authoritative\n",
+      { mode: 0o600 },
+    );
+
+    const replay = await store.load(RUN_ID);
+
+    assert.equal(replay?.records.length, 1);
+    assert.deepEqual(await fs.readdir(paths.manifestSegmentsPath), []);
+  });
+
+  test("fails closed while a manifest temp publisher may still be alive", async (t) => {
+    const root = await tempRoot(t);
+    const store = await openFileArenaManifestStore(root);
+    await store.append(lockDraft());
+    const paths = arenaRunPaths(root, RUN_ID);
+    const temporaryPath = path.join(
+      paths.manifestSegmentsPath,
+      `.00000002.jsonl.${process.pid}-${randomUUID()}.tmp`,
+    );
+    await fs.writeFile(
+      temporaryPath,
+      "possibly live publication\n",
+      { mode: 0o600 },
+    );
+
+    await assert.rejects(
+      store.load(RUN_ID),
+      /live or ambiguous publisher/,
+    );
+    assert.equal((await fs.lstat(temporaryPath)).isFile(), true);
+  });
+
+  test("migrates a legacy multi-row base before adding immutable segments", async (t) => {
+    const root = await tempRoot(t);
+    const store = await openFileArenaManifestStore(root);
+    await store.append(lockDraft());
+    await store.append(
+      observationDraft("event-monitor", "monitorStarted"),
+    );
+    const paths = arenaRunPaths(root, RUN_ID);
+    const currentBase = await fs.readFile(paths.manifestPath, "utf8");
+    const legacyFirstEvent = Buffer.from(
+      currentBase.slice(currentBase.indexOf("\n") + 1),
+      "utf8",
+    );
+    const legacyBody = Buffer.concat([
+      legacyFirstEvent,
+      await fs.readFile(
+        path.join(paths.manifestSegmentsPath, "00000002.jsonl"),
+      ),
+    ]);
+    await fs.writeFile(paths.manifestPath, legacyBody);
+    await fs.rm(paths.manifestSegmentsPath, { recursive: true, force: true });
+
+    const exactLegacyRetry = await store.append(
+      observationDraft("event-monitor", "monitorStarted"),
+    );
+    assert.equal(exactLegacyRetry.sequence, 2);
+
+    await store.append(observationDraft("event-checkpoint", "checkpoint"));
+
+    const migrated = await fs.readFile(paths.manifestPath, "utf8");
+    assert.equal(
+      migrated.slice(migrated.indexOf("\n") + 1),
+      legacyBody.toString("utf8"),
+    );
+    assert.equal(
+      (JSON.parse(migrated.split("\n", 1)[0]!) as {
+        readonly schemaVersion?: number;
+      }).schemaVersion,
+      2,
+    );
+    assert.deepEqual(
+      await fs.readdir(paths.manifestSegmentsPath),
+      ["00000003.jsonl"],
+    );
+    assert.equal((await store.load(RUN_ID))?.records.length, 3);
   });
 
   test("fails closed on torn, malformed UTF-8, non-canonical, and oversized files", async (t) => {
@@ -365,7 +690,7 @@ describe("Arena private manifest store", () => {
   });
 
   test("reserves bounded closure capacity for terminal and cleanup receipts", () => {
-    assert.equal(ARENA_MANIFEST_CLOSURE_EVENT_RESERVE, 363);
+    assert.equal(ARENA_MANIFEST_CLOSURE_EVENT_RESERVE, 364);
     assert.equal(
       evaluateArenaManifestAppendCapacity({
         currentEvents:
@@ -397,6 +722,16 @@ describe("Arena private manifest store", () => {
         observationKind: "checkpoint",
         observationStatus: "changed",
         changedObservationAlreadyRecorded: false,
+      }).accepted,
+      true,
+    );
+    assert.equal(
+      evaluateArenaManifestAppendCapacity({
+        currentEvents: ARENA_MANIFEST_LIMITS.maxEvents - 1,
+        currentBytes: 0,
+        candidateBytes: 1,
+        eventType: "arenaMainWorkspaceObserved",
+        observationKind: "publicationSeal",
       }).accepted,
       true,
     );
@@ -457,6 +792,7 @@ describe("Arena private manifest store", () => {
     const root = await tempRoot(t);
     const store = await openFileArenaManifestStore(root);
     await store.append(lockDraft());
+    await store.append(observationDraft("event-monitor", "monitorStarted"));
     await fs.writeFile(
       store.paths.indexPath,
       '{"runId":"forged-authority","state":"comparable"}\n',
@@ -468,9 +804,27 @@ describe("Arena private manifest store", () => {
     assert.equal(rebuilt[0]?.runId, RUN_ID);
     assert.equal(rebuilt[0]?.state, "locked");
     assert.equal(rebuilt[0]?.comparison, null);
+    assert.equal(rebuilt[0]?.eventCount, 2);
+    const runPaths = arenaRunPaths(root, RUN_ID);
+    const expectedManifestBytes = (await Promise.all([
+      fs.stat(runPaths.manifestPath),
+      fs.stat(path.join(runPaths.manifestSegmentsPath, "00000002.jsonl")),
+    ])).reduce((total, stat) => total + stat.size, 0);
+    assert.equal(rebuilt[0]?.manifestBytes, expectedManifestBytes);
     assert.doesNotMatch(
       await fs.readFile(store.paths.indexPath, "utf8"),
       /forged-authority/,
     );
   });
 });
+
+async function exitedPublisherPid(): Promise<number> {
+  const child = spawn(process.execPath, ["-e", ""], {
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  const pid = child.pid;
+  if (!pid) throw new Error("Could not capture the temporary publisher PID.");
+  await once(child, "exit");
+  return pid;
+}

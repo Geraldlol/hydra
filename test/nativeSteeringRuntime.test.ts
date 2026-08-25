@@ -276,6 +276,39 @@ describe("native steering runtime", () => {
     }
   });
 
+  test("a pre-aborted native steering run submits neither App Server nor one-shot fallback", async () => {
+    const fixture = await createNativeCliFixture();
+    const controller = new SteeringController({
+      store: new InMemorySteeringStore(),
+      ownerId: OWNER,
+      missionSubmissionGate,
+    });
+    const abort = new AbortController();
+    abort.abort();
+
+    try {
+      const runner = createNativeSteeringRunner(runtimeOptions({
+        transport: "codexAppServer",
+        controller,
+        timeoutMs: 0,
+        signal: abort.signal,
+        spawn: fixture.spawn(
+          ["exec", "--sandbox", "read-only", "--json", "-"],
+          { HYDRA_FAKE_CODEX_MODE: "delayed-initialize" },
+        ),
+      }));
+      assert.ok(runner);
+
+      const result = await runner(() => undefined);
+
+      assert.equal(result.cancelled, true);
+      assert.match(result.stderr, /did not start a fallback request/i);
+      assert.deepEqual(await fixture.invocations(), []);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
   test("drains an admitted steer before recording the terminal chain", async () => {
     const fixture = await createNativeCliFixture();
     const controller = new SteeringController({

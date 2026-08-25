@@ -1,5 +1,6 @@
 import type { AgentId } from "./phases";
 import { claudeUsesPrintModeArgs } from "./claudeCli";
+import type { AgentKind } from "./agentAdapter";
 import type { Phase } from "./prompts";
 
 export type AuthorityLevel = "readOnly" | "workspaceWrite" | "fullNative" | "unknown";
@@ -14,9 +15,11 @@ export interface AuthorityClassification {
 export function classifyAgentAuthority(
   agent: AgentId,
   phase: Phase,
-  args: string[]
+  args: string[],
+  declaredKind?: AgentKind,
 ): AuthorityClassification {
-  const validation = validateNativeArgs(agent, args);
+  const kind = effectiveAgentKind(agent, declaredKind);
+  const validation = validateNativeArgs(agent, args, kind);
   const dangerous = dangerousFlag(args);
   if (dangerous) {
     return classification(
@@ -31,9 +34,10 @@ export function classifyAgentAuthority(
   }
 
   const base =
-    agent === "codex" ? classifyCodexAuthority(phase, args)
-    : agent === "claude" ? classifyClaudeAuthority(phase, args)
-    : classifyGenericAuthority(phase, args); // gemini + custom heads: no vendor-specific sandbox flags known
+    kind === "codex" ? classifyCodexAuthority(phase, args)
+    : kind === "claude" ? classifyClaudeAuthority(phase, args)
+    : kind === "gemini" ? classifyGeminiAuthority(phase, args)
+    : classifyGenericAuthority(phase, args);
   if (validation.length === 0) return base;
   return { ...base, warnings: [...base.warnings, ...validation] };
 }
@@ -44,9 +48,14 @@ export function classifyAgentAuthority(
 // classifyAgentAuthority -> AuthorityClassification.warnings (already
 // rendered by Doctor, supportBundle, status bar, and prompt preview).
 // Never throws -- the native CLI is the final word on validity.
-export function validateNativeArgs(agent: AgentId, args: string[]): string[] {
+export function validateNativeArgs(
+  agent: AgentId,
+  args: string[],
+  declaredKind?: AgentKind,
+): string[] {
   const warnings: string[] = [];
-  if (agent === "codex") {
+  const kind = effectiveAgentKind(agent, declaredKind);
+  if (kind === "codex") {
     // `--ask-for-approval` is on the TUI root (`codex` interactive) only --
     // not on `codex exec` / `codex review`. clap will fail to parse it.
     // See codex-rs/utils/cli/src/approval_mode_cli_arg.rs and the
@@ -104,7 +113,7 @@ export function validateNativeArgs(agent: AgentId, args: string[]): string[] {
         `Codex \`--local-provider\` must be lmstudio or ollama; got "${localProvider}".`
       );
     }
-  } else if (agent === "claude") {
+  } else if (kind === "claude") {
     // `--output-format stream-json` (with `--print`/`-p`) requires `--verbose`.
     // panel.ts auto-injects --verbose when Hydra wraps the spawn, but
     // user-supplied args are passed raw -- catch the typo before runtime.
@@ -192,8 +201,30 @@ export function validateNativeArgs(agent: AgentId, args: string[]): string[] {
         `Claude \`--effort\` must be one of low, medium, high, xhigh, max; got "${effort}".`
       );
     }
+  } else if (kind === "gemini") {
+    const approvalMode = readLastFlagValue(args, "--approval-mode");
+    if (approvalMode !== undefined
+      && !["default", "auto_edit", "yolo", "plan"].includes(approvalMode)) {
+      warnings.push(
+        `Gemini \`--approval-mode\` must be one of default, auto_edit, yolo, plan; got "${approvalMode}".`,
+      );
+    }
+    if (readLastGeminiYolo(args) === true && approvalMode !== undefined) {
+      warnings.push(
+        "Gemini `--yolo` / `-y` cannot be combined with `--approval-mode`; use `--approval-mode=yolo` instead.",
+      );
+    }
   }
   return warnings;
+}
+
+function effectiveAgentKind(
+  agent: AgentId,
+  declaredKind?: AgentKind,
+): AgentKind | undefined {
+  if (declaredKind) return declaredKind;
+  if (agent === "codex" || agent === "claude" || agent === "gemini") return agent;
+  return undefined;
 }
 
 function isCodexExecArgs(args: string[]): boolean {
@@ -217,6 +248,7 @@ function firstCodexPositional(args: string[]): string | undefined {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === undefined) continue;
+    if (arg === "--") return undefined;
     if (arg.startsWith("-")) {
       const eq = arg.indexOf("=");
       if (eq < 0 && valueFlags.has(arg)) i++;
@@ -307,11 +339,56 @@ function classifyClaudeAuthority(phase: Phase, args: string[]): AuthorityClassif
   );
 }
 
-// Generic path for agents with no vendor-specific sandbox/permission flags
-// (gemini, custom heads). Hydra has no schema to read authority off of raw
-// args for these, so it honestly reports "unknown" rather than guessing --
-// the dangerousFlag gate above already caught the one signal that applies
-// to every vendor (--dangerously-*).
+function classifyGeminiAuthority(phase: Phase, args: string[]): AuthorityClassification {
+  const approvalMode = readLastFlagValue(args, "--approval-mode");
+  const yolo = readLastGeminiYolo(args);
+  if (yolo === true || approvalMode === "yolo") {
+    return classification(
+      "fullNative",
+      "Full native",
+      "Gemini YOLO mode auto-approves every tool call.",
+      ["Hydra is allowing Gemini full native authority for this call."],
+    );
+  }
+  const policyBypass = firstFlagBeforeDelimiter(args, [
+    "--allowed-tools",
+    "--policy",
+    "--admin-policy",
+  ]);
+  if (policyBypass) {
+    return classification(
+      "fullNative",
+      "Full native",
+      `Gemini args include ${policyBypass}, which can pre-authorize native tools outside Hydra's per-call approval boundary.`,
+      ["Hydra conservatively treats explicit Gemini tool-policy overrides as full native authority."],
+    );
+  }
+  if (approvalMode === "auto_edit") {
+    return classification(
+      "workspaceWrite",
+      "Workspace-write",
+      "Gemini auto_edit mode auto-approves workspace edit tools.",
+      [],
+    );
+  }
+  if (approvalMode === "plan") {
+    return classification(
+      "fullNative",
+      "Full native",
+      "Gemini headless Plan Mode can automatically transition to YOLO when the plan exits.",
+      ["Hydra requires full-native consent because a headless plan is not guaranteed to remain read-only."],
+    );
+  }
+  return classification(
+    "unknown",
+    "Unknown/custom",
+    `Gemini ${phase} args do not declare a recognized auto-approved authority mode.`,
+    ["Hydra cannot prove this Gemini call is read-only or workspace-write from args alone."],
+  );
+}
+
+// Generic path for custom heads without vendor-specific authority semantics.
+// Hydra reports unknown rather than inferring safety from a command name.
 function classifyGenericAuthority(phase: Phase, args: string[]): AuthorityClassification {
   return classification(
     "unknown",
@@ -330,6 +407,7 @@ function hasReviewSubcommand(args: string[]): boolean {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === undefined) continue;
+    if (arg === "--") return false;
     if (arg.startsWith("-")) {
       const eq = arg.indexOf("=");
       if (eq < 0 && valueFlags.has(arg)) i++; // skip value
@@ -341,11 +419,11 @@ function hasReviewSubcommand(args: string[]): boolean {
 }
 
 function dangerousFlag(args: string[]): string | undefined {
-  return args.find((arg) =>
-    arg === "--dangerously-bypass-approvals-and-sandbox" ||
-    arg === "--dangerously-skip-permissions" ||
-    arg === "--bypass-permissions"
-  );
+  return firstFlagBeforeDelimiter(args, [
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--dangerously-skip-permissions",
+    "--bypass-permissions",
+  ]);
 }
 
 function readLastFlagValue(args: string[], flag: string): string | undefined {
@@ -353,7 +431,9 @@ function readLastFlagValue(args: string[], flag: string): string | undefined {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === undefined) continue;
+    if (arg === "--") break;
     if (arg === flag && i + 1 < args.length) {
+      if (args[i + 1] === "--") break;
       value = args[i + 1];
       i++;
       continue;
@@ -363,6 +443,31 @@ function readLastFlagValue(args: string[], flag: string): string | undefined {
     }
   }
   return value;
+}
+
+function readLastGeminiYolo(args: string[]): boolean | undefined {
+  let value: boolean | undefined;
+  for (const arg of args) {
+    if (arg === "--") break;
+    if (arg === "--yolo" || arg === "-y") value = true;
+    else if (arg === "--no-yolo") value = false;
+    else if (arg === "--yolo=true" || arg === "-y=true") value = true;
+    else if (arg === "--yolo=false" || arg === "-y=false") value = false;
+  }
+  return value;
+}
+
+function firstFlagBeforeDelimiter(
+  args: readonly string[],
+  flags: readonly string[],
+): string | undefined {
+  const accepted = new Set(flags);
+  for (const arg of args) {
+    if (arg === "--") break;
+    const name = arg?.split("=", 1)[0];
+    if (name && accepted.has(name)) return name;
+  }
+  return undefined;
 }
 
 function classification(

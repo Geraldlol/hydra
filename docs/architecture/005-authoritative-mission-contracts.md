@@ -1,6 +1,6 @@
 # ADR 005: Private, explicitly confirmed Mission Contracts
 
-- Status: Accepted for staged implementation
+- Status: Accepted; implemented
 - Date: 2026-07-24
 - Owners: Hydra maintainers
 
@@ -154,12 +154,12 @@ queueing at the real stdin write rather than at queue admission. A rejected
 steering gate is a known zero-write `missionHashMismatch` and cannot fail or
 interrupt an otherwise healthy provider session.
 
-During staged rollout, ordinary discussion may use the explicit unbound
-sentinel. Arena, Mission Graph automatic dispatch, replay, and other
-contract-dependent features require an active confirmed contract. Existing
-legacy room Build remains available until the proposal/confirmation UI and
-recovery smoke are complete; it still records the unbound sentinel rather than
-claiming contract coverage.
+For compatibility, ordinary discussion and legacy room Build may use the
+explicit unbound sentinel; those paths still record it rather than claiming
+contract coverage. Arena, Mission Graph automatic dispatch, Replay, and other
+contract-dependent features require an active confirmed contract. The
+proposal/confirmation UI and Mission recovery smoke are implemented, but they
+do not reinterpret an explicitly unbound legacy call as Mission-bound work.
 
 Rollback or temporarily unavailable Mission UI never reinterprets an active or
 invalid ledger as unbound. If strict replay or the enforcement controller is
@@ -228,7 +228,7 @@ disabled when the binding is unbound or invalid. Rollback hides new controls
 and disables bound dispatch while preserving the private history. Never
 reconstruct authority from the mirror during rollback.
 
-### Current staged implementation
+### Current implementation
 
 The foundation now opens and strictly replays the private Mission controller
 before Flight Recorder and steering initialization. Each room turn, direct

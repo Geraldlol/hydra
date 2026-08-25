@@ -11,8 +11,34 @@ const nativeRuntime = fs.readFileSync(
   path.join(process.cwd(), "src", "nativeSteeringRuntime.ts"),
   "utf8",
 );
+const extension = fs.readFileSync(path.join(process.cwd(), "src", "extension.ts"), "utf8");
+const manifest = fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8");
+const webviewMessages = fs.readFileSync(
+  path.join(process.cwd(), "src", "webviewMessages.ts"),
+  "utf8",
+);
 
 describe("Flight Recorder staged panel integration source contract", () => {
+  test("contributes and registers inspect, Replay, and Create Eval operator workflows", () => {
+    for (const command of [
+      "manageFlightRecorder",
+      "replayFlightTrace",
+      "createFlightEval",
+    ]) {
+      assert.match(manifest, new RegExp(`"command": "hydraRoom\\.${command}"`));
+      assert.match(extension, new RegExp(`"hydraRoom\\.${command}"`));
+      assert.match(webviewMessages, new RegExp(command));
+    }
+    assert.match(manifest, /"command": "hydraRoom\.replayFlightTrace"[\s\S]*?"enablement": "isWorkspaceTrusted"/);
+    const replayStart = panel.indexOf("async replayFlightTrace(");
+    const evalStart = panel.indexOf("async createFlightEval(", replayStart);
+    const evalEnd = panel.indexOf("async openMissionContract(", evalStart);
+    const replay = panel.slice(replayStart, evalStart);
+    const createEval = panel.slice(evalStart, evalEnd);
+    assert.match(replay, /controller\.withCurrentBinding\([\s\S]*surface\.prepareReplay\(/);
+    assert.match(createEval, /controller\.withCurrentBinding\([\s\S]*surface\.createEval\(/);
+  });
+
   test("initializes private Mission authority before Flight and steering", () => {
     const mission = panel.indexOf("MissionContractController.tryOpen");
     const flight = panel.indexOf("await createFlightRecorderRuntime", mission);
@@ -61,6 +87,21 @@ describe("Flight Recorder staged panel integration source contract", () => {
     assert.doesNotMatch(method, /hydra-flight-context-v1|authorization\.roomTurnId/);
   });
 
+  test("normalizes provider tool metadata from raw transport evidence before reply reduction", () => {
+    const oneShotStart = panel.indexOf("private async runOneShotPipeline(");
+    const oneShotEnd = panel.indexOf("private async runHttpPipeline(", oneShotStart);
+    const oneShot = panel.slice(oneShotStart, oneShotEnd);
+    assert.ok(oneShotStart >= 0 && oneShotEnd > oneShotStart);
+    const telemetry = oneShot.indexOf("flightProviderTelemetryFromOutput(");
+    const normalizeReply = oneShot.indexOf("this.normalizeOneShotResult(");
+    assert.ok(telemetry >= 0 && normalizeReply > telemetry);
+    assert.match(oneShot, /prepared\.outputMode,[\s\S]*result\.stdout/);
+    assert.match(panel, /const verifiedRawOutput = await this\.terminalBridgeRawOutput\(result\)/);
+    assert.match(panel, /flightState\.providerTelemetry = flightProviderTelemetryFromOutput\(/);
+    assert.match(panel, /if \(resultForFlight[\s\S]*&& flightState\.providerTelemetry\)/);
+    assert.doesNotMatch(panel, /recordStructuredProviderFlightTelemetry\([\s\S]{0,160}resultForFlight\.stdout/);
+  });
+
   test("uses ephemeral prompt-component commitments at every staged dispatch", () => {
     assert.match(panel, /withPrivateFlightContextCommitment\(/);
     assert.match(panel, /promptContextSha256\(\[/);
@@ -73,7 +114,7 @@ describe("Flight Recorder staged panel integration source contract", () => {
   test("drains all started fanout calls before terminalizing their room trace", () => {
     assert.equal(
       (panel.match(/results = await settleAgentCalls\(calls, \(\) => ctrl\??\.abort\(\)\)/g) ?? []).length,
-      4,
+      5,
     );
     assert.match(panel, /const results = await settleAgentCalls\(calls, \(\) => ctrl\.abort\(\)\)/);
     assert.doesNotMatch(panel, /Promise\.all\(calls\)/);

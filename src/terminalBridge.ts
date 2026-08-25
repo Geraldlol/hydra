@@ -21,6 +21,7 @@ import {
   type MissionSubmissionGate,
 } from "./missionDispatch";
 import { effectiveSpawnEnvironment, expandRequestFileSpawn, resolveAgentCommand } from "./cli";
+import { windowsSystemExecutable } from "./executablePath";
 import { appendHydraEvent, createHydraEvent } from "./events";
 import {
   createTerminalSession,
@@ -40,7 +41,9 @@ import {
   buildTerminalPromptFile,
   expandTerminalCommand,
   parseTerminalReply,
+  terminalBridgePlatformSupport,
   terminalProtocolStoragePaths,
+  type TerminalBridgePlatformSupport,
   type TerminalProtocolPaths,
   type TerminalReply,
 } from "./terminalProtocol";
@@ -55,6 +58,15 @@ export interface TerminalBridgeOptions {
   postDispatchSettleMs?: number;
   /** Extension-owned, per-workspace storage. Must not be inside workspaceRoot. */
   artifactRoot?: string;
+  /** @internal Platform override for deterministic cross-platform tests. */
+  platform?: NodeJS.Platform;
+  /** @internal Mutable 32-byte entropy source for focused lifecycle tests. */
+  replyKeyFactory?: () => Buffer;
+}
+
+interface StaleDispatchSweepOptions {
+  /** @internal Deterministic owner-liveness probe for focused cleanup tests. */
+  isProcessAlive?: (pid: number) => boolean | undefined;
 }
 
 interface ArtifactBoundary {
@@ -63,9 +75,21 @@ interface ArtifactBoundary {
 }
 
 const MAX_TERMINAL_ARTIFACT_BYTES = MAX_AGENT_STDOUT_BYTES + 64 * 1024;
+const CRASHED_REPLY_KEY_SWEEP_INTERVAL_MS = 60 * 1000;
+
+const TERMINAL_STARTUP_COMMAND_SETTINGS: Readonly<Partial<Record<AgentId, string>>> = Object.freeze({
+  codex: "codexTerminalCommand",
+  claude: "claudeTerminalCommand",
+  gemini: "geminiTerminalCommand",
+});
+
+export function terminalStartupCommandSetting(agent: AgentId): string | undefined {
+  return TERMINAL_STARTUP_COMMAND_SETTINGS[agent];
+}
 
 export interface TerminalBridgeSelfTestResult {
   ok: boolean;
+  unsupported?: boolean;
   message: string;
   terminationFailed?: boolean;
   logPath: string;
@@ -140,6 +164,16 @@ export class TerminalBridge {
     void this.artifactBoundary
       .then(() => sweepStaleDispatchArtifacts(this.artifactRoot))
       .catch(() => undefined);
+    // A surviving window can promptly reclaim a sibling extension host's
+    // crash-orphaned key. PID liveness makes this safe for active windows;
+    // ambiguous or reused PIDs remain subject only to the one-hour sweep.
+    const sweepTimer = setInterval(() => {
+      void this.artifactBoundary
+        .then(() => sweepStaleDispatchArtifacts(this.artifactRoot))
+        .catch(() => undefined);
+    }, CRASHED_REPLY_KEY_SWEEP_INTERVAL_MS);
+    sweepTimer.unref();
+    this.disposables.push({ dispose: () => clearInterval(sweepTimer) });
   }
 
   dispose(): void {
@@ -158,6 +192,7 @@ export class TerminalBridge {
 
   async openAll(): Promise<void> {
     this.assertNotDisposed();
+    this.assertPlatformSupported();
     await Promise.all([this.ensureTerminal("codex"), this.ensureTerminal("claude")]);
   }
 
@@ -168,6 +203,7 @@ export class TerminalBridge {
     signal?: AbortSignal,
   ): Promise<void> {
     this.assertNotDisposed();
+    this.assertPlatformSupported();
     const terminal = await this.ensureTerminal(agent);
     this.assertNotDisposed();
     const expanded = expandTerminalCommand(line, this.workspaceRoot);
@@ -192,10 +228,9 @@ export class TerminalBridge {
   }
 
   getSessions(): TerminalSession[] {
-    // Why: sessions is keyed by the now-widened AgentId, so a literal .codex/.claude
-    // access is typed as possibly-undefined even though both are always populated
-    // by the field initializer; the fallback is unreachable in practice.
-    return [this.sessions.codex ?? createTerminalSession("codex"), this.sessions.claude ?? createTerminalSession("claude")];
+    // Include dynamically created Gemini/custom sessions so health reporting
+    // cannot hide a terminal after its first dispatch.
+    return Object.values(this.sessions);
   }
 
   async callAgent(
@@ -208,6 +243,8 @@ export class TerminalBridge {
     onChunk?: (chunk: string) => void,
     submissionGate?: MissionSubmissionGate,
   ): Promise<TerminalBridgeRunResult> {
+    this.assertNotDisposed();
+    this.assertPlatformSupported();
     const { result, paths } = await this.callAgentWithPaths(
       agent,
       phase,
@@ -224,6 +261,22 @@ export class TerminalBridge {
 
   async selfTest(timeoutMs: number, signal: AbortSignal = new AbortController().signal): Promise<TerminalBridgeSelfTestResult> {
     this.assertNotDisposed();
+    const support = this.platformSupport();
+    if (!support.supported) {
+      return {
+        ok: false,
+        unsupported: true,
+        message: support.message,
+        logPath: "",
+        replyPath: "",
+        checks: {
+          logBomFree: false,
+          replyStartsWithJsonObject: false,
+          outputNotDuplicated: false,
+          replyParsed: false,
+        },
+      };
+    }
     const expected = "hydra-terminal-bridge-self-test";
     const chunks: string[] = [];
     const { result, paths } = await this.callAgentWithPaths(
@@ -340,7 +393,7 @@ export class TerminalBridge {
     // Math.random's 24-bit hex tail had a real collision risk under rapid
     // pokes — collided requestId ⇒ collided file paths ⇒ stale reply file
     // parsed as new.
-    const requestId = `${Date.now()}-${crypto.randomUUID()}`;
+    const requestId = terminalBridgeRequestId();
     const paths = terminalProtocolStoragePaths(this.artifactRoot, requestId, agent, phase);
     this.assertNotDisposed();
     if (signal.aborted) return { result: cancelledTerminalResult(), paths };
@@ -432,11 +485,14 @@ export class TerminalBridge {
       await cleanupRequestArtifacts(paths);
       return { result: cancelledTerminalResult(), paths };
     }
-    // The per-request key exists only in the live PowerShell session. The
-    // reply carries an HMAC over its text/error/final-log hash, never the key.
-    const replyNonce = crypto.randomBytes(16).toString("base64url");
+    // Keep the HMAC key out of terminal input/history. PowerShell consumes its
+    // one-use private artifact before it resolves or invokes the native CLI.
+    // This removes ambient disclosure paths; it is not isolation from an
+    // already-running process with the same OS-user authority.
+    let replyKey: Buffer | undefined;
     let result: RunResult;
     try {
+      replyKey = this.createReplyKey();
       const dispatchScript = buildPowerShellDispatchCommand(
         expandRequestFileSpawn(terminalSpawn, {
           hydraPromptFile: paths.promptPath,
@@ -457,8 +513,13 @@ export class TerminalBridge {
       if (signal.aborted) {
         return { result: cancelledTerminalResult(), paths };
       }
+      await createPrivateArtifact(paths.replyKeyPath, replyKey, boundary);
+      this.assertNotDisposed();
+      if (signal.aborted) {
+        return { result: cancelledTerminalResult(), paths };
+      }
       const dispatch = () => terminal.sendText(
-        buildPowerShellDispatchInvocation(paths.dispatchPath, replyNonce, sha256(dispatchScript)),
+        buildPowerShellDispatchInvocation(paths.dispatchPath, sha256(dispatchScript)),
         true,
       );
       if (submissionGate) {
@@ -489,15 +550,17 @@ export class TerminalBridge {
         signal,
         this.replyPollMs(),
         chunkHandler,
-        replyNonce,
+        replyKey,
         boundary
       );
     } finally {
-      // Prompt and launcher content are ephemeral. Logs and HMAC-authenticated
-      // replies remain briefly for diagnostics and are swept by age.
+      replyKey?.fill(0);
+      // Prompt, launcher, and reply-key content are ephemeral. Logs and
+      // HMAC-authenticated replies remain briefly for diagnostics and age out.
       await Promise.all([
         unlinkIfExists(paths.dispatchPath),
         unlinkIfExists(paths.promptPath),
+        unlinkPrivateArtifactIfSafe(paths.replyKeyPath, boundary),
         unlinkIfExists(paths.lastMessagePath),
       ]);
     }
@@ -523,7 +586,7 @@ export class TerminalBridge {
   }
 
   private cancelledCall(agent: AgentId, phase: Phase): { result: RunResult; paths: TerminalProtocolPaths } {
-    const requestId = `${Date.now()}-${crypto.randomUUID()}`;
+    const requestId = terminalBridgeRequestId();
     return {
       result: cancelledTerminalResult(),
       paths: terminalProtocolStoragePaths(this.artifactRoot, requestId, agent, phase),
@@ -534,8 +597,26 @@ export class TerminalBridge {
     if (this.disposed) throw new Error("Terminal bridge has been disposed.");
   }
 
+  platformSupport(): TerminalBridgePlatformSupport {
+    return terminalBridgePlatformSupport(this.options.platform ?? process.platform);
+  }
+
+  private assertPlatformSupported(): void {
+    const support = this.platformSupport();
+    if (!support.supported) throw new Error(support.message);
+  }
+
   private postDispatchSettleMs(): number {
     return this.options.postDispatchSettleMs ?? 50;
+  }
+
+  private createReplyKey(): Buffer {
+    const replyKey = this.options.replyKeyFactory?.() ?? crypto.randomBytes(32);
+    if (!Buffer.isBuffer(replyKey) || replyKey.length !== 32) {
+      if (replyKey instanceof Uint8Array) replyKey.fill(0);
+      throw new Error("Terminal bridge reply key source must return a mutable 32-byte Buffer.");
+    }
+    return replyKey;
   }
 
   private async resolveAgentCommandCached(
@@ -573,6 +654,7 @@ export class TerminalBridge {
     enforceEnvironment = false
   ): Promise<vscode.Terminal> {
     this.assertNotDisposed();
+    this.assertPlatformSupported();
     await this.artifactBoundary;
     this.assertNotDisposed();
     const environmentFingerprint = terminalEnvironmentFingerprint(env);
@@ -598,7 +680,8 @@ export class TerminalBridge {
     });
     this.assertNotDisposed();
     const terminal = vscode.window.createTerminal({
-      name: TERMINAL_NAMES[agent],
+      name: TERMINAL_NAMES[agent] ?? `Hydra ${agent}`,
+      shellPath: windowsSystemExecutable("powershell.exe"),
       cwd: this.workspaceRoot,
       env: terminalEnvironmentOverrides(env),
     });
@@ -669,8 +752,13 @@ export class TerminalBridge {
   }
 
   private terminalCommand(agent: AgentId): string {
+    // Never synthesize a configuration key from a workspace-controlled agent
+    // id. VS Code can return undeclared settings from .vscode/settings.json;
+    // only explicitly declared, application-scoped keys may reach sendText.
+    const setting = terminalStartupCommandSetting(agent);
+    if (!setting) return "";
     const cfg = vscode.workspace.getConfiguration("hydraRoom");
-    return cfg.get<string>(`${agent}TerminalCommand`, "");
+    return cfg.get<string>(setting, "");
   }
 
   private startupDelayMs(): number {
@@ -726,7 +814,7 @@ export async function waitForReply(
   signal: AbortSignal,
   pollMs: number,
   onChunk?: (chunk: string) => void,
-  replyNonce?: string,
+  replyKey?: string | Uint8Array,
   artifactBoundary?: ArtifactBoundary
 ): Promise<TerminalWaitResult> {
   const start = Date.now();
@@ -790,9 +878,9 @@ export async function waitForReply(
         ? (await readPrivateArtifact(replyPath, artifactBoundary)).toString("utf8")
         : (await readBoundedArtifact(replyPath)).toString("utf8");
       const reply = parseTerminalReply(raw);
-      if (replyNonce && !isAuthenticatedTerminalReply(reply, replyNonce)) {
-        // Authenticated replies use the nonce as an HMAC key and never write
-        // that key to disk. `reply.nonce` remains accepted for old fixtures.
+      if (replyKey && !isAuthenticatedTerminalReply(reply, replyKey)) {
+        // New dispatches use the one-use private key artifact; `reply.nonce`
+        // remains accepted only for legacy string-key fixtures.
         lastParseError = "reply authentication mismatch — possible spoofed terminal artifact";
         await sleepWithAbort(nextPollMs);
         nextPollMs = Math.min(maxPollMs, nextPollMs * 2);
@@ -959,7 +1047,7 @@ export async function prepareTerminalArtifactRoot(
   }
 
   await fs.chmod(logicalRoot, 0o700).catch(() => undefined);
-  for (const name of ["prompts", "replies", "logs", "dispatch", "sessions"]) {
+  for (const name of ["prompts", "replies", "logs", "dispatch", "reply-keys", "sessions"]) {
     const dir = path.join(logicalRoot, name);
     await fs.mkdir(dir, { recursive: true, mode: 0o700 });
     const stat = await fs.lstat(dir);
@@ -977,7 +1065,7 @@ export async function prepareTerminalArtifactRoot(
 
 async function createPrivateArtifact(
   filePath: string,
-  content: string,
+  content: string | Uint8Array,
   boundary: ArtifactBoundary
 ): Promise<void> {
   await assertArtifactParent(filePath, boundary);
@@ -999,10 +1087,28 @@ async function createPrivateArtifact(
     if (opened.dev !== entry.dev || opened.ino !== entry.ino) {
       throw new Error(`Terminal bridge artifact changed while it was created: ${filePath}`);
     }
-    await handle.writeFile(content, "utf8");
+    if (typeof content === "string") await handle.writeFile(content, "utf8");
+    else await handle.writeFile(content);
     await handle.chmod(0o600).catch(() => undefined);
   } finally {
     await handle.close();
+  }
+}
+
+async function unlinkPrivateArtifactIfSafe(
+  filePath: string,
+  boundary: ArtifactBoundary,
+): Promise<void> {
+  try {
+    await assertArtifactParent(filePath, boundary);
+    const stat = await fs.lstat(filePath);
+    if (stat.isDirectory()) return;
+    // unlink removes a final symlink itself; the validated, non-reparse parent
+    // prevents cleanup from following a swapped directory outside the root.
+    await fs.unlink(filePath);
+  } catch {
+    // Missing or no-longer-contained secret artifacts are left untouched. The
+    // dispatch has already failed closed, and cleanup must never escape root.
   }
 }
 
@@ -1153,13 +1259,21 @@ function sha256Buffer(value: Buffer): string {
 }
 
 /** @internal — exported for terminal reply authentication tests. */
-export function terminalReplyAuth(reply: Pick<TerminalReply, "text" | "error" | "logSha256">, key: string): string {
+export function terminalReplyAuth(
+  reply: Pick<TerminalReply, "text" | "error" | "logSha256">,
+  key: string | Uint8Array,
+): string {
   const material = `${reply.text}\0${reply.error ?? ""}\0${reply.logSha256 ?? ""}`;
-  return crypto.createHmac("sha256", Buffer.from(key, "utf8")).update(material, "utf8").digest("hex");
+  const keyBytes = typeof key === "string" ? Buffer.from(key, "utf8") : key;
+  return crypto.createHmac("sha256", keyBytes).update(material, "utf8").digest("hex");
 }
 
-function isAuthenticatedTerminalReply(reply: TerminalReply, key: string): boolean {
-  if (!reply.auth) return reply.nonce === key;
+function terminalBridgeRequestId(): string {
+  return `pid-${process.pid}-${Date.now()}-${crypto.randomUUID()}`;
+}
+
+function isAuthenticatedTerminalReply(reply: TerminalReply, key: string | Uint8Array): boolean {
+  if (!reply.auth) return typeof key === "string" && reply.nonce === key;
   if (!/^[a-f0-9]{64}$/i.test(reply.auth)) return false;
   const actual = Buffer.from(reply.auth, "hex");
   const expected = Buffer.from(terminalReplyAuth(reply, key), "hex");
@@ -1214,13 +1328,17 @@ async function unlinkIfExists(filePath: string): Promise<void> {
 // sweep covers crashes plus the diagnostic replies/logs kept on the happy path.
 // Per-request UUIDs prevent a stale reply from being accepted as a new one.
 /** @internal — exported for tests */
-export async function sweepStaleDispatchArtifacts(artifactRoot: string): Promise<void> {
+export async function sweepStaleDispatchArtifacts(
+  artifactRoot: string,
+  options: StaleDispatchSweepOptions = {},
+): Promise<void> {
   const STALE_MS = 60 * 60 * 1000;
   const dirs = [
     path.join(artifactRoot, "dispatch"),
     path.join(artifactRoot, "prompts"),
     path.join(artifactRoot, "replies"),
     path.join(artifactRoot, "logs"),
+    path.join(artifactRoot, "reply-keys"),
     path.join(artifactRoot, "sessions"),
   ];
   let realRoot: string;
@@ -1233,6 +1351,7 @@ export async function sweepStaleDispatchArtifacts(artifactRoot: string): Promise
     return;
   }
   const now = Date.now();
+  const isProcessAlive = options.isProcessAlive ?? terminalBridgeOwnerProcessAlive;
   for (const dir of dirs) {
     let entries: import("node:fs").Dirent[];
     try {
@@ -1250,7 +1369,12 @@ export async function sweepStaleDispatchArtifacts(artifactRoot: string): Promise
       const full = path.join(dir, entry.name);
       try {
         const st = await fs.lstat(full);
-        if (!st.isSymbolicLink() && st.isFile() && st.nlink === 1 && now - st.mtimeMs > STALE_MS) {
+        const stale = now - st.mtimeMs > STALE_MS;
+        const ownerPid = path.basename(dir) === "reply-keys"
+          ? terminalBridgeOwnerPid(entry.name)
+          : undefined;
+        const crashedOwner = ownerPid !== undefined && isProcessAlive(ownerPid) === false;
+        if (!st.isSymbolicLink() && st.isFile() && st.nlink === 1 && (stale || crashedOwner)) {
           await fs.unlink(full);
         }
       } catch {
@@ -1258,6 +1382,22 @@ export async function sweepStaleDispatchArtifacts(artifactRoot: string): Promise
         // may block us. Either way, not worth surfacing.
       }
     }
+  }
+}
+
+function terminalBridgeOwnerPid(fileName: string): number | undefined {
+  const match = /^pid-([1-9]\d*)-\d+-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}-.+\.key$/i.exec(fileName);
+  if (!match) return undefined;
+  const pid = Number(match[1]);
+  return Number.isSafeInteger(pid) ? pid : undefined;
+}
+
+function terminalBridgeOwnerProcessAlive(pid: number): boolean | undefined {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException | undefined)?.code === "ESRCH" ? false : undefined;
   }
 }
 

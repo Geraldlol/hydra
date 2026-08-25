@@ -102,7 +102,51 @@ describe("agent definition validation", () => {
   test("baseUrlAllowed rejects a baseUrl carrying a secret-shaped query parameter", () => {
     const result = baseUrlAllowed("https://host/v1?api_key=sk-proj-abc123def456");
     assert.equal(result.ok, false);
-    if (!result.ok) assert.match(result.message, /secret/i);
+    if (!result.ok) {
+      assert.match(result.message, /secret/i);
+      assert.doesNotMatch(result.message, /sk-proj-abc123def456/, "validation errors must not echo the credential");
+    }
+  });
+
+  test("baseUrlAllowed recursively rejects double-encoded secrets in paths and queries", () => {
+    for (const baseUrl of [
+      "https://host/v1/%2573%256b-proj-abc123def456",
+      "https://host/v1?api_key=%2573%256b-proj-abc123def456",
+    ]) {
+      const result = baseUrlAllowed(baseUrl);
+      assert.equal(result.ok, false, baseUrl);
+      if (!result.ok) assert.match(result.message, /secret|encoding/i);
+    }
+  });
+
+  test("baseUrlAllowed rejects literal, encoded, and malformed secrets in URL fragments", () => {
+    for (const baseUrl of [
+      "https://host/v1#sk-proj-abc123def456",
+      "https://host/v1#%2573%256b-proj-abc123def456",
+      "https://host/v1#%ZZ",
+    ]) {
+      const result = baseUrlAllowed(baseUrl);
+      assert.equal(result.ok, false, baseUrl);
+      if (!result.ok) assert.match(result.message, /secret|percent-encoding/i);
+    }
+  });
+
+  test("baseUrlAllowed bounds recursive URL decoding and preserves a clean encoded percent", () => {
+    let deeplyEncoded = [...Buffer.from("sk-proj-abc123def456", "utf8")]
+      .map((byte) => `%${byte.toString(16).padStart(2, "0")}`)
+      .join("");
+    for (let pass = 1; pass < 8; pass += 1) deeplyEncoded = encodeURIComponent(deeplyEncoded);
+    const rejected = baseUrlAllowed(`https://host/v1?api_key=${deeplyEncoded}`);
+    assert.equal(rejected.ok, false);
+    if (!rejected.ok) assert.match(rejected.message, /encoding|secret/i);
+
+    assert.equal(baseUrlAllowed("https://host/v1?discount=100%25").ok, true);
+  });
+
+  test("baseUrlAllowed rejects malformed percent-encoding that masks an encoded secret", () => {
+    const result = baseUrlAllowed("https://host/v1/%73%6b-proj-abc123def456/%ZZ");
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.match(result.message, /percent-encoding/i);
   });
 
   test("baseUrlAllowed still allows clean baseUrls with no credentials or secret-shaped query", () => {
@@ -212,6 +256,36 @@ describe("agent definition validation", () => {
       );
       assert.equal(def, undefined);
       assert.match(error ?? "", /colorIndex|pricing/i);
+    }
+  });
+
+  test("requires a bounded integer output-token ceiling for OpenAI-compatible heads", () => {
+    const valid = validateAgentDefinition(
+      {
+        id: "bounded",
+        displayName: "Bounded",
+        kind: "openai-compatible",
+        baseUrl: "https://x/v1",
+        maxOutputTokens: 8192,
+      },
+      new Set(),
+    );
+    assert.equal(valid.error, undefined);
+    assert.equal(valid.def?.maxOutputTokens, 8192);
+
+    for (const maxOutputTokens of [0, -1, 1.5, 131_073, "4096"]) {
+      const { def, error } = validateAgentDefinition(
+        {
+          id: "bad-bound",
+          displayName: "Bad Bound",
+          kind: "openai-compatible",
+          baseUrl: "https://x/v1",
+          maxOutputTokens,
+        },
+        new Set(),
+      );
+      assert.equal(def, undefined);
+      assert.match(error ?? "", /maxOutputTokens/i);
     }
   });
 

@@ -245,7 +245,7 @@ describe("Mission/Flight panel integration source contracts", () => {
       afterBuild,
       /runVerificationInternal\([\s\S]*signal,\s*\)/,
     );
-    assert.match(afterBuild, /await this\.requestReview\(signal\)/);
+    assert.match(afterBuild, /await this\.requestReview\(signal, "system"\)/);
 
     const autoAdvance = methodSlice(
       source,
@@ -253,9 +253,22 @@ describe("Mission/Flight panel integration source contracts", () => {
       "private async runReviewPhase(",
     );
     assert.match(autoAdvance, /signal\?: AbortSignal/);
-    assert.match(autoAdvance, /await this\.assignBuilder\(action\.builder, signal\)/);
-    assert.match(autoAdvance, /await this\.requestReview\(signal\)/);
-    assert.match(autoAdvance, /\{ signal \}/);
+    assert.match(
+      autoAdvance,
+      /await this\.assignBuilder\(\s*action\.builder,\s*signal,\s*"system",\s*authority,\s*action\.sourceTimestamp,\s*\)/,
+    );
+    assert.match(
+      autoAdvance,
+      /await this\.requestReview\(signal, "system", authority, action\.sourceTimestamp\)/,
+    );
+    assert.match(
+      autoAdvance,
+      /await this\.handBack\(signal, "system", authority, action\.sourceTimestamp\)/,
+    );
+    assert.match(
+      autoAdvance,
+      /signal,\s*source: "system",\s*autoAdvanceAuthority: authority,\s*autoAdvanceDecisionTimestamp: action\.sourceTimestamp/,
+    );
 
     const poke = methodSlice(
       source,

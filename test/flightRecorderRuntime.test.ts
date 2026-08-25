@@ -390,6 +390,156 @@ describe("Flight Recorder runtime", () => {
     assert.deepEqual(usageSteeringChain, agentSteeringChain);
   });
 
+  test("records provider tool plus nested browser approval metadata without content", async (t) => {
+    const root = await tempRoot(t);
+    const runtime = await createFlightRecorderRuntime({
+      privateWorkspaceRoot: root,
+      ownerId: "extension-host-provider-browser",
+    });
+    t.after(() => runtime.dispose());
+    const room = await runtime.beginRoomTurn({
+      traceId: "trace-runtime-provider-browser",
+      roomTurnId: "room-turn-provider-browser",
+      phase: "Build",
+      missionDocumentSha256: DOCUMENT,
+      missionBindingSha256: MISSION,
+      source: "localUser",
+      baseRevisionSha: "a".repeat(40),
+    });
+    const agent = await runtime.beginAgentRun(room, agentInput("run-provider-browser"));
+    assert.equal(await runtime.recordAgentObservation(agent, {
+      kind: "agentRun",
+      observationType: "telemetryAvailability",
+      detail: "unavailable",
+      reason: "unsupported",
+    }), true);
+
+    const tool = await runtime.beginAuxiliaryOperation(room, {
+      parentOperationId: agent.operationId,
+      subject: {
+        kind: "toolCall",
+        provider: "codex",
+        toolName: "shell",
+        providerOperationIdSha256: "8".repeat(64),
+        argumentBytes: 21,
+        evidenceClass: "providerObserved",
+      },
+    });
+    assert.equal(await runtime.finishAuxiliaryOperation(tool, {
+      status: "succeeded",
+      failureCode: null,
+      observation: {
+        kind: "toolCall",
+        observationType: "toolCallResult",
+        status: "succeeded",
+        resultBytes: 34,
+        evidenceClass: "providerObserved",
+      },
+      evidenceClass: "providerObserved",
+    }), true);
+
+    const browser = await runtime.beginAuxiliaryOperation(room, {
+      parentOperationId: agent.operationId,
+      subject: {
+        kind: "browserAction",
+        requestId: "browser-request-one",
+        action: "click",
+        targetSha256: "9".repeat(64),
+        approvalRequired: true,
+        evidenceClass: "hydraObserved",
+      },
+    });
+    const approval = await runtime.beginAuxiliaryOperation(room, {
+      parentOperationId: browser.operationId,
+      subject: {
+        kind: "approval",
+        approvalKind: "browser",
+        policy: "hydra-browser-allow-once-v1",
+        targetSha256: "9".repeat(64),
+        source: "localUser",
+        evidenceClass: "hydraObserved",
+      },
+    });
+    assert.equal(await runtime.finishAuxiliaryOperation(approval, {
+      status: "succeeded",
+      failureCode: null,
+      observation: {
+        kind: "approval",
+        observationType: "approvalDecision",
+        outcome: "allowed",
+        code: null,
+        evidenceClass: "hydraObserved",
+      },
+      evidenceClass: "hydraObserved",
+    }), true);
+    assert.equal(await runtime.finishAuxiliaryOperation(browser, {
+      status: "succeeded",
+      failureCode: null,
+      observation: {
+        kind: "browserAction",
+        observationType: "browserApproval",
+        outcome: "allowed",
+        resultBytes: 55,
+        evidenceClass: "hydraObserved",
+      },
+      evidenceClass: "hydraObserved",
+    }), true);
+    assert.equal(await runtime.finishAgentRun(agent, {
+      status: "succeeded",
+      failureCode: null,
+      output: EMPTY_OUTPUT,
+      terminalSteeringChain: { sha256: TERMINAL_CHAIN, indeterminate: false },
+      actualTransport: "oneShot",
+      evidenceClass: "hydraObserved",
+    }), true);
+    assert.equal(await runtime.finishRoomTurn(room, {
+      status: "succeeded",
+      failureCode: null,
+    }), true);
+    const replay = await runtime.inspectTrace(room.traceId);
+    assert.equal(replay?.completeness, "complete");
+    assert.deepEqual(
+      replay?.operations
+        .filter((operation) => operation.operationKind !== "phase")
+        .map((operation) => [operation.operationKind, operation.parentOperationId]),
+      [
+        ["agentRun", room.phaseOperationId],
+        ["toolCall", agent.operationId],
+        ["browserAction", agent.operationId],
+        ["approval", browser.operationId],
+      ],
+    );
+    const stored = await fs.readFile(flightTracePath(root, room.traceId), "utf8");
+    assert.doesNotMatch(stored, /selector|command body|tool result|page content/i);
+  });
+
+  test("provider telemetry flood fail-closes the room trace as limited", async (t) => {
+    const root = await tempRoot(t);
+    const runtime = await createFlightRecorderRuntime({
+      privateWorkspaceRoot: root,
+      ownerId: "extension-host-provider-flood",
+    });
+    t.after(() => runtime.dispose());
+    const room = await runtime.beginRoomTurn({
+      traceId: "trace-runtime-provider-flood",
+      roomTurnId: "room-turn-provider-flood",
+      phase: "Build",
+      missionDocumentSha256: DOCUMENT,
+      missionBindingSha256: MISSION,
+      source: "localUser",
+      baseRevisionSha: null,
+    });
+    assert.equal(runtime.markProviderTelemetryLimited(room), true);
+    assert.equal(await runtime.finishRoomTurn(room, {
+      status: "succeeded",
+      failureCode: null,
+    }), true);
+    const replay = await runtime.inspectTrace(room.traceId);
+    assert.equal(replay?.completeness, "limited");
+    assert.equal(replay?.records.at(-2)?.recordType, "traceLimited");
+    assert.equal(replay?.records.at(-1)?.recordType, "traceFinished");
+  });
+
   test("rejects wrong auxiliary observations and every lifecycle mutation after finish", async (t) => {
     const root = await tempRoot(t);
     const runtime = await createFlightRecorderRuntime({

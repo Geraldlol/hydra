@@ -6,7 +6,9 @@ import * as path from "node:path";
 import { resolveGitExecutable } from "./gitExecutable";
 import { findExecutableOnPath, windowsSystemExecutable } from "./executablePath";
 import {
+  bindProcessTreeIdentity,
   quoteForCmd,
+  spawnIdentityBoundProcess,
   stripAnsi,
   terminateProcessTree,
   TERMINATION_CONFIRM_WINDOW_MS,
@@ -435,13 +437,14 @@ export async function runVerificationCommand(options: VerificationRunOptions): P
   }
   return new Promise<VerificationResultWithCancel>((resolve) => {
     const processSpec = verificationProcessForCommand(options.command);
-    const child = cp.spawn(processSpec.command, processSpec.args, {
+    const child = spawnIdentityBoundProcess(processSpec.command, processSpec.args, {
       cwd: options.cwd,
       shell: processSpec.shell,
       windowsHide: true,
       env: process.env,
       detached: process.platform !== "win32",
     });
+    bindProcessTreeIdentity(child);
     let stdout = "";
     let stderr = "";
     let stdoutBytes = 0;
@@ -610,7 +613,12 @@ export async function captureGitHead(
   const gitExecutable = await resolveGitExecutable(cwd);
   if (!gitExecutable) return undefined;
   return new Promise<string | undefined>((resolve) => {
-    const child = cp.spawn(gitExecutable, ["rev-parse", "HEAD"], { cwd, windowsHide: true, env: process.env });
+    const child = spawnIdentityBoundProcess(
+      gitExecutable,
+      ["rev-parse", "HEAD"],
+      { cwd, windowsHide: true, env: process.env },
+    );
+    bindProcessTreeIdentity(child);
     let out = "";
     let settled = false;
     const boundedTimeoutMs = Number.isFinite(timeoutMs)

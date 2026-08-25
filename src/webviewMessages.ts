@@ -29,12 +29,51 @@ export type WebviewMessage =
   | { type: "openVerification" }
   | { type: "openNativeActions" }
   | { type: "openAgentCalls" }
+  | { type: "manageFlightRecorder" }
+  | {
+      type: "inspectFlightTrace" | "replayFlightTrace" | "createFlightEval";
+      traceId?: string;
+      expectedRootSha256?: string;
+      expectedMissionBindingSha256?: string;
+    }
   | { type: "openWorkspaceChange"; path?: string }
   | { type: "openRunFailureFile"; path?: string }
   | { type: "copyRunFailurePromptSha"; sha?: string }
   | { type: "clearNativeAction"; id?: string }
   | { type: "clearNativeActions"; ids?: string[] }
   | { type: "openObjective" }
+  | { type: "manageMissionContract" }
+  | {
+      type: "proposeMissionContract";
+      contractJson?: string;
+      expectedBaseBindingSha256?: string;
+    }
+  | {
+      type: "admitMissionProposal";
+      candidateId?: string;
+      expectedDocumentSha256?: string;
+      expectedBaseBindingSha256?: string;
+    }
+  | { type: "discardMissionProposalCandidate"; candidateId?: string }
+  | {
+      type: "confirmMissionContract";
+      proposalId?: string;
+      expectedDocumentSha256?: string;
+      expectedBaseBindingSha256?: string;
+    }
+  | {
+      type: "dismissMissionContractProposal";
+      proposalId?: string;
+      expectedDocumentSha256?: string;
+      expectedBaseBindingSha256?: string;
+    }
+  | {
+      type: "retireMissionContract";
+      expectedMissionId?: string;
+      expectedRevision?: number;
+      expectedDocumentSha256?: string;
+      expectedBindingSha256?: string;
+    }
   | { type: "openSessionBrief" }
   | { type: "openWikiContext" }
   | { type: "runWikiWrapupNow" }
@@ -50,6 +89,7 @@ export type WebviewMessage =
   | { type: "acceptDefaultDecision" }
   | { type: "toggleAutoAdvanceActionableDefaults" }
   | { type: "handBack" }
+  | { type: "resolveReview" }
   | { type: "confirmHandoff"; action?: HandoffAction }
   | { type: "dismissHandoff" }
   | { type: "previewHandoff" }

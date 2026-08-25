@@ -20,7 +20,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: [22.22.1, "24.x"]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
@@ -33,29 +34,21 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22.22.1
+          node-version: ${{ matrix.node }}
           cache: pnpm
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Run tests
-        run: pnpm test
-
-      - name: Package VSIX
-        if: runner.os == 'Linux' && github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: pnpm run package
-
-      - name: Audit dependencies
-        if: runner.os == 'Linux'
-        run: pnpm audit --audit-level=high
+        run: pnpm run verify:fast
 
   extension-host:
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
@@ -78,15 +71,61 @@ jobs:
         if: runner.os == 'Linux'
         run: xvfb-run -a pnpm run test:integration
 
-      - name: Run extension-host tests (Windows)
-        if: runner.os == 'Windows'
+      - name: Run extension-host tests (desktop)
+        if: runner.os != 'Linux'
         run: pnpm run test:integration
+
+  audit:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.22.1
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Audit dependencies
+        run: pnpm audit --audit-level=high
+
+  coverage:
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.22.1
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Enforce coverage thresholds
+        run: pnpm run test:coverage
 
   required-ci:
     name: Required CI
     permissions: {}
     if: ${{ always() }}
-    needs: [build, extension-host]
+    needs: [build, extension-host, audit, coverage]
     timeout-minutes: 5
     runs-on: ubuntu-latest
     steps:
@@ -94,13 +133,45 @@ jobs:
         env:
           BUILD_RESULT: ${{ needs.build.result }}
           EXTENSION_HOST_RESULT: ${{ needs['extension-host'].result }}
+          AUDIT_RESULT: ${{ needs.audit.result }}
+          COVERAGE_RESULT: ${{ needs.coverage.result }}
         shell: bash
         run: |
           printf '%s\n' \
             "build=$BUILD_RESULT" \
-            "extension-host=$EXTENSION_HOST_RESULT"
-          for result in "$BUILD_RESULT" "$EXTENSION_HOST_RESULT"; do
+            "extension-host=$EXTENSION_HOST_RESULT" \
+            "audit=$AUDIT_RESULT" \
+            "coverage=$COVERAGE_RESULT"
+          for result in "$BUILD_RESULT" "$EXTENSION_HOST_RESULT" "$AUDIT_RESULT" "$COVERAGE_RESULT"; do
             if [ "$result" != "success" ]; then
               exit 1
             fi
           done
+
+  package:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [required-ci]
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.22.1
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build VSIX twice and compare bytes
+        run: pnpm run package
+
+      - name: Reverify VSIX
+        run: pnpm run verify:vsix

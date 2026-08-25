@@ -50,6 +50,234 @@ describe("auto-advance security gate source contract", () => {
     assert.ok(riskIdx < actionIdx, "risky-signal gate must run before any decision action is taken");
     assert.match(method, /if \(risk\.risky\)/);
   });
+
+  test("automatic defaults carry immutable system provenance through every dispatch path", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    const methodStart = source.indexOf("private async autoAdvanceActionableDefault(");
+    const methodEnd = source.indexOf("private async runReviewPhase(", methodStart);
+    assert.ok(methodStart >= 0 && methodEnd > methodStart, "could not bound auto-advance method");
+    const method = source.slice(methodStart, methodEnd);
+
+    assert.match(
+      method,
+      /await this\.assignBuilder\(\s*action\.builder,\s*signal,\s*"system",\s*authority,\s*action\.sourceTimestamp,\s*\)/,
+    );
+    assert.match(method, /await this\.requestReview\(signal, "system", authority, action\.sourceTimestamp\)/);
+    assert.match(method, /await this\.handBack\(signal, "system", authority, action\.sourceTimestamp\)/);
+    assert.match(
+      method,
+      /await this\.sendUserMessage\([\s\S]*?source: "system",[\s\S]*?autoAdvanceAuthority: authority,[\s\S]*?autoAdvanceDecisionTimestamp: action\.sourceTimestamp/,
+    );
+    assert.doesNotMatch(
+      source,
+      /autoAdvanceInProgress/,
+      "mutable ambient provenance can relabel a queued local-user turn as system automation",
+    );
+
+    const assignStart = source.indexOf("async assignBuilder(");
+    const assignEnd = source.indexOf("async assignParallelBuilders(", assignStart);
+    const assign = source.slice(assignStart, assignEnd);
+    assert.match(assign, /source: FlightTraceStartedPayload\["source"\] = "localUser"/);
+    assert.match(assign, /prepareInitiatingFlightTurn\(source\)/);
+    assert.match(assign, /source === "localUser"[\s\S]*explicit user build authority/);
+    assert.match(assign, /not explicit per-action local-user build authority/);
+
+    const reviewStart = source.indexOf("async requestReview(");
+    const reviewEnd = source.indexOf("async runVerification(", reviewStart);
+    assert.match(
+      source.slice(reviewStart, reviewEnd),
+      /source: FlightTraceStartedPayload\["source"\] = "localUser"[\s\S]*prepareInitiatingFlightTurn\(source\)/,
+    );
+    const handBackStart = source.indexOf("async handBack(");
+    const handBackEnd = source.indexOf("async resolveReview(", handBackStart);
+    assert.match(
+      source.slice(handBackStart, handBackEnd),
+      /source: FlightTraceStartedPayload\["source"\] = "localUser"[\s\S]*prepareInitiatingFlightTurn\(source\)/,
+    );
+
+    const sendStart = source.indexOf("async sendUserMessage(");
+    const sendEnd = source.indexOf("private async tryDeliverLiveSteering(", sendStart);
+    const send = source.slice(sendStart, sendEnd);
+    assert.match(send, /source\?: FlightTraceStartedPayload\["source"\]/);
+    assert.match(send, /const flightSource = options\.telegramChatId[\s\S]*options\.source \?\? "localUser"/);
+    assert.match(send, /source: flightSource/);
+    assert.match(send, /flightSource === "localUser"/);
+
+    const queueStart = source.indexOf("interface QueuedUserMessage");
+    const queueEnd = source.indexOf("interface RecordedNativeAction", queueStart);
+    const queue = source.slice(queueStart, queueEnd > queueStart ? queueEnd : queueStart + 500);
+    assert.match(queue, /source\?: FlightTraceStartedPayload\["source"\]/);
+    assert.match(queue, /autoAdvanceAuthority\?: AutoAdvanceDispatchAuthority/);
+    assert.match(queue, /autoAdvanceDecisionTimestamp\?: string/);
+    const drainStart = source.indexOf("private async drainQueuedUserMessages(");
+    const drainEnd = source.indexOf("async openTranscript(", drainStart);
+    const drain = source.slice(drainStart, drainEnd);
+    assert.match(drain, /source: next\.source/);
+    assert.match(drain, /autoAdvanceAuthority: next\.autoAdvanceAuthority/);
+    assert.match(drain, /autoAdvanceDecisionTimestamp: next\.autoAdvanceDecisionTimestamp/);
+  });
+
+  test("revocation invalidates and aborts every pending automatic dispatch", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    assert.match(source, /private autoAdvanceGeneration = 0/);
+    assert.match(source, /private autoAdvanceAbort = new AbortController\(\)/);
+
+    const invalidateStart = source.indexOf("private invalidateAutoAdvanceDispatches(");
+    const invalidateEnd = source.indexOf("\n  private ", invalidateStart + 10);
+    assert.ok(invalidateStart >= 0 && invalidateEnd > invalidateStart);
+    const invalidate = source.slice(invalidateStart, invalidateEnd);
+    assert.match(invalidate, /this\.autoAdvanceGeneration \+= 1/);
+    assert.match(invalidate, /this\.autoAdvanceAbort\.abort\(\)/);
+    assert.match(invalidate, /this\.autoAdvanceAbort = new AbortController\(\)/);
+
+    const listenerStart = source.indexOf("vscode.workspace.onDidChangeConfiguration((e) =>");
+    const listenerEnd = source.indexOf("this.initPromise = this.initialize()", listenerStart);
+    const listener = source.slice(listenerStart, listenerEnd);
+    assert.match(listener, /e\.affectsConfiguration\("hydraRoom\.autoAdvanceActionableDefaults"\)/);
+    assert.match(listener, /this\.invalidateAutoAdvanceDispatches\(\)/);
+
+    const toggleStart = source.indexOf("async toggleAutoAdvanceActionableDefaults(");
+    const toggleEnd = source.indexOf("async handBack(", toggleStart);
+    const toggle = source.slice(toggleStart, toggleEnd);
+    const invalidateToggle = toggle.indexOf("this.invalidateAutoAdvanceDispatches()");
+    const disableWrite = toggle.indexOf(
+      'cfg.update("autoAdvanceActionableDefaults", false, vscode.ConfigurationTarget.Global)',
+    );
+    assert.ok(invalidateToggle >= 0 && invalidateToggle < disableWrite, "toggle-off must revoke before its first await");
+
+    const methodStart = source.indexOf("private async autoAdvanceActionableDefault(");
+    const methodEnd = source.indexOf("private async runReviewPhase(", methodStart);
+    const method = source.slice(methodStart, methodEnd);
+    assert.match(method, /const authority = this\.captureAutoAdvanceAuthority\(\)/);
+    assert.match(method, /if \(!this\.autoAdvanceDispatchAllowed\(authority, signal\)\) return/);
+
+    const guard = "if (!this.autoAdvanceDispatchAllowed(authority, signal)) return;";
+    for (const dispatch of [
+      "await this.assignBuilder(",
+      'await this.requestReview(signal, "system", authority, action.sourceTimestamp)',
+      'await this.handBack(signal, "system", authority, action.sourceTimestamp)',
+      "await this.sendUserMessage(",
+    ]) {
+      const dispatchIndex = method.indexOf(dispatch);
+      assert.ok(dispatchIndex >= 0, `automatic dispatch not found: ${dispatch}`);
+      const guardIndex = method.lastIndexOf(guard, dispatchIndex);
+      assert.ok(guardIndex >= 0, `revocation guard missing before: ${dispatch}`);
+      assert.doesNotMatch(
+        method.slice(guardIndex + guard.length, dispatchIndex),
+        /\bawait\b/,
+        `automatic dispatch crossed an await after its last revocation check: ${dispatch}`,
+      );
+    }
+
+    const allowedStart = source.indexOf("private autoAdvanceDispatchAllowed(");
+    const allowedEnd = source.indexOf("\n  private ", allowedStart + 10);
+    const allowed = source.slice(allowedStart, allowedEnd);
+    assert.match(allowed, /authority\.generation === this\.autoAdvanceGeneration/);
+    assert.match(allowed, /!authority\.signal\.aborted/);
+    assert.match(allowed, /!signal\?\.aborted/);
+    assert.match(allowed, /this\.effectiveAutoAdvanceActionableDefaults\(\)/);
+
+    const admittedHelperStart = source.indexOf("private cancelAdmittedAutoAdvanceIfRevoked(");
+    const admittedHelperEnd = source.indexOf("\n  private ", admittedHelperStart + 10);
+    assert.ok(admittedHelperStart >= 0 && admittedHelperEnd > admittedHelperStart);
+    const admittedHelper = source.slice(admittedHelperStart, admittedHelperEnd);
+    assert.match(admittedHelper, /type: "reservationFailed", restore: restoreState/);
+    assert.match(admittedHelper, /status: "cancelled", failureCode: "cancelled"/);
+
+    const runTurnStart = source.indexOf("private async runTurn(");
+    const runTurnEnd = source.indexOf("private async runDiscussionTurn(", runTurnStart);
+    const runTurn = source.slice(runTurnStart, runTurnEnd);
+    assert.match(runTurn, /autoAdvanceAuthority\?: AutoAdvanceDispatchAuthority/);
+    assert.match(runTurn, /autoAdvanceSignal\?: AbortSignal/);
+    assert.match(runTurn, /autoAdvanceAuthority\?\.signal\.addEventListener\("abort", revokeAutoAdvance/);
+    assert.match(runTurn, /autoAdvanceSignal\?\.addEventListener\("abort", revokeAutoAdvance/);
+    assert.match(runTurn, /const revokeAutoAdvance = \(\): void => \{\s*ctrl\.abort\(\)/);
+
+    for (const [startMarker, endMarker] of [
+      ["async assignBuilder(", "async assignParallelBuilders("],
+      ["async requestReview(", "async runVerification("],
+      ["async handBack(", "async resolveReview("],
+    ] as const) {
+      const start = source.indexOf(startMarker);
+      const end = source.indexOf(endMarker, start);
+      const body = source.slice(start, end);
+      assert.match(
+        body,
+        /if \(autoAdvanceAuthority && !this\.autoAdvanceDispatchAllowed\(autoAdvanceAuthority, signal\)\) return;\s*const preparedFlight/,
+        `${startMarker} must recheck revocation immediately before reserving its flight`,
+      );
+    }
+
+    const drainStart = source.indexOf("private async drainQueuedUserMessages(");
+    const drainEnd = source.indexOf("async openTranscript(", drainStart);
+    assert.match(
+      source.slice(drainStart, drainEnd),
+      /if \(\s*next\.autoAdvanceAuthority[\s\S]*autoAdvanceDispatchAllowed\(next\.autoAdvanceAuthority(?:, next\.signal)?\)[\s\S]*source: next\.source/,
+    );
+  });
+
+  test("revocation during flight preparation terminalizes before any phase mutation", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    const helperStart = source.indexOf("private cancelPreparedAutoAdvanceIfRevoked(");
+    const helperEnd = source.indexOf("\n  private ", helperStart + 10);
+    assert.ok(helperStart >= 0 && helperEnd > helperStart, "post-prepare revocation helper not found");
+    const helper = source.slice(helperStart, helperEnd);
+    assert.doesNotMatch(helper, /private async cancelPreparedAutoAdvanceIfRevoked/);
+    assert.match(helper, /\): false \| Promise<true>/);
+    assert.match(
+      helper,
+      /if \(!autoAdvanceAuthority \|\| this\.autoAdvanceDispatchAllowed\(autoAdvanceAuthority, signal\)\) return false/,
+    );
+    assert.match(
+      helper,
+      /await this\.finishPreparedFlightTurn\([\s\S]*status: "cancelled", failureCode: "cancelled"/,
+    );
+    const finishIndex = helper.indexOf("await this.finishPreparedFlightTurn(");
+    const finallyIndex = helper.indexOf("finally", finishIndex);
+    const releaseIndex = helper.indexOf("this.releaseInitiatingFlightTurnReservation()", finallyIndex);
+    assert.ok(finishIndex >= 0 && finallyIndex > finishIndex && releaseIndex > finallyIndex);
+
+    for (const [label, startMarker, endMarker, authorityExpression] of [
+      [
+        "send instruction",
+        "private async startUserMessageTurn(",
+        "async stop(",
+        "options.autoAdvanceAuthority",
+      ],
+      ["assign builder", "async assignBuilder(", "async assignParallelBuilders(", "autoAdvanceAuthority"],
+      ["request review", "async requestReview(", "async runVerification(", "autoAdvanceAuthority"],
+      ["hand back", "async handBack(", "async resolveReview(", "autoAdvanceAuthority"],
+    ] as const) {
+      const start = source.indexOf(startMarker);
+      const end = source.indexOf(endMarker, start);
+      assert.ok(start >= 0 && end > start, `could not bound ${label}`);
+      const body = source.slice(start, end);
+      const prepareIndex = body.indexOf("await this.prepareInitiatingFlightTurn(");
+      const cancellationIndex = body.indexOf("this.cancelPreparedAutoAdvanceIfRevoked(", prepareIndex);
+      const authorityIndex = body.indexOf(authorityExpression, cancellationIndex);
+      const mutationIndex = body.indexOf("this.applyEvent(", prepareIndex);
+      assert.ok(prepareIndex >= 0, `${label} does not prepare a Flight`);
+      assert.ok(cancellationIndex > prepareIndex, `${label} does not recheck revocation after Flight preparation`);
+      assert.ok(authorityIndex > cancellationIndex, `${label} does not pass its automatic authority to the recheck`);
+      assert.ok(mutationIndex < 0 || cancellationIndex < mutationIndex, `${label} mutates phase state before the post-prepare recheck`);
+      assert.doesNotMatch(
+        body.slice(prepareIndex, cancellationIndex + "this.cancelPreparedAutoAdvanceIfRevoked(".length),
+        /await this\.cancelPreparedAutoAdvanceIfRevoked/,
+        `${label} must not yield on the still-authorized fast path`,
+      );
+      assert.match(
+        body.slice(cancellationIndex, mutationIndex < 0 ? undefined : mutationIndex),
+        /if \(revokedPreparation\) \{\s*await revokedPreparation;\s*return;\s*\}/,
+      );
+    }
+
+    const sendStart = source.indexOf("private async startUserMessageTurn(");
+    const sendEnd = source.indexOf("async stop(", sendStart);
+    assert.match(
+      source.slice(sendStart, sendEnd),
+      /signal\?: AbortSignal[\s\S]*cancelPreparedAutoAdvanceIfRevoked\([\s\S]*options\.signal/,
+    );
+  });
 });
 
 describe("unconfirmed native termination safety latch", () => {
@@ -66,6 +294,43 @@ describe("unconfirmed native termination safety latch", () => {
     assert.match(source, /Restart VS Code before continuing/);
     assert.equal(source.match(/unconfirmedNativeTerminationForHost = false;/g)?.length, 1);
     assert.doesNotMatch(source, /this\.unconfirmedNativeTermination = false/);
+  });
+});
+
+describe("non-Windows terminal bridge preflight", () => {
+  test("keeps self-test and Autopilot on one-shot without latching pre-dispatch unsupported status", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    const useStart = source.indexOf("async useTerminalBridge()");
+    const selfTestStart = source.indexOf("async runTerminalBridgeSelfTest()", useStart);
+    const healthStart = source.indexOf("async showTerminalBridgeHealth()", selfTestStart);
+    const autopilotStart = source.indexOf("async runAutopilotStart()");
+    const doctorStart = source.indexOf("async runDoctor()", autopilotStart);
+    const reportStart = source.indexOf("private async buildDoctorReport(");
+    const reportEnd = source.indexOf("private collectTrustScopeWarnings()", reportStart);
+    assert.ok(useStart >= 0 && selfTestStart > useStart && healthStart > selfTestStart);
+    assert.ok(autopilotStart >= 0 && doctorStart > autopilotStart);
+    assert.ok(reportStart >= 0 && reportEnd > reportStart);
+
+    const useBridge = source.slice(useStart, selfTestStart);
+    assert.match(useBridge, /const support = this\.terminalBridge\.platformSupport\(\)/);
+    assert.match(useBridge, /if \(!support\.supported\)[\s\S]*this\.transport = "oneShot"/);
+    assert.ok(
+      useBridge.indexOf("if (!support.supported)") < useBridge.indexOf("this.terminalBridge?.openAll()"),
+      "platform support must be checked before any terminal is opened",
+    );
+
+    const selfTest = source.slice(selfTestStart, healthStart);
+    assert.match(selfTest, /if \(result\.unsupported\)[\s\S]*this\.transport = "oneShot"/);
+    assert.match(selfTest, /if \(!result\.unsupported\)[\s\S]*latchUnconfirmedNativeTermination/);
+
+    const autopilot = source.slice(autopilotStart, doctorStart);
+    assert.match(autopilot, /const bridgeSupport = this\.terminalBridge\?\.platformSupport\(\)/);
+    assert.match(autopilot, /!bridgeSupport\?\.supported[\s\S]*terminal bridge unsupported on/);
+    assert.match(autopilot, /this\.transport = "oneShot"/);
+
+    const report = source.slice(reportStart, reportEnd);
+    assert.match(report, /if \(bridgeResult && !bridgeResult\.unsupported\)/);
+    assert.match(source, /canSend: automationReady/);
   });
 });
 
@@ -718,19 +983,61 @@ describe("many heads smoke command source contract", () => {
     assert.ok(handler.indexOf("vscode.workspace.isTrusted !== true") < handler.indexOf("HydraRoomPanel.current()"));
   });
 
-  test("auto accept setting and command-center toggle are application scoped", () => {
+  test("agent-default auto-advance is default-off and requires a trusted modal opt-in", () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8")) as {
-      contributes?: { configuration?: { properties?: Record<string, { scope?: string }> } };
+      contributes?: {
+        commands?: Array<{ command?: string; enablement?: string }>;
+        configuration?: {
+          properties?: Record<string, { scope?: string; default?: unknown; markdownDescription?: string }>;
+        };
+      };
     };
     const prop = pkg.contributes?.configuration?.properties?.["hydraRoom.autoAdvanceActionableDefaults"];
     assert.equal(prop?.scope, "application");
+    assert.equal(prop?.default, false);
+    assert.match(prop?.markdownDescription ?? "", /agent-authored/i);
+    assert.match(prop?.markdownDescription ?? "", /prompt injection/i);
+    const command = pkg.contributes?.commands?.find(
+      (candidate) => candidate.command === "hydraRoom.toggleAutoAdvanceActionableDefaults",
+    );
+    assert.equal(command?.enablement, undefined, "revocation must stay available while untrusted");
+
+    const extension = fs.readFileSync(path.join(process.cwd(), "src", "extension.ts"), "utf8");
+    const registrationStart = extension.indexOf('"hydraRoom.toggleAutoAdvanceActionableDefaults"');
+    const registrationEnd = extension.indexOf('"hydraRoom.commandCenter"', registrationStart);
+    const registration = extension.slice(registrationStart, registrationEnd);
+    assert.ok(registrationStart >= 0 && registrationEnd > registrationStart);
+    assert.doesNotMatch(registration, /workspace\.isTrusted/, "the panel owns the enable-only trust gate");
+
     const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
     const start = source.indexOf("async toggleAutoAdvanceActionableDefaults(");
     const end = source.indexOf("async handBack(", start);
     const method = source.slice(start, end);
-    assert.match(method, /vscode\.workspace\.isTrusted !== true/);
-    assert.match(method, /cfg\.update\("autoAdvanceActionableDefaults", !current, vscode\.ConfigurationTarget\.Global\)/);
+    const configuredRead = method.indexOf("configuredAutoAdvanceActionableDefaults()");
+    const disableWrite = method.indexOf(
+      'cfg.update("autoAdvanceActionableDefaults", false, vscode.ConfigurationTarget.Global)',
+    );
+    const firstTrustCheck = method.indexOf("vscode.workspace.isTrusted !== true");
+    const modal = method.indexOf("showWarningMessage", firstTrustCheck);
+    const secondTrustCheck = method.indexOf("vscode.workspace.isTrusted !== true", firstTrustCheck + 1);
+    const enableWrite = method.indexOf(
+      'cfg.update("autoAdvanceActionableDefaults", true, vscode.ConfigurationTarget.Global)',
+    );
+    assert.ok(configuredRead >= 0);
+    assert.ok(disableWrite > configuredRead);
+    assert.ok(firstTrustCheck > disableWrite, "revocation must remain available in untrusted workspaces");
+    assert.ok(modal > firstTrustCheck);
+    assert.ok(secondTrustCheck > modal, "trust must be rechecked after the modal returns");
+    assert.ok(enableWrite > secondTrustCheck, "the trusted opt-in must be rechecked before enabling");
+    assert.match(method, /modal:\s*true/);
+    assert.match(method, /Enable Agent-default Auto-advance/);
+    assert.match(method, /Decision Packet defaults are agent-authored/);
     assert.doesNotMatch(method, /ConfigurationTarget\.(?:Workspace|WorkspaceFolder)/);
+
+    const acceptStart = source.indexOf("async acceptDefaultDecision(");
+    const acceptMethod = source.slice(acceptStart, start);
+    assert.doesNotMatch(acceptMethod, /autoAdvanceActionableDefaults/);
+    assert.match(acceptMethod, /await this\.assignBuilder\(action\.builder\)/);
   });
 
   test("panel smoke runner uses the real parallel turn path and durable report", () => {
@@ -1046,5 +1353,36 @@ describe("handoff inbox source contract", () => {
     // runHandoff must NOT reach assignBuilder (needs AwaitingUser; a cold room can't).
     assert.doesNotMatch(body, /assignBuilder\(/);
     assert.match(source, /pendingHandoff: this\.handoffInbox/);
+  });
+});
+
+describe("N-way review convergence source contract", () => {
+  const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+
+  test("review dispatch excludes the builder and honors the participation setting", () => {
+    const start = source.indexOf("async requestReview(");
+    const end = source.indexOf("async runVerification(", start);
+    assert.ok(start >= 0 && end > start);
+    const body = source.slice(start, end);
+    assert.match(body, /pickReviewers\(this\.state\.builder, this\.roster\(\), reviewParticipation\(\)\)/);
+    assert.match(body, /reviewers\.length > 1/);
+    assert.match(body, /runParallelReviewPhase/);
+  });
+
+  test("parallel review evaluates all named verdicts through the configured policy", () => {
+    const start = source.indexOf("private async runParallelReviewPhase(");
+    const end = source.indexOf("// ---------------- agent call helper", start);
+    assert.ok(start >= 0 && end > start);
+    const body = source.slice(start, end);
+    assert.match(body, /const mode = reviewConvergence\(\)/);
+    assert.match(body, /evaluateReviewConvergence\(verdicts, mode\)/);
+    assert.match(body, /displayNameFor\(verdict\.agent\)/);
+    assert.doesNotMatch(body, /results\.every\(\(\{ text \}\) => APPROVED_SENTINEL_RE\.test\(text\)\)/);
+  });
+
+  test("a human split pauses automatic defaults until an explicit resolution", () => {
+    assert.match(source, /async resolveReview\(/);
+    assert.match(source, /resolutionRequired[\s\S]*Human review resolution required/);
+    assert.match(source, /canResolveReview:/);
   });
 });

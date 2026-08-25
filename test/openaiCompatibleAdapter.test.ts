@@ -18,10 +18,20 @@ describe("openai-compatible adapter", () => {
     if (inv.transport !== "http") return;
     assert.equal(inv.url, "http://localhost:11434/v1/chat/completions");
     assert.equal(inv.method, "POST");
-    const body = inv.body as { model: string; messages: Array<{ role: string; content: string }>; stream: boolean };
+    const body = inv.body as {
+      model: string;
+      messages: Array<{ role: string; content: string }>;
+      stream: boolean;
+      max_tokens: number;
+    };
     assert.equal(body.model, "qwen2.5-coder");
     assert.equal(body.messages[0]?.content, "hello");
     assert.equal(body.stream, true);
+    assert.equal(body.max_tokens, 4096);
+  });
+
+  test("honors a validated per-head output-token ceiling", () => {
+    assert.equal(buildOpenAiChatBody({ ...def, maxOutputTokens: 2048 }, "hello").max_tokens, 2048);
   });
 
   test("apiKeyEnv injects Authorization from the environment, never the raw key", () => {

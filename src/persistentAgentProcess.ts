@@ -1,12 +1,14 @@
 import * as cp from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import {
+  bindProcessTreeIdentity,
   MAX_AGENT_STDERR_BYTES,
   MAX_AGENT_STDOUT_BYTES,
   TERMINATION_CONFIRM_WINDOW_MS,
   TERMINATION_FORCE_GRACE_MS,
   appendBoundedStream,
   isWindowsBatchCommand,
+  spawnIdentityBoundProcess,
   spawnViaCmdShim,
   stripAnsi,
   terminateProcessTree,
@@ -295,12 +297,14 @@ function spawnPersistentChild(spawn: AgentSpawn): cp.ChildProcess {
       env: { ...process.env, ...(spawn.env ?? {}) },
     });
   }
-  return cp.spawn(spawn.command, spawn.args, {
+  const child = spawnIdentityBoundProcess(spawn.command, spawn.args, {
     cwd: spawn.cwd,
     windowsHide: true,
     env: { ...process.env, ...(spawn.env ?? {}) },
     detached: process.platform !== "win32",
   });
+  bindProcessTreeIdentity(child);
+  return child;
 }
 
 function formatSpawnError(spawn: AgentSpawn, err: unknown): string {

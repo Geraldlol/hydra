@@ -11,6 +11,7 @@ import {
   readFileTail,
   serializePerFile,
   serializePerFileAcrossProcesses,
+  syncArtifactDirectory,
 } from "./fileQueue";
 import { Phase } from "./prompts";
 import { isValidAgentId } from "./agentValidation";
@@ -180,13 +181,14 @@ async function archiveAndResetTranscriptUnsafe(
   const archiveDir = path.join(path.dirname(filePath), "archive");
   await assertSafeArtifactParent(path.join(archiveDir, "placeholder.md"), true);
   await fs.mkdir(archiveDir, { recursive: true });
+  await syncArtifactDirectory(path.dirname(archiveDir));
   const archivePath = await availableTranscriptArchivePath(archiveDir, now);
   await assertSafeArtifactParent(archivePath);
 
   const before = await fs.lstat(filePath);
   assertSafeTranscriptStat(before, filePath);
   const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
-  const source = await fs.open(filePath, fsConstants.O_RDONLY | noFollow);
+  const source = await fs.open(filePath, fsConstants.O_RDWR | noFollow);
   let moved = false;
   try {
     const opened = await source.stat();
@@ -199,8 +201,13 @@ async function archiveAndResetTranscriptUnsafe(
       throw new Error(`Refusing to archive transcript after path swap: ${filePath}`);
     }
 
+    await source.sync();
     await fs.rename(filePath, archivePath);
     moved = true;
+    await syncArtifactDirectory(path.dirname(filePath));
+    if (path.dirname(archivePath) !== path.dirname(filePath)) {
+      await syncArtifactDirectory(path.dirname(archivePath));
+    }
     const archivedStat = await fs.lstat(archivePath);
     assertSafeTranscriptStat(archivedStat, archivePath);
     if (!sameFileIdentity(opened, archivedStat)) {

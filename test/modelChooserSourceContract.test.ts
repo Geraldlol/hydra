@@ -33,10 +33,15 @@ describe("model chooser source contract", () => {
     assert.match(source, /label:\s*"gpt-5\.5"/, "gpt-5.5 missing from Codex fallback presets");
   });
 
-  test("Gemini appears in the model chooser with a preset flagship", () => {
+  test("Gemini appears with current CLI aliases and concrete models", () => {
     const source = modelChooser();
     assert.match(source, /value:\s*"gemini"/, "Gemini missing from the agent picker");
     assert.match(source, /GEMINI_MODEL_PRESETS/, "Gemini presets missing");
-    assert.match(source, /label:\s*"gemini-2\.5-pro"/, "current Gemini flagship missing"); // VERIFY id
+    for (const alias of ["auto", "pro", "flash", "flash-lite"]) {
+      assert.match(source, new RegExp(`label:\\s*"${alias}"`), `Gemini alias "${alias}" missing`);
+    }
+    assert.match(source, /label:\s*"gemini-3\.1-pro-preview"/, "current Gemini Pro model missing");
+    assert.match(source, /label:\s*"gemini-3\.5-flash"/, "current Gemini Flash model missing");
+    assert.match(source, /label:\s*"gemini-2\.5-pro"/, "stable Gemini Pro fallback missing");
   });
 });

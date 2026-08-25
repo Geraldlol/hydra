@@ -10,6 +10,10 @@ describe("authority classifier", () => {
       classifyAgentAuthority("codex", "build", ["exec", "--sandbox", "read-only", "--sandbox", "danger-full-access"]).level,
       "fullNative"
     );
+    assert.equal(
+      classifyAgentAuthority("codex", "build", ["exec", "--sandbox", "read-only", "--", "--sandbox", "danger-full-access"]).level,
+      "readOnly",
+    );
   });
 
   test("treats Codex native review as read-only unless dangerous flags are present", () => {
@@ -27,6 +31,10 @@ describe("authority classifier", () => {
     assert.equal(classifyAgentAuthority("claude", "build", ["-p", "--permission-mode=acceptEdits"]).level, "workspaceWrite");
     assert.equal(classifyAgentAuthority("claude", "build", ["-p", "--permission-mode=auto"]).level, "workspaceWrite");
     assert.equal(classifyAgentAuthority("claude", "build", ["-p", "--permission-mode", "bypassPermissions"]).level, "fullNative");
+    assert.equal(
+      classifyAgentAuthority("claude", "opener", ["-p", "--permission-mode", "default", "--", "--dangerously-skip-permissions"]).level,
+      "readOnly",
+    );
   });
 
   test("returns unknown for unrecognized authority", () => {
@@ -274,6 +282,19 @@ describe("validateNativeArgs", () => {
     }
   });
 
+  test("validates Gemini approval modes and mutually exclusive YOLO flags", () => {
+    assert.deepEqual(
+      validateNativeArgs("gemini", ["--approval-mode", "auto_edit"]),
+      [],
+    );
+    const invalid = validateNativeArgs("gemini", ["--approval-mode", "automatic"]);
+    assert.equal(invalid.length, 1);
+    assert.match(invalid[0]!, /default, auto_edit, yolo, plan/);
+    const conflict = validateNativeArgs("gemini", ["--yolo", "--approval-mode=plan"]);
+    assert.equal(conflict.length, 1);
+    assert.match(conflict[0]!, /cannot be combined/);
+  });
+
   test("classifyAgentAuthority surfaces validation warnings alongside authority warnings", () => {
     const result = classifyAgentAuthority("codex", "build", [
       "exec",
@@ -304,5 +325,47 @@ describe("authority for non codex/claude heads", () => {
     // per-vendor dispatch, so it must still catch generic heads.
     const result = classifyAgentAuthority("gemini", "build", ["--dangerously-skip-permissions"]);
     assert.equal(result.level, "fullNative");
+  });
+
+  test("classifies Gemini approval and policy bypass flags without reading prompt argv", () => {
+    for (const args of [
+      ["--yolo"],
+      ["-y"],
+      ["--approval-mode=yolo"],
+      ["--approval-mode", "yolo"],
+      ["--allowed-tools", "run_shell_command"],
+      ["--policy", "trusted-policy.toml"],
+    ]) {
+      assert.equal(classifyAgentAuthority("gemini", "build", args).level, "fullNative", args.join(" "));
+    }
+    assert.equal(
+      classifyAgentAuthority("gemini", "build", ["--yolo", "--no-yolo", "--approval-mode=auto_edit"]).level,
+      "workspaceWrite",
+    );
+    assert.equal(
+      classifyAgentAuthority("gemini", "build", ["--approval-mode", "auto_edit"]).level,
+      "workspaceWrite",
+    );
+    assert.equal(
+      classifyAgentAuthority("gemini", "review", ["--approval-mode=plan"]).level,
+      "fullNative",
+      "headless Plan Mode can transition to YOLO on exit",
+    );
+    assert.equal(
+      classifyAgentAuthority("gemini", "build", ["--approval-mode", "default"]).level,
+      "unknown",
+    );
+    assert.equal(
+      classifyAgentAuthority("gemini", "build", ["--", "--yolo"]).level,
+      "unknown",
+      "flags after argv delimiter are prompt text",
+    );
+  });
+
+  test("uses a registered custom head's Gemini kind instead of its arbitrary id", () => {
+    assert.equal(
+      classifyAgentAuthority("research-head", "build", ["--approval-mode=yolo"], "gemini").level,
+      "fullNative",
+    );
   });
 });

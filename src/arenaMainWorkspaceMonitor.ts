@@ -33,6 +33,8 @@ export interface ArenaMainWorkspaceReceipt {
   readonly sourceWorkspaceFingerprintSha256: string | null;
   readonly repositoryControlSha256: string | null;
   readonly head: ArenaGitObjectId | null;
+  readonly publicationOfEventSha256?: string;
+  readonly publicationOfReceiptSha256?: string;
   readonly receiptSha256: string;
 }
 
@@ -48,6 +50,10 @@ export interface ArenaMainWorkspaceMonitor {
   observe(
     kind: ArenaWorkspaceObservationKind,
   ): Promise<ArenaMainWorkspaceObservedPayload>;
+  sealPublication(input: {
+    readonly postEvidenceEventSha256: string;
+    readonly postEvidenceReceiptSha256: string;
+  }): Promise<ArenaMainWorkspaceObservedPayload>;
   close(): void;
 }
 
@@ -87,6 +93,120 @@ export function startArenaMainWorkspaceMonitor(
   let closed = false;
   let compromised = false;
   let observationCount = 0;
+  let lastObservationKind: ArenaWorkspaceObservationKind | undefined;
+
+  const capture = async (): Promise<ArenaMainWorkspaceSnapshot | undefined> => {
+    try {
+      const snapshot = await captureSnapshot();
+      assertDigest(snapshot.sourceWorkspaceFingerprintSha256);
+      assertDigest(snapshot.repositoryControlSha256);
+      assertObjectId(snapshot.head);
+      return snapshot;
+    } catch {
+      return undefined;
+    }
+  };
+
+  const record = async (
+    kind: ArenaWorkspaceObservationKind,
+    snapshot: ArenaMainWorkspaceSnapshot | undefined,
+    settleFailed: boolean,
+    publicationBinding?: {
+      readonly publicationOfEventSha256: string;
+      readonly publicationOfReceiptSha256: string;
+    },
+  ): Promise<ArenaMainWorkspaceObservedPayload> => {
+    let reasonCode: ArenaWorkspaceObservationReason | null = null;
+    let status: ArenaMainWorkspaceObservedPayload["status"] = "unchanged";
+    if (!snapshot) {
+      status = "unverifiable";
+      reasonCode = watcher.error || settleFailed
+        ? "monitorFailed"
+        : "fingerprintFailed";
+    }
+
+    // The manifest schema separates a definite path event from a failed
+    // watcher. `DuelWorkspaceMutationMonitor.changed` includes both, so do
+    // not mislabel monitor failure as a witnessed mutation.
+    const watcherFailed = watcher.error !== undefined || settleFailed;
+    const watcherChanged = !watcherFailed && watcher.changed;
+    if (snapshot) {
+      if (watcherFailed) {
+        status = "unverifiable";
+        reasonCode = "monitorFailed";
+      } else if (watcherChanged) {
+        status = "changed";
+        reasonCode = "watcherChanged";
+      } else if (snapshot.sourceWorkspaceFingerprintSha256
+          !== baseline.sourceWorkspaceFingerprintSha256) {
+        status = "changed";
+        reasonCode = "workspaceFingerprintChanged";
+      } else if (!sameObjectId(snapshot.head, baseline.head)) {
+        status = "changed";
+        reasonCode = "headChanged";
+      } else if (snapshot.repositoryControlSha256
+          !== baseline.repositoryControlSha256) {
+        status = "changed";
+        reasonCode = "repositoryControlChanged";
+      }
+    }
+    compromised ||= status !== "unchanged";
+
+    const changedPathsSha256 = hash(
+      "hydra.arena.monitor.changed-paths.v1\u0000",
+      watcher.changedPaths,
+    );
+    const errorSha256 = watcher.error || settleFailed
+      ? hash(
+          "hydra.arena.monitor.error.v1\u0000",
+          watcher.error ?? "settleFailed",
+        )
+      : null;
+    const receiptBody = {
+      schemaVersion: 1 as const,
+      receiptType: "arenaMainWorkspaceObservation" as const,
+      runId: baseline.runId,
+      epochId,
+      observationCount,
+      kind,
+      status,
+      reasonCode,
+      watcherChanged,
+      changedPathsSha256,
+      errorSha256,
+      sourceWorkspaceFingerprintSha256:
+        snapshot?.sourceWorkspaceFingerprintSha256 ?? null,
+      repositoryControlSha256:
+        snapshot?.repositoryControlSha256 ?? null,
+      head: snapshot?.head ?? null,
+      ...publicationBinding,
+    };
+    const receiptSha256 = hash(
+      "hydra.arena.monitor.receipt.v1\u0000",
+      receiptBody,
+    );
+    const receipt: ArenaMainWorkspaceReceipt = Object.freeze({
+      ...receiptBody,
+      receiptSha256,
+    });
+    await dependencies.persistReceipt?.(receipt);
+    lastObservationKind = kind;
+    return Object.freeze({
+      payloadType: "mainWorkspaceObserved",
+      observationKind: kind,
+      monitorEpochId: epochId,
+      monitorReceiptSha256: receiptSha256,
+      status,
+      sourceWorkspaceFingerprintSha256:
+        snapshot?.sourceWorkspaceFingerprintSha256 ?? null,
+      repositoryControlSha256:
+        snapshot?.repositoryControlSha256 ?? null,
+      head: snapshot?.head ?? null,
+      watcherChanged,
+      reasonCode,
+      ...publicationBinding,
+    });
+  };
 
   return {
     epochId,
@@ -108,94 +228,46 @@ export function startArenaMainWorkspaceMonitor(
         );
       }
       observationCount += 1;
-      await watcher.settle();
-
-      let snapshot: ArenaMainWorkspaceSnapshot | undefined;
-      let reasonCode: ArenaWorkspaceObservationReason | null = null;
-      let status: ArenaMainWorkspaceObservedPayload["status"] = "unchanged";
+      let settleFailed = false;
       try {
-        snapshot = await captureSnapshot();
-        assertDigest(snapshot.sourceWorkspaceFingerprintSha256);
-        assertDigest(snapshot.repositoryControlSha256);
-        assertObjectId(snapshot.head);
+        await watcher.settle();
       } catch {
-        status = "unverifiable";
-        reasonCode = watcher.error ? "monitorFailed" : "fingerprintFailed";
+        settleFailed = true;
       }
-
-      // The manifest schema separates a definite path event from a failed
-      // watcher. `DuelWorkspaceMutationMonitor.changed` includes both, so do
-      // not mislabel monitor failure as a witnessed mutation.
-      const watcherChanged = watcher.error === undefined && watcher.changed;
-      if (snapshot) {
-        if (watcher.error) {
-          status = "unverifiable";
-          reasonCode = "monitorFailed";
-        } else if (watcherChanged) {
-          status = "changed";
-          reasonCode = "watcherChanged";
-        } else if (snapshot.sourceWorkspaceFingerprintSha256
-            !== baseline.sourceWorkspaceFingerprintSha256) {
-          status = "changed";
-          reasonCode = "workspaceFingerprintChanged";
-        } else if (!sameObjectId(snapshot.head, baseline.head)) {
-          status = "changed";
-          reasonCode = "headChanged";
-        } else if (snapshot.repositoryControlSha256
-            !== baseline.repositoryControlSha256) {
-          status = "changed";
-          reasonCode = "repositoryControlChanged";
-        }
+      return record(kind, await capture(), settleFailed);
+    },
+    async sealPublication(input) {
+      if (closed) {
+        throw new Error("Arena main-workspace monitor is closed.");
       }
-      compromised ||= status !== "unchanged";
+      if (lastObservationKind !== "postEvidence") {
+        throw new Error(
+          "Arena publication seal requires the published postEvidence observation.",
+        );
+      }
+      assertDigest(input.postEvidenceEventSha256);
+      assertDigest(input.postEvidenceReceiptSha256);
+      observationCount += 1;
 
-      const changedPathsSha256 = hash(
-        "hydra.arena.monitor.changed-paths.v1\u0000",
-        watcher.changedPaths,
-      );
-      const errorSha256 = watcher.error
-        ? hash("hydra.arena.monitor.error.v1\u0000", watcher.error)
-        : null;
-      const receiptBody = {
-        schemaVersion: 1 as const,
-        receiptType: "arenaMainWorkspaceObservation" as const,
-        runId: baseline.runId,
-        epochId,
-        observationCount,
-        kind,
-        status,
-        reasonCode,
-        watcherChanged,
-        changedPathsSha256,
-        errorSha256,
-        sourceWorkspaceFingerprintSha256:
-          snapshot?.sourceWorkspaceFingerprintSha256 ?? null,
-        repositoryControlSha256:
-          snapshot?.repositoryControlSha256 ?? null,
-        head: snapshot?.head ?? null,
-      };
-      const receiptSha256 = hash(
-        "hydra.arena.monitor.receipt.v1\u0000",
-        receiptBody,
-      );
-      const receipt: ArenaMainWorkspaceReceipt = Object.freeze({
-        ...receiptBody,
-        receiptSha256,
-      });
-      await dependencies.persistReceipt?.(receipt);
-      return Object.freeze({
-        payloadType: "mainWorkspaceObserved",
-        observationKind: kind,
-        monitorEpochId: epochId,
-        monitorReceiptSha256: receiptSha256,
-        status,
-        sourceWorkspaceFingerprintSha256:
-          snapshot?.sourceWorkspaceFingerprintSha256 ?? null,
-        repositoryControlSha256:
-          snapshot?.repositoryControlSha256 ?? null,
-        head: snapshot?.head ?? null,
-        watcherChanged,
-        reasonCode,
+      // Capture while the sentinel remains live, then drain its event queue.
+      // The terminal settle completion is the explicit end of the comparison
+      // window. Any write/revert during the capture is latched before close.
+      const snapshot = await capture();
+      let settleFailed = false;
+      try {
+        await watcher.settle();
+      } catch {
+        settleFailed = true;
+      }
+      closed = true;
+      try {
+        watcher.close();
+      } catch {
+        settleFailed = true;
+      }
+      return record("publicationSeal", snapshot, settleFailed, {
+        publicationOfEventSha256: input.postEvidenceEventSha256,
+        publicationOfReceiptSha256: input.postEvidenceReceiptSha256,
       });
     },
     close() {

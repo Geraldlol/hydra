@@ -8,18 +8,42 @@ import {
 import { runArenaContestantBatch } from "./arenaContestantBatch";
 import { runArenaCleanupTarget } from "./arenaCleanupRunner";
 import { persistArenaDispatchReceipt } from "./arenaDispatchReceipts";
-import { preserveArenaEvidence } from "./arenaEvidence";
+import {
+  discardArenaEvidenceCaptureStages,
+  preserveArenaEvidence,
+  verifyArenaArtifactSet,
+} from "./arenaEvidence";
+import {
+  assertArenaAcceptancePlanSet,
+  runArenaBrowserJourneyAttempt,
+  runArenaVerificationAttempt,
+  type ArenaAcceptanceWorkspaceState,
+  type ArenaBrowserJourneyExecutionPlan,
+  type ArenaBrowserJourneyExecutorInput,
+  type ArenaBrowserJourneyExecutorResult,
+  type ArenaVerificationExecutionPlan,
+  type ArenaVerificationExecutorInput,
+  type ArenaVerificationExecutorResult,
+} from "./arenaAcceptance";
+import {
+  createArenaFlightProjectingManifestStore,
+  openFileArenaFlightProjectionStore,
+  type ArenaFlightProjectingManifestStore,
+  type ArenaFlightProjectionSink,
+} from "./arenaFlightProjection";
 import {
   startArenaMainWorkspaceMonitor,
   type ArenaMainWorkspaceMonitor,
 } from "./arenaMainWorkspaceMonitor";
 import { persistArenaMonitorReceipt } from "./arenaMonitorReceiptStore";
+import { watchDuelWorkspaceMutations } from "./duelWorkspaceGuard";
 import {
-  createArenaProcessIntent,
   arenaProcessFileIdentitySha256,
+  prepareArenaProcessIntent,
   sha256ArenaProcessUtf8,
-  superviseArenaProcess,
+  supervisePreparedArenaProcess,
   type ArenaBundledProcessHelper,
+  type ArenaNativeProcessQuiescenceBroker,
   type ArenaProcessSupervisorInput,
   type ArenaSupervisedProcessResult,
 } from "./arenaProcessSupervisor";
@@ -32,6 +56,7 @@ import {
   arenaReceiptsRootSha256,
   canonicalArenaManifestJson,
   type ArenaContestantLock,
+  type ArenaEvidencePreservedPayload,
   type ArenaManifestEvent,
   type ArenaManifestReplay,
   type ArenaMissionLock,
@@ -48,10 +73,12 @@ export interface ArenaControllerProcessSpec {
   readonly contextSha256: string;
   readonly timeoutMs: number;
   /**
-   * Stage 3 admits only Hydra's bounded fake provider. Native head adapters
-   * remain disabled until they can prove descendant-process quiescence.
+   * Hydra's bounded fake provider is the compatibility path. A native adapter
+   * is admitted only through the exact executable/platform broker below.
    */
-  readonly bundledHelper: ArenaBundledProcessHelper;
+  readonly bundledHelper?: ArenaBundledProcessHelper;
+  readonly nativeAdapterKind?: string;
+  readonly nativeQuiescenceBroker?: ArenaNativeProcessQuiescenceBroker;
 }
 
 export interface ArenaControllerProcessContext {
@@ -76,23 +103,35 @@ export interface ArenaControllerInput {
   readonly createProcess: (
     context: ArenaControllerProcessContext,
   ) => ArenaControllerProcessSpec | Promise<ArenaControllerProcessSpec>;
+  readonly verificationPlans?: readonly ArenaVerificationExecutionPlan[];
+  readonly browserJourneyPlans?: readonly ArenaBrowserJourneyExecutionPlan[];
+  readonly executeVerification?: (
+    input: ArenaVerificationExecutorInput,
+  ) => Promise<ArenaVerificationExecutorResult>;
+  readonly executeBrowserJourney?: (
+    input: ArenaBrowserJourneyExecutorInput,
+  ) => Promise<ArenaBrowserJourneyExecutorResult>;
+  /** Defaults to Hydra's private metadata-only Arena Flight extension. */
+  readonly flightProjectionSink?: ArenaFlightProjectionSink;
 }
 
 export interface ArenaControllerResult {
   readonly replay: ArenaManifestReplay;
   readonly admission: ArenaGitAdmission;
   readonly contestantResults: readonly ArenaSupervisedProcessResult[];
+  /** False means Arena completed but its non-authoritative Flight view is partial. */
+  readonly flightProjectionComplete: boolean;
 }
 
 /**
- * Stage-3 Arena orchestration. This controller deliberately has no panel,
+ * Arena core orchestration. This controller deliberately has no panel,
  * steering, Terminal Bridge, winner, merge, commit, or promotion dependency.
  * All provider writes pass through the dedicated bounded process supervisor.
  */
 export async function runArenaController(
   input: ArenaControllerInput,
 ): Promise<ArenaControllerResult> {
-  assertStageThreeLock(input.lock);
+  assertControllerLock(input);
   const signal = input.signal ?? new AbortController().signal;
   await input.assertMissionAuthority(input.lock.mission);
   const executor = await ArenaGitExecutor.open(
@@ -101,11 +140,33 @@ export async function runArenaController(
     input.repositoryLeaseRoot,
     input.gitResolutionRoot ?? input.workspaceRoot,
   );
+  // The executor authenticates and canonicalizes an upstream directory alias.
+  // Every controller-owned store and receipt must use that one spelling or the
+  // same physical run can acquire divergent path-bound identities.
+  const privateWorkspaceRoot = executor.privateWorkspaceRoot;
   const admission = await executor.inspectAdmission(signal);
   assertLockMatchesAdmission(input.lock, admission);
-  const store = await openFileArenaManifestStore(input.privateWorkspaceRoot);
-  if (await store.load(input.runId)) {
+  const authoritativeStore = await openFileArenaManifestStore(privateWorkspaceRoot);
+  if (await authoritativeStore.load(input.runId)) {
     throw new Error("Arena controller refuses to reuse an existing run.");
+  }
+  let flightProjectionAvailable = true;
+  let projectingStore: ArenaFlightProjectingManifestStore | undefined;
+  let store: ArenaManifestStore = authoritativeStore;
+  try {
+    const projectionSink = input.flightProjectionSink
+      ?? await openFileArenaFlightProjectionStore(privateWorkspaceRoot);
+    projectingStore = createArenaFlightProjectingManifestStore(
+      authoritativeStore,
+      projectionSink,
+      () => {
+        flightProjectionAvailable = false;
+      },
+    );
+    store = projectingStore;
+  } catch {
+    // Flight is a derived diagnostic surface, never Arena execution authority.
+    flightProjectionAvailable = false;
   }
   const runId = input.runId;
   const lockEvent = await append(store, runId, "arenaRunLocked", input.lock);
@@ -114,6 +175,11 @@ export async function runArenaController(
   let monitor: ArenaMainWorkspaceMonitor | undefined;
   let planned = false;
   const worktrees: ArenaProvisionedWorktree[] = [];
+  const evidenceStates = new Map<string, ArenaOwnedEvidenceState>();
+  const contestantMonitors = new Map<
+    string,
+    ReturnType<typeof watchDuelWorkspaceMutations>
+  >();
   try {
     const claim = await executor.claimRepositoryRun(runId, admission);
     if (claim.status !== "active") {
@@ -138,7 +204,7 @@ export async function runArenaController(
       {
         persistReceipt: (receipt) =>
           persistArenaMonitorReceipt(
-            input.privateWorkspaceRoot,
+            privateWorkspaceRoot,
             receipt,
           ).then(() => undefined),
       },
@@ -162,6 +228,10 @@ export async function runArenaController(
         replay: await requiredReplay(store, runId),
         admission,
         contestantResults: Object.freeze([]),
+        flightProjectionComplete: await completeFlightProjection(
+          projectingStore,
+          flightProjectionAvailable,
+        ),
       };
     }
 
@@ -246,11 +316,7 @@ export async function runArenaController(
             processGenerationId,
           });
           assertDigest(spec.contextSha256, "process context");
-          if (!spec.bundledHelper) {
-            throw new Error(
-              "Arena stage 3 permits only the bounded bundled fake-head helper.",
-            );
-          }
+          assertControllerProcessSpec(spec, contestant);
           await input.assertMissionAuthority(input.lock.mission);
           return {
             contestant,
@@ -295,7 +361,6 @@ export async function runArenaController(
     // Every start event becomes durable inside its supervisor's submission
     // gate before that provider receives stdin. Individual process tasks repeat
     // the Mission authority check immediately before intent and spawn.
-    const evidenceStates = new Map<string, ArenaOwnedEvidenceState>();
     let dispatchGate: Promise<void> = Promise.resolve();
     const withDispatchGate = async <T>(work: () => Promise<T>): Promise<T> => {
       const previous = dispatchGate;
@@ -336,10 +401,18 @@ export async function runArenaController(
           stdin: item.spec.stdin,
           environmentPolicySha256: input.lock.environmentPolicySha256,
           invocationSha256: item.contestant.invocationSha256,
-          timeoutMs: item.spec.timeoutMs,
-          signal: batch.signal,
-          processGenerationId: item.processGenerationId,
-          bundledHelper: item.spec.bundledHelper,
+           timeoutMs: item.spec.timeoutMs,
+           signal: batch.signal,
+           processGenerationId: item.processGenerationId,
+           ...(item.spec.bundledHelper
+             ? { bundledHelper: item.spec.bundledHelper }
+             : {}),
+           ...(item.spec.nativeAdapterKind
+             ? { nativeAdapterKind: item.spec.nativeAdapterKind }
+             : {}),
+           ...(item.spec.nativeQuiescenceBroker
+             ? { nativeQuiescenceBroker: item.spec.nativeQuiescenceBroker }
+             : {}),
           onSubmission: async (submission) => {
             let published = false;
             try {
@@ -360,7 +433,7 @@ export async function runArenaController(
               });
               startedPublished = true;
               await persistArenaDispatchReceipt(
-                input.privateWorkspaceRoot,
+                privateWorkspaceRoot,
                 submission,
               );
               published = true;
@@ -381,10 +454,7 @@ export async function runArenaController(
             return state.fingerprint.sha256;
           },
         };
-        const intent = createArenaProcessIntent({
-          ...supervisorInput,
-          processGenerationId: item.processGenerationId,
-        });
+        const intent = await prepareArenaProcessIntent(supervisorInput);
         const { resultPromise } = await withDispatchGate(async () => {
           if (batch.signal.aborted) {
             // A queued contestant that never reached spawn is a typed,
@@ -392,11 +462,14 @@ export async function runArenaController(
             // task. Persist the intent, let the pre-aborted supervisor prove
             // that no child was accepted, and preserve partial evidence below.
             await persistArenaDispatchReceipt(
-              input.privateWorkspaceRoot,
+              privateWorkspaceRoot,
               intent,
             );
             return {
-              resultPromise: superviseArenaProcess(supervisorInput),
+              resultPromise: supervisePreparedArenaProcess(
+                supervisorInput,
+                intent,
+              ),
             };
           }
           await input.assertMissionAuthority(input.lock.mission);
@@ -414,7 +487,7 @@ export async function runArenaController(
           }
 
           await persistArenaDispatchReceipt(
-            input.privateWorkspaceRoot,
+            privateWorkspaceRoot,
             intent,
           );
 
@@ -433,7 +506,10 @@ export async function runArenaController(
             );
           }
           await input.assertMissionAuthority(input.lock.mission);
-          const resultPromise = superviseArenaProcess(supervisorInput);
+          const resultPromise = supervisePreparedArenaProcess(
+            supervisorInput,
+            intent,
+          );
           await Promise.race([
             dispatchBoundary,
             resultPromise.then(
@@ -464,13 +540,13 @@ export async function runArenaController(
         }
         if (result.submission) {
           await persistArenaDispatchReceipt(
-            input.privateWorkspaceRoot,
+            privateWorkspaceRoot,
             result.submission,
           );
         }
         if (result.quiescence) {
           await persistArenaDispatchReceipt(
-            input.privateWorkspaceRoot,
+            privateWorkspaceRoot,
             result.quiescence,
           );
         }
@@ -509,8 +585,28 @@ export async function runArenaController(
       );
     }
 
+    // Start one continuous sentinel per contestant before publishing terminal
+    // state. It remains live through acceptance receipts and evidence
+    // publication, closing the write/revert gaps between those phases.
+    for (const item of prepared) {
+      contestantMonitors.set(
+        item.contestant.contestantId,
+        watchDuelWorkspaceMutations(
+          item.worktree.worktreePath,
+          { excludeHydraState: false },
+        ),
+      );
+    }
+
     const finishedEvents = new Map<string, ArenaManifestEvent>();
-    const evidenceEvents = new Map<string, ArenaManifestEvent>();
+    const verificationEvents = new Map<
+      string,
+      Map<string, ArenaManifestEvent[]>
+    >();
+    const browserJourneyEvents = new Map<
+      string,
+      Map<string, ArenaManifestEvent[]>
+    >();
     for (const item of prepared) {
       const result = requiredResult(
         contestantResults,
@@ -530,36 +626,203 @@ export async function runArenaController(
         outputBytes: result.outputBytes,
       });
       finishedEvents.set(item.contestant.contestantId, finished);
-      const captured = await preserveArenaEvidence({
-        privateWorkspaceRoot: input.privateWorkspaceRoot,
+      verificationEvents.set(item.contestant.contestantId, new Map());
+      browserJourneyEvents.set(item.contestant.contestantId, new Map());
+    }
+
+    const verificationPlans = input.verificationPlans ?? [];
+    const browserJourneyPlans = input.browserJourneyPlans ?? [];
+    const acceptanceConfigured = verificationPlans.length > 0
+      || browserJourneyPlans.length > 0;
+    if (acceptanceConfigured
+      && contestantResults.every((result) => result.status === "succeeded")) {
+      for (const item of prepared) {
+        const result = requiredResult(
+          contestantResults,
+          item.contestant.contestantId,
+        );
+        if (result.stage !== "execution") {
+          throw new Error(
+            "Arena acceptance cannot execute for a contestant that never reached dispatch.",
+          );
+        }
+        const state = evidenceStates.get(item.contestant.contestantId)!;
+        const expectedState: ArenaAcceptanceWorkspaceState = Object.freeze({
+          head: state.finalHead,
+          workspaceFingerprintSha256: state.fingerprint.sha256,
+        });
+        const acceptanceMonitor = contestantMonitors.get(
+          item.contestant.contestantId,
+        )!;
+        const assertNoAcceptanceMutation = async (phase: string) => {
+          await acceptanceMonitor.settle();
+          if (acceptanceMonitor.error || acceptanceMonitor.changed) {
+            throw new Error(
+              `Arena contestant changed during locked acceptance ${phase}; the run remains retained for recovery.`,
+            );
+          }
+        };
+        const captureState = async (): Promise<ArenaAcceptanceWorkspaceState> => {
+          const observed = await executor.captureOwnedEvidenceIdentity(
+            item.worktree,
+            boundedArenaSafetySignal(),
+          );
+          return Object.freeze({
+            head: observed.finalHead,
+            workspaceFingerprintSha256: observed.fingerprint.sha256,
+          });
+        };
+        await assertNoAcceptanceMutation("preflight");
+        for (const [index, plan] of verificationPlans.entries()) {
+          await input.assertMissionAuthority(input.lock.mission);
+          const attempt = await runArenaVerificationAttempt({
+            privateWorkspaceRoot,
+            runId,
+            contestantId: item.contestant.contestantId,
+            worktreePath: item.worktree.worktreePath,
+            plan,
+            locked: input.lock.verificationChecks[index]!,
+            attempt: 1,
+            expectedState,
+            signal,
+            captureState,
+            execute: input.executeVerification!,
+          });
+          await assertNoAcceptanceMutation(`verification ${plan.checkId}`);
+          const event = await append(
+            store,
+            runId,
+            "arenaVerificationRecorded",
+            attempt.payload,
+          );
+          appendAcceptanceEvent(
+            verificationEvents.get(item.contestant.contestantId)!,
+            plan.checkId,
+            event,
+          );
+          await assertNoAcceptanceMutation(
+            `verification ${plan.checkId} publication`,
+          );
+          assertAcceptanceStateMatchesExpected(
+            attempt.payload.head,
+            attempt.payload.workspaceFingerprintSha256,
+            expectedState,
+            `verification ${plan.checkId}`,
+          );
+          if (!attempt.receipt.terminationConfirmed) {
+            throw new Error(
+              `Arena verification ${plan.checkId} did not prove descendant-process quiescence; the run remains retained for recovery.`,
+            );
+          }
+        }
+        for (const [index, plan] of browserJourneyPlans.entries()) {
+          await input.assertMissionAuthority(input.lock.mission);
+          const attempt = await runArenaBrowserJourneyAttempt({
+            privateWorkspaceRoot,
+            runId,
+            contestantId: item.contestant.contestantId,
+            worktreePath: item.worktree.worktreePath,
+            plan,
+            locked: input.lock.browserJourneys[index]!,
+            attempt: 1,
+            expectedState,
+            signal,
+            captureState,
+            execute: input.executeBrowserJourney!,
+          });
+          await assertNoAcceptanceMutation(`browser journey ${plan.journeyId}`);
+          const event = await append(
+            store,
+            runId,
+            "arenaBrowserJourneyRecorded",
+            attempt.payload,
+          );
+          appendAcceptanceEvent(
+            browserJourneyEvents.get(item.contestant.contestantId)!,
+            plan.journeyId,
+            event,
+          );
+          await assertNoAcceptanceMutation(
+            `browser journey ${plan.journeyId} publication`,
+          );
+          assertAcceptanceStateMatchesExpected(
+            attempt.payload.head,
+            attempt.payload.workspaceFingerprintSha256,
+            expectedState,
+            `browser journey ${plan.journeyId}`,
+          );
+        }
+      }
+    }
+
+    const evidenceEvents = new Map<string, ArenaManifestEvent>();
+    const evidencePayloads = new Map<string, ArenaEvidencePreservedPayload>();
+    for (const item of prepared) {
+      const result = requiredResult(
+        contestantResults,
+        item.contestant.contestantId,
+      );
+      const state = evidenceStates.get(item.contestant.contestantId)!;
+      const finished = finishedEvents.get(item.contestant.contestantId)!;
+      const contestantVerificationEvents = verificationEvents.get(
+        item.contestant.contestantId,
+      )!;
+      const contestantBrowserEvents = browserJourneyEvents.get(
+        item.contestant.contestantId,
+      )!;
+      const evidenceMonitor = contestantMonitors.get(
+        item.contestant.contestantId,
+      )!;
+      let captured: Awaited<ReturnType<typeof preserveArenaEvidence>>;
+      try {
+        const confirmEvidenceSnapshot = async (
+          phase: "staging" | "publication",
+        ): Promise<void> => {
+          await assertArenaEvidenceIdentity(executor, item.worktree, state);
+          await evidenceMonitor.settle();
+          if (evidenceMonitor.error || evidenceMonitor.changed) {
+            throw new Error(
+              `Arena contestant changed during private evidence ${phase}${
+                evidenceMonitor.changedPaths.length > 0
+                  ? `: ${evidenceMonitor.changedPaths.join(", ")}`
+                  : "."
+              }`,
+            );
+          }
+        };
+        await confirmEvidenceSnapshot("staging");
+        captured = await preserveArenaEvidence({
+          privateWorkspaceRoot,
+          runId,
+          contestantId: item.contestant.contestantId,
+          worktreePath: item.worktree.worktreePath,
+          patch: state.patch,
+          untrackedPaths: state.untrackedPaths,
+          receiptsRootSha256: arenaReceiptsRootSha256({
+            finished,
+            verifications: contestantVerificationEvents,
+            browserJourneys: contestantBrowserEvents,
+          }),
+          quiescenceReceiptSha256: result.quiescenceReceiptSha256,
+          quiescenceWorkspaceFingerprintSha256:
+            result.quiescenceWorkspaceFingerprintSha256,
+          finalHead: state.finalHead,
+          finalWorkspaceFingerprintSha256: state.fingerprint.sha256,
+          confirmSnapshotBeforePublication: () =>
+            confirmEvidenceSnapshot("staging"),
+          confirmSnapshotAfterPublication: () =>
+            confirmEvidenceSnapshot("publication"),
+        });
+      } finally {
+        evidenceMonitor.close();
+        contestantMonitors.delete(item.contestant.contestantId);
+      }
+      await verifyArenaArtifactSet({
+        privateWorkspaceRoot,
         runId,
         contestantId: item.contestant.contestantId,
-        worktreePath: item.worktree.worktreePath,
-        patch: state.patch,
-        untrackedPathsZ: state.untrackedPathsZ,
-        receiptsRootSha256: arenaReceiptsRootSha256({
-          finished,
-          verifications: new Map(),
-          browserJourneys: new Map(),
-        }),
-        quiescenceReceiptSha256: result.quiescenceReceiptSha256,
-        quiescenceWorkspaceFingerprintSha256:
-          result.quiescenceWorkspaceFingerprintSha256,
-        finalHead: state.finalHead,
-        finalWorkspaceFingerprintSha256: state.fingerprint.sha256,
+        payload: captured.payload,
       });
-      const evidenceRecheck = await executor.captureOwnedEvidenceState(
-        item.worktree,
-        boundedArenaSafetySignal(),
-      );
-      if (evidenceRecheck.fingerprint.sha256 !== state.fingerprint.sha256
-        || evidenceRecheck.finalHead.objectFormat
-          !== state.finalHead.objectFormat
-        || evidenceRecheck.finalHead.oid !== state.finalHead.oid) {
-        throw new Error(
-          "Arena contestant state changed during private evidence preservation.",
-        );
-      }
       const evidence = await append(
         store,
         runId,
@@ -567,7 +830,22 @@ export async function runArenaController(
         captured.payload,
       );
       evidenceEvents.set(item.contestant.contestantId, evidence);
+      evidencePayloads.set(item.contestant.contestantId, captured.payload);
     }
+
+    // Evidence integrity is a precondition of terminal comparability. Perform
+    // one all-contestant pass before the fresh post-evidence source snapshot
+    // so the potentially long byte reads do not create an unmonitored gap.
+    for (const item of prepared) {
+      await verifyArenaArtifactSet({
+        privateWorkspaceRoot,
+        runId,
+        contestantId: item.contestant.contestantId,
+        payload: evidencePayloads.get(item.contestant.contestantId)!,
+      });
+    }
+
+    const beforeFinalization = await requiredReplay(store, runId);
 
     const postEvidencePayload = await monitor.observe("postEvidence");
     const postEvidence = await append(
@@ -576,10 +854,17 @@ export async function runArenaController(
       "arenaMainWorkspaceObserved",
       postEvidencePayload,
     );
-    monitor.close();
+    const publicationSealPayload = await monitor.sealPublication({
+      postEvidenceEventSha256: postEvidence.eventSha256,
+      postEvidenceReceiptSha256: postEvidencePayload.monitorReceiptSha256,
+    });
+    await append(
+      store,
+      runId,
+      "arenaMainWorkspaceObserved",
+      publicationSealPayload,
+    );
     monitor = undefined;
-
-    const beforeFinalization = await requiredReplay(store, runId);
     const terminalClassification = classifyArenaControllerStatuses(
       contestantResults.map((result) => result.status),
       signal.aborted,
@@ -594,14 +879,29 @@ export async function runArenaController(
           contestantId: contestant.contestantId,
           finishedEventSha256:
             finishedEvents.get(contestant.contestantId)!.eventSha256,
-          verificationEventSha256s: [],
-          browserJourneyEventSha256s: [],
+          verificationEventSha256s: input.lock.verificationChecks.flatMap(
+            (check) => (
+              verificationEvents.get(contestant.contestantId)!
+                .get(check.checkId) ?? []
+            ).map((event) => event.eventSha256),
+          ),
+          browserJourneyEventSha256s: input.lock.browserJourneys.flatMap(
+            (journey) => (
+              browserJourneyEvents.get(contestant.contestantId)!
+                .get(journey.journeyId) ?? []
+            ).map((event) => event.eventSha256),
+          ),
           evidenceEventSha256:
             evidenceEvents.get(contestant.contestantId)!.eventSha256,
         })),
       });
     }
-    const compromised = beforeFinalization.compromised;
+    const postEvidenceCompromised = postEvidencePayload.status !== "unchanged";
+    const publicationSealCompromised =
+      publicationSealPayload.status !== "unchanged";
+    const compromised = beforeFinalization.compromised
+      || postEvidenceCompromised
+      || publicationSealCompromised;
     await append(store, runId, "arenaRunFinalized", {
       payloadType: "runFinalized",
       outcome: terminalClassification.outcome,
@@ -612,7 +912,11 @@ export async function runArenaController(
         : "incomplete",
       reasonCode: allSucceeded
         ? compromised
-          ? reasonForReplay(beforeFinalization)
+          ? postEvidenceCompromised
+            ? reasonForMonitor(postEvidencePayload.reasonCode)
+            : publicationSealCompromised
+              ? reasonForMonitor(publicationSealPayload.reasonCode)
+            : reasonForReplay(beforeFinalization)
           : null
         : terminalClassification.reasonCode,
       evidenceMatrixSha256: matrixSha256,
@@ -640,12 +944,29 @@ export async function runArenaController(
     }
     await executor.releaseRepositoryRun(runId);
     claimActive = false;
+    const replay = await requiredReplay(store, runId);
     return Object.freeze({
-      replay: await requiredReplay(store, runId),
+      replay,
       admission,
       contestantResults: Object.freeze(contestantResults),
+      flightProjectionComplete: await completeFlightProjection(
+        projectingStore,
+        flightProjectionAvailable,
+      ),
     });
   } catch (error) {
+    const evidenceCleanup = await Promise.allSettled(
+      [...evidenceStates.entries()].map(([contestantId, state]) =>
+        discardArenaEvidenceCaptureStages({
+          privateWorkspaceRoot,
+          runId,
+          contestantId,
+          patch: state.patch,
+          untrackedPaths: state.untrackedPaths,
+        })),
+    );
+    const evidenceCleanupErrors = evidenceCleanup.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : []);
     // Never infer that a provider did not receive input. The durable intent,
     // any submission receipt, worktrees, and repository claim remain available
     // for an explicit recovery flow; this controller does not retry.
@@ -671,9 +992,38 @@ export async function runArenaController(
       }
     }
     if (claimActive) executor.abandonRepositoryRun(runId);
+    if (evidenceCleanupErrors.length > 0) {
+      throw new AggregateError(
+        [error, ...evidenceCleanupErrors],
+        "Arena controller failure also left evidence stages uncleaned.",
+      );
+    }
     throw error;
   } finally {
+    await projectingStore?.flushProjection();
+    for (const contestantMonitor of contestantMonitors.values()) {
+      contestantMonitor.close();
+    }
+    contestantMonitors.clear();
     monitor?.close();
+  }
+}
+
+async function assertArenaEvidenceIdentity(
+  executor: ArenaGitExecutor,
+  worktree: ArenaProvisionedWorktree,
+  expected: ArenaOwnedEvidenceState,
+): Promise<void> {
+  const observed = await executor.captureOwnedEvidenceIdentity(
+    worktree,
+    boundedArenaSafetySignal(),
+  );
+  if (observed.fingerprint.sha256 !== expected.fingerprint.sha256
+    || observed.finalHead.objectFormat !== expected.finalHead.objectFormat
+    || observed.finalHead.oid !== expected.finalHead.oid) {
+    throw new Error(
+      "Arena contestant state changed during private evidence preservation.",
+    );
   }
 }
 
@@ -693,15 +1043,92 @@ async function finalizeWithoutTargets(
   await executor.releaseRepositoryRun(runId);
 }
 
-function assertStageThreeLock(lock: ArenaRunLockedPayload): void {
-  if (lock.preparationPlanSha256 !== null
-    || lock.verificationChecks.length !== 0
-    || lock.browserJourneys.length !== 0
-    || lock.steering !== "disabled") {
+function assertControllerLock(input: ArenaControllerInput): void {
+  if (input.lock.preparationPlanSha256 !== null
+    || input.lock.steering !== "disabled") {
     throw new Error(
-      "Arena stage 3 supports no preparation, verification, browser journey, or steering plan.",
+      "Arena core supports no preparation or steering plan.",
     );
   }
+  const verificationPlans = input.verificationPlans ?? [];
+  const browserJourneyPlans = input.browserJourneyPlans ?? [];
+  assertArenaAcceptancePlanSet(
+    input.lock,
+    verificationPlans,
+    browserJourneyPlans,
+  );
+  if (verificationPlans.length > 0
+    && typeof input.executeVerification !== "function") {
+    throw new Error(
+      "Arena locked verification plans require a trusted worktree executor.",
+    );
+  }
+  if (browserJourneyPlans.length > 0
+    && typeof input.executeBrowserJourney !== "function") {
+    throw new Error(
+      "Arena locked browser journeys require an owned browser broker executor.",
+    );
+  }
+}
+
+function assertControllerProcessSpec(
+  spec: ArenaControllerProcessSpec,
+  contestant: ArenaContestantLock,
+): void {
+  const bundled = spec.bundledHelper !== undefined;
+  const nativeAdapter = spec.nativeAdapterKind !== undefined;
+  const nativeBroker = spec.nativeQuiescenceBroker !== undefined;
+  if (bundled && (nativeAdapter || nativeBroker)) {
+    throw new Error(
+      "Arena cannot combine its bounded helper with a native process broker.",
+    );
+  }
+  if (!bundled && (!nativeAdapter || !nativeBroker)) {
+    throw new Error(
+      "Arena native admission requires an exact adapter and descendant-quiescence broker.",
+    );
+  }
+  if (nativeAdapter
+    && (spec.nativeAdapterKind !== contestant.agentKind
+      || spec.nativeQuiescenceBroker!.adapterKind
+        !== contestant.agentKind)) {
+    throw new Error(
+      "Arena native process broker does not match the locked contestant adapter.",
+    );
+  }
+}
+
+function appendAcceptanceEvent(
+  events: Map<string, ArenaManifestEvent[]>,
+  acceptanceId: string,
+  event: ArenaManifestEvent,
+): void {
+  const attempts = events.get(acceptanceId) ?? [];
+  attempts.push(event);
+  events.set(acceptanceId, attempts);
+}
+
+function assertAcceptanceStateMatchesExpected(
+  head: ArenaAcceptanceWorkspaceState["head"],
+  workspaceFingerprintSha256: string,
+  expected: ArenaAcceptanceWorkspaceState,
+  label: string,
+): void {
+  if (head.objectFormat !== expected.head.objectFormat
+    || head.oid !== expected.head.oid
+    || workspaceFingerprintSha256
+      !== expected.workspaceFingerprintSha256) {
+    throw new Error(
+      `Arena ${label} changed the contestant worktree; the run remains retained for recovery.`,
+    );
+  }
+}
+
+async function completeFlightProjection(
+  store: ArenaFlightProjectingManifestStore | undefined,
+  available: boolean,
+): Promise<boolean> {
+  return available && store !== undefined && await store.flushProjection();
 }
 
 function assertLockMatchesAdmission(
@@ -801,6 +1228,10 @@ export function classifyArenaControllerStatuses(
   if (statuses.length === 0) {
     throw new Error("Arena controller cannot classify an empty result set.");
   }
+  // Supervised contestant results are the terminal causal record. A Stop that
+  // arrives after every contestant has already succeeded may still be visible
+  // on the parent signal while evidence is being sealed, but it cannot
+  // retroactively cancel those completed executions.
   if (statuses.every((status) => status === "succeeded")) {
     return Object.freeze({ outcome: "completed", reasonCode: null });
   }
@@ -844,6 +1275,12 @@ function reasonForReplay(
   }
   if (replay.compromiseReasons.includes("contestantHeadChanged")) {
     return "contestantHeadChanged";
+  }
+  if (replay.compromiseReasons.includes("verificationMutatedWorkspace")) {
+    return "verificationMutatedWorkspace";
+  }
+  if (replay.compromiseReasons.includes("browserMutatedWorkspace")) {
+    return "browserMutatedWorkspace";
   }
   if (replay.compromiseReasons.some((reason) =>
     ["monitorFailed", "fingerprintFailed", "registryMismatch"].includes(reason))) {

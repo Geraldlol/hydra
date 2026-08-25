@@ -250,7 +250,6 @@ export class FileFlightRecorderStore implements FlightRecorderStore {
   }
 
   async listTraceIds(): Promise<readonly string[]> {
-    await ensureFile(this.paths.indexPath);
     let entries: Dirent[];
     try {
       entries = await fs.readdir(this.paths.tracesPath, { withFileTypes: true });

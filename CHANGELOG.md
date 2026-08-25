@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.8.0
+
+Release candidate. Marketplace and GitHub publication remain separate human-approved actions.
+
+### Added
+
+- Adds operator-complete Mission Contracts: local proposal/amendment, exact confirmation, agent-proposal admission, dismissal, retirement, private authoritative replay, readable mirrors, and dispatch-time Mission/hash binding.
+- Adds a strict private metadata Flight Recorder for phase, provider, steering, browser/approval, structured tool/edit, verification, usage, and native-action lifecycles. The operator inspector supports safe isolated Replay preparation and hash-bound eval-case creation; Replay does not retain exact prompt/response bodies, reuse provider sessions, or submit automatically.
+- Adds capability-negotiated live steering with exact run/Mission/authority targeting, authenticated cross-window delivery, and separately opted-in Telegram steering behind exact bot/chat/sender authorization.
+- Adds N-way reviewer selection and deterministic `human`, `unanimous`, and `majority` convergence. Invalid, missing, tied, or non-unanimous results fail closed for human resolution.
+- Extends Claude Worker Fanout to one-shot Build and Review. Build extras are isolated no-tool advisers that drain before one ordinary lead writer; duplicate Review attempts collapse to one Claude roster verdict and cannot manufacture votes.
+- Completes the built-in Gemini headless adapter contract: stdin JSON mode, strict reply and SessionMetrics usage parsing (including compatible derived-input handling), current model aliases/pricing, raw-output fallback, and phase-aware native-authority classification.
+- Adds Arena's isolated core and operator workflows: bounded immutable manifests/evidence, locked verification and browser journeys, a non-authoritative Flight sidecar, simultaneous reveal, explicit winner/synthesis records, exact-previewed and separately confirmed local promotion, startup classification, and explicitly confirmed dead-owner repository-lease takeover. The recovery command does not resume, abort, clean up, or start contestant work.
+- Adds a strict deterministic SPDX 2.3 consumer SBOM bound to the recorded VSIX checksum and source-commit epoch, plus digest-bound GitHub build-provenance and SBOM attestations in a minimal signing job isolated from dependency and repository code.
+
+### Changed
+
+- Makes Arena history and evidence bounded, crash-recoverable, path/link hardened, and source-bound across process, cleanup, promotion, and repository-owner receipts.
+- Expands CI to Node 22.22.1 and 24.x on Linux, Windows, and macOS, with separate extension-host, dependency-audit, coverage, and package jobs using immutable action revisions and minimal permissions.
+- Adds first-class format/lint and coverage gates; coverage requires at least 80% lines, 70% branches, and 80% functions.
+- Makes agent-default auto-advance an informed opt-in: it defaults off, requires a trusted-workspace modal acknowledgment to enable, and leaves manual Accept Default available.
+
+### Fixed and security
+
+- Bounds every OpenAI-compatible completion request to 4,096 output tokens by default, with a validated per-head override, so provider timeouts and an optional session-cost rail are no longer the only denial-of-wallet controls.
+- Replaces Full Native ordinary-room defaults with read-only Discussion, constrained workspace-editing Build, and read-only Review. Full Native remains an explicit consent-gated opt-in. Default Codex Build keeps command networking off and `.git` behind Codex's protected read-only sandbox boundary; ordinary Claude profiles use `--safe-mode` plus explicit phase-minimal tool lists, so non-managed hooks, plugins, shell/web/MCP/browser/skill/subagent surfaces, project/local settings, and session persistence cannot widen them.
+- Hardens decision-webhook delivery against DNS rebinding: Hydra now requires HTTPS with no URL credentials, rejects any destination whose complete DNS answer set contains a non-public address, pins the vetted address through the request, rejects redirects, and applies one bounded deadline across DNS plus the HTTPS response with a 64-KiB response cap.
+- Makes Arena manifest replay bind the exact segment names and per-file identity/size/change metadata instead of volatile directory timestamps, with bounded-parallel checks at the event ceiling so harmless Windows metadata drift cannot fail healthy runs.
+- Makes same-environment VSIX archive creation prove byte-for-byte reproducibility across two independent package processes over one compiled tree and fail closed against source, tests, scripts, docs, nested packages, local/private tool state, credential-shaped files, unsafe ZIP metadata, and missing, extra, or stale manifests/runtime/static assets. The fresh no-OIDC handoff validator independently rebuilds the complete stable VSIX and requires byte equality for the original immutable artifact ID; it never re-uploads mutable validated files, and the attestation-authorized job can consume only that same ID after validation succeeds.
+- Resolves the high-severity dependency-audit findings in release/test tooling and hardens process cancellation, cross-process lock ownership, durable parent-directory publication, Gemini authority/argument parsing, and cross-platform Terminal Bridge fallback.
+- Removes Terminal Bridge reply-HMAC keys from pasted commands and shell history. Each dispatch now uses a create-new private 32-byte artifact that PowerShell exclusively reads and deletes before resolving the native CLI, with key buffers cleared on every exit path and fresh owner-tagged crash leftovers eligible for early reclamation only after the extension-host PID is definitively gone.
+
+### Known boundaries
+
+- Built-in native Arena heads remain unadmitted and there is no production Start Arena UI. An adapter must first provide platform-specific descendant containment and active-count-zero quiescence proof (for example, a Windows Job Object or a POSIX cgroup/container equivalent). Retained-result management, promotion, recovery, and synthetic/fake-head smoke paths do not weaken that gate.
+- No live paid/authenticated Gemini or Claude worker smoke was performed for this release candidate. The implementation is covered by official contract fixtures and deterministic local tests; operators should run a bounded account-specific smoke before enabling those paths.
+- Cross-platform CI and extension-host matrices must pass on the release commit, and the human-reviewed artifact digest must be recorded before publication.
+- Public promotion remains blocked until a real independent security/workflow reviewer is assigned and an enforced GitHub ruleset or branch-protection policy requires that review and the release gates; a documentation-only or same-owner CODEOWNERS change would not satisfy this boundary.
+
 ## 0.7.3
 
 - Stops a single blank line on the Codex App Server's stdout from failing an entire in-flight turn; the RPC reader now skips empty frame separators the way every other JSONL reader in the room already did.

@@ -2,6 +2,11 @@ import * as vscode from "vscode";
 import { IntegratedBrowserBroker } from "./browserBroker";
 import { HydraRoomPanel } from "./panel";
 import { renderHydraStatusBar, type HydraStatusBarSnapshot } from "./statusBar";
+import {
+  manageArenaRecovery,
+  manageArenaResults,
+  scanArenaRecoveryOnStartup,
+} from "./arenaOperator";
 
 // Command-palette callbacks have no built-in error surface in VS Code:
 // async rejections become unhandled and appear in the host log, not in the UI.
@@ -100,7 +105,7 @@ export function activate(context: vscode.ExtensionContext): void {
         const panel = HydraRoomPanel.open(context);
         const text = await vscode.window.showInputBox({
           title: "Hydra: Send Discussion Turn",
-          prompt: "Hydra runs a serialized discussion turn, or parallel Codex + Claude replies when the instruction addresses both.",
+          prompt: "Hydra runs a serialized discussion turn, or parallel replies from every seated head when the instruction addresses the group.",
           ignoreFocusOut: true,
         });
         if (text && text.trim()) await panel.sendUserMessage(text);
@@ -188,10 +193,6 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand(
       "hydraRoom.toggleAutoAdvanceActionableDefaults",
       withErrorReporting(async () => {
-        if (vscode.workspace.isTrusted !== true) {
-          await vscode.window.showWarningMessage("Hydra auto-advance stays off until this workspace is trusted.");
-          return;
-        }
         const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
         await panel.toggleAutoAdvanceActionableDefaults();
       })
@@ -351,10 +352,73 @@ export function activate(context: vscode.ExtensionContext): void {
       })
     ),
     vscode.commands.registerCommand(
+      "hydraRoom.manageFlightRecorder",
+      withErrorReporting(async () => {
+        const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
+        await panel.manageFlightRecorder();
+      })
+    ),
+    vscode.commands.registerCommand(
+      "hydraRoom.replayFlightTrace",
+      withErrorReporting(async () => {
+        const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
+        await panel.replayFlightTrace();
+      })
+    ),
+    vscode.commands.registerCommand(
+      "hydraRoom.createFlightEval",
+      withErrorReporting(async () => {
+        const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
+        await panel.createFlightEval();
+      })
+    ),
+    vscode.commands.registerCommand(
       "hydraRoom.openMissionContract",
       withErrorReporting(async () => {
         const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
         await panel.openMissionContract();
+      })
+    ),
+    vscode.commands.registerCommand(
+      "hydraRoom.manageMissionContract",
+      withErrorReporting(async () => {
+        const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
+        await panel.manageMissionContract();
+      })
+    ),
+    vscode.commands.registerCommand(
+      "hydraRoom.proposeMissionContract",
+      withErrorReporting(async () => {
+        const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
+        await panel.proposeMissionContract();
+      })
+    ),
+    vscode.commands.registerCommand(
+      "hydraRoom.admitMissionProposal",
+      withErrorReporting(async () => {
+        const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
+        await panel.admitMissionProposal();
+      })
+    ),
+    vscode.commands.registerCommand(
+      "hydraRoom.confirmMissionContract",
+      withErrorReporting(async () => {
+        const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
+        await panel.confirmMissionContract();
+      })
+    ),
+    vscode.commands.registerCommand(
+      "hydraRoom.dismissMissionContractProposal",
+      withErrorReporting(async () => {
+        const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
+        await panel.dismissMissionContractProposal();
+      })
+    ),
+    vscode.commands.registerCommand(
+      "hydraRoom.retireMissionContract",
+      withErrorReporting(async () => {
+        const panel = HydraRoomPanel.current() ?? HydraRoomPanel.open(context);
+        await panel.retireMissionContract();
       })
     ),
     vscode.commands.registerCommand(
@@ -625,6 +689,18 @@ export function activate(context: vscode.ExtensionContext): void {
       })
     ),
     vscode.commands.registerCommand(
+      "hydraRoom.manageArenaResults",
+      withErrorReporting(async () => {
+        await manageArenaResults(context);
+      }),
+    ),
+    vscode.commands.registerCommand(
+      "hydraRoom.recoverArenaRuns",
+      withErrorReporting(async () => {
+        await manageArenaRecovery(context);
+      }),
+    ),
+    vscode.commands.registerCommand(
       "hydraRoom.runManyHeadsSmokeTest",
       withErrorReporting(async () => {
         if (vscode.workspace.isTrusted !== true) {
@@ -692,6 +768,15 @@ export function activate(context: vscode.ExtensionContext): void {
       })
     )
   );
+  void scanArenaRecoveryOnStartup(context).catch(async () => {
+    const action = await vscode.window.showWarningMessage(
+      "Hydra could not complete the Arena startup recovery scan. No run was resumed or reapplied.",
+      "Review Arena Recovery",
+    );
+    if (action === "Review Arena Recovery") {
+      await vscode.commands.executeCommand("hydraRoom.recoverArenaRuns");
+    }
+  });
 }
 
 export function deactivate(): void {

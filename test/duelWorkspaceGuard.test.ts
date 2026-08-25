@@ -184,9 +184,32 @@ describe("duel workspace integrity guard", () => {
 
     await fs.writeFile(projectFile, "temporary mutation\n", "utf8");
     await fs.writeFile(projectFile, "original\n", "utf8");
+    await Promise.all(Array.from({ length: 64 }, (_value, index) =>
+      fs.writeFile(path.join(root, `mutation-${index}.txt`), "changed\n", "utf8")));
     await monitor.settle();
     assert.equal(monitor.changed, true);
     assert.ok(monitor.changedPaths.some((entry) => entry === "ignored.log"));
+    assert.ok(monitor.changedPaths.length <= 20);
+  });
+
+  test("Arena-mode monitoring treats contestant .hydra writes as mutations", async (t) => {
+    const { root } = await createRepository(t);
+    const monitor = watchDuelWorkspaceMutations(root, {
+      excludeHydraState: false,
+    });
+    t.after(() => monitor.close());
+
+    await fs.mkdir(path.join(root, ".hydra"));
+    await fs.writeFile(
+      path.join(root, ".hydra", "unbound-output.txt"),
+      "contestant output\n",
+      "utf8",
+    );
+    await monitor.settle();
+
+    assert.equal(monitor.changed, true);
+    assert.ok(monitor.changedPaths.some((entry) =>
+      entry.startsWith(".hydra/")));
   });
 
   test("fails closed when individual, aggregate, file-count, or Git-output bounds are exceeded", async (t) => {

@@ -34,6 +34,7 @@ import {
   ARENA_POLICY_ID,
   arenaArtifactSetSha256,
   arenaReceiptsRootSha256,
+  canonicalArenaManifestJson,
   type ArenaContestantFinishedPayload,
   type ArenaEvidencePreservedPayload,
   type ArenaGitObjectId,
@@ -497,9 +498,10 @@ export async function runArenaSmokeTest(options: {
     await options.onProgress?.("finalCleanupStarted");
     let preserveForRecovery =
       hasArenaTerminationUnconfirmed(primaryFailure);
-    let cleanupFailure: unknown = preserveForRecovery
-      ? primaryFailure
-      : undefined;
+    // Cleanup is best-effort after a primary failure. Preserve the causal
+    // failure rather than replacing it with a secondary authorization error
+    // from a manifest that never reached its cleanup-authorizing state.
+    let cleanupFailure: unknown = primaryFailure;
     if (executor && repositoryClaimActive && !preserveForRecovery) {
       for (const worktree of [...provisioned].reverse()) {
         try {
@@ -875,14 +877,14 @@ async function preserveSmokeEvidence(
     ["artifacts", runId, worktree.contestantId],
   );
   const patch = Buffer.alloc(0);
-  const inventory = Buffer.from('{"entries":[]}\n', "utf8");
+  const inventory = Buffer.from('{"entries":[],"schemaVersion":2}\n', "utf8");
   await createArenaPrivateFile(
     path.join(artifactPath, "patch.bin"),
     patch,
     boundary,
   );
   await createArenaPrivateFile(
-    path.join(artifactPath, "inventory.v1.json"),
+    path.join(artifactPath, "inventory.v2.json"),
     inventory,
     boundary,
   );
@@ -910,6 +912,18 @@ async function preserveSmokeEvidence(
     ...payloadWithoutArtifactSet,
     artifactSetSha256: arenaArtifactSetSha256(payloadWithoutArtifactSet),
   };
+  const artifactSet = Buffer.from(`${canonicalArenaManifestJson({
+    schemaVersion: 1,
+    recordType: "arenaArtifactSet",
+    payload,
+  })}\n`, "utf8");
+  // Match production publication ordering: the immutable receipt is the last
+  // authoritative name and therefore can never claim a partial generation.
+  await createArenaPrivateFile(
+    path.join(artifactPath, "artifact-set.v1.json"),
+    artifactSet,
+    boundary,
+  );
   await store.append({
     eventId: `${runId}-${worktree.contestantId}-evidence`,
     runId,

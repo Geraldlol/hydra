@@ -28,13 +28,23 @@ export interface AgentDefinition {
   baseUrl?: string;
   apiKeyEnv?: string;
   headers?: Record<string, string>;
+  maxOutputTokens?: number;
   // cli-template + vendor command override:
   command?: string;
   argsTemplate?: string[];
 }
 
 export type Invocation =
-  | { transport: "spawn"; command: string; args: string[]; stdin?: string }
+  | {
+      transport: "spawn";
+      command: string;
+      args: string[];
+      stdin?: string;
+      /** Explicit working-directory override for an isolated worker. */
+      cwd?: string;
+      /** Prevent optional browser/MCP enrichment from widening a restricted worker. */
+      disableBrowserBroker?: boolean;
+    }
   | { transport: "http"; url: string; method: "POST"; headers: Record<string, string>; body: unknown };
 
 export interface InvocationContext {
@@ -58,18 +68,10 @@ export interface AdapterRawOutput {
 
 export type AuthorityClass = AuthorityClassification;
 
-/**
- * Why: in SP1, `parseReply`/`parseUsage` are NOT yet wired into panel's
- * dispatch — panel.ts calls only `buildInvocation` (and `pricing`/`authority`
- * separately); the reply/usage normalization panel actually uses still lives
- * in panel.ts's own code paths (e.g. `roomTextFromClaudeStreamJson`), not
- * here. Concretely, `claudeAdapter.parseReply` returns raw stdout while
- * `claudeAdapter.parseUsage` parses the stream-json event stream — two
- * different shapes for the same call, which is only harmless because nothing
- * reads them yet. SP2 must wire `parseReply`/`parseUsage` into panel's actual
- * dispatch path and reconcile them with panel's real normalization before
- * relying on either method's output.
- */
+/** Vendor boundary used by native and HTTP dispatch for invocation planning,
+ * authoritative reply normalization, structured usage, pricing, and authority.
+ * A parser must key off AdapterRawOutput.outputMode and preserve raw output on
+ * an incompatible reply envelope rather than silently returning empty text. */
 export interface AgentAdapter {
   readonly kind: AgentKind;
   /**

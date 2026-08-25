@@ -6,8 +6,7 @@ export type CommandCenterActionId =
   | "acceptDefaultDecision"
   | "toggleAutoAdvanceActionableDefaults"
   | "archiveAndClearRoom"
-  | "assignCodex"
-  | "assignClaude"
+  | "assignBuilder"
   | "assignParallelBuilders"
   | "chooseModel"
   | "chooseEffort"
@@ -21,6 +20,7 @@ export type CommandCenterActionId =
   | "nativeAction"
   | "pokeBothTerminalsWithDiff"
   | "openObjective"
+  | "manageMissionContract"
   | "openLastPrompt"
   | "attachFiles"
   | "cleanWorkspaceState"
@@ -34,6 +34,9 @@ export type CommandCenterActionId =
   | "captureNativeDataSnapshot"
   | "openNativeActions"
   | "openAgentCalls"
+  | "manageFlightRecorder"
+  | "replayFlightTrace"
+  | "createFlightEval"
   | "openNativeTerminals"
   | "useTerminalBridge"
   | "useOneShotTransport"
@@ -113,12 +116,14 @@ export function buildCommandCenterActions(input: CommandCenterInput): CommandCen
           "Grant or revoke session-only agent access to Hydra-managed Integrated Browser tabs."
         ),
       ] : []),
-      ...(input.isWorkspaceTrusted === false ? [] : [
+      ...(input.isWorkspaceTrusted === false && !input.autoAdvanceActionableDefaults ? [] : [
         action(
           "toggleAutoAdvanceActionableDefaults",
-          input.autoAdvanceActionableDefaults ? "Turn Off Auto-advance Safe Defaults" : "Turn On Auto-advance Safe Defaults",
+          input.autoAdvanceActionableDefaults ? "Turn Off Agent-default Auto-advance" : "Turn On Agent-default Auto-advance",
           "Workflow",
-          "Toggle whether Hydra automatically runs unblocked Decision Packet defaults."
+          input.isWorkspaceTrusted === false
+            ? "This global opt-in is suspended while the workspace is untrusted. Turn it off now to revoke it; automatic execution remains blocked."
+            : "Automatically run eligible agent-authored Decision Packet defaults after an explicit modal opt-in. Manual Accept Default remains available when off."
         ),
       ]),
       action("runDoctor", "Run Doctor", "Diagnose", "Show setup checks for the current VS Code window."),
@@ -137,16 +142,15 @@ export function buildCommandCenterActions(input: CommandCenterInput): CommandCen
   }
   if (input.canAssignBuilder) {
     actions.push(
-      action("assignCodex", "Assign Codex Builder", "Build flow", "Give Codex explicit build authority for the next implementation turn."),
-      action("assignClaude", "Assign Claude Builder", "Build flow", "Give Claude explicit build authority for the next implementation turn."),
-      action("assignParallelBuilders", "Assign Both Builders", "Build flow", "Dispatch Codex and Claude as parallel room-level Build workers.")
+      action("assignBuilder", "Choose Builder...", "Build flow", "Choose one seated head and grant it explicit build authority for the next implementation turn."),
+      action("assignParallelBuilders", "Assign All Seated Builders", "Build flow", "Dispatch every seated head as a parallel room-level Build worker.")
     );
   }
   if (input.canRequestReview) {
-    actions.push(action("requestReview", "Request Review", "Build flow", "Ask the non-builder head to review the current diff."));
+    actions.push(action("requestReview", "Request Review", "Build flow", "Ask the eligible seated heads to review the current diff under the configured participation policy."));
   }
   if (input.canHandBack) {
-    actions.push(action("handBack", "Hand Back To Builder", "Build flow", "Return a rejected review to the other head for another build pass."));
+    actions.push(action("handBack", "Hand Back To Builder", "Build flow", "Return a rejected review to the builder or builders for another build pass."));
   }
   if (input.canRunVerification) {
     actions.push(action("runVerification", "Run Verification", "Build flow", "Run Hydra's configured check/test command from the workspace root."));
@@ -176,6 +180,7 @@ export function buildCommandCenterActions(input: CommandCenterInput): CommandCen
 
   actions.push(
     action("openObjective", "Open Objective", "State", "Open the pinned room objective file."),
+    action("manageMissionContract", "Manage Mission Contract", "Authority", "Review exact active and pending terms, admit agent candidates, propose amendments, confirm, dismiss, or retire."),
     action("openLastPrompt", "Open Last Prompt", "State", "Open the latest persisted prompt envelope preview."),
     action("attachFiles", "Attach Files", "Composer", "Copy user-selected files into .hydra/attachments for the next room turn."),
     action("cleanWorkspaceState", "Clean Workspace State", "State", "Compact old prompt bodies and delete stale terminal diagnostics from .hydra."),
@@ -209,12 +214,14 @@ export function buildCommandCenterActions(input: CommandCenterInput): CommandCen
       ),
     ]),
     action("testTelegram", "Send Test Telegram", "Settings", "Send a Telegram test ping using the configured bot token and chat id."),
-    ...(input.isWorkspaceTrusted === false ? [] : [
+    ...(input.isWorkspaceTrusted === false && !input.autoAdvanceActionableDefaults ? [] : [
       action(
         "toggleAutoAdvanceActionableDefaults",
-        input.autoAdvanceActionableDefaults ? "Turn Off Auto-advance Safe Defaults" : "Turn On Auto-advance Safe Defaults",
+        input.autoAdvanceActionableDefaults ? "Turn Off Agent-default Auto-advance" : "Turn On Agent-default Auto-advance",
         "Settings",
-        "Toggle whether Hydra automatically runs unblocked Decision Packet defaults."
+        input.isWorkspaceTrusted === false
+          ? "This global opt-in is suspended while the workspace is untrusted. Turn it off now to revoke it; automatic execution remains blocked."
+          : "Automatically run eligible agent-authored Decision Packet defaults after an explicit modal opt-in. Manual Accept Default remains available when off."
       ),
     ]),
     action("changeCapabilityProfile", "Change Capability Profile", "Settings", "Pick safe, native, review, full-native, or custom CLI profiles."),
@@ -222,6 +229,9 @@ export function buildCommandCenterActions(input: CommandCenterInput): CommandCen
     action("captureNativeDataSnapshot", "Capture Native Data Snapshot", "Native CLIs", "Snapshot redacted Codex/Claude config, plugin, model, state, and session metadata."),
     action("openNativeActions", "Open Native Action Log", `${input.nativeActionsCount} recorded`, "Open the durable direct native action receipt log."),
     action("openAgentCalls", "Open Agent Call Log", "Flight recorder", "Open the durable native dispatch trace with args, timeouts, request files, and stderr previews."),
+    action("manageFlightRecorder", "Inspect Flight Recorder", "Private evidence", "Inspect strictly validated authoritative traces; the workspace Markdown mirror is never authority."),
+    action("replayFlightTrace", "Replay Flight Trace", "Derived regression", "Prepare an isolated worktree from an exact complete trace and supply replacement input without automatic provider submission."),
+    action("createFlightEval", "Create Eval from Flight Trace", "Human adjudication", "Bind a private eval case to an exact complete trace and the active Mission acceptance plan."),
     action("openNativeTerminals", "Open Native Terminals", "Native CLIs", "Bring the visible Codex and Claude terminals forward."),
     input.transport === "terminalBridge"
       ? action("useOneShotTransport", "Use Safe One-Shot", "Transport", "Switch future agent calls back to direct one-shot process execution.")

@@ -270,6 +270,14 @@ export interface FlightTelemetryAvailabilityObservation {
   readonly reason: "plainOutput" | "unsupported" | "malformed" | "providerFlood" | "notRequested";
 }
 
+export interface FlightToolCallResultObservation {
+  readonly kind: "toolCall";
+  readonly observationType: "toolCallResult";
+  readonly status: "succeeded" | "failed" | "unknown";
+  readonly resultBytes: number;
+  readonly evidenceClass: FlightEvidenceClass;
+}
+
 export interface FlightWorkspaceMutationObservation {
   readonly kind: "editBatch";
   readonly observationType: "workspaceMutation";
@@ -346,6 +354,7 @@ export interface FlightBrowserApprovalObservation {
   readonly kind: "browserAction";
   readonly observationType: "browserApproval";
   readonly outcome: "allowed" | "denied" | "expired" | "revoked" | "notRequired";
+  readonly resultBytes: number;
   readonly evidenceClass: FlightEvidenceClass;
 }
 
@@ -370,6 +379,7 @@ export type FlightOperationObservation =
   | FlightPhaseTransitionObservation
   | FlightDispatchDecisionObservation
   | FlightTelemetryAvailabilityObservation
+  | FlightToolCallResultObservation
   | FlightWorkspaceMutationObservation
   | FlightApprovalDecisionObservation
   | FlightSteeringOutcomeObservation
@@ -1399,6 +1409,20 @@ function isOperationObservation(value: unknown, operationKind: FlightOperationKi
           || value.reason === "malformed"
           || value.reason === "providerFlood"
           || value.reason === "notRequested");
+    case "toolCallResult":
+      return operationKind === "toolCall"
+        && hasExactKeys(value, [
+          "kind",
+          "observationType",
+          "status",
+          "resultBytes",
+          "evidenceClass",
+        ])
+        && (value.status === "succeeded"
+          || value.status === "failed"
+          || value.status === "unknown")
+        && isNonNegativeSafeInteger(value.resultBytes)
+        && isEvidenceClass(value.evidenceClass);
     case "workspaceMutation":
       return operationKind === "editBatch"
         && hasExactKeys(value, [
@@ -1532,6 +1556,7 @@ function isOperationObservation(value: unknown, operationKind: FlightOperationKi
           "kind",
           "observationType",
           "outcome",
+          "resultBytes",
           "evidenceClass",
         ])
         && (value.outcome === "allowed"
@@ -1539,6 +1564,7 @@ function isOperationObservation(value: unknown, operationKind: FlightOperationKi
           || value.outcome === "expired"
           || value.outcome === "revoked"
           || value.outcome === "notRequired")
+        && isNonNegativeSafeInteger(value.resultBytes)
         && isEvidenceClass(value.evidenceClass);
     case "replayGate":
       return operationKind === "replay"

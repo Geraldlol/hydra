@@ -19,6 +19,7 @@ interface PackageJsonShape {
       properties?: Record<string, {
         scope?: string;
         type?: string;
+        enum?: string[];
         default?: unknown;
         minItems?: number;
         uniqueItems?: boolean;
@@ -143,6 +144,7 @@ describe("trust scope contract", () => {
     const geminiKeys = [
       "geminiCommand", "geminiExecArgsDiscussion", "geminiExecArgsBuild",
       "geminiExecArgsReview", "geminiModel", "geminiNativeEnv", "geminiNativePathPrepend",
+      "geminiTerminalCommand",
     ];
     for (const key of geminiKeys) {
       assert.ok(
@@ -164,6 +166,16 @@ describe("trust scope contract", () => {
       (TRUST_SCOPED_SETTINGS as readonly string[]).includes("roomRoster"),
       "roomRoster must be trust-scoped because it controls which configured agents Hydra dispatches",
     );
+  });
+
+  test("review decision policies are trust-scoped because they control paid dispatch and approval", () => {
+    assert.ok((TRUST_SCOPED_SETTINGS as readonly string[]).includes("reviewConvergence"));
+    assert.ok((TRUST_SCOPED_SETTINGS as readonly string[]).includes("reviewParticipation"));
+    const properties = loadPackageJson().contributes?.configuration?.properties ?? {};
+    assert.equal(properties["hydraRoom.reviewConvergence"]?.scope, "application");
+    assert.equal(properties["hydraRoom.reviewParticipation"]?.scope, "application");
+    assert.deepEqual(properties["hydraRoom.reviewConvergence"]?.enum, ["human", "unanimous", "majority"]);
+    assert.deepEqual(properties["hydraRoom.reviewParticipation"]?.enum, ["single", "all"]);
   });
 
   test("hydraRoom.roomRoster schema preserves the safe two-head default", () => {

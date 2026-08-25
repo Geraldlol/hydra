@@ -282,20 +282,32 @@ export interface DuelWorkspaceMutationMonitor {
   close(): void;
 }
 
+export interface DuelWorkspaceMutationMonitorOptions {
+  /** Keep Hydra's own live mirror quiet in the main workspace. */
+  readonly excludeHydraState?: boolean;
+}
+
 /**
  * Keep a best-effort recursive mutation sentinel alive across each native head
  * call. The stable before/after fingerprint remains authoritative; this
  * sentinel additionally catches write-then-revert and ignored-file activity.
  */
-export function watchDuelWorkspaceMutations(workspaceRoot: string): DuelWorkspaceMutationMonitor {
+export function watchDuelWorkspaceMutations(
+  workspaceRoot: string,
+  options: DuelWorkspaceMutationMonitorOptions = {},
+): DuelWorkspaceMutationMonitor {
   const root = path.resolve(workspaceRoot);
+  const excludeHydraState = options.excludeHydraState !== false;
+  const maxRetainedChangedPaths = 20;
   const changedPaths = new Set<string>();
+  let changed = false;
   let watcher: FSWatcher;
   let watcherError: string | undefined;
   try {
     watcher = watchFileSystem(root, { recursive: true }, (_eventType, filename) => {
       const relative = typeof filename === "string" ? filename.replace(/\\/g, "/") : "";
       if (!relative) {
+        changed = true;
         watcherError ??= "Workspace watcher emitted an event without a path.";
         return;
       }
@@ -303,8 +315,11 @@ export function watchDuelWorkspaceMutations(workspaceRoot: string): DuelWorkspac
       // Git metadata may be refreshed by read-only Git commands, and .hydra
       // is Hydra's own live state/mirror surface. Project evidence elsewhere
       // is never exempt, even when ignored by Git.
-      if (top === ".git" || top === ".hydra") return;
-      changedPaths.add(relative.slice(0, 512));
+      if (top === ".git" || (excludeHydraState && top === ".hydra")) return;
+      changed = true;
+      if (changedPaths.size < maxRetainedChangedPaths) {
+        changedPaths.add(relative.slice(0, 512));
+      }
     });
   } catch (error) {
     throw new DuelWorkspaceIntegrityError(
@@ -317,8 +332,8 @@ export function watchDuelWorkspaceMutations(workspaceRoot: string): DuelWorkspac
     watcherError = `Workspace mutation monitor failed${isNodeError(error) && error.code ? ` (${error.code})` : ""}.`;
   });
   return {
-    get changed() { return changedPaths.size > 0 || watcherError !== undefined; },
-    get changedPaths() { return [...changedPaths].sort(compareGitPaths).slice(0, 20); },
+    get changed() { return changed || watcherError !== undefined; },
+    get changedPaths() { return [...changedPaths].sort(compareGitPaths); },
     get error() { return watcherError; },
     async settle() {
       await new Promise<void>((resolve) => setTimeout(resolve, 25));

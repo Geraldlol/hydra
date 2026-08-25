@@ -20,6 +20,10 @@ const INTENT_HASH_DOMAIN = "hydra.arena.process.v1.intent\u0000";
 const OWNER_HASH_DOMAIN = "hydra.arena.process.v1.owner\u0000";
 const SUBMISSION_HASH_DOMAIN = "hydra.arena.process.v1.submission\u0000";
 const QUIESCENCE_HASH_DOMAIN = "hydra.arena.process.v1.quiescence\u0000";
+const NATIVE_BROKER_CAPABILITY_HASH_DOMAIN =
+  "hydra.arena.process.v1.native-broker-capability\u0000";
+const NATIVE_BROKER_PROOF_HASH_DOMAIN =
+  "hydra.arena.process.v1.native-broker-proof\u0000";
 const INPUT_HASH_DOMAIN = "hydra.arena.process.v1.input\u0000";
 const OUTPUT_HASH_DOMAIN = "hydra.arena.process.v1.output\u0000";
 const ENVIRONMENT_HASH_DOMAIN = "hydra.arena.process.v1.environment\u0000";
@@ -96,6 +100,67 @@ export interface ArenaBundledProcessHelper {
   readonly scriptFileIdentitySha256: string;
 }
 
+export interface ArenaNativeBrokerCapabilityInput {
+  readonly adapterKind: string;
+  readonly brokerId: string;
+  readonly commandFileIdentitySha256: string;
+  readonly platform: NodeJS.Platform;
+}
+
+export interface ArenaNativeProcessQuiescenceProof {
+  readonly schemaVersion: typeof ARENA_PROCESS_SCHEMA_VERSION;
+  readonly proofType: "arenaNativeProcessTreeQuiescence";
+  readonly adapterKind: string;
+  readonly brokerId: string;
+  readonly platform: NodeJS.Platform;
+  readonly capabilitySha256: string;
+  readonly commandFileIdentitySha256: string;
+  readonly processGenerationId: string;
+  readonly processOwnerSha256: string;
+  readonly terminationConfirmed: true;
+  readonly activeProcessCount: 0;
+  readonly proofReceiptSha256: string;
+}
+
+export interface ArenaNativeProcessBrokerBinding {
+  readonly processGenerationId: string;
+  readonly processOwnerSha256: string;
+}
+
+export interface ArenaNativeBrokerSpawnInput {
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly options: cp.SpawnOptions;
+  readonly binding: ArenaNativeProcessBrokerBinding;
+}
+
+export interface ArenaNativeBrokeredProcess {
+  readonly child: cp.ChildProcess;
+  /**
+   * Must settle only after the adapter broker's OS containment primitive has
+   * proved that the exact generation has zero active processes. A direct
+   * child's `close` event is deliberately insufficient.
+   */
+  readonly proveQuiescence: (
+    binding: ArenaNativeProcessBrokerBinding,
+    signal: AbortSignal,
+  ) => Promise<ArenaNativeProcessQuiescenceProof>;
+}
+
+/**
+ * Capability supplied by a platform-specific adapter broker. Hydra ships no
+ * implicit native capability: an adapter is admitted only when this exact
+ * executable/platform binding is present and the broker later returns a
+ * generation-bound zero-process proof.
+ */
+export interface ArenaNativeProcessQuiescenceBroker
+  extends ArenaNativeBrokerCapabilityInput {
+  readonly capabilitySha256: string;
+  readonly spawn: (
+    input: ArenaNativeBrokerSpawnInput,
+  ) => ArenaNativeBrokeredProcess;
+}
+
 export interface ArenaProcessSupervisorInput {
   readonly runId: string;
   readonly contestantId: string;
@@ -113,6 +178,8 @@ export interface ArenaProcessSupervisorInput {
   readonly signal: AbortSignal;
   readonly processGenerationId?: string;
   readonly bundledHelper?: ArenaBundledProcessHelper;
+  readonly nativeAdapterKind?: string;
+  readonly nativeQuiescenceBroker?: ArenaNativeProcessQuiescenceBroker;
   /**
    * Runs after OS process acceptance and before any stdin byte is written.
    * The callback must durably persist this receipt or reject; rejection stops
@@ -142,6 +209,10 @@ export interface ArenaProcessIntentReceipt {
   readonly commandSha256: string;
   readonly commandFileIdentitySha256: string;
   readonly bundledHelperFileIdentitySha256: string | null;
+  /** Present only on the new native-broker receipt variant. */
+  readonly nativeAdapterKind?: string;
+  /** Present only on the new native-broker receipt variant. */
+  readonly nativeBrokerCapabilitySha256?: string;
   readonly argsSha256: string;
   readonly promptSha256: string;
   readonly inputSha256: string;
@@ -176,7 +247,13 @@ export interface ArenaProcessQuiescenceReceipt {
   readonly processOwnerSha256: string;
   readonly intentSha256: string;
   readonly submissionReceiptSha256: string;
-  readonly proof: "bundledFakeHeadNoDescendants";
+  readonly proof:
+    | "bundledFakeHeadNoDescendants"
+    | "nativeAdapterProcessTreeBroker";
+  /** Native-broker proof fields are absent on byte-compatible Stage-3 receipts. */
+  readonly adapterKind?: string;
+  readonly brokerCapabilitySha256?: string;
+  readonly brokerReceiptSha256?: string;
   readonly terminationConfirmed: true;
   readonly activeProcessCount: 0;
   readonly finalWorkspaceFingerprintSha256: string;
@@ -264,9 +341,86 @@ interface ValidatedSupervisorInput extends ArenaProcessSupervisorInput {
    * commands execute through their canonical target.
    */
   readonly spawnCommand: string;
-  /** Authenticated arguments used at spawn without rewriting the sealed intent. */
+  /** Canonical authenticated arguments used for the eventual process spawn. */
   readonly spawnArgs: readonly string[];
   readonly spawnEnvironment: NodeJS.ProcessEnv;
+}
+
+export function arenaNativeBrokerCapabilitySha256(
+  input: ArenaNativeBrokerCapabilityInput,
+): string {
+  assertIdentifier(input.adapterKind, "native broker adapterKind");
+  assertIdentifier(input.brokerId, "native broker brokerId");
+  assertSha256(
+    input.commandFileIdentitySha256,
+    "native broker commandFileIdentitySha256",
+  );
+  assertSupportedPlatform(input.platform, "native broker platform");
+  return hashCanonical(NATIVE_BROKER_CAPABILITY_HASH_DOMAIN, {
+    adapterKind: input.adapterKind,
+    brokerId: input.brokerId,
+    commandFileIdentitySha256: input.commandFileIdentitySha256,
+    platform: input.platform,
+  });
+}
+
+export function createArenaNativeProcessQuiescenceProof(
+  input: ArenaNativeBrokerCapabilityInput & {
+    readonly capabilitySha256: string;
+    readonly processGenerationId: string;
+    readonly processOwnerSha256: string;
+  },
+): ArenaNativeProcessQuiescenceProof {
+  const expectedCapability = arenaNativeBrokerCapabilitySha256(input);
+  if (input.capabilitySha256 !== expectedCapability) {
+    throw new Error(
+      "Arena native broker capability does not match its adapter, platform, and executable binding.",
+    );
+  }
+  assertIdentifier(input.processGenerationId, "native proof processGenerationId");
+  assertSha256(input.processOwnerSha256, "native proof processOwnerSha256");
+  const withoutHash = {
+    schemaVersion: ARENA_PROCESS_SCHEMA_VERSION,
+    proofType: "arenaNativeProcessTreeQuiescence" as const,
+    adapterKind: input.adapterKind,
+    brokerId: input.brokerId,
+    platform: input.platform,
+    capabilitySha256: input.capabilitySha256,
+    commandFileIdentitySha256: input.commandFileIdentitySha256,
+    processGenerationId: input.processGenerationId,
+    processOwnerSha256: input.processOwnerSha256,
+    terminationConfirmed: true as const,
+    activeProcessCount: 0 as const,
+  };
+  return Object.freeze({
+    ...withoutHash,
+    proofReceiptSha256: hashCanonical(
+      NATIVE_BROKER_PROOF_HASH_DOMAIN,
+      withoutHash,
+    ),
+  });
+}
+
+function validateNativeQuiescenceProof(
+  proof: ArenaNativeProcessQuiescenceProof,
+  broker: ArenaNativeProcessQuiescenceBroker,
+  intent: ArenaProcessIntentReceipt,
+): void {
+  const expected = createArenaNativeProcessQuiescenceProof({
+    adapterKind: broker.adapterKind,
+    brokerId: broker.brokerId,
+    platform: broker.platform,
+    capabilitySha256: broker.capabilitySha256,
+    commandFileIdentitySha256: broker.commandFileIdentitySha256,
+    processGenerationId: intent.processGenerationId,
+    processOwnerSha256: intent.processOwnerSha256,
+  });
+  if (canonicalArenaManifestJson(proof)
+    !== canonicalArenaManifestJson(expected)) {
+    throw new Error(
+      "Arena native process broker returned a stale or invalid quiescence proof.",
+    );
+  }
 }
 
 interface MutableStreamMetadata {
@@ -284,12 +438,56 @@ type StopReason =
   | "stderrLimitExceeded"
   | "processError";
 
+export async function prepareArenaProcessIntent(
+  rawInput: ArenaProcessSupervisorInput,
+  dependencies: ArenaProcessSupervisorDependencies = {},
+): Promise<ArenaProcessIntentReceipt> {
+  if (rawInput.processGenerationId === undefined) {
+    throw new Error(
+      "A prepared Arena process intent requires an explicit processGenerationId.",
+    );
+  }
+  const input = await validateSupervisorInput(rawInput, dependencies);
+  return createArenaProcessIntent(input);
+}
+
 export async function superviseArenaProcess(
   rawInput: ArenaProcessSupervisorInput,
   dependencies: ArenaProcessSupervisorDependencies = {},
 ): Promise<ArenaSupervisedProcessResult> {
+  return superviseArenaProcessAgainstIntent(
+    rawInput,
+    undefined,
+    dependencies,
+  );
+}
+
+export async function supervisePreparedArenaProcess(
+  rawInput: ArenaProcessSupervisorInput,
+  expectedIntent: ArenaProcessIntentReceipt,
+  dependencies: ArenaProcessSupervisorDependencies = {},
+): Promise<ArenaSupervisedProcessResult> {
+  return superviseArenaProcessAgainstIntent(
+    rawInput,
+    expectedIntent,
+    dependencies,
+  );
+}
+
+async function superviseArenaProcessAgainstIntent(
+  rawInput: ArenaProcessSupervisorInput,
+  expectedIntent: ArenaProcessIntentReceipt | undefined,
+  dependencies: ArenaProcessSupervisorDependencies,
+): Promise<ArenaSupervisedProcessResult> {
   const input = await validateSupervisorInput(rawInput, dependencies);
   const intent = createArenaProcessIntent(input);
+  if (expectedIntent !== undefined
+    && canonicalArenaManifestJson(intent)
+      !== canonicalArenaManifestJson(expectedIntent)) {
+    throw new Error(
+      "Arena process input changed after its durable intent was prepared.",
+    );
+  }
 
   if (input.signal.aborted) {
     return resultBeforeDispatch(
@@ -303,6 +501,7 @@ export async function superviseArenaProcess(
 
   const spawnProcess = dependencies.spawnProcess ?? defaultSpawnProcess;
   let child: cp.ChildProcess;
+  let brokeredProcess: ArenaNativeBrokeredProcess | undefined;
   let abortedDuringSpawn = false;
   const onAbortDuringSpawn = () => {
     abortedDuringSpawn = true;
@@ -320,13 +519,38 @@ export async function superviseArenaProcess(
         "preDispatchCancelled",
       );
     }
-    child = spawnProcess(input.spawnCommand, input.spawnArgs, {
+    const spawnEnvironment = Object.assign(
+      Object.create(null) as NodeJS.ProcessEnv,
+      input.spawnEnvironment,
+    );
+    // Node's child_process layer otherwise reintroduces NODE_V8_COVERAGE from
+    // process.env even when callers supply an allowlisted environment. An own
+    // undefined value suppresses that implicit propagation and preserves the
+    // locked policy's ban on every NODE_* variable.
+    spawnEnvironment.NODE_V8_COVERAGE = undefined;
+    const spawnOptions: cp.SpawnOptions = {
       cwd: input.spawnWorktreePath,
-      env: input.spawnEnvironment,
+      // Keep Hydra's validated policy object frozen. The runtime receives an
+      // isolated, extensible copy and cannot mutate later revalidation state.
+      env: spawnEnvironment,
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
       detached: process.platform !== "win32",
-    });
+    };
+    if (input.nativeQuiescenceBroker) {
+      brokeredProcess = input.nativeQuiescenceBroker.spawn({
+        command: input.spawnCommand,
+        args: input.spawnArgs,
+        options: spawnOptions,
+        binding: {
+          processGenerationId: intent.processGenerationId,
+          processOwnerSha256: intent.processOwnerSha256,
+        },
+      });
+      child = brokeredProcess.child;
+    } else {
+      child = spawnProcess(input.spawnCommand, input.spawnArgs, spawnOptions);
+    }
   } catch {
     input.signal.removeEventListener("abort", onAbortDuringSpawn);
     return resultBeforeDispatch(
@@ -530,6 +754,12 @@ export async function superviseArenaProcess(
           exitCode,
           stdout: finishStream(stdout, true),
           stderr: finishStream(stderr, true),
+          ...(brokeredProcess
+             ? {
+               proveNativeQuiescence: brokeredProcess.proveQuiescence,
+               nativeQuiescenceTimeoutMs: terminationConfirmMs,
+             }
+             : {}),
         });
       }).then((result) => {
           if (settled) return;
@@ -622,6 +852,8 @@ export function createArenaProcessIntent(
     | "invocationSha256"
     | "timeoutMs"
     | "bundledHelper"
+    | "nativeAdapterKind"
+    | "nativeQuiescenceBroker"
   >,
 ): ArenaProcessIntentReceipt {
   if (input.processGenerationId === undefined) {
@@ -655,6 +887,13 @@ export function createArenaProcessIntent(
     commandFileIdentitySha256: input.commandFileIdentitySha256,
     bundledHelperFileIdentitySha256:
       input.bundledHelper?.scriptFileIdentitySha256 ?? null,
+    ...(input.nativeAdapterKind && input.nativeQuiescenceBroker
+      ? {
+        nativeAdapterKind: input.nativeAdapterKind,
+        nativeBrokerCapabilitySha256:
+          input.nativeQuiescenceBroker.capabilitySha256,
+      }
+      : {}),
     argsSha256: hashCanonical(INPUT_HASH_DOMAIN, [...input.args]),
     promptSha256,
     inputSha256: hashCanonical(INPUT_HASH_DOMAIN, {
@@ -695,6 +934,7 @@ export function createArenaProcessSubmissionReceipt(
 function createArenaProcessQuiescenceReceipt(
   submission: ArenaProcessSubmissionReceipt,
   finalWorkspaceFingerprintSha256: string,
+  nativeProof?: ArenaNativeProcessQuiescenceProof,
 ): ArenaProcessQuiescenceReceipt {
   assertSha256(
     finalWorkspaceFingerprintSha256,
@@ -711,7 +951,16 @@ function createArenaProcessQuiescenceReceipt(
     processOwnerSha256: submission.processOwnerSha256,
     intentSha256: submission.intentSha256,
     submissionReceiptSha256: submission.submissionReceiptSha256,
-    proof: "bundledFakeHeadNoDescendants" as const,
+    proof: nativeProof
+      ? "nativeAdapterProcessTreeBroker" as const
+      : "bundledFakeHeadNoDescendants" as const,
+    ...(nativeProof
+      ? {
+        adapterKind: nativeProof.adapterKind,
+        brokerCapabilitySha256: nativeProof.capabilitySha256,
+        brokerReceiptSha256: nativeProof.proofReceiptSha256,
+      }
+      : {}),
     terminationConfirmed: true as const,
     activeProcessCount: 0 as const,
     finalWorkspaceFingerprintSha256,
@@ -869,10 +1118,61 @@ async function validateSupervisorInput(
     // upstream junction cannot be retargeted after validation.
     spawnCommand = extensionHostInvocation;
     spawnArgs = [scriptPath, ...args.slice(1)];
+    args[0] = scriptPath;
     bundledHelper = Object.freeze({
-      scriptPath: input.bundledHelper.scriptPath,
+      scriptPath,
       scriptFileIdentitySha256: actualScriptIdentity,
     });
+  }
+
+  let nativeAdapterKind: string | undefined;
+  let nativeQuiescenceBroker: ArenaNativeProcessQuiescenceBroker | undefined;
+  if (input.nativeAdapterKind !== undefined
+    || input.nativeQuiescenceBroker !== undefined) {
+    if (bundledHelper) {
+      throw new Error(
+        "Arena process supervision cannot combine the bundled helper with a native broker.",
+      );
+    }
+    if (input.nativeAdapterKind === undefined
+      || input.nativeQuiescenceBroker === undefined) {
+      throw new Error(
+        "Arena native admission requires both an adapter kind and a process-tree broker.",
+      );
+    }
+    assertIdentifier(input.nativeAdapterKind, "nativeAdapterKind");
+    const broker = input.nativeQuiescenceBroker;
+    assertIdentifier(broker.adapterKind, "native broker adapterKind");
+    assertIdentifier(broker.brokerId, "native broker brokerId");
+    assertSha256(broker.capabilitySha256, "native broker capabilitySha256");
+    assertSha256(
+      broker.commandFileIdentitySha256,
+      "native broker commandFileIdentitySha256",
+    );
+    assertSupportedPlatform(broker.platform, "native broker platform");
+    if (broker.adapterKind !== input.nativeAdapterKind) {
+      throw new Error(
+        "Arena native process broker does not match the selected adapter kind.",
+      );
+    }
+    if (broker.platform !== process.platform) {
+      throw new Error(
+        "Arena native process broker is not valid on this platform.",
+      );
+    }
+    if (broker.commandFileIdentitySha256 !== actualCommandIdentity) {
+      throw new Error(
+        "Arena native process broker executable identity does not match the locked command.",
+      );
+    }
+    const expectedCapability = arenaNativeBrokerCapabilitySha256(broker);
+    if (broker.capabilitySha256 !== expectedCapability) {
+      throw new Error(
+        "Arena native process broker capability digest is invalid.",
+      );
+    }
+    nativeAdapterKind = input.nativeAdapterKind;
+    nativeQuiescenceBroker = broker;
   }
 
   const spawnEnvironment = sanitizedArenaProcessEnvironment(
@@ -891,6 +1191,8 @@ async function validateSupervisorInput(
 
   return Object.freeze({
     ...input,
+    worktreePath: spawnWorktreePath,
+    command: canonicalCommand,
     args: Object.freeze(args),
     processGenerationId,
     spawnWorktreePath,
@@ -898,6 +1200,8 @@ async function validateSupervisorInput(
     spawnArgs: Object.freeze([...spawnArgs]),
     spawnEnvironment: Object.freeze({ ...spawnEnvironment }),
     ...(bundledHelper ? { bundledHelper } : {}),
+    ...(nativeAdapterKind ? { nativeAdapterKind } : {}),
+    ...(nativeQuiescenceBroker ? { nativeQuiescenceBroker } : {}),
   });
 }
 
@@ -986,6 +1290,11 @@ async function finalizeClosedProcess(input: {
   readonly exitCode: number | null;
   readonly stdout: ArenaProcessStreamMetadata;
   readonly stderr: ArenaProcessStreamMetadata;
+  readonly proveNativeQuiescence?: (
+    binding: ArenaNativeProcessBrokerBinding,
+    signal: AbortSignal,
+  ) => Promise<ArenaNativeProcessQuiescenceProof>;
+  readonly nativeQuiescenceTimeoutMs?: number;
 }): Promise<ArenaSupervisedProcessResult> {
   if (input.submission === null) {
     if (input.stopReason === "cancelled") {
@@ -1023,14 +1332,37 @@ async function finalizeClosedProcess(input: {
 
   let quiescence: ArenaProcessQuiescenceReceipt | null = null;
   let diagnosticCode = input.diagnosticCode;
-  if (input.input.bundledHelper
+  if ((input.input.bundledHelper || input.input.nativeQuiescenceBroker)
     && input.input.postProcessFingerprintSha256) {
     try {
+      let nativeProof: ArenaNativeProcessQuiescenceProof | undefined;
+      if (input.input.nativeQuiescenceBroker) {
+        if (!input.proveNativeQuiescence) {
+          throw new Error(
+            "Arena native process broker omitted its quiescence proof callback.",
+          );
+        }
+        nativeProof = await proveNativeQuiescenceWithinBound(
+          input.proveNativeQuiescence,
+          {
+            processGenerationId: input.intent.processGenerationId,
+            processOwnerSha256: input.intent.processOwnerSha256,
+          },
+          input.nativeQuiescenceTimeoutMs
+            ?? ARENA_PROCESS_LIMITS.terminationConfirmMs,
+        );
+        validateNativeQuiescenceProof(
+          nativeProof,
+          input.input.nativeQuiescenceBroker,
+          input.intent,
+        );
+      }
       const fingerprint = await input.input.postProcessFingerprintSha256();
       assertSha256(fingerprint, "postProcessFingerprintSha256 result");
       quiescence = createArenaProcessQuiescenceReceipt(
         input.submission,
         fingerprint,
+        nativeProof,
       );
     } catch {
       if (diagnosticCode === "none") {
@@ -1054,6 +1386,33 @@ async function finalizeClosedProcess(input: {
     stderr: input.stderr,
     diagnosticCode,
   });
+}
+
+async function proveNativeQuiescenceWithinBound(
+  prove: (
+    binding: ArenaNativeProcessBrokerBinding,
+    signal: AbortSignal,
+  ) => Promise<ArenaNativeProcessQuiescenceProof>,
+  binding: ArenaNativeProcessBrokerBinding,
+  timeoutMs: number,
+): Promise<ArenaNativeProcessQuiescenceProof> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => prove(binding, controller.signal)),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          controller.abort(new Error(
+            "Arena native descendant-quiescence proof exceeded its bound.",
+          ));
+          reject(controller.signal.reason);
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function classifyClosedOutcome(
@@ -1273,6 +1632,28 @@ function assertIdentifier(value: unknown, label: string): asserts value is strin
 function assertSha256(value: unknown, label: string): asserts value is string {
   if (typeof value !== "string" || !SHA256_PATTERN.test(value)) {
     throw new Error(`Arena process ${label} must be a lowercase SHA-256 digest.`);
+  }
+}
+
+function assertSupportedPlatform(
+  value: unknown,
+  label: string,
+): asserts value is NodeJS.Platform {
+  if (typeof value !== "string"
+    || ![
+      "aix",
+      "android",
+      "darwin",
+      "freebsd",
+      "haiku",
+      "linux",
+      "openbsd",
+      "sunos",
+      "win32",
+      "cygwin",
+      "netbsd",
+    ].includes(value)) {
+    throw new Error(`Arena process ${label} is unsupported.`);
   }
 }
 

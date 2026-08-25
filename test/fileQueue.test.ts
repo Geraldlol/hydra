@@ -1,12 +1,15 @@
 import { describe, test } from "node:test";
 import { strict as assert } from "node:assert";
-import type { PathLike, Stats } from "node:fs";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { constants as fsConstants, type PathLike, type Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import fsPromises = require("node:fs/promises");
 import * as os from "node:os";
 import * as path from "node:path";
 import {
   appendFileSafely,
+  artifactNamespaceDurability,
   atomicWriteFile,
   ensureFile,
   readFileHead,
@@ -16,7 +19,45 @@ import {
   rewriteFileLinesAtomically,
   serializePerFile,
   serializePerFileAcrossProcesses,
+  syncArtifactDirectory,
 } from "../src/fileQueue";
+
+type PromisesFileHandle = Awaited<ReturnType<typeof fsPromises.open>>;
+
+function trackFileSync(handle: PromisesFileHandle, onSync: () => void): PromisesFileHandle {
+  return new Proxy(handle, {
+    get(target, property) {
+      if (property === "sync") {
+        return async () => {
+          onSync();
+          await target.sync();
+        };
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
+function crossProcessOwnerRecord(
+  ownerPid: number,
+  overrides: Partial<{
+    readonly token: string;
+    readonly createdAt: string;
+    readonly ownerStartedAt: string;
+    readonly ownerInstanceId: string;
+  }> = {},
+): string {
+  return `${JSON.stringify({
+    token: overrides.token ?? "test-owner-token",
+    createdAt: overrides.createdAt ?? new Date().toISOString(),
+    ownerPid,
+    ownerStartedAt:
+      overrides.ownerStartedAt ?? "2000-01-01T00:00:00.000Z",
+    ownerInstanceId:
+      overrides.ownerInstanceId ?? "00000000-0000-4000-8000-000000000001",
+  })}\n`;
+}
 
 // Helper: check whether the host supports creating symlinks. On Windows this
 // requires either admin rights or Developer Mode; without those, fs.symlink
@@ -272,6 +313,181 @@ describe("serializePerFile serialization", () => {
     assert.equal(value, 42);
   });
 
+  test("publishes lock and marker records atomically from complete temporary files", async (t) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-lock-publish-"));
+    t.after(() => fs.rm(dir, { recursive: true, force: true }));
+    const file = path.join(dir, ".hydra", "events.jsonl");
+    const lock = `${file}.lock`;
+    await fs.mkdir(path.dirname(file), { recursive: true });
+
+    const originalLink = fsPromises.link.bind(fsPromises);
+    const originalRename = fsPromises.rename.bind(fsPromises);
+    let lockPublications = 0;
+    let markerPublications = 0;
+    t.mock.method(fsPromises, "link", (async (source: PathLike, destination: PathLike) => {
+      if (path.resolve(String(destination)) === path.resolve(lock)) {
+        assert.doesNotThrow(() => JSON.parse(require("node:fs").readFileSync(source, "utf8")));
+        await assert.rejects(fs.lstat(lock), { code: "ENOENT" });
+        lockPublications += 1;
+      }
+      return originalLink(source, destination);
+    }) as typeof fsPromises.link);
+    t.mock.method(fsPromises, "rename", (async (source: PathLike, destination: PathLike) => {
+      const target = String(destination);
+      if (target.startsWith(`${lock}.acquire-`)) {
+        assert.doesNotThrow(() => JSON.parse(require("node:fs").readFileSync(source, "utf8")));
+        await assert.rejects(fs.lstat(target), { code: "ENOENT" });
+        markerPublications += 1;
+      }
+      return originalRename(source, destination);
+    }) as typeof fsPromises.rename);
+
+    await serializePerFileAcrossProcesses(file, async () => undefined);
+
+    assert.equal(lockPublications, 1);
+    assert.equal(markerPublications, 1);
+  });
+
+  test("completes a lock publication interrupted after the canonical hard link", async (t) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-lock-interrupted-publish-"));
+    t.after(() => fs.rm(dir, { recursive: true, force: true }));
+    const file = path.join(dir, ".hydra", "events.jsonl");
+    const lock = `${file}.lock`;
+    const token = "00000000-0000-4000-8000-000000000099";
+    const temporary = path.join(
+      path.dirname(lock),
+      `.${path.basename(lock)}.publish-${token}.tmp`,
+    );
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(temporary, crossProcessOwnerRecord(process.pid, {
+      token,
+      ownerStartedAt: "1970-01-01T00:00:00.000Z",
+    }), { encoding: "utf8", flag: "wx", mode: 0o600 });
+    await fs.link(temporary, lock);
+    const expired = new Date(Date.now() - 3 * 60_000);
+    await fs.utimes(temporary, expired, expired);
+    await fs.utimes(lock, expired, expired);
+
+    let calls = 0;
+    await serializePerFileAcrossProcesses(file, async () => {
+      calls += 1;
+    });
+
+    assert.equal(calls, 1);
+    await assert.rejects(fs.lstat(temporary), { code: "ENOENT" });
+    await assert.rejects(fs.lstat(lock), { code: "ENOENT" });
+  });
+
+  test("records PID and process-start identity on the cross-process owner", async (t) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-lock-owner-identity-"));
+    t.after(() => fs.rm(dir, { recursive: true, force: true }));
+    const file = path.join(dir, ".hydra", "events.jsonl");
+    await fs.mkdir(path.dirname(file), { recursive: true });
+
+    await serializePerFileAcrossProcesses(file, async () => {
+      const record = JSON.parse(
+        await fs.readFile(`${file}.lock`, "utf8"),
+      ) as Record<string, unknown>;
+      assert.equal(record.ownerPid, process.pid);
+      assert.equal(typeof record.ownerStartedAt, "string");
+      assert.equal(Number.isFinite(Date.parse(String(record.ownerStartedAt))), true);
+      assert.match(
+        String(record.ownerInstanceId),
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      );
+    });
+  });
+
+  test(
+    "does not steal an expired-looking lock from a live owner and recovers after exit",
+    { timeout: 10_000 },
+    async (t) => {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-lock-live-owner-"));
+      t.after(() => fs.rm(dir, { recursive: true, force: true }));
+      const file = path.join(dir, ".hydra", "events.jsonl");
+      const lock = `${file}.lock`;
+      await fs.mkdir(path.dirname(file), { recursive: true });
+
+      const owner = spawn(
+        process.execPath,
+        ["-e", "setInterval(() => {}, 1000)"],
+        { stdio: "ignore", windowsHide: true },
+      );
+      t.after(() => {
+        if (owner.exitCode === null && owner.signalCode === null) owner.kill();
+      });
+      await once(owner, "spawn");
+      assert.ok(owner.pid);
+      await fs.writeFile(lock, crossProcessOwnerRecord(owner.pid), {
+        encoding: "utf8",
+        flag: "wx",
+        mode: 0o600,
+      });
+      const expired = new Date(Date.now() - 3 * 60_000);
+      await fs.utimes(lock, expired, expired);
+
+      let workCalls = 0;
+      const pending = serializePerFileAcrossProcesses(file, async () => {
+        workCalls += 1;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      assert.equal(workCalls, 0, "a live owner must remain authoritative despite stale mtime");
+      assert.equal((await fs.lstat(lock)).isFile(), true);
+
+      const exited = once(owner, "exit");
+      owner.kill();
+      await exited;
+      await pending;
+      assert.equal(workCalls, 1, "a definitely dead owner may be recovered");
+    },
+  );
+
+  test("fails closed on an expired owner record without liveness proof", async (t) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-lock-ambiguous-owner-"));
+    t.after(() => fs.rm(dir, { recursive: true, force: true }));
+    const file = path.join(dir, ".hydra", "events.jsonl");
+    const lock = `${file}.lock`;
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(lock, "legacy-owner-without-liveness-proof\n", "utf8");
+    const expired = new Date(Date.now() - 3 * 60_000);
+    await fs.utimes(lock, expired, expired);
+
+    let workCalls = 0;
+    const pending = serializePerFileAcrossProcesses(file, async () => {
+      workCalls += 1;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(workCalls, 0);
+    assert.equal((await fs.lstat(lock)).isFile(), true);
+
+    await fs.unlink(lock);
+    await pending;
+    assert.equal(workCalls, 1);
+  });
+
+  test("recovers a dead prior process after a provable PID reuse", async (t) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-lock-pid-reuse-"));
+    t.after(() => fs.rm(dir, { recursive: true, force: true }));
+    const file = path.join(dir, ".hydra", "events.jsonl");
+    const lock = `${file}.lock`;
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(
+      lock,
+      crossProcessOwnerRecord(process.pid, {
+        ownerStartedAt: "1970-01-01T00:00:00.000Z",
+      }),
+      { encoding: "utf8", flag: "wx", mode: 0o600 },
+    );
+    const expired = new Date(Date.now() - 3 * 60_000);
+    await fs.utimes(lock, expired, expired);
+
+    let workCalls = 0;
+    await serializePerFileAcrossProcesses(file, async () => {
+      workCalls += 1;
+    });
+    assert.equal(workCalls, 1);
+  });
+
   test("treats delete-pending lock entries as concurrent disappearance", async (t) => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-lock-delete-pending-"));
     t.after(() => fs.rm(dir, { recursive: true, force: true }));
@@ -279,7 +495,13 @@ describe("serializePerFile serialization", () => {
     const lock = `${file}.lock`;
     const controlledMarker = `${lock}.acquire-controlled-replacement`;
     await fs.mkdir(path.dirname(file), { recursive: true });
-    await fs.writeFile(lock, "stale-owner", "utf8");
+    await fs.writeFile(
+      lock,
+      crossProcessOwnerRecord(process.pid, {
+        ownerStartedAt: "1970-01-01T00:00:00.000Z",
+      }),
+      "utf8",
+    );
     const expired = new Date(Date.now() - 3 * 60_000);
     await fs.utimes(lock, expired, expired);
     await fs.writeFile(controlledMarker, `${process.pid}\n`, {
@@ -368,6 +590,74 @@ describe("serializePerFile serialization", () => {
 
     assert.equal(workCalls, 1);
     await fs.unlink(retiredFixture);
+  });
+});
+
+describe("fileQueue durability", () => {
+  test("fsyncs acknowledged appends and atomic replacements", async (t) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-file-sync-"));
+    t.after(() => fs.rm(dir, { recursive: true, force: true }));
+    const appendPath = path.join(dir, "append.jsonl");
+    const atomicPath = path.join(dir, "atomic.json");
+    const rewritePath = path.join(dir, "rewrite.jsonl");
+    await fs.writeFile(appendPath, "seed\n", "utf8");
+    await fs.writeFile(atomicPath, "old", "utf8");
+    await fs.writeFile(rewritePath, "one\ntwo\n", "utf8");
+
+    const originalOpen = fsPromises.open.bind(fsPromises) as unknown as (
+      filePath: PathLike,
+      flags: string | number,
+      mode?: number,
+    ) => Promise<PromisesFileHandle>;
+    let appendSyncs = 0;
+    let atomicSyncs = 0;
+    let rewriteSyncs = 0;
+    const mockedOpen = async (filePath: PathLike, flags: string | number, mode?: number) => {
+      const handle = await originalOpen(filePath, flags, mode);
+      const candidate = path.resolve(String(filePath));
+      if (candidate === path.resolve(appendPath)
+        && typeof flags === "number"
+        && (flags & fsConstants.O_APPEND) !== 0) {
+        return trackFileSync(handle, () => { appendSyncs += 1; });
+      }
+      if (candidate.startsWith(`${path.resolve(atomicPath)}.`) && candidate.endsWith(".tmp")) {
+        return trackFileSync(handle, () => { atomicSyncs += 1; });
+      }
+      if (candidate.startsWith(`${path.resolve(rewritePath)}.`) && candidate.endsWith(".tmp")) {
+        return trackFileSync(handle, () => { rewriteSyncs += 1; });
+      }
+      return handle;
+    };
+    t.mock.method(fsPromises, "open", mockedOpen as unknown as typeof fsPromises.open);
+
+    await appendFileSafely(appendPath, "next\n");
+    await atomicWriteFile(atomicPath, "new");
+    await rewriteFileLinesAtomically(rewritePath, (line) => line.toUpperCase());
+
+    assert.equal(appendSyncs, 1);
+    assert.equal(atomicSyncs, 1);
+    assert.equal(rewriteSyncs, 1);
+  });
+
+  test("documents and tolerates only the weaker Windows namespace guarantee", async (t) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-directory-sync-"));
+    t.after(() => fs.rm(dir, { recursive: true, force: true }));
+    assert.equal(artifactNamespaceDurability("linux"), "file-and-directory");
+    assert.equal(artifactNamespaceDurability("win32"), "file-only");
+
+    const originalOpen = fsPromises.open.bind(fsPromises);
+    const unsupported = Object.assign(new Error("directory sync unsupported"), { code: "EPERM" });
+    t.mock.method(fsPromises, "open", (async (filePath: PathLike, flags: string | number, mode?: number) => {
+      if (path.resolve(String(filePath)) === path.resolve(dir)) throw unsupported;
+      return (originalOpen as unknown as (
+        target: PathLike,
+        openFlags: string | number,
+        openMode?: number,
+      ) => Promise<PromisesFileHandle>)(filePath, flags, mode);
+    }) as unknown as typeof fsPromises.open);
+
+    assert.equal(await syncArtifactDirectory(dir, "win32"), "file-only");
+    await assert.rejects(() => syncArtifactDirectory(dir, "linux"), /directory sync unsupported/);
   });
 });
 

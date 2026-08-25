@@ -1,9 +1,12 @@
 import { describe, test } from "node:test";
 import { strict as assert } from "node:assert";
 import * as cp from "node:child_process";
+import type { PathLike } from "node:fs";
 import * as fs from "node:fs/promises";
+import fsPromises = require("node:fs/promises");
 import * as path from "node:path";
 import * as os from "node:os";
+import { performance } from "node:perf_hooks";
 import {
   appendMessage,
   archiveAndResetTranscript,
@@ -289,6 +292,68 @@ describe("transcript", () => {
     assert.equal(await fs.readFile(file, "utf8"), "# Hydra Room Transcript\n\n");
   });
 
+  test("fsyncs transcript data before rotation and both affected directories after rename", async (t) => {
+    const dir = await makeTmpDir();
+    t.after(() => fs.rm(dir, { recursive: true, force: true }));
+    const file = path.join(dir, ".hydra", "transcript.md");
+    const sourceDir = path.dirname(file);
+    const archiveDir = path.join(sourceDir, "archive");
+    await appendMessage(file, { role: "user", text: "durable", timestamp: "2026-05-08T14:00:00Z" });
+
+    type Handle = Awaited<ReturnType<typeof fsPromises.open>>;
+    const originalOpen = fsPromises.open.bind(fsPromises) as unknown as (
+      filePath: PathLike,
+      flags: string | number,
+      mode?: number,
+    ) => Promise<Handle>;
+    const originalRename = fsPromises.rename.bind(fsPromises);
+    let sourceSyncs = 0;
+    let moved = false;
+    const syncedAfterMove = new Set<string>();
+    t.mock.method(fsPromises, "open", (async (
+      filePath: PathLike,
+      flags: string | number,
+      mode?: number,
+    ) => {
+      const candidate = path.resolve(String(filePath));
+      if (candidate === path.resolve(sourceDir) || candidate === path.resolve(archiveDir)) {
+        return {
+          sync: async () => {
+            if (moved) syncedAfterMove.add(candidate);
+          },
+          close: async () => undefined,
+        } as unknown as Handle;
+      }
+      const handle = await originalOpen(filePath, flags, mode);
+      if (candidate !== path.resolve(file)) return handle;
+      return new Proxy(handle, {
+        get(target, property) {
+          if (property === "sync") {
+            return async () => {
+              sourceSyncs += 1;
+              await target.sync();
+            };
+          }
+          const value = Reflect.get(target, property, target) as unknown;
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    }) as unknown as typeof fsPromises.open);
+    t.mock.method(fsPromises, "rename", (async (source: PathLike, destination: PathLike) => {
+      if (path.resolve(String(source)) === path.resolve(file)) {
+        assert.ok(sourceSyncs > 0, "file data must be synced before transcript rename");
+        moved = true;
+      }
+      return originalRename(source, destination);
+    }) as typeof fsPromises.rename);
+
+    await archiveAndResetTranscript(file, new Date("2026-05-10T01:02:03.004Z"));
+
+    assert.ok(sourceSyncs > 0);
+    assert.equal(syncedAfterMove.has(path.resolve(sourceDir)), true);
+    assert.equal(syncedAfterMove.has(path.resolve(archiveDir)), true);
+  });
+
   test("ensureGitignore adds .hydra/ to a fresh .gitignore", async () => {
     const dir = await makeTmpDir();
     await ensureGitignore(dir);
@@ -510,7 +575,7 @@ describe("transcript", () => {
     await assert.rejects(fs.stat(`${file}.lock`), { code: "ENOENT" });
   });
 
-  test("recovers an expired malformed filesystem writer lock", async () => {
+  test("fails closed on an expired malformed filesystem writer lock", async () => {
     const dir = await makeTmpDir();
     const file = path.join(dir, ".hydra", "transcript.md");
     await appendMessage(file, { role: "user", text: "before stale lock", timestamp: "2026-05-08T14:00:00Z" });
@@ -519,10 +584,25 @@ describe("transcript", () => {
     const expired = new Date(Date.now() - 3 * 60_000);
     await fs.utimes(lock, expired, expired);
 
-    await appendMessage(file, { role: "system", text: "after stale lock", timestamp: "2026-05-08T14:00:01Z" });
+    let completed = false;
+    const pendingAppend = appendMessage(file, {
+      role: "system",
+      text: "after explicit recovery",
+      timestamp: "2026-05-08T14:00:01Z",
+    }).then(() => {
+      completed = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(completed, false, "age without owner identity must not authorize lock theft");
+    assert.equal((await fs.lstat(lock)).isFile(), true);
+
+    // Malformed/legacy locks require an operator or a stronger external
+    // recovery proof. Removing this test fixture models that explicit action.
+    await fs.unlink(lock);
+    await pendingAppend;
     assert.deepEqual((await readTranscript(file)).map((message) => message.text), [
       "before stale lock",
-      "after stale lock",
+      "after explicit recovery",
     ]);
     await assert.rejects(fs.stat(lock), { code: "ENOENT" });
   });
@@ -532,7 +612,13 @@ describe("transcript", () => {
     const file = path.join(dir, ".hydra", "transcript.md");
     await appendMessage(file, { role: "user", text: "before recovery", timestamp: "2026-05-08T14:00:00Z" });
     const lock = `${file}.lock`;
-    await fs.writeFile(lock, "stale-owner", "utf8");
+    await fs.writeFile(lock, `${JSON.stringify({
+      token: "definitely-dead-owner",
+      createdAt: "1970-01-01T00:00:00.000Z",
+      ownerPid: process.pid,
+      ownerStartedAt: "1970-01-01T00:00:00.000Z",
+      ownerInstanceId: "00000000-0000-4000-8000-000000000001",
+    })}\n`, "utf8");
     const expired = new Date(Date.now() - 3 * 60_000);
     await fs.utimes(lock, expired, expired);
 
@@ -540,7 +626,15 @@ describe("transcript", () => {
     // The recovery marker must fence retirement until this contender either
     // publishes and validates its replacement lease or stands down.
     const acquisitionMarker = `${lock}.acquire-controlled-replacement`;
-    await fs.writeFile(acquisitionMarker, `${process.pid}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    const currentProcessStartedAt = new Date(
+      Math.floor(performance.timeOrigin),
+    ).toISOString();
+    await fs.writeFile(acquisitionMarker, `${JSON.stringify({
+      createdAt: new Date().toISOString(),
+      ownerPid: process.pid,
+      ownerStartedAt: currentProcessStartedAt,
+      ownerInstanceId: "00000000-0000-4000-8000-000000000002",
+    })}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
     const pendingAppend = appendMessage(file, {
       role: "system",
       text: "after replacement",
@@ -554,6 +648,9 @@ describe("transcript", () => {
     await fs.writeFile(lock, `${JSON.stringify({
       token: replacementToken,
       createdAt: new Date().toISOString(),
+      ownerPid: process.pid,
+      ownerStartedAt: currentProcessStartedAt,
+      ownerInstanceId: "00000000-0000-4000-8000-000000000003",
     })}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
     await fs.unlink(acquisitionMarker);
 

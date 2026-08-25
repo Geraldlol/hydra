@@ -181,3 +181,11 @@ describe("codex live text extraction", () => {
     assert.equal(out, "split message");
   });
 });
+
+describe("Gemini live text extraction", () => {
+  test("suppresses the single JSON envelope until authoritative normalization", () => {
+    const extractor = createLiveTextExtractor("geminiJson")!;
+    assert.equal(extractor.push('{"response":"do'), "");
+    assert.equal(extractor.push('ne","stats":{}}'), "");
+  });
+});

@@ -15,6 +15,11 @@ import {
   type ArenaControllerProcessContext,
   type ArenaControllerProcessSpec,
 } from "../src/arenaController";
+import {
+  createArenaBrowserJourneyExecutionPlan,
+  createArenaVerificationExecutionPlan,
+} from "../src/arenaAcceptance";
+import { verifyArenaFlightProjection } from "../src/arenaFlightProjection";
 import type { ArenaFakeHeadRequest } from "../src/arenaFakeHeadCli";
 import {
   ArenaGitExecutor,
@@ -28,6 +33,7 @@ import {
 } from "../src/arenaRunManifest";
 import {
   arenaContestantArtifactPath,
+  FileArenaManifestStore,
   openFileArenaManifestStore,
 } from "../src/arenaStore";
 import {
@@ -272,7 +278,7 @@ test(
         (await fs.readdir(artifactDirectory)).sort(),
         [
           "artifact-set.v1.json",
-          "inventory.v1.json",
+          "inventory.v2.json",
           "patch.bin",
         ],
       );
@@ -300,6 +306,23 @@ test(
     assert.equal(
       (leaseEvents.at(-1)?.payload as { readonly runId?: string }).runId,
       fixture.runId,
+    );
+    const retainedPatch = path.join(
+      arenaContestantArtifactPath(
+        fixture.privateRoot,
+        fixture.runId,
+        fixture.lock.contestants[0]!.contestantId,
+      ),
+      "patch.bin",
+    );
+    await fs.writeFile(retainedPatch, "tampered after cleanup\n", {
+      mode: 0o600,
+    });
+    await assert.rejects(
+      (await openFileArenaManifestStore(fixture.privateRoot)).load(
+        fixture.runId,
+      ),
+      /retained evidence .* missing or invalid/i,
     );
   },
 );
@@ -485,6 +508,78 @@ test(
 );
 
 test(
+  "a Stop after every contestant finished cannot rewrite the completed run",
+  { timeout: 120_000 },
+  async (t: TestContext) => {
+    const fixture = await createFixture(t, "late-stop-after-finished");
+    if (!fixture) return;
+    const controller = new AbortController();
+    const originalAppend = FileArenaManifestStore.prototype.append;
+    let finishedCount = 0;
+    t.mock.method(
+      FileArenaManifestStore.prototype,
+      "append",
+      async function stopAfterEveryFinishedEvent(
+        this: FileArenaManifestStore,
+        ...args: Parameters<typeof originalAppend>
+      ) {
+        const event = await originalAppend.apply(this, args);
+        const payload = args[0].payload as {
+          readonly payloadType?: string;
+        };
+        if (payload.payloadType === "contestantFinished") {
+          finishedCount += 1;
+          if (finishedCount === fixture.lock.contestants.length) {
+            controller.abort(new Error("synthetic late local-user Stop"));
+          }
+        }
+        return event;
+      },
+    );
+
+    const result = await runArenaController({
+      runId: fixture.runId,
+      workspaceRoot: fixture.sourceRoot,
+      privateWorkspaceRoot: fixture.privateRoot,
+      repositoryLeaseRoot: fixture.leaseRoot,
+      gitResolutionRoot: process.cwd(),
+      lock: fixture.lock,
+      signal: controller.signal,
+      assertMissionAuthority: () => {},
+      createProcess: (context) => {
+        fixture.worktrees.add(context.worktree.worktreePath);
+        return fixture.processSpec(context, false);
+      },
+    });
+
+    assert.equal(finishedCount, fixture.lock.contestants.length);
+    assert.equal(controller.signal.aborted, true);
+    assert.equal(
+      result.contestantResults.every((contestant) =>
+        contestant.status === "succeeded"),
+      true,
+    );
+    assert.equal(result.replay.state, "cleanupComplete");
+    assert.deepEqual(result.replay.finalization?.payload, {
+      payloadType: "runFinalized",
+      outcome: "completed",
+      comparison: "comparable",
+      reasonCode: null,
+      evidenceMatrixSha256:
+        (result.replay.finalization?.payload as {
+          readonly evidenceMatrixSha256: string;
+        }).evidenceMatrixSha256,
+    });
+    assert.match(
+      (result.replay.finalization?.payload as {
+        readonly evidenceMatrixSha256?: string;
+      }).evidenceMatrixSha256 ?? "",
+      /^[a-f0-9]{64}$/u,
+    );
+  },
+);
+
+test(
   "aborting after both hanging heads edit yields quiescent evidence-bound cancellation and exact cleanup",
   { timeout: 120_000 },
   async (t: TestContext) => {
@@ -568,9 +663,9 @@ test(
         (await fs.readdir(artifactDirectory)).sort(),
         [
           "artifact-set.v1.json",
-          "inventory.v1.json",
+          "inventory.v2.json",
           "patch.bin",
-          "untracked.v1.bin",
+          "untracked.v2.bin",
         ],
       );
       const worktreePath = worktrees.get(contestant.contestantId);
@@ -615,6 +710,240 @@ test(
       (leaseEvents.at(-1)?.payload as { readonly runId?: string }).runId,
       fixture.runId,
     );
+  },
+);
+
+test(
+  "a source mutation while postEvidence publication resolves is sealed as compromised",
+  { timeout: 120_000 },
+  async (t: TestContext) => {
+    const fixture = await createFixture(t, "post-evidence-publication");
+    if (!fixture) return;
+    const originalAppend = FileArenaManifestStore.prototype.append;
+    let injected = false;
+    t.mock.method(
+      FileArenaManifestStore.prototype,
+      "append",
+      async function injectDuringPublication(
+        this: FileArenaManifestStore,
+        ...args: Parameters<typeof originalAppend>
+      ) {
+        const event = await originalAppend.apply(this, args);
+        const payload = args[0].payload as {
+          readonly observationKind?: string;
+        };
+        if (!injected && payload.observationKind === "postEvidence") {
+          injected = true;
+          await fs.writeFile(
+            path.join(fixture.sourceRoot, "fixture.txt"),
+            "mutated while postEvidence append resolved\n",
+            "utf8",
+          );
+        }
+        return event;
+      },
+    );
+
+    const result = await runArenaController({
+      runId: fixture.runId,
+      workspaceRoot: fixture.sourceRoot,
+      privateWorkspaceRoot: fixture.privateRoot,
+      repositoryLeaseRoot: fixture.leaseRoot,
+      gitResolutionRoot: process.cwd(),
+      lock: fixture.lock,
+      assertMissionAuthority: () => {},
+      createProcess: (context) => {
+        fixture.worktrees.add(context.worktree.worktreePath);
+        return fixture.processSpec(context, false);
+      },
+    });
+
+    assert.equal(injected, true);
+    assert.equal(result.replay.state, "cleanupComplete");
+    assert.equal(result.replay.compromised, true);
+    assert.equal(result.replay.promotionEligible, false);
+    assert.equal(
+      (result.replay.finalization?.payload as { comparison?: string })
+        .comparison,
+      "compromised",
+    );
+    const terminalObservation = result.replay.mainWorkspaceObservations.at(-1)
+      ?.payload as {
+        readonly observationKind?: string;
+        readonly status?: string;
+        readonly publicationOfEventSha256?: string;
+      };
+    assert.equal(terminalObservation.observationKind, "publicationSeal");
+    assert.equal(terminalObservation.status, "changed");
+    assert.match(
+      terminalObservation.publicationOfEventSha256 ?? "",
+      /^[a-f0-9]{64}$/u,
+    );
+  },
+);
+
+test(
+  "an ignored file created after capture cannot cross the evidence publication gap",
+  { timeout: 120_000 },
+  async (t: TestContext) => {
+    const fixture = await createFixture(t, "ignored-publication-gap");
+    if (!fixture) return;
+    const originalCapture =
+      ArenaGitExecutor.prototype.captureOwnedEvidenceState;
+    let injected = false;
+    t.mock.method(
+      ArenaGitExecutor.prototype,
+      "captureOwnedEvidenceState",
+      async function injectedIgnoredFile(
+        this: ArenaGitExecutor,
+        ...args: Parameters<typeof originalCapture>
+      ) {
+        const state = await originalCapture.apply(this, args);
+        if (!injected) {
+          injected = true;
+          await fs.writeFile(
+            path.join(args[0].worktreePath, "late-output.ignored"),
+            "created after staged evidence capture\n",
+            "utf8",
+          );
+        }
+        return state;
+      },
+    );
+
+    await assert.rejects(
+      runArenaController({
+        runId: fixture.runId,
+        workspaceRoot: fixture.sourceRoot,
+        privateWorkspaceRoot: fixture.privateRoot,
+        repositoryLeaseRoot: fixture.leaseRoot,
+        gitResolutionRoot: process.cwd(),
+        lock: fixture.lock,
+        assertMissionAuthority: () => {},
+        createProcess: (context) => {
+          fixture.worktrees.add(context.worktree.worktreePath);
+          return fixture.processSpec(context, false);
+        },
+      }),
+      /refuses ignored contestant files/i,
+    );
+    assert.equal(injected, true);
+  },
+);
+
+test(
+  "locked verification and browser plans execute in every contestant worktree and project to Flight",
+  { timeout: 120_000 },
+  async (t: TestContext) => {
+    const fixture = await createFixture(t, "acceptance-flight");
+    if (!fixture) return;
+    const verificationPlan = createArenaVerificationExecutionPlan({
+      checkId: "locked-check",
+      command: "hydra-test --locked-check",
+      controlSha256: digest("locked-check-control"),
+      timeoutMs: 30_000,
+      maxOutputChars: 8_192,
+    });
+    const browserPlan = createArenaBrowserJourneyExecutionPlan({
+      journeyId: "locked-journey",
+      journeyDefinitionSha256: digest("locked-journey-definition"),
+      timeoutMs: 30_000,
+    });
+    const lock: ArenaRunLockedPayload = {
+      ...fixture.lock,
+      verificationChecks: [{
+        checkId: verificationPlan.checkId,
+        planSha256: verificationPlan.planSha256,
+      }],
+      browserJourneys: [{
+        journeyId: browserPlan.journeyId,
+        planSha256: browserPlan.planSha256,
+      }],
+    };
+    const worktrees = new Map<string, string>();
+    const verifiedWorktrees: string[] = [];
+    const browserWorktrees: string[] = [];
+
+    const result = await runArenaController({
+      runId: fixture.runId,
+      workspaceRoot: fixture.sourceRoot,
+      privateWorkspaceRoot: fixture.privateRoot,
+      repositoryLeaseRoot: fixture.leaseRoot,
+      gitResolutionRoot: process.cwd(),
+      lock,
+      verificationPlans: [verificationPlan],
+      browserJourneyPlans: [browserPlan],
+      assertMissionAuthority: () => {},
+      createProcess: (context) => {
+        worktrees.set(
+          context.contestant.contestantId,
+          context.worktree.worktreePath,
+        );
+        fixture.worktrees.add(context.worktree.worktreePath);
+        return fixture.processSpec(context, false);
+      },
+      executeVerification: async (execution) => {
+        verifiedWorktrees.push(execution.worktreePath);
+        assert.equal(execution.command, verificationPlan.command);
+        return {
+          exitCode: 0,
+          timedOut: false,
+          cancelled: false,
+          durationMs: 5,
+          stdout: { bytes: 0, sha256: digest("") },
+          stderr: { bytes: 0, sha256: digest("") },
+          terminationConfirmed: true,
+          quiescenceReceiptSha256: digest(
+            `verification-quiescence:${execution.worktreePath}`,
+          ),
+        };
+      },
+      executeBrowserJourney: async (execution) => {
+        browserWorktrees.push(execution.worktreePath);
+        assert.equal(
+          execution.journeyDefinitionSha256,
+          browserPlan.journeyDefinitionSha256,
+        );
+        return {
+          status: "passed",
+          durationMs: 7,
+          actionCount: 2,
+          screenshotCount: 1,
+          executionStarted: true,
+          brokerReceiptSha256: digest(
+            `browser-broker:${execution.worktreePath}`,
+          ),
+          quiescenceReceiptSha256: digest(
+            `browser-quiescence:${execution.worktreePath}`,
+          ),
+        };
+      },
+    });
+
+    const expectedWorktrees = [...worktrees.values()].sort();
+    assert.deepEqual(verifiedWorktrees.sort(), expectedWorktrees);
+    assert.deepEqual(browserWorktrees.sort(), expectedWorktrees);
+    assert.equal(result.flightProjectionComplete, true);
+    assert.equal(
+      (result.replay.finalization?.payload as { readonly comparison?: string })
+        .comparison,
+      "comparable",
+    );
+    assert.equal(
+      result.replay.contestants.every((contestant) =>
+        contestant.verifications[0]?.attempts.length === 1
+        && contestant.browserJourneys[0]?.attempts.length === 1),
+      true,
+    );
+    const acceptanceFiles = await listPrivateFiles(path.join(
+      fixture.privateRoot,
+      "arena",
+      "support",
+      "acceptance",
+      fixture.runId,
+    ));
+    assert.equal(acceptanceFiles.length, lock.contestants.length * 2);
+    await verifyArenaFlightProjection(fixture.privateRoot, result.replay);
   },
 );
 
@@ -796,7 +1125,12 @@ async function initializeRepository(
     BASE_CONTENT,
     "utf8",
   );
-  await runGit(git, sourceRoot, ["add", "--", "fixture.txt"]);
+  await fs.writeFile(
+    path.join(sourceRoot, ".gitignore"),
+    "*.ignored\n",
+    "utf8",
+  );
+  await runGit(git, sourceRoot, ["add", "--", ".gitignore", "fixture.txt"]);
   await runGit(
     git,
     sourceRoot,
