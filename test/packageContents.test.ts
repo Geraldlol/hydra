@@ -65,6 +65,19 @@ describe("VSIX packaged-content safety gate", () => {
     assert.match(source, /ensureReproducibleEpoch\(\)/);
   });
 
+  test("pins VS Code API types to the declared minimum engine", async () => {
+    const manifest = await packageManifest() as {
+      readonly engines?: { readonly vscode?: unknown };
+      readonly devDependencies?: { readonly "@types/vscode"?: unknown };
+    };
+    const engine = manifest.engines?.vscode;
+    const apiTypes = manifest.devDependencies?.["@types/vscode"];
+
+    assert.ok(typeof engine === "string");
+    assert.match(engine, /^\^\d+\.\d+\.\d+$/u);
+    assert.equal(apiTypes, engine.slice(1));
+  });
+
   test("explicitly denies agent state, MCP configuration, env files, and credentials", () => {
     const { findDeniedVsixEntries } = loadGate();
     const denied = findDeniedVsixEntries([
