@@ -254,10 +254,18 @@ export interface ArenaProcessSupervisorDependencies {
 }
 
 interface ValidatedSupervisorInput extends ArenaProcessSupervisorInput {
-  readonly worktreePath: string;
-  readonly command: string;
   readonly args: readonly string[];
   readonly processGenerationId: string;
+  /** Authenticated canonical cwd used for the native spawn. */
+  readonly spawnWorktreePath: string;
+  /**
+   * Authenticated native invocation path. Bundled Electron helpers must use
+   * the exact path that bootstrapped the current extension host; other
+   * commands execute through their canonical target.
+   */
+  readonly spawnCommand: string;
+  /** Authenticated arguments used at spawn without rewriting the sealed intent. */
+  readonly spawnArgs: readonly string[];
   readonly spawnEnvironment: NodeJS.ProcessEnv;
 }
 
@@ -312,8 +320,8 @@ export async function superviseArenaProcess(
         "preDispatchCancelled",
       );
     }
-    child = spawnProcess(input.command, input.args, {
-      cwd: input.worktreePath,
+    child = spawnProcess(input.spawnCommand, input.spawnArgs, {
+      cwd: input.spawnWorktreePath,
       env: input.spawnEnvironment,
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
@@ -739,24 +747,25 @@ async function validateSupervisorInput(
   if (!(input.signal instanceof AbortSignal)) {
     throw new Error("Arena process signal must be an AbortSignal.");
   }
-  const worktreePath = await validateExactRealPath(
+  const spawnWorktreePath = await validateExactRealPath(
     input.worktreePath,
     "Arena worktree",
     "directory",
   );
-  const command = await validateExactRealPath(
+  const canonicalCommand = await validateExactRealPath(
     input.command,
     "Arena command",
     "file",
   );
   const actualWorktreeIdentity =
-    await arenaProcessWorktreeDirectoryIdentitySha256(worktreePath);
+    await arenaProcessWorktreeDirectoryIdentitySha256(spawnWorktreePath);
   if (actualWorktreeIdentity !== input.worktreeDirectoryIdentitySha256) {
     throw new Error(
       "Arena process worktree directory identity does not match its locked registration.",
     );
   }
-  const actualCommandIdentity = await arenaProcessFileIdentitySha256(command);
+  const actualCommandIdentity =
+    await arenaProcessFileIdentitySha256(canonicalCommand);
   if (actualCommandIdentity !== input.commandFileIdentitySha256) {
     throw new Error(
       "Arena process executable identity does not match its locked invocation.",
@@ -793,6 +802,8 @@ async function validateSupervisorInput(
   assertIdentifier(processGenerationId, "processGenerationId");
 
   let bundledHelper: ArenaBundledProcessHelper | undefined;
+  let spawnCommand = canonicalCommand;
+  let spawnArgs: readonly string[] = args;
   if (input.bundledHelper !== undefined) {
     assertSha256(
       input.bundledHelper.scriptFileIdentitySha256,
@@ -803,9 +814,10 @@ async function validateSupervisorInput(
       "Arena bundled helper",
       "file",
     );
-    const installedFakeHeadHelper = path.resolve(
-      __dirname,
-      "arenaFakeHeadCli.js",
+    const installedFakeHeadHelper = await validateExactRealPath(
+      path.resolve(__dirname, "arenaFakeHeadCli.js"),
+      "Hydra installed Arena helper",
+      "file",
     );
     if (path.basename(scriptPath).toLowerCase() !== "arenafakeheadcli.js"
       || !samePath(scriptPath, installedFakeHeadHelper)) {
@@ -813,7 +825,14 @@ async function validateSupervisorInput(
         "Arena bundled Electron Node mode is restricted to Hydra's installed arenaFakeHeadCli.js.",
       );
     }
-    if (!samePath(command, path.resolve(process.execPath))) {
+    const extensionHostInvocation = path.resolve(process.execPath);
+    const extensionHostExecutable = await validateExactRealPath(
+      extensionHostInvocation,
+      "Hydra extension-host executable",
+      "file",
+    );
+    if (!samePath(canonicalCommand, extensionHostExecutable)
+      || !samePath(input.command, extensionHostInvocation)) {
       throw new Error(
         "Arena bundled helper must run under Hydra's exact extension-host executable.",
       );
@@ -827,13 +846,31 @@ async function validateSupervisorInput(
         "Arena bundled helper identity does not match the installed helper.",
       );
     }
-    if (args[0] !== scriptPath) {
+    const firstArg = args[0];
+    if (typeof firstArg !== "string"
+      || firstArg !== input.bundledHelper.scriptPath
+      || !samePath(
+        await validateExactRealPath(
+          firstArg,
+          "Arena bundled helper argument",
+          "file",
+        ),
+        scriptPath,
+      )) {
       throw new Error(
         "Arena bundled helper must be the exact first process argument.",
       );
     }
+    // Electron's Windows bootstrap path is part of the running host contract.
+    // A realpath-equivalent target is suitable for identity binding, but it
+    // is not necessarily a supported way to re-enter that installation in
+    // ELECTRON_RUN_AS_NODE mode. Preserve that exact authenticated invocation
+    // while opening the helper itself through its canonical path so an
+    // upstream junction cannot be retargeted after validation.
+    spawnCommand = extensionHostInvocation;
+    spawnArgs = [scriptPath, ...args.slice(1)];
     bundledHelper = Object.freeze({
-      scriptPath,
+      scriptPath: input.bundledHelper.scriptPath,
       scriptFileIdentitySha256: actualScriptIdentity,
     });
   }
@@ -854,10 +891,11 @@ async function validateSupervisorInput(
 
   return Object.freeze({
     ...input,
-    worktreePath,
-    command,
     args: Object.freeze(args),
     processGenerationId,
+    spawnWorktreePath,
+    spawnCommand,
+    spawnArgs: Object.freeze([...spawnArgs]),
     spawnEnvironment: Object.freeze({ ...spawnEnvironment }),
     ...(bundledHelper ? { bundledHelper } : {}),
   });
@@ -880,10 +918,20 @@ async function validateExactRealPath(
     throw new Error(`${label} must be a real ${kind}, not a link.`);
   }
   const real = await fs.realpath(value);
-  if (!samePath(real, value)) {
-    throw new Error(`${label} path must contain no linked path components.`);
+  const realStat = await fs.lstat(real);
+  if (realStat.isSymbolicLink()
+    || (kind === "file" ? !realStat.isFile() : !realStat.isDirectory())
+    || String(stat.dev) !== String(realStat.dev)
+    || String(stat.ino) !== String(realStat.ino)) {
+    throw new Error(
+      `${label} changed identity while resolving its canonical path.`,
+    );
   }
-  return value;
+  // Hosted runners and user profiles can sit below an OS-managed junction.
+  // Return the authenticated canonical target for identities and native
+  // boundaries so such an upstream alias cannot name two different objects.
+  // A link at the final component is still rejected above.
+  return path.resolve(real);
 }
 
 async function revalidateSpawnBoundary(
@@ -899,6 +947,14 @@ async function revalidateSpawnBoundary(
     throw new Error("Arena executable identity changed across the spawn boundary.");
   }
   if (input.bundledHelper) {
+    const extensionHostInvocation = path.resolve(process.execPath);
+    if (!samePath(input.spawnCommand, extensionHostInvocation)
+      || await arenaProcessFileIdentitySha256(extensionHostInvocation)
+        !== input.commandFileIdentitySha256) {
+      throw new Error(
+        "Arena extension-host executable changed across the spawn boundary.",
+      );
+    }
     const helperIdentity = await arenaProcessFileIdentitySha256(
       input.bundledHelper.scriptPath,
     );

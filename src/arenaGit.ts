@@ -260,7 +260,21 @@ export class ArenaGitExecutor {
         "Arena Git executable must resolve to one real native file.",
       );
     }
-    const boundary = await prepareArenaPrivateStorage(privateWorkspaceRoot);
+    const preparedBoundary = await prepareArenaPrivateStorage(
+      privateWorkspaceRoot,
+    );
+    // Windows hosted runners and user profiles may expose a stable directory
+    // through an OS-managed junction. Use the authenticated real root for all
+    // durable path derivation so Git and Hydra cannot name the same worktree
+    // differently in registry hashes or receipts.
+    const boundary = sameArenaPath(
+      preparedBoundary.privateWorkspaceRoot,
+      preparedBoundary.realPrivateWorkspaceRoot,
+    )
+      ? preparedBoundary
+      : await prepareArenaPrivateStorage(
+          preparedBoundary.realPrivateWorkspaceRoot,
+        );
     const realWorkspace = await fs.realpath(root);
     const realResolutionRoot = await fs.realpath(resolutionRoot);
     if (isArenaPathWithin(realWorkspace, boundary.realRoot)
@@ -300,13 +314,13 @@ export class ArenaGitExecutor {
     }
     const executor = new ArenaGitExecutor(
       realWorkspace,
-      path.resolve(privateWorkspaceRoot),
+      boundary.privateWorkspaceRoot,
       realGitExecutable,
       executableIdentitySha256(realGitExecutable, gitStat),
       realResolutionRoot,
       boundary,
       emptyHooksPath,
-      new FileArenaWorktreeRegistrationStore(privateWorkspaceRoot),
+      new FileArenaWorktreeRegistrationStore(boundary.privateWorkspaceRoot),
       new FileArenaRepositoryRunLeaseStore(leaseBoundary),
     );
     await executor.assertWorktreeCapabilities();

@@ -395,8 +395,8 @@ export class IntegratedBrowserBroker implements vscode.Disposable {
         return await this.handleMcpRequest(agent, token, body, response, requestEpoch, requestCancellation);
       }
       return writeJson(response, 404, { ok: false, error: "Unknown Hydra browser endpoint." });
-    } catch (err) {
-      return writeJson(response, 400, { ok: false, error: errorMessage(err) });
+    } catch {
+      return writeJson(response, 400, { ok: false, error: "Hydra browser request failed." });
     } finally {
       response.off("close", cancelOnClose);
       if (trackedToken) this.untrackTokenCancellation(trackedToken, requestCancellation);
@@ -474,9 +474,9 @@ export class IntegratedBrowserBroker implements vscode.Disposable {
         content.push({ type: "image", data: Buffer.from(image.data).toString("base64"), mimeType: image.mimeType });
       }
       return writeJsonRpcResult(response, id, { content, isError: !invocation.response.ok });
-    } catch (err) {
+    } catch {
       return writeJsonRpcResult(response, id, {
-        content: [{ type: "text", text: errorMessage(err) }],
+        content: [{ type: "text", text: "Hydra browser request failed." }],
         isError: true,
       });
     } finally {

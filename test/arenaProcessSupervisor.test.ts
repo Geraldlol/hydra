@@ -29,6 +29,166 @@ const INVOCATION_SHA256 = digest("invocation");
 const FINAL_FINGERPRINT_SHA256 = digest("final-fingerprint");
 
 describe("Arena process supervisor", () => {
+  test("canonicalizes upstream directory aliases before binding process paths", async (t) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-arena-process-alias-"));
+    const realParent = path.join(root, "real-parent");
+    const aliasParent = path.join(root, "alias-parent");
+    const realWorktree = path.join(realParent, "worktree");
+    const realExecutable = path.join(realParent, "helper.js");
+    await fs.mkdir(realWorktree, { recursive: true });
+    await fs.writeFile(realExecutable, "process.exit(0);\n", "utf8");
+    t.after(async () => {
+      await fs.rm(root, { recursive: true, force: true });
+    });
+    try {
+      await fs.symlink(
+        realParent,
+        aliasParent,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+    } catch (error) {
+      t.skip(`directory-link creation unavailable: ${String(error)}`);
+      return;
+    }
+
+    assert.equal(
+      await arenaProcessWorktreeDirectoryIdentitySha256(
+        path.join(aliasParent, "worktree"),
+      ),
+      await arenaProcessWorktreeDirectoryIdentitySha256(realWorktree),
+    );
+    assert.equal(
+      await arenaProcessFileIdentitySha256(
+        path.join(aliasParent, "helper.js"),
+      ),
+      await arenaProcessFileIdentitySha256(realExecutable),
+    );
+  });
+
+  test("preserves the exact Electron host invocation while canonicalizing its helper", async (t) => {
+    const fixture = await createFixture(t);
+    const originalExecPath = path.resolve(process.execPath);
+    const originalExecPathDescriptor = Object.getOwnPropertyDescriptor(
+      process,
+      "execPath",
+    );
+    assert.ok(originalExecPathDescriptor?.configurable);
+    const hostAliasParent = path.join(fixture.root, "host-invocation-alias");
+    const helperAliasParent = path.join(fixture.root, "installed-helper-alias");
+    try {
+      await fs.symlink(
+        path.dirname(originalExecPath),
+        hostAliasParent,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      await fs.symlink(
+        path.resolve(__dirname, "..", "src"),
+        helperAliasParent,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+    } catch (error) {
+      t.skip(`directory-link creation unavailable: ${String(error)}`);
+      return;
+    }
+    const hostInvocationAlias = path.join(
+      hostAliasParent,
+      path.basename(originalExecPath),
+    );
+    const helperAlias = path.join(
+      helperAliasParent,
+      "arenaFakeHeadCli.js",
+    );
+    Object.defineProperty(process, "execPath", {
+      ...originalExecPathDescriptor,
+      value: hostInvocationAlias,
+    });
+    try {
+      const base = await supervisorInput(fixture.root, fakeRequest());
+      const input: ArenaProcessSupervisorInput = {
+        ...base,
+        args: [helperAlias],
+        bundledHelper: {
+          scriptPath: helperAlias,
+          scriptFileIdentitySha256:
+            await arenaProcessFileIdentitySha256(helperAlias),
+        },
+      };
+      const expectedIntent = createArenaProcessIntent(input);
+      const observed = acceptedMockChild();
+      let spawnedCommand = "";
+      let spawnedArgs: readonly string[] = [];
+      let spawnedCwd: string | undefined;
+      const result = await superviseArenaProcess(input, {
+        spawnProcess: (command, args, options) => {
+          spawnedCommand = command;
+          spawnedArgs = args;
+          spawnedCwd = typeof options.cwd === "string" ? options.cwd : undefined;
+          observed.child.stdin?.once("finish", () => {
+            queueMicrotask(() => observed.child.emit("close", 0));
+          });
+          queueMicrotask(() => observed.child.emit("spawn"));
+          return observed.child;
+        },
+      });
+
+      assert.equal(result.intentSha256, expectedIntent.intentSha256);
+      assert.equal(spawnedCommand, hostInvocationAlias);
+      assert.deepEqual(spawnedArgs, [await fs.realpath(helperAlias)]);
+      assert.equal(spawnedCwd, await fs.realpath(fixture.root));
+    } finally {
+      Object.defineProperty(process, "execPath", originalExecPathDescriptor);
+    }
+  });
+
+  test("spawns generic command aliases through their canonical target", async (t) => {
+    const fixture = await createFixture(t);
+    const executableAliasParent = path.join(fixture.root, "executable-alias");
+    try {
+      await fs.symlink(
+        path.dirname(process.execPath),
+        executableAliasParent,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+    } catch (error) {
+      t.skip(`directory-link creation unavailable: ${String(error)}`);
+      return;
+    }
+    const commandAlias = path.join(
+      executableAliasParent,
+      path.basename(process.execPath),
+    );
+    const base = await supervisorInput(fixture.root, fakeRequest());
+    const input: ArenaProcessSupervisorInput = {
+      ...base,
+      command: commandAlias,
+      commandFileIdentitySha256:
+        await arenaProcessFileIdentitySha256(commandAlias),
+      args: ["-e", ""],
+      stdin: "",
+      environmentPolicySha256:
+        arenaProcessEnvironmentPolicySha256(process.env, false),
+      bundledHelper: undefined,
+    };
+    const observed = acceptedMockChild();
+    let spawnedCommand = "";
+    const result = await superviseArenaProcess(input, {
+      spawnProcess: (command) => {
+        spawnedCommand = command;
+        observed.child.stdin?.once("finish", () => {
+          queueMicrotask(() => observed.child.emit("close", 0));
+        });
+        queueMicrotask(() => observed.child.emit("spawn"));
+        return observed.child;
+      },
+    });
+
+    assert.equal(
+      result.intentSha256,
+      createArenaProcessIntent(input).intentSha256,
+    );
+    assert.equal(spawnedCommand, await fs.realpath(commandAlias));
+  });
+
   test("runs the bundled fake head with isolated edits and metadata-only output", async (t) => {
     const fixture = await createFixture(t);
     const request = fakeRequest({
@@ -686,6 +846,38 @@ describe("Arena process supervisor", () => {
       /real, singly-linked regular file|linked components/,
     );
     assert.equal(await fs.readFile(outside, "utf8"), "outside\n");
+  });
+
+  test("fake head canonicalizes an upstream cwd alias before editing", async (t) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-arena-fake-alias-"));
+    const realParent = path.join(root, "real-parent");
+    const aliasParent = path.join(root, "alias-parent");
+    const realWorktree = path.join(realParent, "worktree");
+    await fs.mkdir(realWorktree, { recursive: true });
+    await fs.writeFile(path.join(realWorktree, "fixture.txt"), "base\n", "utf8");
+    t.after(async () => {
+      await fs.rm(root, { recursive: true, force: true });
+    });
+    try {
+      await fs.symlink(
+        realParent,
+        aliasParent,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+    } catch (error) {
+      t.skip(`directory-link creation unavailable: ${String(error)}`);
+      return;
+    }
+
+    const execution = await executeArenaFakeHeadRequest(
+      fakeRequest({ fixtureContent: "through canonical cwd\n" }),
+      path.join(aliasParent, "worktree"),
+    );
+    assert.equal(execution.response.fixtureSha256, digest("through canonical cwd\n"));
+    assert.equal(
+      await fs.readFile(path.join(realWorktree, "fixture.txt"), "utf8"),
+      "through canonical cwd\n",
+    );
   });
 });
 

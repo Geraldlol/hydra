@@ -119,5 +119,5 @@ export function formatCommandForSession(command: string, args: string[]): string
 
 function formatCommandPart(value: string): string {
   if (/^[A-Za-z0-9_./:=@-]+$/.test(value)) return value;
-  return `"${value.replace(/"/g, '\\"')}"`;
+  return JSON.stringify(value) ?? '""';
 }

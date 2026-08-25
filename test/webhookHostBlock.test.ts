@@ -58,4 +58,10 @@ describe("sanitizeWebhookError", () => {
     const cleaned = sanitizeWebhookError(raw);
     assert.equal(cleaned.length, 300);
   });
+
+  test("bounds adversarial tag input before sanitizing it", () => {
+    const cleaned = sanitizeWebhookError("<system>".repeat(100));
+    assert.ok(cleaned.length <= 300);
+    assert.doesNotMatch(cleaned, /<system>/i);
+  });
 });

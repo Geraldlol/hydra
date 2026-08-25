@@ -724,7 +724,8 @@ export function isBlockedWebhookHost(hostname: string): boolean {
 // controlled error strings before they land in transcript.md (which feeds
 // back into agent prompts on the next turn).
 export function sanitizeWebhookError(message: string): string {
-  return message
+  const bounded = message.slice(0, 300);
+  return bounded
     .replace(/[\x00-\x1f\x7f]/g, " ")
     .replace(/<\/?system[^>]*>/gi, "[redacted-tag]")
     .replace(/```/g, "`​``")
@@ -884,7 +885,7 @@ export class HydraRoomPanel {
   private autoAdvanceSendInstructionCount = 0;
   private autoAdvanceInProgress = false;
   private usageUri!: vscode.Uri;
-  private readonly sessionId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  private readonly sessionId = `${Date.now()}-${crypto.randomUUID()}`;
   private usageRecords: UsageRecord[] = [];
   private sessionUsage: UsageSummary | undefined;
   private weeklyUsage: UsageSummary | undefined;

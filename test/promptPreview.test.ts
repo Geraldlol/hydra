@@ -54,7 +54,7 @@ describe("prompt preview envelopes", () => {
       renderedPrompt: "Review the diff.",
     });
     const preview = renderPromptEnvelopePreview(envelope);
-    assert.match(preview, /Command: claude -p --add-dir "C:\\repo with spaces"/);
+    assert.match(preview, /Command: claude -p --add-dir "C:\\\\repo with spaces"/);
     assert.match(preview, /Latest verification: passed: npm test/);
     assert.match(preview, /## Prompt Budget/);
     assert.match(preview, /Total: 16 chars \(~4 tokens\)/);
@@ -403,7 +403,7 @@ describe("prompt preview envelopes", () => {
   });
 
   test("formats readable command strings", () => {
-    assert.equal(formatCommand("codex", ["exec", "--cd", "C:\\repo with spaces", "-"]), 'codex exec --cd "C:\\repo with spaces" -');
+    assert.equal(formatCommand("codex", ["exec", "--cd", "C:\\repo with spaces", "-"]), 'codex exec --cd "C:\\\\repo with spaces" -');
   });
 });
 

@@ -401,7 +401,7 @@ describe("Claude persistent-session provider contract", () => {
       },
     });
     assert.equal(published, false);
-    assert.match(result.stderr, new RegExp(`>=${MIN_CLAUDE_SESSION_VERSION.replace(/\./g, "\\.")}`));
+    assert.ok(result.stderr.includes(`>=${MIN_CLAUDE_SESSION_VERSION}`), result.stderr);
     assert.match(result.stderr, new RegExp(CLAUDE_SESSION_CAPABILITY));
     assert.notEqual(result.exitCode, 0);
   });
