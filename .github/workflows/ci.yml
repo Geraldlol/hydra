@@ -4,12 +4,19 @@ on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -17,12 +24,14 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22.22.1
           cache: pnpm
@@ -42,6 +51,7 @@ jobs:
         run: pnpm audit --audit-level=high
 
   extension-host:
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -49,12 +59,14 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22.22.1
           cache: pnpm
@@ -69,3 +81,26 @@ jobs:
       - name: Run extension-host tests (Windows)
         if: runner.os == 'Windows'
         run: pnpm run test:integration
+
+  required-ci:
+    name: Required CI
+    permissions: {}
+    if: ${{ always() }}
+    needs: [build, extension-host]
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every CI dependency
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+          EXTENSION_HOST_RESULT: ${{ needs['extension-host'].result }}
+        shell: bash
+        run: |
+          printf '%s\n' \
+            "build=$BUILD_RESULT" \
+            "extension-host=$EXTENSION_HOST_RESULT"
+          for result in "$BUILD_RESULT" "$EXTENSION_HOST_RESULT"; do
+            if [ "$result" != "success" ]; then
+              exit 1
+            fi
+          done
