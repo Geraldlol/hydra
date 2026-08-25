@@ -55,7 +55,7 @@ describe("terminal session state", () => {
   test("formats commands for readable session cards", () => {
     assert.equal(
       formatCommandForSession("codex", ["exec", "--cd", "C:\\repo with spaces", "-"]),
-      'codex exec --cd "C:\\repo with spaces" -'
+      'codex exec --cd "C:\\\\repo with spaces" -'
     );
   });
 });

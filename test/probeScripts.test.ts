@@ -3,6 +3,14 @@ import { strict as assert } from "node:assert";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+const {
+  quotePowerShell,
+  escapeCell,
+}: {
+  quotePowerShell(value: string): string;
+  escapeCell(value: unknown): string;
+} = require(path.join(process.cwd(), "scripts", "native-contract-probe.js"));
+
 const PROBE_SCRIPTS = [
   "native-contract-probe.js",
   "codex-json-probe.js",
@@ -23,4 +31,9 @@ describe("native probe workspace boundary", () => {
       );
     });
   }
+
+  test("quotes copyable PowerShell paths and escapes Markdown table cells", () => {
+    assert.equal(quotePowerShell("C:\\it's\\fine"), "'C:\\it''s\\fine'");
+    assert.equal(escapeCell("a\\b|c"), "a\\\\b\\|c");
+  });
 });

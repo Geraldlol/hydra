@@ -61,6 +61,20 @@ describe("Hydra browser broker security contract", () => {
     assert.match(panelSource, /browserRequiresOneShot = !!spawn\.env\?\.HYDRA_BROWSER_TOKEN/);
   });
 
+  test("does not expose exception details over HTTP or MCP", () => {
+    const httpStart = source.indexOf("private async handleHttpRequest(");
+    const httpEnd = source.indexOf("private async handleMcpRequest(", httpStart);
+    const mcpEnd = source.indexOf("private mcpTools(", httpEnd);
+    assert.ok(httpStart >= 0 && httpEnd > httpStart && mcpEnd > httpEnd);
+
+    const httpHandler = source.slice(httpStart, httpEnd);
+    const mcpHandler = source.slice(httpEnd, mcpEnd);
+    assert.match(httpHandler, /catch \{[\s\S]*Hydra browser request failed\./);
+    assert.match(mcpHandler, /catch \{[\s\S]*Hydra browser request failed\./);
+    assert.doesNotMatch(httpHandler, /errorMessage\(/);
+    assert.doesNotMatch(mcpHandler, /errorMessage\(/);
+  });
+
   test("redacts and revokes per-dispatch browser bearer tokens", () => {
     assert.match(source, /revokeAgentSpawn/);
     assert.match(source, /cancellationsByToken/);

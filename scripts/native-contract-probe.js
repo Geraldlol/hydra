@@ -102,10 +102,12 @@ const probes = [
   },
 ];
 
-main().catch((err) => {
-  console.error(err);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(err);
+    process.exitCode = 1;
+  });
+}
 
 async function main() {
   await fsp.mkdir(outDir, { recursive: true });
@@ -164,8 +166,8 @@ async function main() {
     resultPath: path.join(outDir, "report.json"),
     probes: results,
     manualInteractiveChecks: [
-      `codex --cd ${quote(repoRoot)}`,
-      `claude --add-dir ${quote(repoRoot)}`,
+      `codex --cd ${quotePowerShell(repoRoot)}`,
+      `claude --add-dir ${quotePowerShell(repoRoot)}`,
       "Compare whether interactive sessions continue context, ask permission, and perform tools differently from the one-shot probes.",
     ],
   };
@@ -296,15 +298,17 @@ function preview(value) {
   return trimmed.length <= 1200 ? trimmed : `${trimmed.slice(0, 1200)}\n[truncated ${trimmed.length - 1200} chars]`;
 }
 
-function quote(value) {
-  return `"${value.replace(/"/g, '\\"')}"`;
+function quotePowerShell(value) {
+  return `'${value.replace(/'/g, "''")}'`;
 }
 
 function escapeCell(value) {
-  return String(value).replace(/\|/g, "\\|");
+  return String(value).replace(/\\/g, "\\\\").replace(/\|/g, "\\|");
 }
 
 const ANSI_RE = /\x1B(?:[\]PX^_][^\x07\x1B]*(?:\x07|\x1B\\)|\[[0-?]*[ -\/]*[@-~]|[@-Z\\-_])/g;
 function stripAnsi(value) {
   return value.replace(ANSI_RE, "");
 }
+
+module.exports = { quotePowerShell, escapeCell };

@@ -434,8 +434,8 @@ const server = http.createServer(async (request, response) => {
       return send(response, 200, "image/png", await fs.readFile(path.join(workspaceRoot, "media", "hydra-heads", headMatch[1])));
     }
     return send(response, 404, "text/plain; charset=utf-8", "Not found");
-  } catch (error) {
-    return send(response, 500, "text/plain; charset=utf-8", error instanceof Error ? error.message : String(error));
+  } catch {
+    return send(response, 500, "text/plain; charset=utf-8", "Internal Server Error");
   }
 });
 

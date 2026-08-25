@@ -3,6 +3,14 @@ import { strict as assert } from "node:assert";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+describe("panel identity source contract", () => {
+  test("uses a cryptographically strong session identifier", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
+    assert.match(source, /private readonly sessionId = `\$\{Date\.now\(\)\}-\$\{crypto\.randomUUID\(\)\}`/);
+    assert.doesNotMatch(source, /private readonly sessionId[^;]*Math\.random/);
+  });
+});
+
 describe("codex transport source contracts", () => {
   test("Codex last-message capture is not disabled by unrelated -o flags", () => {
     // The guard previously lived in panel.ts; it moved to codexTransport.ts
