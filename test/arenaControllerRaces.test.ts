@@ -42,11 +42,15 @@ import {
   sha256ArenaProcessUtf8,
 } from "../src/arenaProcessSupervisor";
 import { resolveGitExecutable } from "../src/gitExecutable";
+import { HANG_NET_TIMEOUT_MS } from "./testBudgets";
 
 const BASE_CONTENT = "Hydra Arena controller race base.\n";
 const HEAD_CONTENT = "Hydra Arena controller race result.\n";
 const UNTRACKED_CONTENT = "Hydra Arena controller race evidence.\n";
 const FIXTURE_PREFIX = "hydra-arena-controller-race-";
+const DUAL_HEAD_READY_TIMEOUT_MS = HANG_NET_TIMEOUT_MS * 2;
+const HANGING_HEAD_TIMEOUT_MS = HANG_NET_TIMEOUT_MS * 3;
+const DUAL_HEAD_RACE_TIMEOUT_MS = HANG_NET_TIMEOUT_MS * 6;
 
 const workspace = vscode.workspace as typeof vscode.workspace & {
   isTrusted?: boolean;
@@ -581,11 +585,19 @@ test(
 
 test(
   "aborting after both hanging heads edit yields quiescent evidence-bound cancellation and exact cleanup",
-  { timeout: 120_000 },
+  { timeout: DUAL_HEAD_RACE_TIMEOUT_MS },
   async (t: TestContext) => {
+    const controller = new AbortController();
+    let cleanupRun: Promise<unknown> | undefined;
+    // TestContext after hooks run in registration order. Register the drain
+    // before createFixture registers filesystem cleanup so an outer timeout or
+    // assertion failure cannot remove worktrees beneath a live controller.
+    t.after(async () => {
+      controller.abort(new Error("controller race test cleanup"));
+      await cleanupRun?.catch(() => undefined);
+    });
     const fixture = await createFixture(t, "cancel");
     if (!fixture) return;
-    const controller = new AbortController();
     const worktrees = new Map<string, string>();
     const running = runArenaController({
       runId: fixture.runId,
@@ -594,7 +606,7 @@ test(
       repositoryLeaseRoot: fixture.leaseRoot,
       gitResolutionRoot: process.cwd(),
       lock: fixture.lock,
-      signal: controller.signal,
+      signal: AbortSignal.any([controller.signal, t.signal]),
       assertMissionAuthority: () => {},
       createProcess: (context) => {
         worktrees.set(
@@ -605,17 +617,49 @@ test(
         return fixture.processSpec(context, true);
       },
     });
+    cleanupRun = running;
+    let earlyFailure: { readonly error: unknown } | undefined;
+    void running.catch((error: unknown) => {
+      earlyFailure = { error };
+    });
+    let readinessDetail = "worktrees=0/2";
 
-    await waitFor(async () => {
-      if (worktrees.size !== 2) return false;
-      return (
-        await Promise.all([...worktrees.values()].map(async (worktreePath) =>
-          await readIfPresent(path.join(worktreePath, "fixture.txt"))
-            === HEAD_CONTENT
-          && await readIfPresent(path.join(worktreePath, "evidence.txt"))
-            === UNTRACKED_CONTENT))
-      ).every(Boolean);
-    }, "both fake heads to receive stdin and finish their edits");
+    try {
+      await waitFor(async () => {
+        if (earlyFailure) throw earlyFailure.error;
+        const states = await Promise.all([...worktrees.entries()].map(
+          async ([contestantId, worktreePath]) => {
+            const [fixtureBody, evidenceBody] = await Promise.all([
+              readIfPresent(path.join(worktreePath, "fixture.txt")),
+              readIfPresent(path.join(worktreePath, "evidence.txt")),
+            ]);
+            const fixtureState = fixtureBody === undefined
+              ? "missing"
+              : fixtureBody === HEAD_CONTENT ? "expected" : "other";
+            const evidenceState = evidenceBody === undefined
+              ? "missing"
+              : evidenceBody === UNTRACKED_CONTENT ? "expected" : "other";
+            return {
+              ready: fixtureState === "expected" && evidenceState === "expected",
+              summary: `${contestantId}:fixture=${fixtureState},evidence=${evidenceState}`,
+            };
+          },
+        ));
+        readinessDetail = `worktrees=${worktrees.size}/2; ${
+          states.map((state) => state.summary).join("; ") || "no contestants dispatched"
+        }`;
+        return worktrees.size === 2 && states.every((state) => state.ready);
+      }, () => (
+        `both fake heads to receive stdin and finish their edits (${readinessDetail})`
+      ), DUAL_HEAD_READY_TIMEOUT_MS, 100);
+    } catch (error) {
+      // A failed readiness assertion must not leave the controller running
+      // while test hooks remove its worktrees or the next test installs global
+      // prototype mocks. Abort and drain before surfacing the original error.
+      controller.abort(error);
+      await running.catch(() => undefined);
+      throw error;
+    }
     controller.abort(new Error("synthetic local-user Stop"));
     const result = await running;
 
@@ -717,6 +761,13 @@ test(
   "a source mutation while postEvidence publication resolves is sealed as compromised",
   { timeout: 120_000 },
   async (t: TestContext) => {
+    const controller = new AbortController();
+    let cleanupRun: Promise<unknown> | undefined;
+    // Drain production work before createFixture removes any worktree state.
+    t.after(async () => {
+      controller.abort(new Error("controller race test cleanup"));
+      await cleanupRun?.catch(() => undefined);
+    });
     const fixture = await createFixture(t, "post-evidence-publication");
     if (!fixture) return;
     const originalAppend = FileArenaManifestStore.prototype.append;
@@ -744,19 +795,22 @@ test(
       },
     );
 
-    const result = await runArenaController({
+    const running = runArenaController({
       runId: fixture.runId,
       workspaceRoot: fixture.sourceRoot,
       privateWorkspaceRoot: fixture.privateRoot,
       repositoryLeaseRoot: fixture.leaseRoot,
       gitResolutionRoot: process.cwd(),
       lock: fixture.lock,
+      signal: AbortSignal.any([controller.signal, t.signal]),
       assertMissionAuthority: () => {},
       createProcess: (context) => {
         fixture.worktrees.add(context.worktree.worktreePath);
         return fixture.processSpec(context, false);
       },
     });
+    cleanupRun = running;
+    const result = await running;
 
     assert.equal(injected, true);
     assert.equal(result.replay.state, "cleanupComplete");
@@ -1043,7 +1097,10 @@ async function createFixture(
         contextSha256: digest(
           `${runId}:${context.contestant.contestantId}:context`,
         ),
-        timeoutMs: 30_000,
+        // Hanging heads are stopped by the race under test. Their own timeout
+        // must outlive two-head Windows dispatch/readiness contention so it
+        // cannot win the race and change the asserted outcome.
+        timeoutMs: hang ? HANGING_HEAD_TIMEOUT_MS : HANG_NET_TIMEOUT_MS,
         bundledHelper: {
           scriptPath: fakeHelper,
           scriptFileIdentitySha256: fakeHelperIdentitySha256,
@@ -1206,14 +1263,17 @@ async function readLeaseEvents(
 
 async function waitFor(
   predicate: () => Promise<boolean>,
-  label: string,
+  label: string | (() => string),
+  timeoutMs = HANG_NET_TIMEOUT_MS,
+  pollMs = 25,
 ): Promise<void> {
-  const deadline = Date.now() + 30_000;
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await predicate()) return;
-    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    await new Promise<void>((resolve) => setTimeout(resolve, pollMs));
   }
-  throw new Error(`Timed out waiting for ${label}.`);
+  const detail = typeof label === "function" ? label() : label;
+  throw new Error(`Timed out waiting for ${detail}.`);
 }
 
 async function readIfPresent(filePath: string): Promise<string | undefined> {
