@@ -3,6 +3,11 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { serializePerFileAcrossProcesses } from "./fileQueue";
+import { syncArenaDirectoryEntry } from "./arenaPrivateStorage";
+import {
+  parseArenaRecoveryActionProof,
+  type ArenaRecoveryActionProof,
+} from "./arenaRecovery";
 
 export const ARENA_REPOSITORY_LEASE_SCHEMA_VERSION = 1 as const;
 export const ARENA_REPOSITORY_LEASE_GENESIS_SHA256 = "0".repeat(64);
@@ -91,6 +96,22 @@ interface ArenaRepositoryLeaseReplay {
   };
 }
 
+interface PendingLocalClaimPublication {
+  readonly eventId: string;
+  readonly eventSha256: string;
+  readonly ownerId: string;
+  readonly eventType: "claimAcquired" | "claimRecovered";
+}
+
+export interface ArenaRepositoryLeaseStoreOptions {
+  readonly isProcessDefinitelyGone?: (pid: number) => Promise<boolean>;
+}
+
+const pendingLocalClaimPublications = new Map<
+  string,
+  PendingLocalClaimPublication
+>();
+
 export async function prepareArenaRepositoryLeaseRoot(
   leaseRoot: string,
 ): Promise<ArenaRepositoryLeaseBoundary> {
@@ -122,7 +143,15 @@ export async function assertArenaRepositoryLeaseBoundary(
 }
 
 export class FileArenaRepositoryRunLeaseStore {
-  constructor(readonly boundary: ArenaRepositoryLeaseBoundary) {}
+  private readonly isProcessDefinitelyGone: (pid: number) => Promise<boolean>;
+
+  constructor(
+    readonly boundary: ArenaRepositoryLeaseBoundary,
+    options: ArenaRepositoryLeaseStoreOptions = {},
+  ) {
+    this.isProcessDefinitelyGone = options.isProcessDefinitelyGone
+      ?? defaultIsProcessDefinitelyGone;
+  }
 
   async withRepositoryLock<T>(
     repositoryIdentitySha256: string,
@@ -144,11 +173,41 @@ export class FileArenaRepositoryRunLeaseStore {
     });
   }
 
+  async withUnownedRepository<T>(
+    repositoryIdentitySha256: string,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    return this.withRepositoryLock(repositoryIdentitySha256, async () => {
+      const ledgerPath = this.ledgerPath(repositoryIdentitySha256);
+      const before = await loadLedger(
+        ledgerPath,
+        this.boundary,
+        repositoryIdentitySha256,
+      );
+      if (before.activeClaim) {
+        throw new Error(
+          `Arena repository remains owned by unreleased run ${
+            before.activeClaim.payload.runId}.`,
+        );
+      }
+      const result = await work();
+      const after = await loadLedger(
+        ledgerPath,
+        this.boundary,
+        repositoryIdentitySha256,
+      );
+      if (after.activeClaim) {
+        throw new Error("Arena repository ownership changed during exclusive work.");
+      }
+      return result;
+    });
+  }
+
   async claim(
     input: ArenaRepositoryRunClaimInput,
   ): Promise<ArenaRepositoryRunClaim> {
     validateClaimInput(input);
-    const ownerId = randomUUID();
+    let ownerId: string = randomUUID();
     const ledgerPath = this.ledgerPath(input.repositoryIdentitySha256);
     let claimEvent!: ArenaRepositoryLeaseEvent & {
       readonly payload: ArenaRepositoryClaimPayload;
@@ -162,6 +221,32 @@ export class FileArenaRepositoryRunLeaseStore {
           input.repositoryIdentitySha256,
         );
         const active = replay.activeClaim;
+        const pending = pendingLocalClaimPublications.get(ledgerPath);
+        if (pending && (!active || !samePendingClaim(active, pending))) {
+          pendingLocalClaimPublications.delete(ledgerPath);
+        }
+        if (active
+          && pending
+          && pending.eventType === "claimAcquired"
+          && samePendingClaim(active, pending)
+          && sameExactClaimBinding(active.payload, input)) {
+          const durable = await syncAndReloadLedger(
+            ledgerPath,
+            this.boundary,
+            input.repositoryIdentitySha256,
+          );
+          const durableActive = durable.activeClaim;
+          if (!durableActive || !samePendingClaim(durableActive, pending)) {
+            throw new Error(
+              "Arena repository published claim changed while re-syncing.",
+            );
+          }
+          ownerId = pending.ownerId;
+          claimEvent = durableActive;
+          pendingLocalClaimPublications.delete(ledgerPath);
+          activeLocalOwners.add(ownerId);
+          return;
+        }
         if (active && !sameClaimBinding(active.payload, input)) {
           throw new Error(
             `Arena repository remains owned by unreleased run ${
@@ -180,122 +265,151 @@ export class FileArenaRepositoryRunLeaseStore {
           );
         }
         const type: ArenaRepositoryLeaseEventType = "claimAcquired";
-        claimEvent = await appendLedgerEvent(
-          ledgerPath,
-          replay,
-          {
-            eventId: randomUUID(),
-            occurredAt: new Date().toISOString(),
-            type,
-            payload: {
-              payloadType: type,
-              ...input,
-              ownerId,
-              pid: process.pid,
-              priorClaimSha256: null,
+        const eventId = randomUUID();
+        try {
+          claimEvent = await appendLedgerEvent(
+            ledgerPath,
+            replay,
+            {
+              eventId,
+              occurredAt: new Date().toISOString(),
+              type,
+              payload: {
+                payloadType: type,
+                ...input,
+                ownerId,
+                pid: process.pid,
+                priorClaimSha256: null,
+              },
             },
-          },
-          this.boundary,
-        ) as typeof claimEvent;
+            this.boundary,
+          ) as typeof claimEvent;
+        } catch (error) {
+          await rememberPublishedClaim(
+            ledgerPath,
+            this.boundary,
+            input,
+            eventId,
+            ownerId,
+            type,
+          );
+          throw error;
+        }
+        pendingLocalClaimPublications.delete(ledgerPath);
         activeLocalOwners.add(ownerId);
       },
     );
+    return createRunClaimHandle(this, input, ownerId, ledgerPath, claimEvent);
+  }
 
-    let disposed = false;
-    let lost = false;
-    const stopLocal = () => {
-      if (disposed) return;
-      disposed = true;
-      activeLocalOwners.delete(ownerId);
-    };
-    const assertOwned = async (): Promise<void> => {
-      if (disposed || lost || !activeLocalOwners.has(ownerId)) {
-        throw new Error("Arena repository run claim is no longer active.");
-      }
-      const replay = await loadLedger(
-        ledgerPath,
-        this.boundary,
-        input.repositoryIdentitySha256,
+  async recover(
+    input: ArenaRepositoryRunClaimInput,
+    proofInput: ArenaRecoveryActionProof,
+  ): Promise<ArenaRepositoryRunClaim> {
+    validateClaimInput(input);
+    const proof = parseArenaRecoveryActionProof(proofInput);
+    if (input.recoveryProofSha256 !== proof.recoveryProofSha256) {
+      throw new Error(
+        "Arena repository recovery input does not match the typed recovery proof.",
       );
-      const active = replay.activeClaim;
-      if (!active
-        || active.eventSha256 !== claimEvent.eventSha256
-        || active.payload.ownerId !== ownerId
-        || active.payload.pid !== process.pid) {
-        lost = true;
-        activeLocalOwners.delete(ownerId);
-        throw new Error("Arena repository run claim changed ownership.");
-      }
+    }
+    if (input.runId !== proof.runId
+      || input.manifestLockEventSha256 !== proof.manifestLockEventSha256) {
+      throw new Error(
+        "Arena repository recovery proof does not bind the requested repository claim.",
+      );
+    }
+    let ownerId: string = randomUUID();
+    const ledgerPath = this.ledgerPath(input.repositoryIdentitySha256);
+    let claimEvent!: ArenaRepositoryLeaseEvent & {
+      readonly payload: ArenaRepositoryClaimPayload;
     };
-
-    return Object.freeze({
-      runId: input.runId,
-      repositoryIdentitySha256: input.repositoryIdentitySha256,
-      ownerId,
-      claimSha256: claimEvent.eventSha256,
-      runExclusive: async <T>(work: () => Promise<T>): Promise<T> =>
-        this.withRepositoryLock(
+    await this.withRepositoryLock(
+      input.repositoryIdentitySha256,
+      async () => {
+        const replay = await loadLedger(
+          ledgerPath,
+          this.boundary,
           input.repositoryIdentitySha256,
-          async () => {
-            await assertOwned();
-            const result = await work();
-            await assertOwned();
-            return result;
-          },
-        ),
-      releaseWithProof: async (
-        createCompletionReceipt: () => Promise<string>,
-      ): Promise<void> => {
-        await this.withRepositoryLock(
-          input.repositoryIdentitySha256,
-          async () => {
-            const before = await loadLedger(
-              ledgerPath,
-              this.boundary,
-              input.repositoryIdentitySha256,
-            );
-            const existingRelease = before.events.find((event) =>
-              event.type === "claimReleased"
-              && (event.payload as ArenaRepositoryReleasePayload)
-                .claimSha256 === claimEvent.eventSha256
-              && (event.payload as ArenaRepositoryReleasePayload)
-                .ownerId === ownerId);
-            if (existingRelease) return;
-            await assertOwned();
-            const completionReceiptSha256 =
-              await createCompletionReceipt();
-            assertSha256(completionReceiptSha256, "completion receipt");
-            await assertOwned();
-            const replay = await loadLedger(
-              ledgerPath,
-              this.boundary,
-              input.repositoryIdentitySha256,
-            );
-            await appendLedgerEvent(
-              ledgerPath,
-              replay,
-              {
-                eventId: randomUUID(),
-                occurredAt: new Date().toISOString(),
-                type: "claimReleased",
-                payload: {
-                  payloadType: "claimReleased",
-                  runId: input.runId,
-                  repositoryIdentitySha256:
-                    input.repositoryIdentitySha256,
-                  ownerId,
-                  claimSha256: claimEvent.eventSha256,
-                  completionReceiptSha256,
-                },
-              },
-              this.boundary,
-            );
-          },
         );
-        stopLocal();
+        const active = replay.activeClaim;
+        const pending = pendingLocalClaimPublications.get(ledgerPath);
+        if (pending && (!active || !samePendingClaim(active, pending))) {
+          pendingLocalClaimPublications.delete(ledgerPath);
+        }
+        if (active
+          && pending
+          && pending.eventType === "claimRecovered"
+          && samePendingClaim(active, pending)
+          && sameExactClaimBinding(active.payload, input)) {
+          const durable = await syncAndReloadLedger(
+            ledgerPath,
+            this.boundary,
+            input.repositoryIdentitySha256,
+          );
+          const durableActive = durable.activeClaim;
+          if (!durableActive || !samePendingClaim(durableActive, pending)) {
+            throw new Error(
+              "Arena repository published recovery changed while re-syncing.",
+            );
+          }
+          ownerId = pending.ownerId;
+          claimEvent = durableActive;
+          pendingLocalClaimPublications.delete(ledgerPath);
+          activeLocalOwners.add(ownerId);
+          return;
+        }
+        if (!active) {
+          throw new Error(
+            "Arena repository recovery requires one unreleased active claim.",
+          );
+        }
+        if (!sameClaimBinding(active.payload, input)) {
+          throw new Error(
+            "Arena repository recovery proof does not bind the active claim.",
+          );
+        }
+        if (!await this.isProcessDefinitelyGone(active.payload.pid)) {
+          throw new Error(
+            "Arena repository owner process is not definitely gone; takeover is refused.",
+          );
+        }
+        const type = "claimRecovered" as const;
+        const eventId = randomUUID();
+        try {
+          claimEvent = await appendLedgerEvent(
+            ledgerPath,
+            replay,
+            {
+              eventId,
+              occurredAt: new Date().toISOString(),
+              type,
+              payload: {
+                payloadType: type,
+                ...input,
+                ownerId,
+                pid: process.pid,
+                priorClaimSha256: active.eventSha256,
+              },
+            },
+            this.boundary,
+          ) as typeof claimEvent;
+        } catch (error) {
+          await rememberPublishedClaim(
+            ledgerPath,
+            this.boundary,
+            input,
+            eventId,
+            ownerId,
+            type,
+          );
+          throw error;
+        }
+        pendingLocalClaimPublications.delete(ledgerPath);
+        activeLocalOwners.add(ownerId);
       },
-      abandon: stopLocal,
-    });
+    );
+    return createRunClaimHandle(this, input, ownerId, ledgerPath, claimEvent);
   }
 
   async releasedCompletion(
@@ -339,6 +453,212 @@ export class FileArenaRepositoryRunLeaseStore {
       `${repositoryIdentitySha256}.owner.v1.jsonl`,
     );
   }
+}
+
+function createRunClaimHandle(
+  store: FileArenaRepositoryRunLeaseStore,
+  input: ArenaRepositoryRunClaimInput,
+  ownerId: string,
+  ledgerPath: string,
+  claimEvent: ArenaRepositoryLeaseEvent & {
+    readonly payload: ArenaRepositoryClaimPayload;
+  },
+): ArenaRepositoryRunClaim {
+  let disposed = false;
+  let lost = false;
+  const stopLocal = () => {
+    if (disposed) return;
+    disposed = true;
+    activeLocalOwners.delete(ownerId);
+  };
+  const assertOwned = async (): Promise<void> => {
+    if (disposed || lost || !activeLocalOwners.has(ownerId)) {
+      throw new Error("Arena repository run claim is no longer active.");
+    }
+    const replay = await loadLedger(
+      ledgerPath,
+      store.boundary,
+      input.repositoryIdentitySha256,
+    );
+    const active = replay.activeClaim;
+    if (!active
+      || active.eventSha256 !== claimEvent.eventSha256
+      || active.payload.ownerId !== ownerId
+      || active.payload.pid !== process.pid) {
+      lost = true;
+      activeLocalOwners.delete(ownerId);
+      throw new Error("Arena repository run claim changed ownership.");
+    }
+  };
+
+  return Object.freeze({
+    runId: input.runId,
+    repositoryIdentitySha256: input.repositoryIdentitySha256,
+    ownerId,
+    claimSha256: claimEvent.eventSha256,
+    runExclusive: async <T>(work: () => Promise<T>): Promise<T> =>
+      store.withRepositoryLock(
+        input.repositoryIdentitySha256,
+        async () => {
+          await assertOwned();
+          const result = await work();
+          await assertOwned();
+          return result;
+        },
+      ),
+    releaseWithProof: async (
+      createCompletionReceipt: () => Promise<string>,
+    ): Promise<void> => {
+      await store.withRepositoryLock(
+        input.repositoryIdentitySha256,
+        async () => {
+          const before = await loadLedger(
+            ledgerPath,
+            store.boundary,
+            input.repositoryIdentitySha256,
+          );
+          const existingRelease = before.events.find((event) =>
+            event.type === "claimReleased"
+            && (event.payload as ArenaRepositoryReleasePayload)
+              .claimSha256 === claimEvent.eventSha256
+            && (event.payload as ArenaRepositoryReleasePayload)
+              .ownerId === ownerId);
+          if (existingRelease) {
+            const durable = await syncAndReloadLedger(
+              ledgerPath,
+              store.boundary,
+              input.repositoryIdentitySha256,
+            );
+            if (!durable.events.some((event) =>
+              event.eventSha256 === existingRelease.eventSha256
+              && event.type === "claimReleased")) {
+              throw new Error(
+                "Arena repository published release changed while re-syncing.",
+              );
+            }
+            return;
+          }
+          await assertOwned();
+          const completionReceiptSha256 = await createCompletionReceipt();
+          assertSha256(completionReceiptSha256, "completion receipt");
+          await assertOwned();
+          const replay = await loadLedger(
+            ledgerPath,
+            store.boundary,
+            input.repositoryIdentitySha256,
+          );
+          await appendLedgerEvent(
+            ledgerPath,
+            replay,
+            {
+              eventId: randomUUID(),
+              occurredAt: new Date().toISOString(),
+              type: "claimReleased",
+              payload: {
+                payloadType: "claimReleased",
+                runId: input.runId,
+                repositoryIdentitySha256: input.repositoryIdentitySha256,
+                ownerId,
+                claimSha256: claimEvent.eventSha256,
+                completionReceiptSha256,
+              },
+            },
+            store.boundary,
+          );
+        },
+      );
+      stopLocal();
+    },
+    abandon: stopLocal,
+  });
+}
+
+async function rememberPublishedClaim(
+  ledgerPath: string,
+  boundary: ArenaRepositoryLeaseBoundary,
+  input: ArenaRepositoryRunClaimInput,
+  eventId: string,
+  ownerId: string,
+  eventType: "claimAcquired" | "claimRecovered",
+): Promise<void> {
+  try {
+    const replay = await loadLedger(
+      ledgerPath,
+      boundary,
+      input.repositoryIdentitySha256,
+    );
+    const active = replay.activeClaim;
+    if (!active
+      || active.type !== eventType
+      || active.payload.payloadType !== eventType
+      || active.eventId !== eventId
+      || active.payload.ownerId !== ownerId
+      || active.payload.pid !== process.pid
+      || !sameExactClaimBinding(active.payload, input)) {
+      return;
+    }
+    pendingLocalClaimPublications.set(ledgerPath, Object.freeze({
+      eventId,
+      eventSha256: active.eventSha256,
+      ownerId,
+      eventType,
+    }));
+  } catch {
+    // Keep the publication failure as the primary error. Without a complete,
+    // hash-valid replay proving this exact event, a later call must continue
+    // through the normal fail-closed restart-takeover guard.
+  }
+}
+
+async function syncAndReloadLedger(
+  ledgerPath: string,
+  boundary: ArenaRepositoryLeaseBoundary,
+  expectedRepositoryIdentitySha256: string,
+): Promise<ArenaRepositoryLeaseReplay> {
+  await assertArenaRepositoryLeaseBoundary(boundary);
+  await syncArenaDirectoryEntry(
+    boundary.realRoot,
+    boundary.identity,
+    "Arena repository lease root",
+  );
+  await assertArenaRepositoryLeaseBoundary(boundary);
+  return loadLedger(
+    ledgerPath,
+    boundary,
+    expectedRepositoryIdentitySha256,
+  );
+}
+
+function samePendingClaim(
+  active: ArenaRepositoryLeaseEvent & {
+    readonly payload: ArenaRepositoryClaimPayload;
+  },
+  pending: PendingLocalClaimPublication,
+): boolean {
+  return active.type === pending.eventType
+    && active.payload.payloadType === pending.eventType
+    && active.eventId === pending.eventId
+    && active.eventSha256 === pending.eventSha256
+    && active.payload.ownerId === pending.ownerId
+    && active.payload.pid === process.pid;
+}
+
+async function defaultIsProcessDefinitelyGone(pid: number): Promise<boolean> {
+  if (!Number.isSafeInteger(pid) || pid < 1) return false;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ESRCH";
+  }
+}
+
+function sameExactClaimBinding(
+  left: ArenaRepositoryRunClaimInput,
+  right: ArenaRepositoryRunClaimInput,
+): boolean {
+  return sameClaimBinding(left, right)
+    && left.recoveryProofSha256 === right.recoveryProofSha256;
 }
 
 async function loadLedger(
@@ -623,8 +943,8 @@ async function writeOwnerLedgerAtomically(
       throw new Error("Arena repository owner temporary ledger changed identity.");
     }
     await handle.writeFile(body, "utf8");
-    await handle.sync();
     await handle.chmod(0o600).catch(() => undefined);
+    await handle.sync();
   } catch (error) {
     await handle.close().catch(() => undefined);
     await fs.unlink(temporaryPath).catch(() => undefined);
@@ -643,7 +963,8 @@ async function writeOwnerLedgerAtomically(
     }
     if (createOnly) {
       // A hard-link commit is an atomic no-replace publication. The temporary
-      // name is removed only after the final entry is durable.
+      // name is then removed before one parent-directory sync flushes both
+      // namespace mutations together.
       await fs.link(temporaryPath, ledgerPath);
       await fs.unlink(temporaryPath);
     } else {
@@ -651,10 +972,26 @@ async function writeOwnerLedgerAtomically(
       // the previous complete history. A crash exposes old-or-new authority.
       await fs.rename(temporaryPath, ledgerPath);
     }
+    const expectedBytes = Buffer.byteLength(body, "utf8");
     const published = await fs.lstat(ledgerPath);
     assertSafeFile(published, ledgerPath);
-    if (published.size !== Buffer.byteLength(body, "utf8")) {
+    if (published.size !== expectedBytes) {
       throw new Error("Arena repository owner ledger replacement was incomplete.");
+    }
+    await assertArenaRepositoryLeaseBoundary(boundary);
+    await syncArenaDirectoryEntry(
+      boundary.realRoot,
+      boundary.identity,
+      "Arena repository lease root",
+    );
+    await assertArenaRepositoryLeaseBoundary(boundary);
+    const durable = await fs.lstat(ledgerPath);
+    assertSafeFile(durable, ledgerPath);
+    if (!sameFileIdentity(published, durable)
+      || durable.size !== expectedBytes) {
+      throw new Error(
+        "Arena repository owner ledger changed while flushing its parent.",
+      );
     }
   } catch (error) {
     await fs.unlink(temporaryPath).catch(() => undefined);

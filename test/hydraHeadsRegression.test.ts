@@ -68,7 +68,11 @@ describe("hydra heads SP1 regression", () => {
     const command = "gemini";
     for (const phase of ALL_PHASES) {
       const ctx: InvocationContext = {
-        phase, workspaceRoot: "C:/repo", prompt: "hi", command, rawArgs: ["-p", "-"],
+        phase,
+        workspaceRoot: "C:/repo",
+        prompt: "hi",
+        command,
+        rawArgs: ["--output-format", "json"],
       };
       const inv = adapterForKind(def.kind).buildInvocation(def, ctx);
       assert.equal(inv.transport, "spawn", `phase ${phase} must spawn`);
@@ -79,6 +83,7 @@ describe("hydra heads SP1 regression", () => {
         modelIndex >= 0 && inv.args[modelIndex + 1] === def.model,
         `phase ${phase} must inject --model ${def.model} into argv, got ${JSON.stringify(inv.args)}`
       );
+      assert.equal(inv.stdin, "hi", `phase ${phase} must pipe the prompt on stdin`);
     }
   });
 });

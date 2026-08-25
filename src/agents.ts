@@ -1,5 +1,17 @@
 import * as cp from "node:child_process";
+import * as path from "node:path";
 import { windowsSystemExecutable } from "./executablePath";
+import {
+  TERMINATION_CONFIRM_WINDOW_MS,
+  TERMINATION_FORCE_GRACE_MS,
+  WINDOWS_PROCESS_TREE_IDENTITY_PROBE_TIMEOUT_MS,
+  WINDOWS_PROCESS_TREE_TERMINATION_HELPER_TIMEOUT_MS,
+} from "./processTreeBudgets";
+
+export {
+  TERMINATION_CONFIRM_WINDOW_MS,
+  TERMINATION_FORCE_GRACE_MS,
+} from "./processTreeBudgets";
 
 // Cap accumulated agent stdout per call. A poisoned CLAUDE.md / AGENTS.md
 // can prompt-inject the CLI into emitting hundreds of MB of stream-json
@@ -16,18 +28,6 @@ export const MAX_AGENT_STDOUT_BYTES = 16 * 1024 * 1024;
 // channel, so legitimate output is rarely more than a few KB. Same UTF-16
 // char accounting as the stdout cap above.
 export const MAX_AGENT_STDERR_BYTES = 1 * 1024 * 1024;
-
-// Grace between asking a process tree to die and force-killing it. Short on
-// purpose: a cooperative child exits well inside this, and escalating quickly
-// is what actually reclaims the inherited pipes.
-export const TERMINATION_FORCE_GRACE_MS = 1_000;
-// Why 10s and not 1s: `close` fires only once every inherited stdio handle in
-// the tree is released. A Windows agent CLI runs behind a cmd.exe shim over a
-// deep child tree (powershell, subagent threads), and after taskkill /F /T those
-// handles can take seconds to drain. A 1s window declared such runs "termination
-// unconfirmed", which latches a host-wide automation block that only a window
-// reload clears - so a merely slow reap bricked the room.
-export const TERMINATION_CONFIRM_WINDOW_MS = 10_000;
 
 export interface BoundedStreamState {
   text: string;
@@ -144,10 +144,14 @@ export function spawnViaCmdShim(
 ): cp.ChildProcess {
   const line = [command, ...args].map(quoteForCmd).join(" ");
   const wrapped = `"${line}"`;
-  return cp.spawn(windowsSystemExecutable("cmd.exe"), ["/d", "/s", "/c", wrapped], {
+  return spawnIdentityBoundProcess(
+    windowsSystemExecutable("cmd.exe"),
+    ["/d", "/s", "/c", wrapped],
+    {
     ...options,
     windowsVerbatimArguments: true,
-  });
+    },
+  );
 }
 
 function spawnAgentChild(spawn: AgentSpawn): cp.ChildProcess {
@@ -158,13 +162,13 @@ function spawnAgentChild(spawn: AgentSpawn): cp.ChildProcess {
       env: { ...process.env, ...(spawn.env ?? {}) },
     });
   }
-  return cp.spawn(spawn.command, spawn.args, {
+  return spawnIdentityBoundProcess(spawn.command, spawn.args, {
     cwd: spawn.cwd,
     windowsHide: true,
     env: { ...process.env, ...(spawn.env ?? {}) },
     // POSIX: become a process-group leader so terminateProcessTree
     // can signal the whole group (kills grandchildren too). Windows
-    // uses taskkill /T which has its own tree-walk semantics.
+    // uses an identity-bound native snapshot and handle termination.
     detached: process.platform !== "win32",
   });
 }
@@ -225,7 +229,7 @@ export async function runAgent(
         if (process.platform !== "win32" && child.pid) {
           try {
             // Last-resort escalation: SIGKILL the whole process group.
-            // Windows already used taskkill /F /T (forceful), so no
+            // Windows already used forceful identity-bound termination, so no
             // equivalent step is needed there.
             process.kill(-child.pid, "SIGKILL");
           } catch {
@@ -238,6 +242,7 @@ export async function runAgent(
           appendTerminationDiagnostic(
             "[Hydra did not observe the native agent process close; it may still be running. Restart VS Code before starting more Hydra work.]"
           );
+          releaseUnconfirmedChildProcess(child);
           finish(null);
         }, TERMINATION_CONFIRM_WINDOW_MS);
       }, TERMINATION_FORCE_GRACE_MS);
@@ -374,6 +379,321 @@ function formatSpawnError(spawn: AgentSpawn, err: unknown): string {
 }
 
 /** @internal — shared by bounded native probes that must confirm teardown. */
+const WINDOWS_PROCESS_CREATION_IDENTITIES = new WeakMap<
+  cp.ChildProcess,
+  Promise<string | undefined>
+>();
+const WINDOWS_LAZY_IDENTITY_PROBES = new WeakMap<
+  cp.ChildProcess,
+  typeof cp.spawn
+>();
+const WINDOWS_PROCESS_HOST_READY = new WeakSet<cp.ChildProcess>();
+
+const WINDOWS_PROCESS_HOST_SPEC_ENV =
+  "HYDRA_WINDOWS_PROCESS_TREE_HOST_V1";
+
+function stdioMode(
+  stdio: cp.StdioOptions | undefined,
+  index: 0 | 1 | 2,
+): "pipe" | "ignore" | "inherit" {
+  const entry = Array.isArray(stdio)
+    ? stdio[index]
+    : stdio ?? "pipe";
+  if (entry === "pipe" || entry === "ignore" || entry === "inherit") {
+    return entry;
+  }
+  throw new Error(
+    "Hydra's Windows process host supports only pipe, ignore, or inherit stdio.",
+  );
+}
+
+/**
+ * Spawn through a bundled Windows host that authenticates its own creation
+ * generation before starting the requested command. POSIX callers retain the
+ * ordinary detached-process-group path.
+ */
+export function spawnIdentityBoundProcess(
+  command: string,
+  args: readonly string[],
+  options: cp.SpawnOptions = {},
+): cp.ChildProcess {
+  if (process.platform !== "win32") {
+    return cp.spawn(command, [...args], options);
+  }
+  const targetEnvironment = options.env ?? process.env;
+  if (Object.prototype.hasOwnProperty.call(
+    targetEnvironment,
+    WINDOWS_PROCESS_HOST_SPEC_ENV,
+  )) {
+    throw new Error(
+      `Refusing reserved process environment variable ${WINDOWS_PROCESS_HOST_SPEC_ENV}.`,
+    );
+  }
+  const stdinMode = stdioMode(options.stdio, 0);
+  const stdoutMode = stdioMode(options.stdio, 1);
+  const stderrMode = stdioMode(options.stdio, 2);
+  const electronRunAsNodePresent = Object.prototype.hasOwnProperty.call(
+    targetEnvironment,
+    "ELECTRON_RUN_AS_NODE",
+  );
+  const spec = Buffer.from(JSON.stringify({
+    args: [...args],
+    command,
+    cwd: typeof options.cwd === "string" ? options.cwd : process.cwd(),
+    electronRunAsNode: {
+      present: electronRunAsNodePresent,
+      value: electronRunAsNodePresent
+        ? targetEnvironment.ELECTRON_RUN_AS_NODE ?? ""
+        : null,
+    },
+    shell: typeof options.shell === "string"
+      ? options.shell
+      : options.shell === true,
+    stdinMode,
+    windowsVerbatimArguments: options.windowsVerbatimArguments === true,
+  }), "utf8").toString("base64");
+  if (Buffer.byteLength(spec, "ascii") > 256 * 1024) {
+    throw new Error("Hydra Windows process launch specification is oversized.");
+  }
+  const hostEnvironment: NodeJS.ProcessEnv = {
+    ...targetEnvironment,
+    ELECTRON_RUN_AS_NODE: "1",
+    [WINDOWS_PROCESS_HOST_SPEC_ENV]: spec,
+  };
+  const hostPath = path.join(__dirname, "windowsProcessTreeHost.js");
+  const child = cp.spawn(process.execPath, [hostPath], {
+    cwd: typeof options.cwd === "string" ? options.cwd : undefined,
+    env: hostEnvironment,
+    shell: false,
+    windowsHide: true,
+    stdio: [stdinMode, stdoutMode, stderrMode, "pipe"],
+  });
+  WINDOWS_PROCESS_CREATION_IDENTITIES.set(
+    child,
+    receiveWindowsHostCreationIdentity(child),
+  );
+  child.once("close", (code) => {
+    if (code !== 125 || WINDOWS_PROCESS_HOST_READY.has(child)) return;
+    const error = Object.assign(
+      new Error(`spawn ${command} failed inside Hydra's Windows process host`),
+      { code: "ENOENT" },
+    );
+    child.emit("error", error);
+  });
+  return child;
+}
+
+function receiveWindowsHostCreationIdentity(
+  child: cp.ChildProcess,
+): Promise<string | undefined> {
+  const receipt = child.stdio[3];
+  if (!receipt || typeof (receipt as NodeJS.ReadableStream).on !== "function") {
+    return Promise.resolve(undefined);
+  }
+  return new Promise<string | undefined>((resolve) => {
+    let output = "";
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      const lines = output.trim().split(/\r?\n/u);
+      const value = lines[0] ?? "";
+      if (lines.length !== 2
+        || lines[1] !== "READY"
+        || !/^[1-9][0-9]{0,18}$/u.test(value)) {
+        resolve(undefined);
+        return;
+      }
+      try {
+        if (BigInt(value) <= 9_223_372_036_854_775_807n) {
+          WINDOWS_PROCESS_HOST_READY.add(child);
+          resolve(value);
+        } else {
+          resolve(undefined);
+        }
+      } catch {
+        resolve(undefined);
+      }
+    };
+    receipt.on("data", (chunk: Buffer | string) => {
+      if (output.length < 64) {
+        output += (Buffer.isBuffer(chunk) ? chunk.toString("ascii") : chunk)
+          .slice(0, 64 - output.length);
+      }
+    });
+    receipt.once("error", finish);
+    receipt.once("end", finish);
+    child.once("error", finish);
+    child.once("close", finish);
+  });
+}
+
+/**
+ * Register a direct Windows child for identity capture only if termination is
+ * later requested. The capture is bracketed by liveness checks against Node's
+ * retained process handle, so ordinary exit/reuse during the PID probe fails
+ * closed. This avoids paying a PowerShell startup for the common successful
+ * path of trusted short-lived probes while preserving generation-bound
+ * teardown on timeout, cancellation, or output overflow. Untrusted native
+ * providers still use spawnIdentityBoundProcess() and its pre-spawn receipt.
+ */
+export function bindProcessTreeIdentity(
+  child: cp.ChildProcess,
+  spawnProcess: typeof cp.spawn = cp.spawn,
+): void {
+  if (process.platform !== "win32"
+    || !child.pid
+    || WINDOWS_PROCESS_CREATION_IDENTITIES.has(child)) return;
+  WINDOWS_LAZY_IDENTITY_PROBES.set(child, spawnProcess);
+}
+
+async function captureLiveWindowsChildIdentity(
+  child: cp.ChildProcess,
+  spawnProcess: typeof cp.spawn,
+): Promise<string | undefined> {
+  if (!child.pid
+    || child.exitCode !== null
+    || child.signalCode !== null
+    || !windowsChildHandleIsLive(child)) {
+    return undefined;
+  }
+  const identity = await captureWindowsProcessCreationIdentity(
+    child.pid,
+    spawnProcess,
+  );
+  if (!identity
+    || child.exitCode !== null
+    || child.signalCode !== null) {
+    return undefined;
+  }
+  try {
+    // libuv checks the retained process handle here. An ordinary exit during
+    // the PID-based probe therefore fails even if Windows has already reused
+    // the numeric PID for an unrelated process.
+    return windowsChildHandleIsLive(child) ? identity : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function windowsChildHandleIsLive(child: cp.ChildProcess): boolean {
+  try {
+    return child.kill(0);
+  } catch {
+    return false;
+  }
+}
+
+export async function captureWindowsProcessCreationIdentity(
+  pid: number,
+  spawnProcess: typeof cp.spawn = cp.spawn,
+): Promise<string | undefined> {
+  if (!Number.isSafeInteger(pid) || pid <= 0 || pid > 0x7fff_ffff) {
+    return undefined;
+  }
+  const script = [
+    "$ErrorActionPreference='Stop'",
+    "try {",
+    `  $process=[System.Diagnostics.Process]::GetProcessById(${pid})`,
+    "  $identity=$process.StartTime.ToFileTimeUtc()",
+    "  if($identity -le 0){exit 1}",
+    "  [Console]::Out.Write($identity.ToString())",
+    "  exit 0",
+    "} catch { exit 1 }",
+  ].join("\n");
+  return new Promise<string | undefined>((resolve) => {
+    let probe: cp.ChildProcess;
+    try {
+      probe = spawnProcess(
+        windowsSystemExecutable("powershell.exe"),
+        ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+        { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] },
+      );
+    } catch {
+      resolve(undefined);
+      return;
+    }
+    let output = "";
+    let done = false;
+    const finish = (value: string | undefined) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timeout);
+      resolve(value);
+    };
+    probe.stdout?.on("data", (chunk: Buffer | string) => {
+      if (output.length >= 64) return;
+      output += (Buffer.isBuffer(chunk) ? chunk.toString("ascii") : chunk)
+        .slice(0, 64 - output.length);
+    });
+    const timeout = setTimeout(() => {
+      try {
+        probe.kill();
+      } catch {
+        // The identity probe may have exited between timeout and termination.
+      }
+      probe.stdout?.destroy();
+      probe.unref();
+      finish(undefined);
+    }, WINDOWS_PROCESS_TREE_IDENTITY_PROBE_TIMEOUT_MS);
+    probe.once("error", () => finish(undefined));
+    probe.once("close", (code) => {
+      const value = output.trim();
+      if (code !== 0 || !/^[1-9][0-9]{0,18}$/u.test(value)) {
+        finish(undefined);
+        return;
+      }
+      try {
+        if (BigInt(value) > 9_223_372_036_854_775_807n) {
+          finish(undefined);
+          return;
+        }
+      } catch {
+        finish(undefined);
+        return;
+      }
+      finish(value);
+    });
+  });
+}
+
+/**
+ * @internal Release local native handles after process-tree shutdown could not
+ * be confirmed. This is not termination evidence: callers must preserve their
+ * fail-closed result and diagnostics because descendants may still be alive.
+ */
+export function releaseUnconfirmedChildProcess(child: cp.ChildProcess): void {
+  try {
+    // Node targets the retained native process handle here, so this final
+    // direct-child request cannot be redirected by numeric PID reuse.
+    child.kill("SIGKILL");
+  } catch {
+    // The direct child may already have closed or rejected termination.
+  }
+  for (const entry of child.stdio ?? []) {
+    if (!entry) continue;
+    const stream = entry as {
+      destroy?: () => unknown;
+      unref?: () => unknown;
+    };
+    try {
+      stream.destroy?.call(entry);
+    } catch {
+      // Continue releasing the remaining handles after one stream fails.
+    }
+    try {
+      stream.unref?.call(entry);
+    } catch {
+      // A stream may already have closed or may not expose a live handle.
+    }
+  }
+  try {
+    child.unref();
+  } catch {
+    // Releasing local ownership is best effort and never proves termination.
+  }
+}
+
 export async function terminateProcessTree(child: cp.ChildProcess, force: boolean): Promise<boolean> {
   const signal: NodeJS.Signals = force ? "SIGKILL" : "SIGTERM";
   if (!child.pid) {
@@ -384,54 +704,32 @@ export async function terminateProcessTree(child: cp.ChildProcess, force: boolea
     }
   }
   if (process.platform === "win32") {
-    // taskkill /T can lose descendants when a .cmd shim exits as its tree is
-    // being terminated (the child is re-parented before taskkill walks it).
-    // Snapshot the numeric PID tree first and stop it leaf-first. Keep the
-    // existing taskkill path as a bounded fallback for systems where CIM or
-    // Windows PowerShell is unavailable.
-    if (await terminateWindowsProcessTreeSnapshot(child.pid)) return true;
-    return new Promise<boolean>((resolve) => {
-      let killer: cp.ChildProcess;
-      try {
-        killer = cp.spawn(
-          windowsSystemExecutable("taskkill.exe"),
-          ["/PID", String(child.pid), "/T", "/F"],
-          { windowsHide: true }
-        );
-      } catch {
-        try {
-          resolve(child.kill(signal));
-        } catch {
-          resolve(false);
-        }
-        return;
+    let identityWork = WINDOWS_PROCESS_CREATION_IDENTITIES.get(child);
+    if (!identityWork) {
+      const probeSpawner = WINDOWS_LAZY_IDENTITY_PROBES.get(child);
+      if (probeSpawner) {
+        identityWork = captureLiveWindowsChildIdentity(child, probeSpawner);
+        WINDOWS_PROCESS_CREATION_IDENTITIES.set(child, identityWork);
+        WINDOWS_LAZY_IDENTITY_PROBES.delete(child);
       }
-      let done = false;
-      const finish = (requested: boolean) => {
-        if (done) return;
-        done = true;
-        clearTimeout(killerTimeout);
-        resolve(requested);
-      };
-      const fallback = () => {
-        try {
-          return child.kill(signal);
-        } catch {
-          return false;
-        }
-      };
-      // Bound taskkill itself so a wedged helper cannot hang cancellation.
-      const killerTimeout = setTimeout(() => {
-        try {
-          killer.kill();
-        } catch {
-          // The helper may have exited between the timeout and this kill.
-        }
-        finish(fallback());
-      }, 750);
-      killer.on("error", () => finish(fallback()));
-      killer.on("close", (code) => finish(code === 0 ? true : fallback()));
-    });
+    }
+    const expectedCreationIdentity = await identityWork;
+    if (!expectedCreationIdentity) {
+      // The retained ChildProcess handle can safely address the direct child,
+      // but no PID-only tree walk is allowed without a spawn-generation bind.
+      try {
+        child.kill(signal);
+      } catch {
+        // Direct-handle termination is best effort; tree proof remains false.
+      }
+      return false;
+    }
+    return terminateWindowsProcessTreeSnapshot(
+      child.pid,
+      expectedCreationIdentity,
+      cp.spawn,
+      WINDOWS_PROCESS_HOST_READY.has(child),
+    );
   }
   // POSIX: kill the process group (negative pid). Requires the child to
   // have been spawned with detached:true so it became a group leader.
@@ -449,30 +747,137 @@ export async function terminateProcessTree(child: cp.ChildProcess, force: boolea
   }
 }
 
-/** @internal — exported for focused fail-closed helper tests. */
+/**
+ * Confirm that one POSIX process group has no remaining members. Sending a
+ * signal is not proof: the group leader can close while a descendant ignores
+ * SIGTERM. EPERM and other probe failures stay ambiguous and therefore false.
+ */
+export async function waitForPosixProcessGroupQuiescence(
+  processGroupId: number,
+  timeoutMs: number,
+  pollMs = 25,
+): Promise<boolean> {
+  if (!Number.isSafeInteger(processGroupId) || processGroupId < 1) return false;
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 0) return false;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      process.kill(-processGroupId, 0);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ESRCH") return true;
+      // Darwin can report EPERM while a process group contains only zombies:
+      // no member is signalable, but the group has not been reaped yet. Keep
+      // that ambiguity bounded by the existing deadline; never accept it as
+      // proof of quiescence.
+      if (code !== "EPERM") return false;
+    }
+    if (Date.now() >= deadline) return false;
+    await new Promise<void>((resolve) => setTimeout(
+      resolve,
+      Math.max(1, Math.min(pollMs, deadline - Date.now())),
+    ));
+  }
+}
+
 export async function terminateWindowsProcessTreeSnapshot(
   rootPid: number,
+  expectedRootCreationIdentity: string,
   spawnProcess: typeof cp.spawn = cp.spawn,
+  descendantsBoundToRootLifetime = false,
 ): Promise<boolean> {
+  if (!Number.isSafeInteger(rootPid)
+    || rootPid <= 0
+    || rootPid > 0x7fff_ffff
+    || !/^[1-9][0-9]{0,18}$/u.test(expectedRootCreationIdentity)) {
+    return false;
+  }
   const script = [
     "$ErrorActionPreference='Stop'",
+    "Add-Type -TypeDefinition @'",
+    "using System;",
+    "using System.Collections.Generic;",
+    "using System.ComponentModel;",
+    "using System.Runtime.InteropServices;",
+    "public sealed class HydraProcessRow { public int ProcessId; public int ParentProcessId; public long CreationIdentity; }",
+    "public static class HydraProcessSnapshot {",
+    "  private const uint TH32CS_SNAPPROCESS = 0x00000002;",
+    "  private const uint PROCESS_TERMINATE = 0x0001;",
+    "  private const uint SYNCHRONIZE = 0x00100000;",
+    "  private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;",
+    "  private const uint WAIT_OBJECT_0 = 0x00000000;",
+    "  private const uint STILL_ACTIVE = 259;",
+    "  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]",
+    "  private struct PROCESSENTRY32 {",
+    "    public uint dwSize; public uint cntUsage; public uint th32ProcessID;",
+    "    public IntPtr th32DefaultHeapID; public uint th32ModuleID; public uint cntThreads;",
+    "    public uint th32ParentProcessID; public int pcPriClassBase; public uint dwFlags;",
+    "    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string szExeFile;",
+    "  }",
+    "  [StructLayout(LayoutKind.Sequential)] private struct FILETIME { public uint Low; public uint High; }",
+    "  [DllImport(\"kernel32.dll\", SetLastError = true)] private static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint processId);",
+    "  [DllImport(\"kernel32.dll\", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool Process32FirstW(IntPtr snapshot, ref PROCESSENTRY32 entry);",
+    "  [DllImport(\"kernel32.dll\", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool Process32NextW(IntPtr snapshot, ref PROCESSENTRY32 entry);",
+    "  [DllImport(\"kernel32.dll\", SetLastError = true)] private static extern IntPtr OpenProcess(uint access, bool inheritHandle, int processId);",
+    "  [DllImport(\"kernel32.dll\", SetLastError = true)] private static extern bool GetProcessTimes(IntPtr process, out FILETIME creation, out FILETIME exit, out FILETIME kernel, out FILETIME user);",
+    "  [DllImport(\"kernel32.dll\", SetLastError = true)] private static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);",
+    "  [DllImport(\"kernel32.dll\", SetLastError = true)] private static extern bool TerminateProcess(IntPtr process, uint exitCode);",
+    "  [DllImport(\"kernel32.dll\", SetLastError = true)] private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);",
+    "  [DllImport(\"kernel32.dll\")] private static extern bool CloseHandle(IntPtr handle);",
+    "  private static long FileTimeIdentity(FILETIME value) { return ((long)value.High << 32) | value.Low; }",
+    "  private static long ReadCreationIdentity(int processId) {",
+    "    IntPtr process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, processId);",
+    "    if (process == IntPtr.Zero) return 0;",
+    "    try {",
+    "      FILETIME creation, exit, kernel, user;",
+    "      return GetProcessTimes(process, out creation, out exit, out kernel, out user) ? FileTimeIdentity(creation) : 0;",
+    "    } finally { CloseHandle(process); }",
+    "  }",
+    "  public static HydraProcessRow[] Capture() {",
+    "    IntPtr snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);",
+    "    if (snapshot == new IntPtr(-1)) throw new Win32Exception(Marshal.GetLastWin32Error());",
+    "    try {",
+    "      var rows = new List<HydraProcessRow>();",
+    "      var entry = new PROCESSENTRY32(); entry.dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32));",
+    "      if (!Process32FirstW(snapshot, ref entry)) throw new Win32Exception(Marshal.GetLastWin32Error());",
+    "      do { int pid = (int)entry.th32ProcessID; rows.Add(new HydraProcessRow { ProcessId = pid, ParentProcessId = (int)entry.th32ParentProcessID, CreationIdentity = ReadCreationIdentity(pid) }); entry.dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32)); } while (Process32NextW(snapshot, ref entry));",
+    "      return rows.ToArray();",
+    "    } finally { CloseHandle(snapshot); }",
+    "  }",
+    "  public static int TerminateIfIdentityMatches(int processId, long expectedCreationIdentity) {",
+    "    IntPtr process = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, false, processId);",
+    "    if (process == IntPtr.Zero) { int error = Marshal.GetLastWin32Error(); return error == 87 ? 0 : -1; }",
+    "    try {",
+    "      FILETIME creation, exit, kernel, user;",
+    "      if (!GetProcessTimes(process, out creation, out exit, out kernel, out user)) return -1;",
+    "      if (expectedCreationIdentity <= 0 || FileTimeIdentity(creation) != expectedCreationIdentity) return 0;",
+    "      if (!TerminateProcess(process, 1)) { uint exitCode; return GetExitCodeProcess(process, out exitCode) && exitCode != STILL_ACTIVE ? 0 : -1; }",
+    "      return WaitForSingleObject(process, 1000) == WAIT_OBJECT_0 ? 1 : -1;",
+    "    } finally { CloseHandle(process); }",
+    "  }",
+    "}",
+    "'@",
+    "function Get-HydraProcessRows{return @([HydraProcessSnapshot]::Capture())}",
     "try {",
     `  $rootProcessId=${rootPid}`,
-    "  $known=[System.Collections.Generic.HashSet[int]]::new()",
+    `  $expectedRootCreationIdentity=[long]${expectedRootCreationIdentity}`,
+    "  $known=[System.Collections.Generic.Dictionary[int,long]]::new()",
     "  $ordered=[System.Collections.Generic.List[int]]::new()",
-    "  [void]$known.Add($rootProcessId)",
+    "  $processes=@(Get-HydraProcessRows)",
+    "  $rootRows=@($processes | Where-Object { [int]$_.ProcessId -eq $rootProcessId })",
+    "  if($rootRows.Count -ne 1 -or [long]$rootRows[0].CreationIdentity -ne $expectedRootCreationIdentity){exit 2}",
+    "  $known.Add($rootProcessId,[long]$rootRows[0].CreationIdentity)",
     "  [void]$ordered.Add($rootProcessId)",
-    "  function Add-HydraDescendants($rows){$added=$true;while($added){$added=$false;foreach($row in $rows){$childProcessId=[int]$row.ProcessId;$parentProcessId=[int]$row.ParentProcessId;if($known.Contains($parentProcessId)-and $known.Add($childProcessId)){[void]$ordered.Add($childProcessId);$added=$true}}}}",
-    "  function Stop-HydraProcess([int]$targetProcessId){try{Stop-Process -Id $targetProcessId -Force -ErrorAction Stop}catch{if(Get-Process -Id $targetProcessId -ErrorAction SilentlyContinue){throw}}}",
+    "  function Add-HydraDescendants($rows){$rowByPid=@{};foreach($candidate in $rows){$rowByPid[[int]$candidate.ProcessId]=$candidate};$added=$true;while($added){$added=$false;foreach($row in $rows){$childProcessId=[int]$row.ProcessId;$parentProcessId=[int]$row.ParentProcessId;$expectedParentIdentity=[long]0;if($known.TryGetValue($parentProcessId,[ref]$expectedParentIdentity)){$parentRow=$rowByPid[$parentProcessId];if($null -ne $parentRow -and [long]$parentRow.CreationIdentity -eq $expectedParentIdentity -and -not $known.ContainsKey($childProcessId)){if([long]$row.CreationIdentity -le 0){throw 'Process creation identity unavailable'};$known.Add($childProcessId,[long]$row.CreationIdentity);[void]$ordered.Add($childProcessId);$added=$true}}}}}",
+    "  function Stop-HydraProcess([int]$targetProcessId){$expectedCreationIdentity=[long]$known[$targetProcessId];$outcome=[HydraProcessSnapshot]::TerminateIfIdentityMatches($targetProcessId,$expectedCreationIdentity);if($outcome -lt 0){throw 'Identity-bound process termination failed'}}",
     "  $maxPasses=4",
-    "  $processes=@(Get-CimInstance Win32_Process -ErrorAction Stop)",
     "  for($pass=0;$pass -lt $maxPasses;$pass++){",
     "    Add-HydraDescendants $processes",
     "    for($index=$ordered.Count-1;$index -ge 0;$index--){Stop-HydraProcess $ordered[$index]}",
     "    $knownCountBeforeRefresh=$known.Count",
-    "    $processes=@(Get-CimInstance Win32_Process -ErrorAction Stop)",
+    "    $processes=@(Get-HydraProcessRows)",
     "    Add-HydraDescendants $processes",
-    "    $alive=@($processes | Where-Object { $known.Contains([int]$_.ProcessId) })",
+    "    $alive=@($processes | Where-Object {$expectedCreationIdentity=[long]0;$known.TryGetValue([int]$_.ProcessId,[ref]$expectedCreationIdentity) -and [long]$_.CreationIdentity -eq $expectedCreationIdentity})",
     "    if($known.Count -eq $knownCountBeforeRefresh -and $alive.Count -eq 0){exit 0}",
     "  }",
     "  exit 1",
@@ -505,9 +910,16 @@ export async function terminateWindowsProcessTreeSnapshot(
       } catch {
         // The helper may have exited between the timeout and this kill.
       }
+      killer.unref();
       finish(false);
-    }, 3_000);
+    }, WINDOWS_PROCESS_TREE_TERMINATION_HELPER_TIMEOUT_MS);
     killer.on("error", () => finish(false));
-    killer.on("close", (code) => finish(code === 0));
+    // A PID snapshot can safely identity-bind every process it saw, but it
+    // cannot prove that the root did not create and orphan a new descendant
+    // between capture and root termination. Only the bundled host's
+    // spawn-before-target KILL_ON_JOB_CLOSE binding closes that race.
+    killer.on("close", (code) => finish(
+      code === 0 && descendantsBoundToRootLifetime,
+    ));
   });
 }

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
   MAX_AGENT_STDOUT_BYTES,
@@ -225,9 +226,21 @@ export const planClaudeSessionTransport = planClaudeSession;
 export async function runClaudeSession(options: ClaudeSessionRunOptions): Promise<RunResult> {
   validateRunOptions(options);
 
-  const protocol = new ClaudeSessionProtocol(options);
+  let plan = options.plan;
+  try {
+    plan = {
+      spawn: {
+        ...plan.spawn,
+        cwd: path.resolve(await fs.realpath(plan.spawn.cwd)),
+      },
+    };
+  } catch {
+    // Preserve the ordinary spawn failure result for a missing/inaccessible
+    // cwd. A successful realpath is used for both spawn and protocol identity.
+  }
+  const protocol = new ClaudeSessionProtocol({ ...options, plan });
   const processHandle = (options.startProcess ?? startPersistentAgentProcess)(
-    options.plan.spawn,
+    plan.spawn,
     options.timeoutMs,
     (chunk) => {
       protocol.push(chunk);

@@ -1,6 +1,6 @@
 ## Summary
 
-- 
+- Describe the user-visible outcome and the main implementation choice.
 
 ## Verification
 

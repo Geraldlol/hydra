@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import type { PathLike } from "node:fs";
+import { constants as fsConstants, type PathLike } from "node:fs";
 import * as fs from "node:fs/promises";
 import fsPromises = require("node:fs/promises");
 import * as os from "node:os";
@@ -12,6 +13,7 @@ import {
   ensureArenaPrivateDirectory,
   prepareArenaPrivateStorage,
   readArenaPrivateFile,
+  writeArenaPrivateFileAtomically,
   type ArenaPrivateStorageBoundary,
 } from "../src/arenaPrivateStorage";
 
@@ -113,6 +115,279 @@ describe("Arena crash-atomic private file publication", () => {
     assert.deepEqual(await temporaryEntries(fixture.directory), []);
   });
 
+  test("rejects private files whose POSIX permissions become shared", async (t) => {
+    if (process.platform === "win32") {
+      t.skip("POSIX private-file permissions");
+      return;
+    }
+    const fixture = await privateFileFixture(t);
+    await createArenaPrivateFile(
+      fixture.filePath,
+      "private record\n",
+      fixture.boundary,
+    );
+    await fs.chmod(fixture.filePath, 0o640);
+
+    await assert.rejects(
+      readArenaPrivateFile(
+        fixture.filePath,
+        1_024,
+        fixture.boundary,
+      ),
+      /permissions are unsafe/,
+    );
+  });
+
+  test("rejects a private parent whose POSIX permissions become shared", async (t) => {
+    if (process.platform === "win32") {
+      t.skip("POSIX private-directory permissions");
+      return;
+    }
+    const fixture = await privateFileFixture(t);
+    await fs.chmod(fixture.directory, 0o750);
+
+    await assert.rejects(
+      createArenaPrivateFile(
+        fixture.filePath,
+        "must not publish\n",
+        fixture.boundary,
+      ),
+      /permissions are not private/,
+    );
+  });
+
+  test("replacement surfaces a parent-directory flush failure after complete publication", async (t) => {
+    const fixture = await privateFileFixture(t);
+    await createArenaPrivateFile(
+      fixture.filePath,
+      "first-complete-record\n",
+      fixture.boundary,
+    );
+    const originalOpen = fsPromises.open.bind(fsPromises) as unknown as (
+      filePath: PathLike,
+      flags: string | number,
+      mode?: number,
+    ) => Promise<fs.FileHandle>;
+    t.mock.method(
+      fsPromises,
+      "open",
+      (async (filePath: PathLike, flags: string | number, mode?: number) => {
+        if (path.resolve(String(filePath)) === path.resolve(fixture.directory)
+          && flags === fsConstants.O_RDONLY) {
+          throw ioError("injected parent-directory flush failure");
+        }
+        return originalOpen(filePath, flags, mode);
+      }) as typeof fsPromises.open,
+    );
+
+    await assert.rejects(
+      writeArenaPrivateFileAtomically(
+        fixture.filePath,
+        "second-complete-record\n",
+        fixture.boundary,
+      ),
+      /injected parent-directory flush failure/,
+    );
+    assert.equal(
+      await fs.readFile(fixture.filePath, "utf8"),
+      "second-complete-record\n",
+    );
+    assert.deepEqual(await temporaryEntries(fixture.directory), []);
+  });
+
+  test("replacement retries sweep only strict dead-publisher temporary names", async (t) => {
+    const fixture = await privateFileFixture(t);
+    const deadPid = 2_000_000_000;
+    const modern = path.join(
+      fixture.directory,
+      `.${path.basename(fixture.filePath)}.replace.${deadPid}-${randomUUID()}.tmp`,
+    );
+    const legacy = path.join(
+      fixture.directory,
+      `${path.basename(fixture.filePath)}.${deadPid}-${randomUUID()}.tmp`,
+    );
+    const nearMatch = path.join(
+      fixture.directory,
+      `X${path.basename(fixture.filePath)}Y${deadPid}-${randomUUID()}Ztmp`,
+    );
+    await Promise.all([
+      fs.writeFile(modern, "orphan", { mode: 0o600 }),
+      fs.writeFile(legacy, "orphan", { mode: 0o600 }),
+      fs.writeFile(nearMatch, "unrelated", { mode: 0o600 }),
+    ]);
+
+    await writeArenaPrivateFileAtomically(
+      fixture.filePath,
+      "replacement after recovery\n",
+      fixture.boundary,
+    );
+    await assert.rejects(fs.lstat(modern), { code: "ENOENT" });
+    await assert.rejects(fs.lstat(legacy), { code: "ENOENT" });
+    assert.equal(await fs.readFile(nearMatch, "utf8"), "unrelated");
+    assert.equal(
+      await fs.readFile(fixture.filePath, "utf8"),
+      "replacement after recovery\n",
+    );
+  });
+
+  test("new nested directories surface parent-entry durability failures", async (t) => {
+    const fixture = await privateFileFixture(t);
+    const runsPath = path.join(fixture.boundary.logicalRoot, "runs");
+    const createdPath = path.join(runsPath, "durability-probe");
+    const originalOpen = fsPromises.open.bind(fsPromises) as unknown as (
+      filePath: PathLike,
+      flags: string | number,
+      mode?: number,
+    ) => Promise<fs.FileHandle>;
+    t.mock.method(
+      fsPromises,
+      "open",
+      (async (filePath: PathLike, flags: string | number, mode?: number) => {
+        if (path.resolve(String(filePath)) === path.resolve(runsPath)
+          && flags === fsConstants.O_RDONLY) {
+          throw ioError("injected directory-entry flush failure");
+        }
+        return originalOpen(filePath, flags, mode);
+      }) as typeof fsPromises.open,
+    );
+
+    await assert.rejects(
+      ensureArenaPrivateDirectory(
+        fixture.boundary,
+        ["runs", "durability-probe"],
+      ),
+      /injected directory-entry flush failure/,
+    );
+    const created = await fs.lstat(createdPath);
+    assert.equal(created.isDirectory() && !created.isSymbolicLink(), true);
+  });
+
+  test("an existing directory retry repeats a previously failed parent flush", async (t) => {
+    const fixture = await privateFileFixture(t);
+    const runsPath = path.join(fixture.boundary.logicalRoot, "runs");
+    const originalOpen = fsPromises.open.bind(fsPromises) as unknown as (
+      filePath: PathLike,
+      flags: string | number,
+      mode?: number,
+    ) => Promise<fs.FileHandle>;
+    let targetFlushes = 0;
+    t.mock.method(
+      fsPromises,
+      "open",
+      (async (filePath: PathLike, flags: string | number, mode?: number) => {
+        if (path.resolve(String(filePath)) === path.resolve(runsPath)
+          && flags === fsConstants.O_RDONLY) {
+          targetFlushes += 1;
+          if (targetFlushes === 1) {
+            throw ioError("injected first directory-entry flush failure");
+          }
+        }
+        return originalOpen(filePath, flags, mode);
+      }) as typeof fsPromises.open,
+    );
+
+    await assert.rejects(
+      ensureArenaPrivateDirectory(
+        fixture.boundary,
+        ["runs", "retry-durability-probe"],
+      ),
+      /injected first directory-entry flush failure/,
+    );
+    await ensureArenaPrivateDirectory(
+      fixture.boundary,
+      ["runs", "retry-durability-probe"],
+    );
+    assert.equal(targetFlushes >= 2, true);
+  });
+
+  test("an exact file retry repeats a parent flush after publication uncertainty", async (t) => {
+    const fixture = await privateFileFixture(t);
+    const originalOpen = fsPromises.open.bind(fsPromises) as unknown as (
+      filePath: PathLike,
+      flags: string | number,
+      mode?: number,
+    ) => Promise<fs.FileHandle>;
+    let parentFlushes = 0;
+    t.mock.method(
+      fsPromises,
+      "open",
+      (async (filePath: PathLike, flags: string | number, mode?: number) => {
+        if (path.resolve(String(filePath)) === path.resolve(fixture.directory)
+          && flags === fsConstants.O_RDONLY) {
+          parentFlushes += 1;
+          if (parentFlushes === 1) {
+            throw ioError("injected first publication flush failure");
+          }
+        }
+        return originalOpen(filePath, flags, mode);
+      }) as typeof fsPromises.open,
+    );
+
+    await assert.rejects(
+      createArenaPrivateFile(
+        fixture.filePath,
+        "durable exact payload\n",
+        fixture.boundary,
+      ),
+      /injected first publication flush failure/,
+    );
+    await assert.rejects(
+      createArenaPrivateFile(
+        fixture.filePath,
+        "durable exact payload\n",
+        fixture.boundary,
+      ),
+      (error: unknown) =>
+        (error as NodeJS.ErrnoException).code === "EEXIST",
+    );
+    assert.equal(parentFlushes >= 2, true);
+    assert.equal(
+      await fs.readFile(fixture.filePath, "utf8"),
+      "durable exact payload\n",
+    );
+  });
+
+  test("replacement preserves Windows when directory handles cannot be flushed", async (t) => {
+    if (process.platform !== "win32") {
+      t.skip("Windows-specific unsupported directory-handle behavior");
+      return;
+    }
+    const fixture = await privateFileFixture(t);
+    await createArenaPrivateFile(
+      fixture.filePath,
+      "first-complete-record\n",
+      fixture.boundary,
+    );
+    const originalOpen = fsPromises.open.bind(fsPromises) as unknown as (
+      filePath: PathLike,
+      flags: string | number,
+      mode?: number,
+    ) => Promise<fs.FileHandle>;
+    t.mock.method(
+      fsPromises,
+      "open",
+      (async (filePath: PathLike, flags: string | number, mode?: number) => {
+        if (path.resolve(String(filePath)) === path.resolve(fixture.directory)
+          && flags === fsConstants.O_RDONLY) {
+          throw Object.assign(new Error("directory handles unsupported"), {
+            code: "EACCES",
+          });
+        }
+        return originalOpen(filePath, flags, mode);
+      }) as typeof fsPromises.open,
+    );
+
+    await writeArenaPrivateFileAtomically(
+      fixture.filePath,
+      "second-complete-record\n",
+      fixture.boundary,
+    );
+    assert.equal(
+      await fs.readFile(fixture.filePath, "utf8"),
+      "second-complete-record\n",
+    );
+  });
+
   test("a publication syscall failure leaves no partial final record", async (t) => {
     const fixture = await privateFileFixture(t);
     t.mock.method(fsPromises, "link", async () => {
@@ -133,6 +408,100 @@ describe("Arena crash-atomic private file publication", () => {
         (error as NodeJS.ErrnoException).code === "ENOENT",
     );
     assert.deepEqual(await temporaryEntries(fixture.directory), []);
+  });
+
+  test("create retries sweep strict pre-commit temporaries from dead publishers", async (t) => {
+    const fixture = await privateFileFixture(t);
+    const deadPid = 2_000_000_000;
+    const orphan = path.join(
+      fixture.directory,
+      `.${path.basename(fixture.filePath)}.${deadPid}-${randomUUID()}.tmp`,
+    );
+    const nearMatch = path.join(
+      fixture.directory,
+      `X${path.basename(fixture.filePath)}Y${deadPid}-${randomUUID()}Ztmp`,
+    );
+    await fs.writeFile(orphan, "orphan", { mode: 0o600 });
+    await fs.writeFile(nearMatch, "unrelated", { mode: 0o600 });
+
+    await createArenaPrivateFile(
+      fixture.filePath,
+      "created after orphan recovery\n",
+      fixture.boundary,
+    );
+    await assert.rejects(fs.lstat(orphan), { code: "ENOENT" });
+    assert.equal(await fs.readFile(nearMatch, "utf8"), "unrelated");
+  });
+
+  test("a domain-recovered caller can skip the generic parent scan", async (t) => {
+    const fixture = await privateFileFixture(t);
+    t.mock.method(
+      fsPromises,
+      "opendir",
+      (async () => {
+        throw new Error("generic parent scan must not run");
+      }) as typeof fsPromises.opendir,
+    );
+
+    await createArenaPrivateFile(
+      fixture.filePath,
+      "created after domain-specific recovery\n",
+      fixture.boundary,
+      { orphanCreationTempsAlreadyRecovered: true },
+    );
+
+    assert.equal(
+      await fs.readFile(fixture.filePath, "utf8"),
+      "created after domain-specific recovery\n",
+    );
+  });
+
+  test("an early post-open failure cleans its same-process temporary before retry", async (t) => {
+    const fixture = await privateFileFixture(t);
+    const originalOpen = fsPromises.open.bind(fsPromises);
+    const originalLstat = fsPromises.lstat.bind(fsPromises);
+    let stageOpened = false;
+    let failedParentProbe = false;
+    t.mock.method(
+      fsPromises,
+      "open",
+      (async (...args: Parameters<typeof fsPromises.open>) => {
+        if (String(args[0]).includes(`.${path.basename(fixture.filePath)}.`)
+          && args[1] === "wx") {
+          stageOpened = true;
+        }
+        return originalOpen(...args);
+      }) as typeof fsPromises.open,
+    );
+    t.mock.method(
+      fsPromises,
+      "lstat",
+      (async (...args: Parameters<typeof fsPromises.lstat>) => {
+        if (stageOpened
+          && !failedParentProbe
+          && path.resolve(String(args[0])) === path.resolve(fixture.directory)) {
+          failedParentProbe = true;
+          throw ioError("injected early parent probe failure");
+        }
+        return originalLstat(...args);
+      }) as typeof fsPromises.lstat,
+    );
+
+    await assert.rejects(
+      createArenaPrivateFile(
+        fixture.filePath,
+        "first attempt\n",
+        fixture.boundary,
+      ),
+      /injected early parent probe failure/,
+    );
+    assert.deepEqual(await temporaryEntries(fixture.directory), []);
+    await createArenaPrivateFile(
+      fixture.filePath,
+      "second attempt\n",
+      fixture.boundary,
+    );
+    assert.equal(await fs.readFile(fixture.filePath, "utf8"), "second attempt\n");
   });
 
   test("a partial temporary write is cleaned without publishing its bytes", async (t) => {

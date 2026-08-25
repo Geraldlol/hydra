@@ -193,8 +193,12 @@ describe("Arena worktree registration store", () => {
       RUN_ID,
       CONTESTANT_ID,
     );
-    await fs.mkdir(destination.registrationPath, { recursive: true });
+    await fs.mkdir(destination.registrationPath, {
+      recursive: true,
+      mode: 0o700,
+    });
     await fs.copyFile(source.intentPath, destination.intentPath);
+    await fs.chmod(destination.intentPath, 0o600);
     await assert.rejects(
       second.load(RUN_ID, CONTESTANT_ID),
       /does not use the derived worktree path/,
@@ -363,7 +367,7 @@ describe("Arena worktree registration store", () => {
     await fs.writeFile(
       receiptPath,
       `${canonicalArenaManifestJson(mismatched)}\n`,
-      "utf8",
+      { encoding: "utf8", mode: 0o600 },
     );
     await assert.rejects(
       store.load(RUN_ID, CONTESTANT_ID),

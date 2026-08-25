@@ -156,4 +156,41 @@ describe("Arena main workspace monitor", () => {
     second.close();
     await assert.rejects(second.observe("checkpoint"), /closed/);
   });
+
+  test("seals a published observation only after a terminal watcher barrier", async () => {
+    const sentinel = watcher();
+    let closeCount = 0;
+    const originalClose = sentinel.close;
+    sentinel.close = () => {
+      closeCount += 1;
+      originalClose();
+    };
+    const monitor = startArenaMainWorkspaceMonitor(
+      "C:\\workspace",
+      baseline(),
+      async () => baseline(),
+      { watch: () => sentinel, randomId: () => "epoch" },
+    );
+    await monitor.observe("monitorStarted");
+    const published = await monitor.observe("postEvidence");
+
+    // This models a mutation after the postEvidence observation returns but
+    // before its append resolves. The publication seal must latch it.
+    sentinel.setChanged(true);
+    const seal = await monitor.sealPublication({
+      postEvidenceEventSha256: "c".repeat(64),
+      postEvidenceReceiptSha256: published.monitorReceiptSha256,
+    });
+
+    assert.equal(seal.observationKind, "publicationSeal");
+    assert.equal(seal.status, "changed");
+    assert.equal(seal.reasonCode, "watcherChanged");
+    assert.equal(seal.publicationOfEventSha256, "c".repeat(64));
+    assert.equal(
+      seal.publicationOfReceiptSha256,
+      published.monitorReceiptSha256,
+    );
+    assert.equal(closeCount, 1);
+    await assert.rejects(monitor.observe("checkpoint"), /closed/);
+  });
 });

@@ -7,14 +7,20 @@ import {
 } from "./flightRecorderController";
 import {
   isFlightTraceId,
+  type FlightApprovalSubject,
   type FlightAgentRunSubject,
+  type FlightBrowserActionSubject,
+  type FlightEditBatchSubject,
+  type FlightEvalCaseSubject,
   type FlightEvidenceClass,
   type FlightFailureCode,
   type FlightNativeActionSubject,
   type FlightOperationObservation,
   type FlightOutputMetadata,
+  type FlightReplaySubject,
   type FlightSteeringChainMetadata,
   type FlightTerminalStatus,
+  type FlightToolCallSubject,
   type FlightTraceReplay,
   type FlightTraceStartedPayload,
   type FlightUsageSubject,
@@ -145,12 +151,24 @@ export interface FinishFlightRoomTurnInput extends FlightRecordedOutcome {}
 export type FlightAuxiliaryOperationKind =
   | "verification"
   | "usage"
-  | "nativeAction";
+  | "nativeAction"
+  | "toolCall"
+  | "editBatch"
+  | "approval"
+  | "browserAction"
+  | "replay"
+  | "evalCase";
 
 export type FlightAuxiliaryOperationSubject =
   | FlightVerificationSubject
   | FlightUsageSubject
-  | FlightNativeActionSubject;
+  | FlightNativeActionSubject
+  | FlightToolCallSubject
+  | FlightEditBatchSubject
+  | FlightApprovalSubject
+  | FlightBrowserActionSubject
+  | FlightReplaySubject
+  | FlightEvalCaseSubject;
 
 export interface BeginFlightAuxiliaryOperationInput {
   readonly subject: FlightAuxiliaryOperationSubject;
@@ -193,6 +211,7 @@ interface MutableRoomTurn {
   finished: boolean;
   traceStarted: boolean;
   phaseStarted: boolean;
+  telemetryLimited: boolean;
 }
 
 interface MutableAgentOperation {
@@ -345,6 +364,7 @@ export class FlightRecorderRuntime {
       finished: false,
       traceStarted: false,
       phaseStarted: false,
+      telemetryLimited: false,
     };
 
     try {
@@ -550,6 +570,63 @@ export class FlightRecorderRuntime {
     }
   }
 
+  async recordAgentObservation(
+    operation: FlightAgentRunOperation,
+    observation: Extract<FlightOperationObservation, { readonly kind: "agentRun" }>,
+  ): Promise<boolean> {
+    try {
+      const state = this.roomTurns.get(operation.traceId);
+      const mutable = state?.agentOperations.get(operation.operationId);
+      if (this.disposed
+        || !this.controller
+        || !operation.recorded
+        || !mutable
+        || mutable.finished
+        || state?.finished
+        || mutable.handle.phaseOperationId !== operation.phaseOperationId
+        || mutable.handle.missionBindingSha256 !== operation.missionBindingSha256) {
+        return false;
+      }
+      const controller = this.controller;
+      this.enqueueAuthoritativeWork(operation.traceId, async () => {
+        if (!mutable.started) return;
+        const receipt = await controller.recordEvent({
+          traceId: operation.traceId,
+          operationId: operation.operationId,
+          parentOperationId: operation.phaseOperationId,
+          operationKind: "agentRun",
+          observation: structuredClone(observation),
+          missionBindingSha256: operation.missionBindingSha256,
+        });
+        if (!receipt.ok) {
+          this.latchNotice(
+            "recordingDegraded",
+            operation.traceId,
+            receipt.health.noticeCode,
+          );
+        }
+      });
+      return true;
+    } catch {
+      this.latchNotice("recordingDegraded", operation.traceId);
+      return false;
+    }
+  }
+
+  markProviderTelemetryLimited(roomTurn: FlightRoomTurnContext): boolean {
+    const state = this.roomTurns.get(roomTurn.traceId);
+    if (this.disposed
+      || !roomTurn.recorded
+      || !state
+      || state.finished
+      || state.context.phaseOperationId !== roomTurn.phaseOperationId
+      || state.context.missionBindingSha256 !== roomTurn.missionBindingSha256) {
+      return false;
+    }
+    state.telemetryLimited = true;
+    return true;
+  }
+
   async beginAuxiliaryOperation(
     roomTurn: FlightRoomTurnContext,
     input: BeginFlightAuxiliaryOperationInput,
@@ -573,6 +650,9 @@ export class FlightRecorderRuntime {
     const parentAgent = parentOperationId === roomTurn.phaseOperationId
       ? undefined
       : state?.agentOperations.get(parentOperationId);
+    const parentAuxiliary = parentOperationId === roomTurn.phaseOperationId
+      ? undefined
+      : state?.auxiliaryOperations.get(parentOperationId);
 
     try {
       if (this.disposed
@@ -585,7 +665,9 @@ export class FlightRecorderRuntime {
           !== roomTurn.missionBindingSha256
         || (
           parentOperationId !== roomTurn.phaseOperationId
-          && (!parentAgent || parentAgent.finished)
+          && ((!parentAgent && !parentAuxiliary)
+            || parentAgent?.finished
+            || parentAuxiliary?.finished)
         )) {
         return handle;
       }
@@ -602,6 +684,7 @@ export class FlightRecorderRuntime {
           || (
             parentOperationId !== roomTurn.phaseOperationId
             && !parentAgent?.started
+            && !parentAuxiliary?.started
           )) {
           return;
         }
@@ -795,11 +878,29 @@ export class FlightRecorderRuntime {
           this.roomTurns.delete(roomTurn.traceId);
           return;
         }
+        if (state.telemetryLimited) {
+          const limited = await controller.limitTrace({
+            traceId: roomTurn.traceId,
+            reason: "providerFlood",
+            droppedRecordsAtLeast: 1,
+          });
+          if (!limited.ok) {
+            this.latchNotice(
+              "recordingDegraded",
+              roomTurn.traceId,
+              limited.health.noticeCode,
+            );
+          }
+        }
         const trace = await controller.finishTrace({
           traceId: roomTurn.traceId,
-          status: phaseOk ? outcome.status : "incomplete",
+          status: phaseOk && !state.telemetryLimited
+            ? outcome.status
+            : "incomplete",
           durationMs,
-          incomplete: !phaseOk || outcome.status === "incomplete",
+          incomplete: !phaseOk
+            || outcome.status === "incomplete"
+            || state.telemetryLimited,
         });
         if (!trace.ok) {
           this.latchNotice(
@@ -964,6 +1065,18 @@ export class FlightRecorderRuntime {
       await this.disposalPromise;
     } catch {
       this.latchNotice("recordingDegraded", traceId);
+    }
+  }
+
+  async flushAllDerivedWork(): Promise<void> {
+    try {
+      const queues = [...this.authoritativeQueues.entries()];
+      await Promise.all(queues.map(([, queue]) => queue));
+      await Promise.all(queues.map(([traceId]) => this.controller?.flush(traceId)));
+      await this.derivedMaintenanceTail;
+      await this.disposalPromise;
+    } catch {
+      this.latchNotice("recordingDegraded", null);
     }
   }
 

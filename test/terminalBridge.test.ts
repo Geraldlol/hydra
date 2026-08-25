@@ -11,6 +11,7 @@ import {
   prepareTerminalArtifactRoot,
   sweepStaleDispatchArtifacts,
   TerminalBridge,
+  terminalStartupCommandSetting,
   terminalEnvironmentFingerprint,
   terminalReplyAuth,
   unstreamedTail,
@@ -21,6 +22,7 @@ import {
   MissionSubmissionRejectedError,
   type MissionSubmissionGate,
 } from "../src/missionDispatch";
+import { windowsSystemExecutable } from "../src/executablePath";
 
 const vscodeRuntime = require("vscode") as {
   window: Record<string, unknown>;
@@ -222,7 +224,7 @@ describe("terminal bridge artifact storage", () => {
     const storage = await tempDir();
     const boundary = await prepareTerminalArtifactRoot(workspace, storage);
     assert.equal(boundary.logicalRoot, path.resolve(storage));
-    for (const name of ["prompts", "replies", "logs", "dispatch", "sessions"]) {
+    for (const name of ["prompts", "replies", "logs", "dispatch", "reply-keys", "sessions"]) {
       assert.equal((await fs.lstat(path.join(storage, name))).isDirectory(), true);
     }
   });
@@ -279,29 +281,65 @@ describe("terminal bridge artifact storage", () => {
 });
 
 describe("terminal bridge lifecycle fences", () => {
-  function installTerminalWindowStub(): { created: unknown[]; sent: string[] } {
+  test("only declared application-scoped startup commands can reach a terminal", () => {
+    assert.equal(terminalStartupCommandSetting("codex"), "codexTerminalCommand");
+    assert.equal(terminalStartupCommandSetting("claude"), "claudeTerminalCommand");
+    assert.equal(terminalStartupCommandSetting("gemini"), "geminiTerminalCommand");
+    assert.equal(terminalStartupCommandSetting("repo-controlled-agent"), undefined);
+  });
+
+  function installTerminalWindowStub(
+    defaultShellPath = "mock-user-default-shell.exe",
+    onSend?: (line: string) => void,
+  ): { created: unknown[]; sent: string[]; effectiveShellPaths: string[] } {
     const created: unknown[] = [];
     const sent: string[] = [];
+    const effectiveShellPaths: string[] = [];
     vscodeRuntime.window.onDidCloseTerminal = () => ({ dispose() {} });
-    vscodeRuntime.window.createTerminal = () => {
+    vscodeRuntime.window.createTerminal = (options?: { shellPath?: string }) => {
       const terminal = {
         sendText(line: string) {
           sent.push(line);
+          onSend?.(line);
         },
         show() {},
         dispose() {},
       };
       created.push(terminal);
+      effectiveShellPaths.push(options?.shellPath ?? defaultShellPath);
       return terminal;
     };
-    return { created, sent };
+    return { created, sent, effectiveShellPaths };
   }
+
+  test("Windows bridge selects inbox PowerShell when the user default profile is not PowerShell", async (t) => {
+    const userDefaultShell = windowsSystemExecutable("cmd.exe");
+    const { created, effectiveShellPaths } = installTerminalWindowStub(
+      userDefaultShell,
+    );
+    const workspace = await tempDir();
+    const storage = await tempDir();
+    const bridge = new TerminalBridge(workspace, {
+      artifactRoot: storage,
+      platform: "win32",
+    });
+    t.after(() => bridge.dispose());
+
+    await bridge.openAll();
+
+    assert.equal(created.length, 2);
+    assert.deepEqual(effectiveShellPaths, [
+      windowsSystemExecutable("powershell.exe"),
+      windowsSystemExecutable("powershell.exe"),
+    ]);
+    assert.equal(effectiveShellPaths.includes(userDefaultShell), false);
+  });
 
   test("a stale Mission gate sends no raw terminal line", async (t) => {
     const { sent } = installTerminalWindowStub();
     const workspace = await tempDir();
     const storage = await tempDir();
-    const bridge = new TerminalBridge(workspace, { artifactRoot: storage });
+    const bridge = new TerminalBridge(workspace, { artifactRoot: storage, platform: "win32" });
     t.after(() => bridge.dispose());
     const gate: MissionSubmissionGate = {
       write: async (point) => {
@@ -329,7 +367,7 @@ describe("terminal bridge lifecycle fences", () => {
     const { created } = installTerminalWindowStub();
     const workspace = await tempDir();
     const storage = await tempDir();
-    const bridge = new TerminalBridge(workspace, { artifactRoot: storage });
+    const bridge = new TerminalBridge(workspace, { artifactRoot: storage, platform: "win32" });
     t.after(() => bridge.dispose());
     const controller = new AbortController();
     controller.abort();
@@ -354,7 +392,7 @@ describe("terminal bridge lifecycle fences", () => {
     const { created } = installTerminalWindowStub();
     const workspace = await tempDir();
     const storage = await tempDir();
-    const bridge = new TerminalBridge(workspace, { artifactRoot: storage });
+    const bridge = new TerminalBridge(workspace, { artifactRoot: storage, platform: "win32" });
     bridge.dispose();
 
     await assert.rejects(
@@ -378,6 +416,7 @@ describe("terminal bridge lifecycle fences", () => {
     const bridge = new TerminalBridge(workspace, {
       artifactRoot: storage,
       postDispatchSettleMs: 0,
+      platform: "win32",
     });
     t.after(() => bridge.dispose());
 
@@ -385,14 +424,114 @@ describe("terminal bridge lifecycle fences", () => {
 
     assert.equal(result.ok, false);
     assert.equal(created.length, 1);
+    assert.equal(result.terminationFailed, true);
     assert.doesNotMatch(result.message, /could not resolve native CLI/i);
+    assert.deepEqual(await fs.readdir(path.join(storage, "reply-keys")), []);
+  });
+
+  test("production bridge wiring authenticates a consumed key and zeroes the host buffer", async (t) => {
+    const workspace = await tempDir();
+    const storage = await tempDir();
+    const hostKey = Buffer.alloc(32, 0x4b);
+    const rawKey = hostKey.toString("latin1");
+    const hexKey = hostKey.toString("hex");
+    const base64Key = hostKey.toString("base64");
+    let completion: Promise<void> | undefined;
+    const { sent } = installTerminalWindowStub(undefined, (line) => {
+      if (!line.includes("Hydra terminal dispatch integrity check failed") || completion) return;
+      completion = (async () => {
+        const replyKeyDirectory = path.join(storage, "reply-keys");
+        const keyFiles = await fs.readdir(replyKeyDirectory);
+        assert.equal(keyFiles.length, 1);
+        assert.match(keyFiles[0]!, new RegExp(`^pid-${process.pid}-`));
+        const keyPath = path.join(replyKeyDirectory, keyFiles[0]!);
+        const consumedKey = await fs.readFile(keyPath);
+        try {
+          assert.deepEqual(consumedKey, hostKey);
+          await fs.unlink(keyPath);
+          const base = path.basename(keyPath, ".key");
+          const logPath = path.join(storage, "logs", `${base}.log`);
+          const replyPath = path.join(storage, "replies", `${base}.json`);
+          const text = "hydra-terminal-bridge-self-test";
+          await fs.writeFile(logPath, text, "utf8");
+          const payload = {
+            text,
+            logSha256: crypto.createHash("sha256").update(text).digest("hex"),
+          };
+          await fs.writeFile(
+            replyPath,
+            JSON.stringify({ ...payload, auth: terminalReplyAuth(payload, consumedKey) }),
+            "utf8",
+          );
+        } finally {
+          consumedKey.fill(0);
+        }
+      })();
+    });
+    const bridge = new TerminalBridge(workspace, {
+      artifactRoot: storage,
+      platform: "win32",
+      postDispatchSettleMs: 0,
+      replyKeyFactory: () => hostKey,
+    });
+    t.after(() => bridge.dispose());
+
+    const result = await bridge.selfTest(2000);
+    await completion;
+
+    assert.equal(result.ok, true);
+    assert.equal(hostKey.every((byte) => byte === 0), true);
+    assert.doesNotMatch(sent.join("\n"), new RegExp(rawKey));
+    assert.doesNotMatch(sent.join("\n"), new RegExp(hexKey));
+    assert.doesNotMatch(sent.join("\n"), new RegExp(base64Key));
+    assert.deepEqual(await fs.readdir(path.join(storage, "reply-keys")), []);
+  });
+
+  test("non-Windows self-test stays pre-dispatch and reports an explicit safe fallback", async (t) => {
+    const { created, sent } = installTerminalWindowStub();
+    const workspace = await tempDir();
+    const storage = await tempDir();
+    const bridge = new TerminalBridge(workspace, {
+      artifactRoot: storage,
+      platform: "linux",
+    });
+    t.after(() => bridge.dispose());
+
+    const result = await bridge.selfTest(10);
+
+    assert.equal(result.ok, false);
+    assert.equal(result.unsupported, true);
+    assert.equal(result.terminationFailed, undefined);
+    assert.match(result.message, /requires Windows PowerShell/i);
+    assert.match(result.message, /Safe One-Shot remains active/i);
+    assert.deepEqual(created, []);
+    assert.deepEqual(sent, []);
+  });
+
+  test("non-Windows terminal entry points reject before creating or sending to a terminal", async (t) => {
+    const { created, sent } = installTerminalWindowStub();
+    const workspace = await tempDir();
+    const storage = await tempDir();
+    const bridge = new TerminalBridge(workspace, {
+      artifactRoot: storage,
+      platform: "darwin",
+    });
+    t.after(() => bridge.dispose());
+
+    await assert.rejects(bridge.openAll(), /requires Windows PowerShell/i);
+    await assert.rejects(
+      bridge.sendRawLine("codex", "must-not-send"),
+      /requires Windows PowerShell/i,
+    );
+    assert.deepEqual(created, []);
+    assert.deepEqual(sent, []);
   });
 
   test("ordinary calls cannot opt into Hydra's internal synthetic echo command", async (t) => {
     const { created } = installTerminalWindowStub();
     const workspace = await tempDir();
     const storage = await tempDir();
-    const bridge = new TerminalBridge(workspace, { artifactRoot: storage });
+    const bridge = new TerminalBridge(workspace, { artifactRoot: storage, platform: "win32" });
     t.after(() => bridge.dispose());
 
     await assert.rejects(
@@ -499,16 +638,65 @@ describe("sweepStaleDispatchArtifacts", () => {
     await fs.mkdir(logsDir, { recursive: true });
     const staleReply = path.join(repliesDir, "old.json");
     const staleLog = path.join(logsDir, "old.log");
+    const replyKeysDir = path.join(root, "reply-keys");
+    await fs.mkdir(replyKeysDir, { recursive: true });
+    const staleReplyKey = path.join(replyKeysDir, "old.key");
     await fs.writeFile(staleReply, "{}", "utf8");
     await fs.writeFile(staleLog, "log", "utf8");
+    await fs.writeFile(staleReplyKey, "secret", "utf8");
     const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
     await fs.utimes(staleReply, twoHoursAgo, twoHoursAgo);
     await fs.utimes(staleLog, twoHoursAgo, twoHoursAgo);
+    await fs.utimes(staleReplyKey, twoHoursAgo, twoHoursAgo);
 
     await sweepStaleDispatchArtifacts(root);
 
     await assert.rejects(fs.access(staleReply), /ENOENT/);
     await assert.rejects(fs.access(staleLog), /ENOENT/);
+    await assert.rejects(fs.access(staleReplyKey), /ENOENT/);
+  });
+
+  test("reclaims recent keys from dead owners without deleting live or unowned keys", async () => {
+    const root = await tempDir();
+    const replyKeysDir = path.join(root, "reply-keys");
+    await fs.mkdir(replyKeysDir, { recursive: true });
+    const deadOwnerKey = path.join(
+      replyKeysDir,
+      "pid-41001-1-11111111-1111-4111-8111-111111111111-codex-opener.key",
+    );
+    const liveOwnerKey = path.join(
+      replyKeysDir,
+      "pid-41002-1-22222222-2222-4222-8222-222222222222-codex-opener.key",
+    );
+    const legacyKey = path.join(replyKeysDir, "legacy.key");
+    await Promise.all([
+      fs.writeFile(deadOwnerKey, "dead", "utf8"),
+      fs.writeFile(liveOwnerKey, "live", "utf8"),
+      fs.writeFile(legacyKey, "legacy", "utf8"),
+    ]);
+
+    await sweepStaleDispatchArtifacts(root, {
+      isProcessAlive: (pid) => pid === 41002,
+    });
+
+    await assert.rejects(fs.access(deadOwnerKey), /ENOENT/);
+    await fs.access(liveOwnerKey);
+    await fs.access(legacyKey);
+  });
+
+  test("the production liveness probe preserves a recent key owned by this host", async () => {
+    const root = await tempDir();
+    const replyKeysDir = path.join(root, "reply-keys");
+    await fs.mkdir(replyKeysDir, { recursive: true });
+    const liveOwnerKey = path.join(
+      replyKeysDir,
+      `pid-${process.pid}-1-33333333-3333-4333-8333-333333333333-codex-opener.key`,
+    );
+    await fs.writeFile(liveOwnerKey, "live", "utf8");
+
+    await sweepStaleDispatchArtifacts(root);
+
+    await fs.access(liveOwnerKey);
   });
 
   test("sweeps crashed prompt, last-message, and session leftovers", async () => {

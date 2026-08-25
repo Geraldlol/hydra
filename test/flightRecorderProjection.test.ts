@@ -3,6 +3,7 @@ import { describe, test } from "node:test";
 import { strict as assert } from "node:assert";
 import {
   buildFlightNativeActionProjection,
+  buildFlightProviderTelemetryProjection,
   buildFlightUsageProjection,
   buildFlightVerificationProjection,
   type BuildFlightVerificationProjectionInput,
@@ -291,5 +292,135 @@ describe("Flight Recorder metadata projections", () => {
       failureCode: "recorderFailure",
     });
     assert.equal(missingReceipt.observation.status, "failed");
+  });
+
+  test("projects structured provider tool and edit metadata without content", () => {
+    const operationId = "e".repeat(64);
+    const projection = buildFlightProviderTelemetryProjection([
+      {
+        observationType: "providerToolStarted",
+        provider: "codex",
+        providerOperationIdSha256: operationId,
+        toolCategory: "shell",
+        argumentBytes: 42,
+        evidenceClass: "providerObserved",
+      },
+      {
+        observationType: "providerToolFinished",
+        provider: "codex",
+        providerOperationIdSha256: operationId,
+        toolCategory: "shell",
+        status: "succeeded",
+        resultBytes: 84,
+        evidenceClass: "providerObserved",
+      },
+      {
+        observationType: "providerEditBatch",
+        provider: "codex",
+        createCount: 1,
+        updateCount: 2,
+        deleteCount: 0,
+        pathCount: 3,
+        evidenceClass: "providerObserved",
+      },
+    ], "b".repeat(64), "c".repeat(64));
+
+    assert.equal(projection.childOperations.length, 2);
+    assert.deepEqual(projection.childOperations[0], {
+      subject: {
+        kind: "toolCall",
+        provider: "codex",
+        toolName: "shell",
+        providerOperationIdSha256: operationId,
+        argumentBytes: 42,
+        evidenceClass: "providerObserved",
+      },
+      observation: {
+        kind: "toolCall",
+        observationType: "toolCallResult",
+        status: "succeeded",
+        resultBytes: 84,
+        evidenceClass: "providerObserved",
+      },
+      outcome: { status: "succeeded", failureCode: null },
+    });
+    assert.deepEqual(projection.childOperations[1], {
+      subject: {
+        kind: "editBatch",
+        provider: "codex",
+        createCount: 1,
+        updateCount: 2,
+        deleteCount: 0,
+        pathCount: 3,
+        workspaceBeforeSha256: "b".repeat(64),
+        evidenceClass: "providerObserved",
+      },
+      observation: {
+        kind: "editBatch",
+        observationType: "workspaceMutation",
+        createCount: 1,
+        updateCount: 2,
+        deleteCount: 0,
+        pathCount: 3,
+        workspaceAfterSha256: "c".repeat(64),
+        evidenceClass: "providerObserved",
+      },
+      outcome: { status: "succeeded", failureCode: null },
+    });
+    assert.doesNotMatch(JSON.stringify(projection), /command|arguments|result body/i);
+  });
+
+  test("marks unmatched provider tools incomplete and refuses unbound edit hashes", () => {
+    const operationId = "f".repeat(64);
+    const projection = buildFlightProviderTelemetryProjection([
+      {
+        observationType: "providerToolStarted",
+        provider: "claude",
+        providerOperationIdSha256: operationId,
+        toolCategory: "mcp",
+        argumentBytes: 1,
+        evidenceClass: "providerObserved",
+      },
+      {
+        observationType: "providerEditBatch",
+        provider: "claude",
+        createCount: 0,
+        updateCount: 1,
+        deleteCount: 0,
+        pathCount: 1,
+        evidenceClass: "providerObserved",
+      },
+    ]);
+    assert.equal(projection.childOperations.length, 1);
+    assert.deepEqual(projection.childOperations[0]?.outcome, {
+      status: "incomplete",
+      failureCode: "unknown",
+    });
+    assert.deepEqual(projection.agentObservations, [{
+      kind: "agentRun",
+      observationType: "telemetryAvailability",
+      detail: "unavailable",
+      reason: "unsupported",
+    }]);
+
+    const finishOnly = buildFlightProviderTelemetryProjection([{
+      observationType: "providerToolFinished",
+      provider: "codex",
+      providerOperationIdSha256: "a".repeat(64),
+      toolCategory: "shell",
+      status: "succeeded",
+      resultBytes: 5,
+      evidenceClass: "providerObserved",
+    }]);
+    assert.deepEqual(finishOnly.childOperations[0]?.outcome, {
+      status: "incomplete",
+      failureCode: "unknown",
+    });
+    assert.deepEqual(finishOnly.agentObservations, [{
+      kind: "agentRun",
+      observationType: "telemetryAvailability",
+      detail: "unavailable",
+      reason: "malformed",
+    }]);
   });
 });

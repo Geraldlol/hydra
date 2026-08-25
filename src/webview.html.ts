@@ -1170,6 +1170,8 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     #panelOverlay[data-panel="queue"] .panel-view[data-view="queue"],
     #panelOverlay[data-panel="edits"] .panel-view[data-view="edits"],
     #panelOverlay[data-panel="verify"] .panel-view[data-view="verify"],
+    #panelOverlay[data-panel="mission"] .panel-view[data-view="mission"],
+    #panelOverlay[data-panel="flight"] .panel-view[data-view="flight"],
     #panelOverlay[data-panel="decisions"] .panel-view[data-view="decisions"],
     #panelOverlay[data-panel="standings"] .panel-view[data-view="standings"],
     #panelOverlay[data-panel="duels"] .panel-view[data-view="duels"],
@@ -1177,6 +1179,90 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
     #panelOverlay[data-panel="usage"] .panel-view[data-view="usage"] {
       display: grid;
       grid-template-rows: auto minmax(0, 1fr);
+    }
+    .mission-layout { display: grid; gap: 16px; }
+    .mission-policy {
+      margin: 0;
+      padding: 9px 11px;
+      border: 1px solid var(--warn);
+      border-radius: var(--r-chip);
+      color: var(--text);
+      background: color-mix(in srgb, var(--warn) 7%, var(--ink));
+      font-size: 11px;
+      line-height: 1.5;
+    }
+    .mission-section { display: grid; gap: 8px; }
+    .mission-section h4 { margin: 0; color: var(--text); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; }
+    .mission-board { display: grid; gap: 8px; }
+    .mission-card {
+      display: grid;
+      gap: 8px;
+      padding: 10px 11px;
+      border: 1px solid var(--border);
+      border-radius: var(--r-card);
+      background: var(--ink);
+    }
+    .mission-card.active { border-color: rgba(116,208,201,.45); box-shadow: inset 2px 0 0 var(--hydra); }
+    .mission-card-head, .mission-card-actions { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+    .mission-card-head { justify-content: space-between; }
+    .mission-card-title { color: var(--text); font-weight: 700; }
+    .mission-state { color: var(--hydra); font-family: var(--font-mono); font-size: 10px; }
+    .mission-meta { color: var(--text-faint); font-family: var(--font-mono); font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+    .mission-terms { margin: 0; max-height: 260px; padding: 8px 9px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid var(--border); background: var(--abyss-raised); color: var(--text-muted); font-family: var(--font-mono); font-size: 10px; line-height: 1.45; }
+    .mission-card-actions { justify-content: flex-end; }
+    .mission-draft-label { color: var(--text); font-size: 11px; font-weight: 700; }
+    #missionDraft { width: 100%; min-height: 240px; resize: vertical; padding: 9px; color: var(--text); background: var(--ink); border: 1px solid var(--border-strong); border-radius: var(--r-card); font-family: var(--font-mono); font-size: 11px; line-height: 1.45; }
+    #missionDraftStatus { min-height: 1.4em; color: var(--text-faint); font-size: 10px; }
+    .mission-draft-actions { display: flex; gap: 7px; justify-content: flex-end; flex-wrap: wrap; }
+    @media (max-width: 720px) {
+      .mission-card-actions, .mission-draft-actions { justify-content: stretch; }
+      .mission-card-actions button, .mission-draft-actions button { flex: 1 1 150px; }
+    }
+    .flight-layout {
+      display: grid;
+      grid-template-columns: minmax(230px, .72fr) minmax(300px, 1.28fr);
+      gap: 12px;
+      min-height: 360px;
+    }
+    .flight-trace-list, .flight-detail, .flight-operation-list { display: grid; gap: 7px; align-content: start; }
+    .flight-trace-list { max-height: min(66vh, 680px); overflow: auto; }
+    .flight-trace-choice {
+      display: grid;
+      gap: 4px;
+      width: 100%;
+      padding: 9px 10px;
+      text-align: left;
+      color: var(--text);
+      background: var(--ink);
+      border: 1px solid var(--border);
+      border-radius: var(--r-chip);
+    }
+    .flight-trace-choice[aria-current="true"] { border-color: var(--hydra); box-shadow: inset 2px 0 0 var(--hydra); }
+    .flight-trace-choice.invalid { border-color: var(--error); }
+    .flight-trace-title { display: flex; gap: 7px; align-items: center; justify-content: space-between; }
+    .flight-trace-meta, .flight-hash, .flight-operation-meta { color: var(--text-faint); font-family: var(--font-mono); font-size: 10px; overflow-wrap: anywhere; }
+    .flight-operation > .flight-operation-meta { grid-column: 1 / -1; }
+    .flight-detail-card { display: grid; gap: 8px; padding: 11px; border: 1px solid var(--border); border-radius: var(--r-card); background: var(--ink); }
+    .flight-detail-card h4 { margin: 0; color: var(--text); font-size: 12px; }
+    .flight-gates { display: grid; gap: 6px; }
+    .flight-gate { margin: 0; padding: 7px 8px; border-left: 2px solid var(--border-strong); color: var(--text-muted); font-size: 11px; line-height: 1.45; }
+    .flight-gate.eligible { border-left-color: var(--hydra); }
+    .flight-actions { display: flex; gap: 7px; flex-wrap: wrap; }
+    .flight-operation {
+      display: grid;
+      grid-template-columns: 74px minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: start;
+      padding: 7px 8px;
+      border-bottom: 1px solid var(--border);
+      background: var(--abyss-raised);
+      border-radius: var(--r-chip);
+    }
+    .flight-empty { padding: 12px; border: 1px dashed var(--border-strong); color: var(--text-faint); line-height: 1.5; }
+    @media (max-width: 720px) {
+      .flight-layout { grid-template-columns: 1fr; }
+      .flight-trace-list { max-height: 240px; }
+      .flight-actions button { flex: 1 1 140px; }
     }
     .native-action-board,
     .work-queue-board,
@@ -1586,6 +1672,8 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
       <div id="railSecondaryWrap" class="rail-secondary-wrap">
         <div id="railSecondary" class="rail-secondary" role="region" tabindex="0" aria-label="Operational status. Scroll horizontally for more details." title="Scroll horizontally for more status, or choose All status.">
           <span id="transportChip" class="rail-chip">Safe one-shot</span>
+          <span id="missionRail" class="rail-chip" role="button" tabindex="0" aria-label="Mission Contract: checking. Open Mission Contract manager" aria-haspopup="dialog" aria-controls="panelOverlay">mission: checking</span>
+          <span id="flightRail" class="rail-chip" role="button" tabindex="0" aria-label="Flight Recorder: checking. Open trace inspector" aria-haspopup="dialog" aria-controls="panelOverlay">flight: checking</span>
           <span id="standingsRail" class="rail-chip" role="button" tabindex="0" aria-label="scoreboard: unranked. Open passive Hydra Scoreboard" aria-haspopup="dialog" aria-controls="panelOverlay">scoreboard: unranked</span>
           <span id="duelsRail" class="rail-chip" role="button" tabindex="0" aria-label="duels: none. Open formal Hydra duels" aria-haspopup="dialog" aria-controls="panelOverlay">duels: none</span>
           <span id="agentStatusRail" class="agent-rail" role="list" aria-label="Hydra head status"></span>
@@ -1700,12 +1788,13 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
           <button id="commandCenterBtn" class="secondary" type="button" title="Open Command Center (Ctrl+K)">Commands</button>
           <button id="browserBtn" class="secondary" type="button" title="Open VS Code's Integrated Browser">Browser</button>
           <button id="nativeActionBtn" class="secondary hidden" type="button" title="Choose a direct native terminal action">Native Action...</button>
-          <button id="autoAdvanceDefaultsBtn" class="secondary" type="button">Auto-advance safe defaults: On</button>
+          <button id="autoAdvanceDefaultsBtn" class="secondary" type="button">Agent-default auto-advance: Off</button>
         </div>
         <div id="workflowActions" class="workflow-actions">
           <span id="builderButtons" class="builder-buttons hidden" role="group" aria-label="Choose a Hydra builder"></span>
           <button id="assignBothBtn" class="secondary hidden" type="button">Assign Builders: Both</button>
           <button id="reviewBtn" class="secondary hidden" type="button">Request Review</button>
+          <button id="resolveReviewBtn" class="secondary hidden" type="button" title="Explicitly accept this diff while retaining every dissenting verdict in the transcript">Accept despite dissent</button>
           <button id="handBackBtn" class="secondary hidden" type="button">Hand back to Builder</button>
           <button id="resetTurnBtn" class="secondary hidden" type="button">Reset Turn</button>
         </div>
@@ -1761,6 +1850,45 @@ export function renderHtml(nonce: string, heads: HydraHeadAssets, scriptUri: str
 
     <div class="overlay" id="panelOverlay" data-open="false" data-panel="actions" aria-hidden="true">
       <div class="inspector" role="dialog" aria-modal="true" aria-label="Hydra inspector">
+        <section class="panel-view" data-view="mission">
+          <div class="insp-head"><h3>Mission Contract</h3><span class="count" id="missionPanelCount"></span><button class="secondary close" type="button">Close</button></div>
+          <div class="insp-body">
+            <div class="mission-layout">
+              <p class="mission-policy">Only the local operator can admit, confirm, dismiss, or retire Mission authority. Agent proposals remain ephemeral until admission, and admission never confirms them. Every action is bound to the exact terms and hashes shown here.</p>
+              <section class="mission-section" aria-labelledby="missionActiveHeading">
+                <h4 id="missionActiveHeading">Active authority</h4>
+                <div id="missionActiveBoard" class="mission-board" aria-live="polite"></div>
+              </section>
+              <section class="mission-section" aria-labelledby="missionPendingHeading">
+                <h4 id="missionPendingHeading">Pending proposals</h4>
+                <div id="missionProposalBoard" class="mission-board" aria-live="polite"></div>
+              </section>
+              <section class="mission-section" aria-labelledby="missionCandidateHeading">
+                <h4 id="missionCandidateHeading">Agent candidates awaiting admission</h4>
+                <div id="missionCandidateBoard" class="mission-board" aria-live="polite"></div>
+              </section>
+              <section class="mission-section" aria-labelledby="missionDraftHeading">
+                <h4 id="missionDraftHeading">Propose or amend</h4>
+                <label class="mission-draft-label" for="missionDraft">Exact Mission Contract JSON</label>
+                <textarea id="missionDraft" spellcheck="false" aria-describedby="missionDraftStatus"></textarea>
+                <div id="missionDraftStatus" role="status"></div>
+                <div class="mission-draft-actions"><button id="missionResetDraftBtn" class="secondary" type="button">Reset Draft</button><button id="missionProposeBtn" class="suggested" type="button">Record Pending Proposal</button></div>
+              </section>
+            </div>
+          </div>
+        </section>
+        <section class="panel-view" data-view="flight">
+          <div class="insp-head"><h3>Flight Recorder</h3><span class="count" id="flightPanelCount"></span><button class="secondary close" type="button">Close</button></div>
+          <div class="insp-body">
+            <div class="flight-layout">
+              <section aria-labelledby="flightTraceListHeading">
+                <h4 id="flightTraceListHeading" class="visually-hidden">Authoritative traces</h4>
+                <div id="flightTraceList" class="flight-trace-list" aria-live="polite"></div>
+              </section>
+              <section id="flightTraceDetail" class="flight-detail" aria-live="polite" aria-label="Selected Flight trace details"></section>
+            </div>
+          </div>
+        </section>
         <section class="panel-view" data-view="actions">
           <div class="insp-head"><h3>Native Actions</h3><span class="count" id="nativePanelCount"></span><button class="secondary close" type="button">Close</button></div>
           <div class="insp-body"><div id="nativeActionBoard" class="native-action-board hidden"></div></div>

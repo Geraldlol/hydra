@@ -6,11 +6,25 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+  bindProcessTreeIdentity,
+  captureWindowsProcessCreationIdentity,
+  releaseUnconfirmedChildProcess,
   runAgent,
   RunResult,
+  spawnIdentityBoundProcess,
   stripAnsi,
+  TERMINATION_CONFIRM_WINDOW_MS,
+  TERMINATION_FORCE_GRACE_MS,
+  terminateProcessTree,
   terminateWindowsProcessTreeSnapshot,
+  waitForPosixProcessGroupQuiescence,
 } from "../src/agents";
+import {
+  WINDOWS_PROCESS_TREE_IDENTITY_PROBE_TIMEOUT_MS,
+  WINDOWS_PROCESS_TREE_JOB_BIND_TIMEOUT_MS,
+  WINDOWS_PROCESS_TREE_TERMINATION_HELPER_TIMEOUT_MS,
+} from "../src/processTreeBudgets";
+import { HANG_NET_TIMEOUT_MS } from "./testBudgets";
 
 const MOCK_CLI = path.join(__dirname, "fixtures", "mock-cli.js");
 
@@ -23,12 +37,62 @@ function spawnBlockedBySandbox(result: RunResult): boolean {
 }
 
 describe("runAgent", () => {
+  test("releases every stdio handle after unconfirmed termination", () => {
+    const calls: string[] = [];
+    const child = new EventEmitter() as cp.ChildProcess;
+    child.kill = ((signal?: NodeJS.Signals | number) => {
+      calls.push(`kill:${String(signal)}`);
+      throw new Error("simulated direct-handle kill failure");
+    }) as cp.ChildProcess["kill"];
+    child.unref = () => {
+      calls.push("child:unref");
+    };
+    const stdio = Array.from({ length: 4 }, (_value, index) => ({
+      destroy(): void {
+        calls.push(`stdio:${index}:destroy`);
+        if (index === 1) throw new Error("simulated stream destroy failure");
+      },
+      unref(): void {
+        calls.push(`stdio:${index}:unref`);
+        if (index === 2) throw new Error("simulated stream unref failure");
+      },
+    }));
+    Object.defineProperty(child, "stdio", { value: stdio });
+
+    releaseUnconfirmedChildProcess(child);
+
+    assert.deepEqual(calls, [
+      "kill:SIGKILL",
+      "stdio:0:destroy",
+      "stdio:0:unref",
+      "stdio:1:destroy",
+      "stdio:1:unref",
+      "stdio:2:destroy",
+      "stdio:2:unref",
+      "stdio:3:destroy",
+      "stdio:3:unref",
+      "child:unref",
+    ]);
+  });
+
+  test("keeps Windows cold bootstrap inside the termination confirmation window", () => {
+    assert.ok(
+      TERMINATION_FORCE_GRACE_MS + TERMINATION_CONFIRM_WINDOW_MS
+        > Math.max(
+          WINDOWS_PROCESS_TREE_JOB_BIND_TIMEOUT_MS,
+          WINDOWS_PROCESS_TREE_IDENTITY_PROBE_TIMEOUT_MS,
+        )
+          + WINDOWS_PROCESS_TREE_TERMINATION_HELPER_TIMEOUT_MS,
+      "the final lifecycle backstop must outlive cold binding plus identity-bound teardown",
+    );
+  });
+
   test("streams chunks via onChunk and resolves with full stdout", async () => {
     const chunks: string[] = [];
     const result: RunResult = await runAgent(
       nodeSpawn(["--emit", "hello ", "world"]),
       "",
-      5000,
+      HANG_NET_TIMEOUT_MS,
       (c) => chunks.push(c),
       new AbortController().signal
     );
@@ -46,7 +110,7 @@ describe("runAgent", () => {
     const result = await runAgent(
       nodeSpawn(["--emit", "ok"]),
       "this is the prompt body",
-      5000,
+      HANG_NET_TIMEOUT_MS,
       () => {},
       new AbortController().signal
     );
@@ -62,7 +126,7 @@ describe("runAgent", () => {
     const result = await runAgent(
       { ...echo, stdin: "from-spawn-stdin" },
       "prompt-arg-must-not-be-piped",
-      5000,
+      HANG_NET_TIMEOUT_MS,
       () => {},
       new AbortController().signal
     );
@@ -76,7 +140,7 @@ describe("runAgent", () => {
     const result = await runAgent(
       { ...echo, stdin: "" },
       "prompt-arg-must-not-be-piped",
-      5000,
+      HANG_NET_TIMEOUT_MS,
       () => {},
       new AbortController().signal
     );
@@ -89,7 +153,7 @@ describe("runAgent", () => {
     const result = await runAgent(
       nodeSpawn(["--emit", "boom", "--fail"]),
       "",
-      5000,
+      HANG_NET_TIMEOUT_MS,
       () => {},
       new AbortController().signal
     );
@@ -167,7 +231,7 @@ describe("runAgent", () => {
     }
   });
 
-  test("Windows snapshot termination rescans descendants and fails closed when its helper fails", async () => {
+  test("Windows snapshot termination binds every kill to process creation identity", async () => {
     let capturedArgs: readonly string[] = [];
     const helper = new EventEmitter() as cp.ChildProcess;
     helper.kill = () => true;
@@ -177,20 +241,192 @@ describe("runAgent", () => {
       return helper;
     }) as typeof cp.spawn;
 
-    assert.equal(await terminateWindowsProcessTreeSnapshot(4242, spawnProcess), false);
+    assert.equal(
+      await terminateWindowsProcessTreeSnapshot(
+        4242,
+        "133700000000000000",
+        spawnProcess,
+      ),
+      false,
+    );
     const script = capturedArgs.at(-1) ?? "";
     assert.match(script, /\$ErrorActionPreference='Stop'/);
     assert.match(script, /function Add-HydraDescendants/);
-    assert.match(script, /\$known\.Contains\(\$parentProcessId\)/);
+    assert.match(script, /\$known\.TryGetValue\(\$parentProcessId/);
+    assert.match(script, /CreateToolhelp32Snapshot/);
+    assert.match(script, /function Get-HydraProcessRows/);
+    assert.match(script, /CreationIdentity/);
+    assert.match(script, /expectedRootCreationIdentity/);
+    assert.match(script, /GetProcessTimes/);
+    assert.match(script, /TerminateIfIdentityMatches/);
+    assert.match(script, /Dictionary\[int,long\]/);
+    assert.doesNotMatch(
+      script,
+      /Stop-Process\s+-Id/,
+      "PID-only Stop-Process cannot distinguish a reused PID",
+    );
+    assert.doesNotMatch(
+      script,
+      /Get-CimInstance/,
+      "every snapshot must use the same native process-creation identity",
+    );
     assert.equal(
-      script.match(/Get-CimInstance Win32_Process -ErrorAction Stop/g)?.length,
-      2,
-      "the helper must take an initial snapshot and a fresh snapshot after each kill pass",
+      script.match(/Get-HydraProcessRows/g)?.length,
+      3,
+      "the helper must define one snapshot function and call it before and after each kill pass",
     );
     assert.match(script, /for\(\$pass=0;\$pass -lt \$maxPasses;\$pass\+\+\)/);
-    assert.match(script, /Stop-Process .* -ErrorAction Stop/);
-    assert.match(script, /\$known\.Count -eq \$knownCountBeforeRefresh -and \$alive\.Count -eq 0\)\{exit 0\}/);
+    assert.match(script, /TerminateIfIdentityMatches\(\$targetProcessId,\$expectedCreationIdentity\)/);
+    assert.match(script, /CreationIdentity -eq \$expectedCreationIdentity/);
     assert.match(script, /catch \{\s*exit 1\s*\}/);
+  });
+
+  test("Windows snapshot helper directly terminates a real root and descendant", { timeout: HANG_NET_TIMEOUT_MS }, async (t) => {
+    if (process.platform !== "win32") {
+      t.skip("Windows process snapshot semantics");
+      return;
+    }
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-windows-tree-helper-"));
+    const pidFile = path.join(dir, "descendant.pid");
+    const scriptPath = path.join(dir, "tree.js");
+    await fs.writeFile(scriptPath, [
+      'const cp = require("node:child_process");',
+      'const fs = require("node:fs");',
+      'const child = cp.spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });',
+      'fs.writeFileSync(process.argv[2], String(child.pid));',
+      'setInterval(() => {}, 1000);',
+    ].join("\n"), "utf8");
+    const root = cp.spawn(process.execPath, [scriptPath, pidFile], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    let descendantPid = 0;
+    t.after(async () => {
+      if (root.exitCode === null && root.signalCode === null) root.kill("SIGKILL");
+      if (descendantPid > 0 && processIsAlive(descendantPid)) {
+        try { process.kill(descendantPid, "SIGKILL"); } catch { /* already gone */ }
+      }
+      await fs.rm(dir, { recursive: true, force: true });
+    });
+    await waitForFile(pidFile);
+    descendantPid = Number(await fs.readFile(pidFile, "utf8"));
+
+    const identity = await captureWindowsProcessCreationIdentity(root.pid!);
+    assert.ok(identity);
+    assert.equal(
+      await terminateWindowsProcessTreeSnapshot(root.pid!, identity),
+      false,
+      "an uncontained PID snapshot may kill what it saw but cannot prove no late descendant escaped",
+    );
+    assert.equal(await waitForProcessExit(descendantPid), true);
+  });
+
+  test("Windows lazily binds a still-live direct child before tree teardown", { timeout: HANG_NET_TIMEOUT_MS }, async (t) => {
+    if (process.platform !== "win32") {
+      t.skip("Windows lazy process identity semantics");
+      return;
+    }
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-windows-lazy-tree-"));
+    const pidFile = path.join(dir, "descendant.pid");
+    const scriptPath = path.join(dir, "tree.js");
+    await fs.writeFile(scriptPath, [
+      'const cp = require("node:child_process");',
+      'const fs = require("node:fs");',
+      'const child = cp.spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });',
+      'fs.writeFileSync(process.argv[2], String(child.pid));',
+      'setInterval(() => {}, 1000);',
+    ].join("\n"), "utf8");
+    const root = cp.spawn(process.execPath, [scriptPath, pidFile], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    bindProcessTreeIdentity(root);
+    let descendantPid = 0;
+    t.after(async () => {
+      if (root.exitCode === null && root.signalCode === null) root.kill("SIGKILL");
+      if (descendantPid > 0 && processIsAlive(descendantPid)) {
+        try { process.kill(descendantPid, "SIGKILL"); } catch { /* already gone */ }
+      }
+      await fs.rm(dir, { recursive: true, force: true });
+    });
+    await waitForFile(pidFile);
+    descendantPid = Number(await fs.readFile(pidFile, "utf8"));
+
+    assert.equal(
+      await terminateProcessTree(root, false),
+      false,
+      "lazy identity binding is not spawn-time descendant containment",
+    );
+    assert.equal(await waitForProcessExit(descendantPid), true);
+  });
+
+  test("Windows identity-bound host kills descendants when the host itself is terminated", { timeout: HANG_NET_TIMEOUT_MS }, async (t) => {
+    if (process.platform !== "win32") {
+      t.skip("Windows kill-on-close job semantics");
+      return;
+    }
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-windows-job-host-"));
+    const pidFile = path.join(dir, "descendant.pid");
+    const scriptPath = path.join(dir, "tree.js");
+    await fs.writeFile(scriptPath, [
+      'const cp = require("node:child_process");',
+      'const fs = require("node:fs");',
+      'const child = cp.spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });',
+      'fs.writeFileSync(process.argv[2], String(child.pid));',
+      'setInterval(() => {}, 1000);',
+    ].join("\n"), "utf8");
+    const host = spawnIdentityBoundProcess(
+      process.execPath,
+      [scriptPath, pidFile],
+      { stdio: "ignore", windowsHide: true },
+    );
+    let descendantPid = 0;
+    t.after(async () => {
+      releaseUnconfirmedChildProcess(host);
+      if (descendantPid > 0 && processIsAlive(descendantPid)) {
+        try { process.kill(descendantPid, "SIGKILL"); } catch { /* already gone */ }
+      }
+      await fs.rm(dir, { recursive: true, force: true });
+    });
+    await waitForFile(pidFile, HANG_NET_TIMEOUT_MS);
+    descendantPid = Number(await fs.readFile(pidFile, "utf8"));
+    assert.ok(Number.isSafeInteger(descendantPid) && descendantPid > 0);
+
+    assert.equal(
+      await terminateProcessTree(host, true),
+      true,
+      "the host receipt must bind termination to its native creation FILETIME",
+    );
+    assert.equal(
+      await waitForProcessExit(descendantPid),
+      true,
+      "the host's kill-on-close job must terminate descendants without a PID snapshot",
+    );
+  });
+
+  test("Windows identity-bound helper leaves a reused PID identity untouched", { timeout: HANG_NET_TIMEOUT_MS }, async (t) => {
+    if (process.platform !== "win32") {
+      t.skip("Windows process creation identity semantics");
+      return;
+    }
+    const root = cp.spawn(
+      process.execPath,
+      ["-e", "setInterval(() => {}, 1000)"],
+      { stdio: "ignore", windowsHide: true },
+    );
+    t.after(() => {
+      if (root.exitCode === null && root.signalCode === null) root.kill("SIGKILL");
+    });
+    const identity = await captureWindowsProcessCreationIdentity(root.pid!);
+    assert.ok(identity);
+    const staleIdentity = (BigInt(identity) - 1n).toString();
+
+    assert.equal(
+      await terminateWindowsProcessTreeSnapshot(root.pid!, staleIdentity),
+      false,
+      "the stale generation must fail closed without killing its PID replacement",
+    );
+    assert.equal(processIsAlive(root.pid!), true);
   });
 
   test("zero timeout disables the wall-clock cap", async () => {
@@ -207,11 +443,59 @@ describe("runAgent", () => {
     assert.equal(result.stdout, "slow ok");
   });
 
+  test("retries a transient POSIX EPERM group probe until ESRCH proves quiescence", async (t) => {
+    let probes = 0;
+    t.mock.method(process, "kill", ((pid: number, signal?: string | number) => {
+      assert.equal(pid, -12345);
+      assert.equal(signal, 0);
+      probes += 1;
+      throw Object.assign(new Error(probes === 1 ? "zombie group" : "gone"), {
+        code: probes === 1 ? "EPERM" : "ESRCH",
+      });
+    }) as typeof process.kill);
+
+    assert.equal(
+      await waitForPosixProcessGroupQuiescence(12345, 50, 1),
+      true,
+    );
+    assert.equal(probes, 2);
+  });
+
+  test("keeps a persistent POSIX EPERM group probe ambiguous at its deadline", async (t) => {
+    let probes = 0;
+    t.mock.method(process, "kill", ((pid: number, signal?: string | number) => {
+      assert.equal(pid, -12346);
+      assert.equal(signal, 0);
+      probes += 1;
+      throw Object.assign(new Error("permission denied"), { code: "EPERM" });
+    }) as typeof process.kill);
+
+    assert.equal(
+      await waitForPosixProcessGroupQuiescence(12346, 10, 1),
+      false,
+    );
+    assert.ok(probes > 1);
+  });
+
+  test("fails a POSIX process-group probe immediately on an unrelated error", async (t) => {
+    let probes = 0;
+    t.mock.method(process, "kill", (() => {
+      probes += 1;
+      throw Object.assign(new Error("invalid group probe"), { code: "EINVAL" });
+    }) as typeof process.kill);
+
+    assert.equal(
+      await waitForPosixProcessGroupQuiescence(12347, 50, 1),
+      false,
+    );
+    assert.equal(probes, 1);
+  });
+
   test("missing native command returns a clear spawn failure", async () => {
     const result = await runAgent(
       { command: "hydra-definitely-missing-cli", args: [], cwd: process.cwd() },
       "",
-      5000,
+      HANG_NET_TIMEOUT_MS,
       () => {},
       new AbortController().signal
     );
@@ -227,7 +511,7 @@ describe("runAgent", () => {
     const result = await runAgent(
       nodeSpawn(["--emit", "before ", "after"]),
       "",
-      5000,
+      HANG_NET_TIMEOUT_MS,
       (_c) => {
         if (!firstChunkSeen) {
           firstChunkSeen = true;
@@ -248,7 +532,7 @@ describe("runAgent", () => {
     const result = await runAgent(
       nodeSpawn(["--hang"]),
       "",
-      5000,
+      HANG_NET_TIMEOUT_MS,
       () => {},
       ctrl.signal
     );
@@ -286,6 +570,22 @@ function processIsAlive(pid: number): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+async function waitForFile(filePath: string, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      await fs.access(filePath);
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(`Timed out waiting for fixture file: ${filePath}`);
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
   }
 }
 

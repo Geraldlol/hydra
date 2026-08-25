@@ -2,7 +2,7 @@
   "name": "vscode-hydra-room",
   "displayName": "Hydra Agents",
   "description": "A multi-head AI collaboration room with evidence-backed decisions, build/review handoffs, and native CLI workflows inside VS Code.",
-  "version": "0.7.3",
+  "version": "0.8.0",
   "packageManager": "pnpm@11.1.3",
   "publisher": "geraldlol",
   "license": "MIT",
@@ -36,7 +36,7 @@
   "qna": false,
   "engines": {
     "vscode": "^1.120.0",
-    "node": ">=22.13"
+    "node": "^22.13.0 || ^24.0.0"
   },
   "categories": [
     "AI",
@@ -107,8 +107,7 @@
       },
       {
         "command": "hydraRoom.toggleAutoAdvanceActionableDefaults",
-        "title": "Hydra: Toggle Auto-advance Safe Defaults",
-        "enablement": "isWorkspaceTrusted"
+        "title": "Hydra: Toggle Agent-default Auto-advance"
       },
       {
         "command": "hydraRoom.commandCenter",
@@ -211,12 +210,49 @@
         "title": "Hydra: Open Agent Call Log"
       },
       {
+        "command": "hydraRoom.manageFlightRecorder",
+        "title": "Hydra: Inspect Flight Recorder"
+      },
+      {
+        "command": "hydraRoom.replayFlightTrace",
+        "title": "Hydra: Replay Flight Trace",
+        "enablement": "isWorkspaceTrusted"
+      },
+      {
+        "command": "hydraRoom.createFlightEval",
+        "title": "Hydra: Create Eval from Flight Trace"
+      },
+      {
         "command": "hydraRoom.openObjective",
         "title": "Hydra: Open Room Objective"
       },
       {
         "command": "hydraRoom.openMissionContract",
         "title": "Hydra: Open Mission Contract"
+      },
+      {
+        "command": "hydraRoom.manageMissionContract",
+        "title": "Hydra: Manage Mission Contract"
+      },
+      {
+        "command": "hydraRoom.proposeMissionContract",
+        "title": "Hydra: Propose or Amend Mission Contract"
+      },
+      {
+        "command": "hydraRoom.admitMissionProposal",
+        "title": "Hydra: Admit Agent Mission Proposal"
+      },
+      {
+        "command": "hydraRoom.confirmMissionContract",
+        "title": "Hydra: Confirm Mission Contract"
+      },
+      {
+        "command": "hydraRoom.dismissMissionContractProposal",
+        "title": "Hydra: Dismiss Mission Contract Proposal"
+      },
+      {
+        "command": "hydraRoom.retireMissionContract",
+        "title": "Hydra: Retire Mission Contract"
       },
       {
         "command": "hydraRoom.openNativeTerminals",
@@ -290,6 +326,14 @@
         "command": "hydraRoom.runArenaSmokeTest",
         "title": "Hydra: Advanced: Run Arena Worktree Smoke Test",
         "enablement": "isWorkspaceTrusted"
+      },
+      {
+        "command": "hydraRoom.manageArenaResults",
+        "title": "Hydra: Manage Arena Results"
+      },
+      {
+        "command": "hydraRoom.recoverArenaRuns",
+        "title": "Hydra: Review Arena Recovery"
       },
       {
         "command": "hydraRoom.runManyHeadsSmokeTest",
@@ -468,6 +512,13 @@
                 },
                 "markdownDescription": "Extra HTTP headers. Reference secrets as `${env:NAME}`."
               },
+              "maxOutputTokens": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 131072,
+                "default": 4096,
+                "markdownDescription": "openai-compatible: maximum completion tokens requested per response. Defaults to 4096 so a transport timeout cannot become an unbounded token/spend allowance."
+              },
               "command": {
                 "type": "string"
               },
@@ -543,8 +594,6 @@
             "exec",
             "--sandbox",
             "workspace-write",
-            "-c",
-            "sandbox_workspace_write.network_access=true",
             "--color",
             "never",
             "--cd",
@@ -564,8 +613,6 @@
             "exec",
             "--sandbox",
             "workspace-write",
-            "-c",
-            "sandbox_workspace_write.network_access=true",
             "--color",
             "never",
             "--cd",
@@ -599,8 +646,8 @@
             "fullNative",
             "custom"
           ],
-          "default": "fullNative",
-          "markdownDescription": "Capability profile for Codex discussion turns. Defaults to `fullNative` for equal maximum Hydra authority; native tool implementations can still differ by CLI. Hydra still requires explicit per-workspace full-native consent. `custom` preserves `hydraRoom.codexExecArgsDiscussion`."
+          "default": "safeDiscussion",
+          "markdownDescription": "Capability profile for Codex discussion turns. The default `safeDiscussion` profile is read-only. `fullNative` remains an explicit opt-in and requires per-workspace consent. `custom` preserves `hydraRoom.codexExecArgsDiscussion`."
         },
         "hydraRoom.codexBuildProfile": {
           "scope": "application",
@@ -613,8 +660,8 @@
             "fullNative",
             "custom"
           ],
-          "default": "fullNative",
-          "markdownDescription": "Capability profile for Codex Build turns. Defaults to `fullNative` for equal maximum Hydra authority; native tool implementations can still differ by CLI. Hydra still requires explicit per-workspace full-native consent. `custom` preserves `hydraRoom.codexExecArgsBuild`."
+          "default": "nativeBuild",
+          "markdownDescription": "Capability profile for Codex Build turns. The default `nativeBuild` profile permits workspace edits while the Codex sandbox keeps `.git` read-only and command network access off. `fullNative` remains an explicit opt-in and requires per-workspace consent. `custom` preserves `hydraRoom.codexExecArgsBuild`."
         },
         "hydraRoom.codexReviewProfile": {
           "scope": "application",
@@ -627,8 +674,8 @@
             "fullNative",
             "custom"
           ],
-          "default": "fullNative",
-          "markdownDescription": "Capability profile for Codex Review turns. Defaults to `fullNative` for equal maximum Hydra authority; native tool implementations can still differ by CLI. Hydra still requires explicit per-workspace full-native consent. `custom` preserves `hydraRoom.codexExecArgsReview`."
+          "default": "nativeReview",
+          "markdownDescription": "Capability profile for Codex Review turns. The default `nativeReview` profile is read-only. `fullNative` remains an explicit opt-in and requires per-workspace consent. `custom` preserves `hydraRoom.codexExecArgsReview`."
         },
         "hydraRoom.codexCaptureLastMessage": {
           "type": "boolean",
@@ -702,8 +749,8 @@
             "fullNative",
             "custom"
           ],
-          "default": "fullNative",
-          "markdownDescription": "Capability profile for Claude discussion turns. Defaults to `fullNative` for equal maximum Hydra authority; native tool implementations can still differ by CLI. Hydra still requires explicit per-workspace full-native consent. `custom` preserves `hydraRoom.claudeExecArgsDiscussion`."
+          "default": "safeDiscussion",
+          "markdownDescription": "Capability profile for Claude discussion turns. The default `safeDiscussion` profile uses Claude `--safe-mode`, plan permission mode, and an explicit read/search-only tool list; non-managed hooks, plugins, skills, commands, agents, MCP, browser, and session persistence stay disabled. Organization-managed Claude policy may still apply. `fullNative` remains an explicit opt-in and requires per-workspace consent. `custom` preserves `hydraRoom.claudeExecArgsDiscussion`."
         },
         "hydraRoom.claudeBuildProfile": {
           "scope": "application",
@@ -716,8 +763,8 @@
             "fullNative",
             "custom"
           ],
-          "default": "fullNative",
-          "markdownDescription": "Capability profile for Claude Build turns. Defaults to `fullNative` for equal maximum Hydra authority; native tool implementations can still differ by CLI. Hydra still requires explicit per-workspace full-native consent. `custom` preserves `hydraRoom.claudeExecArgsBuild`."
+          "default": "nativeBuild",
+          "markdownDescription": "Capability profile for Claude Build turns. The default `nativeBuild` profile uses Claude `--safe-mode` and exposes only read/edit/write notebook tools; non-managed shell, web, MCP, browser, skill, subagent, hook, project/local-setting, and session-persistence surfaces stay disabled. Organization-managed Claude policy may still apply. `fullNative` remains an explicit opt-in and requires per-workspace consent. `custom` preserves `hydraRoom.claudeExecArgsBuild`."
         },
         "hydraRoom.claudeReviewProfile": {
           "scope": "application",
@@ -730,8 +777,8 @@
             "fullNative",
             "custom"
           ],
-          "default": "fullNative",
-          "markdownDescription": "Capability profile for Claude Review turns. Defaults to `fullNative` for equal maximum Hydra authority; native tool implementations can still differ by CLI. Hydra still requires explicit per-workspace full-native consent. `custom` preserves `hydraRoom.claudeExecArgsReview`."
+          "default": "nativeReview",
+          "markdownDescription": "Capability profile for Claude Review turns. The default `nativeReview` profile uses Claude `--safe-mode`, plan permission mode, and an explicit read/search-only tool list; non-managed hooks, plugins, skills, commands, agents, MCP, browser, and session persistence stay disabled. Organization-managed Claude policy may still apply. `fullNative` remains an explicit opt-in and requires per-workspace consent. `custom` preserves `hydraRoom.claudeExecArgsReview`."
         },
         "hydraRoom.claudeStreamJson": {
           "type": "boolean",
@@ -761,10 +808,10 @@
             "type": "string"
           },
           "default": [
-            "-p",
-            "-"
+            "--output-format",
+            "json"
           ],
-          "markdownDescription": "Raw Gemini CLI args for serialized discussion turns. `${workspaceFolder}` is expanded; the trailing `-` reads the Hydra prompt from stdin. Hydra also expands `${hydraPromptFile}`, `${hydraReplyFile}`, and `${hydraLogFile}` per request so native file/output flags can target Hydra artifacts. Placeholder pending a verified real Gemini CLI install (tracked follow-up)."
+          "markdownDescription": "Raw Gemini CLI args for serialized discussion turns. Hydra pipes the prompt on stdin, which activates Gemini headless mode; `--output-format json` supplies the documented response and per-model SessionMetrics envelope used for safe reply and usage parsing. Hydra also expands `${workspaceFolder}`, `${hydraPromptFile}`, `${hydraReplyFile}`, and `${hydraLogFile}` per request."
         },
         "hydraRoom.geminiExecArgsBuild": {
           "scope": "application",
@@ -773,10 +820,10 @@
             "type": "string"
           },
           "default": [
-            "-p",
-            "-"
+            "--output-format",
+            "json"
           ],
-          "markdownDescription": "Raw Gemini CLI args for Build. Add native flags such as model, sandbox/approval mode, or Hydra request-file placeholders here. Placeholder pending a verified real Gemini CLI install (tracked follow-up)."
+          "markdownDescription": "Raw Gemini CLI args for Build. Hydra pipes the prompt on stdin; the default documented JSON envelope enables authoritative reply extraction and token accounting. Add native model, sandbox/approval, or Hydra request-file flags here as needed."
         },
         "hydraRoom.geminiExecArgsReview": {
           "scope": "application",
@@ -785,16 +832,16 @@
             "type": "string"
           },
           "default": [
-            "-p",
-            "-"
+            "--output-format",
+            "json"
           ],
-          "markdownDescription": "Raw Gemini CLI args for Review. Hydra does not downgrade these args by phase and expands Hydra request-file placeholders. Placeholder pending a verified real Gemini CLI install (tracked follow-up)."
+          "markdownDescription": "Raw Gemini CLI args for Review. Hydra pipes the prompt on stdin and parses the default documented JSON envelope. Hydra does not downgrade these args by phase and expands Hydra request-file placeholders."
         },
         "hydraRoom.manyHeadsMode": {
           "scope": "application",
           "type": "boolean",
           "default": false,
-          "markdownDescription": "Claude Worker Fanout (experimental; legacy key name): mirror each structured agent stream into a shared `.hydra/live/<turn>/<agent>.jsonl` channel so Codex can inspect Claude-side work while it is still streaming. In one-shot parallel discussion turns, Hydra launches `hydraRoom.manyHeadsClaudeWorkerCount` local subscription-backed Claude workers. These workers are not independent Hydra head identities. Stored as a User setting and forced off in untrusted workspaces."
+          "markdownDescription": "Claude Worker Fanout (experimental; legacy key name): use up to `hydraRoom.manyHeadsClaudeWorkerCount` local subscription-backed Claude processes in one-shot Discussion, Build, and Review. Build extras are isolated no-tool advisers that drain before one lead may edit; Review duplicates collapse to one Claude roster verdict. Workers receive trace/live files but are not independent Hydra head identities. Stored as a User setting and forced off in untrusted workspaces."
         },
         "hydraRoom.agentInitiatedDuels": {
           "scope": "application",
@@ -808,7 +855,7 @@
           "default": 3,
           "minimum": 1,
           "maximum": 8,
-          "markdownDescription": "Number of local subscription-backed Claude workers to launch for Claude Worker Fanout parallel discussion turns. This multiplies official Claude Code / Agent SDK dispatches and therefore Agent SDK credit usage; workspace overrides are ignored in untrusted workspaces."
+          "markdownDescription": "Maximum local subscription-backed Claude worker count for one-shot Discussion, Build, and Review fanout (1-8). For Build this count includes the sole lead; remaining workers are isolated read-only advisers. This multiplies official Claude Code / Agent SDK dispatches and therefore Agent SDK credit usage; workspace overrides are ignored in untrusted workspaces."
         },
         "hydraRoom.nativePathPrepend": {
           "scope": "application",
@@ -817,7 +864,7 @@
             "type": "string"
           },
           "default": [],
-          "markdownDescription": "Directories prepended to PATH/Path for every native Codex and Claude dispatch, in both one-shot and terminal-bridge transports. Supports `${workspaceFolder}` and `${env:NAME}` placeholders."
+          "markdownDescription": "Directories prepended to PATH/Path for every spawned native head, including Codex, Claude, and Gemini, in both one-shot and terminal-bridge transports. Supports `${workspaceFolder}` and `${env:NAME}` placeholders."
         },
         "hydraRoom.nativeEnv": {
           "scope": "application",
@@ -826,7 +873,7 @@
           "additionalProperties": {
             "type": "string"
           },
-          "markdownDescription": "Environment variables applied to every native Codex and Claude dispatch, in both one-shot and terminal-bridge transports. Values support `${workspaceFolder}` and `${env:NAME}` placeholders."
+          "markdownDescription": "Environment variables applied to every spawned native head, including Codex, Claude, and Gemini, in both one-shot and terminal-bridge transports. Values support `${workspaceFolder}` and `${env:NAME}` placeholders."
         },
         "hydraRoom.codexNativePathPrepend": {
           "scope": "application",
@@ -914,6 +961,12 @@
           "type": "string",
           "default": "",
           "markdownDescription": "Optional startup command sent once when Hydra opens the Claude terminal. Leave blank for command-dispatch mode. `${workspaceFolder}` is expanded."
+        },
+        "hydraRoom.geminiTerminalCommand": {
+          "scope": "application",
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Optional startup command sent once when Hydra opens the Gemini terminal. Leave blank for command-dispatch mode. `${workspaceFolder}` is expanded."
         },
         "hydraRoom.terminalStartupDelayMs": {
           "type": "number",
@@ -1092,13 +1145,11 @@
           "markdownDescription": "Days to keep copied attachments and legacy workspace-local terminal diagnostics before `Hydra: Clean Workspace State` deletes them. Current terminal-bridge artifacts live in VS Code extension storage and use a short automatic retention sweep. `.hydra/prompts/index.jsonl` is preserved and compacted separately."
         },
         "hydraRoom.firstSpeaker": {
+          "scope": "application",
           "type": "string",
-          "enum": [
-            "codex",
-            "claude"
-          ],
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
           "default": "codex",
-          "markdownDescription": "Default opener for serialized discussion turns. The webview can flip this per turn without changing the setting."
+          "markdownDescription": "Default opener for serialized discussion turns. Set this to any registered, seated head ID; if that head is not seated, Hydra falls back to the first roster entry. The webview can change the opener per turn without changing this setting."
         },
         "hydraRoom.discussionMode": {
           "type": "string",
@@ -1108,7 +1159,7 @@
             "parallel"
           ],
           "default": "parallelOnBoth",
-          "markdownDescription": "How normal room messages run Discussion. `parallelOnBoth` preserves the default behavior: serialized opener -> reactor -> optional closer unless the user explicitly addresses both agents. `serial` always uses the serialized loop. `parallel` always dispatches Codex and Claude at the same time and returns after both replies finish, trading less critique choreography for lower wall-clock latency."
+          "markdownDescription": "How normal room messages run Discussion. `parallelOnBoth` is retained for compatibility: Hydra uses the serialized opener -> reactor -> optional closer loop unless the user explicitly addresses the group, in which case every seated head runs independently. `serial` always uses the serialized loop. `parallel` always dispatches the entire seated roster and returns after all replies finish, trading less critique choreography for lower wall-clock latency."
         },
         "hydraRoom.oneShotTimeoutMs": {
           "type": "number",
@@ -1161,14 +1212,35 @@
         "hydraRoom.autoAdvanceActionableDefaults": {
           "scope": "application",
           "type": "boolean",
-          "default": true,
-          "markdownDescription": "Automatically execute actionable Decision Packet defaults when they have no blockers and require no user decision. For example, a discussion default that names a builder enters Build without requiring the user to click Accept Default. Stored as a User setting and forced off in untrusted workspaces."
+          "default": false,
+          "markdownDescription": "Controls agent-default auto-advance. Decision Packet defaults are agent-authored and may be influenced by prompt injection from repository content. Off by default. Enabling requires an explicit modal opt-in in a trusted workspace and can automatically execute eligible follow-up actions without a separate Accept Default click. Manual Accept Default remains available. Stored as a User setting and forced off in untrusted workspaces."
         },
         "hydraRoom.autoSkipCloserOnAgreement": {
           "scope": "application",
           "type": "boolean",
           "default": true,
           "markdownDescription": "Skip the discussion closer when the reactor begins with `Agree:` and its Decision Packet has `Decision needed from user: none` and `Blockers: none`. Disable to force the traditional opener/reactor/closer cadence."
+        },
+        "hydraRoom.reviewConvergence": {
+          "scope": "application",
+          "type": "string",
+          "enum": [
+            "human",
+            "unanimous",
+            "majority"
+          ],
+          "default": "human",
+          "markdownDescription": "How Hydra folds multiple independent review verdicts. `human` advances unanimous approval but requires an explicit Accept despite dissent or Hand back choice whenever a multi-reviewer panel has any dissent. `unanimous` requires every reviewer to approve. `majority` requires strictly more than half; a tie never approves. Single-reviewer behavior is unchanged."
+        },
+        "hydraRoom.reviewParticipation": {
+          "scope": "application",
+          "type": "string",
+          "enum": [
+            "single",
+            "all"
+          ],
+          "default": "all",
+          "markdownDescription": "Who reviews a single builder's diff. `all` sends every other seated head an independent review in parallel; `single` sends only the first eligible non-builder. The builder is excluded in both modes."
         },
         "hydraRoom.autoAdvanceSendInstructionMaxConsecutive": {
           "type": "number",
@@ -1180,7 +1252,7 @@
           "type": "number",
           "default": 0,
           "minimum": 0,
-          "markdownDescription": "If greater than 0, Hydra pauses auto-advance once the session's estimated cost reaches this USD value. Cost is computed from `.hydra/usage.jsonl` using `hydraRoom.modelPrices`. Set to 0 to disable. Useful guard rail when running autonomous loops. Note: on the default Codex one-shot path (`hydraRoom.codexJson: false`) there is no per-token usage breakdown, so Hydra estimates conservatively by billing the whole plain-text reply at the output rate — the displayed figure (and therefore when this cap trips) runs high. Enable `hydraRoom.codexJson` for token-accurate Codex accounting."
+          "markdownDescription": "If greater than 0, Hydra pauses auto-advance once the session's estimated cost reaches this USD value. Cost is computed from `.hydra/usage.jsonl` using `hydraRoom.modelPrices`. Set to 0 to disable. Useful guard rail when running autonomous loops. Codex JSON event accounting is enabled by default. If you disable `hydraRoom.codexJson`, the one-shot plain-text fallback has no per-token usage breakdown, so Hydra estimates conservatively by billing the whole reply at the output rate — the displayed figure (and therefore when this cap trips) runs high."
         },
         "hydraRoom.claudeAutomationCreditGuard": {
           "type": "string",
@@ -1215,7 +1287,7 @@
           "scope": "application",
           "type": "string",
           "default": "",
-          "markdownDescription": "Optional HTTPS endpoint Hydra POSTs to when a new decision packet has a non-empty `Decision needed from user` field. Body is `{ event: \"hydra.decision_needed\", timestamp, workspace, agent, phase, decisionNeededFromUser, defaultNextAction, recommendation, blockers, objective }`. Use a Slack incoming webhook URL or your own paging service. For Telegram, use `hydraRoom.telegramBotToken` + `hydraRoom.telegramChatId` instead — Hydra speaks the Telegram Bot API directly. Dedupes per packet timestamp."
+          "markdownDescription": "Optional HTTPS endpoint Hydra POSTs to when a new decision packet has a non-empty `Decision needed from user` field. Hydra rejects URL credentials, redirects, and any destination whose complete DNS answer set contains a private or otherwise non-public address; the request is pinned to a vetted address. Body is `{ event: \"hydra.decision_needed\", timestamp, workspace, agent, phase, decisionNeededFromUser, defaultNextAction, recommendation, blockers, objective }`. Use a Slack incoming webhook URL or your own paging service. For Telegram, use `hydraRoom.telegramBotToken` + `hydraRoom.telegramChatId` instead — Hydra speaks the Telegram Bot API directly. Dedupes per packet timestamp."
         },
         "hydraRoom.telegramBotToken": {
           "scope": "application",
@@ -1240,6 +1312,19 @@
           "type": "boolean",
           "default": false,
           "markdownDescription": "Poll Telegram Bot API updates and inject accepted messages into the Hydra room as user input. Requires `hydraRoom.telegramBotToken`, `hydraRoom.telegramChatId`, and the `hydraRoom.telegramInboundCommandPrefix` prefix. Disabled by default because inbound Telegram messages are remote untrusted input. **Authorization is chat-level, not per-sender:** anyone who can post to the configured `hydraRoom.telegramChatId` can drive agent turns under the configured execution permissions — keep that chat private (a 1:1 with the bot, or a group of fully-trusted members)."
+        },
+        "hydraRoom.telegramLiveSteeringEnabled": {
+          "scope": "application",
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Allow explicitly routed Telegram messages beginning with `hydraRoom.telegramLiveSteeringCommandPrefix` to steer an already-active native run without interrupting it. Requires inbound polling, an exact configured chat, and a **non-empty** `hydraRoom.telegramInboundAllowedSenderIds` list. Disabled by default because steering can consume paid provider work."
+        },
+        "hydraRoom.telegramLiveSteeringCommandPrefix": {
+          "scope": "application",
+          "type": "string",
+          "default": "/steer",
+          "pattern": "^/[A-Za-z0-9_]{1,31}$",
+          "markdownDescription": "Separate slash-command prefix for Telegram live steering. Reply to a Hydra-routed Telegram message with `/steer <instruction>`, or use `/hydra <room-token> /steer <instruction>`. Telegram text never selects the native target or changes its Mission/authority bindings."
         },
         "hydraRoom.telegramInboundCommandPrefix": {
           "scope": "application",
@@ -1362,7 +1447,7 @@
               "description": "Per-phase models for Gemini. Missing phases fall back to the CLI default."
             }
           ],
-          "markdownDescription": "Model passed to the Gemini CLI as `--model <id>`. Either a single string (applied to every phase) or an object with per-phase overrides like `{ \"discussion\": \"gemini-2.5-flash\", \"build\": \"gemini-2.5-pro\", \"review\": \"gemini-2.5-pro\" }`."
+          "markdownDescription": "Model passed to the Gemini CLI as `--model <id>`. Either a single string (applied to every phase) or a per-phase object. Prefer the current CLI aliases `auto`, `pro`, `flash`, and `flash-lite`; concrete choices include `gemini-3.1-pro-preview`, `gemini-3.5-flash`, `gemini-3.1-flash-lite`, and the stable Gemini 2.5 family. The CLI default is used when empty."
         },
         "hydraRoom.claudeEffort": {
           "scope": "application",
@@ -1533,13 +1618,15 @@
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": "limited",
-      "description": "Hydra spawns Codex and Claude with workspace-write authority and runs a configured verify command. In untrusted workspaces, Hydra ignores workspace-scoped settings for CLI paths, args, env, terminal startup, verify command, automatic execution controls, handoff webhook, and Telegram credentials so a hostile repo cannot redirect or auto-start those sinks.",
+      "description": "Hydra can spawn Codex, Claude, Gemini, and configured native heads and can run a configured verify command. In untrusted workspaces, Hydra ignores workspace-scoped settings for CLI paths, args, env, terminal startup, verify command, automatic execution controls, handoff webhook, and Telegram credentials so a hostile repo cannot redirect or auto-start those sinks.",
       "restrictedConfigurations": [
         "hydraRoom.transcriptPath",
         "hydraRoom.workspaceRoot",
         "hydraRoom.codexCommand",
         "hydraRoom.agents",
         "hydraRoom.roomRoster",
+        "hydraRoom.reviewConvergence",
+        "hydraRoom.reviewParticipation",
         "hydraRoom.codexExecArgsDiscussion",
         "hydraRoom.codexExecArgsBuild",
         "hydraRoom.codexExecArgsReview",
@@ -1575,6 +1662,7 @@
         "hydraRoom.geminiNativePathPrepend",
         "hydraRoom.codexTerminalCommand",
         "hydraRoom.claudeTerminalCommand",
+        "hydraRoom.geminiTerminalCommand",
         "hydraRoom.autopilotOnStart",
         "hydraRoom.preferTerminalBridgeOnStart",
         "hydraRoom.verifyCommand",
@@ -1592,6 +1680,8 @@
         "hydraRoom.telegramChatId",
         "hydraRoom.telegramNotifyOnDecisionNeeded",
         "hydraRoom.telegramInboundPollingEnabled",
+        "hydraRoom.telegramLiveSteeringEnabled",
+        "hydraRoom.telegramLiveSteeringCommandPrefix",
         "hydraRoom.telegramInboundCommandPrefix",
         "hydraRoom.telegramInboundPollIntervalSeconds",
         "hydraRoom.telegramInboundAllowedSenderIds"
@@ -1604,19 +1694,25 @@
     "dev": "node scripts/open-dev-host.js",
     "watch": "tsc -watch -p ./",
     "preview:webview": "node scripts/preview-webview.mjs",
-    "check": "tsc --noEmit -p ./",
+    "check": "tsc --noEmit --incremental false -p ./",
+    "format:check": "node scripts/check-source-format.js",
+    "lint": "corepack pnpm run check && corepack pnpm run format:check",
     "probe:native-contract": "node scripts/native-contract-probe.js",
     "probe:native-contract:execute": "node scripts/native-contract-probe.js --execute",
     "copy-fixtures": "node -e \"const fs=require('node:fs');if(fs.existsSync('test/fixtures'))fs.cpSync('test/fixtures','dist/test/fixtures',{recursive:true})\"",
     "setup-vscode-stub": "node scripts/setup-vscode-stub.js",
-    "test": "pnpm run clean && pnpm run test:fast",
-    "test:fast": "tsc --incremental -p ./ && pnpm run copy-fixtures && pnpm run setup-vscode-stub && node --test --test-concurrency=4 dist/test/*.test.js",
-    "test:integration": "pnpm run compile && vscode-test --label extensionHost",
-    "verify:fast": "pnpm run test:fast",
-    "prepackage": "pnpm test",
-    "package": "pnpm exec vsce package --no-dependencies",
-    "prepackage:pre-release": "pnpm test",
-    "package:pre-release": "pnpm exec vsce package --no-dependencies --pre-release",
+    "test": "corepack pnpm run clean && corepack pnpm run test:fast",
+    "test:fast": "tsc --incremental -p ./ && corepack pnpm run copy-fixtures && corepack pnpm run setup-vscode-stub && node --test --test-concurrency=4 dist/test/*.test.js",
+    "test:coverage": "corepack pnpm run clean && tsc --incremental -p ./ && corepack pnpm run copy-fixtures && corepack pnpm run setup-vscode-stub && node --require=./scripts/coverage-child-isolation.js --test --test-concurrency=4 --experimental-test-coverage --test-coverage-include=dist/src/**/*.js --test-coverage-exclude=dist/src/arenaFakeHeadCli.js --test-coverage-exclude=dist/src/windowsProcessTreeHost.js --test-coverage-exclude=dist/src/panel.js --test-coverage-exclude=dist/src/extension.js --test-coverage-lines=80 --test-coverage-branches=70 --test-coverage-functions=80 dist/test/*.test.js",
+    "test:integration": "corepack pnpm run compile && vscode-test --label extensionHost",
+    "verify:fast": "corepack pnpm run format:check && corepack pnpm run test:fast",
+    "prepackage": "corepack pnpm run test",
+    "package": "node scripts/verify-vsix-reproducibility.js",
+    "prepackage:pre-release": "corepack pnpm run test",
+    "package:pre-release": "node scripts/verify-vsix-reproducibility.js --pre-release",
+    "verify:vsix": "node scripts/verify-vsix-contents.js",
+    "digest:vsix": "node scripts/write-vsix-digest.js",
+    "sbom:vsix": "node scripts/write-vsix-sbom.js",
     "install:local": "node scripts/install-local.js",
     "install:local:existing": "node scripts/install-local.js --skip-package",
     "install:handoff-skill": "node scripts/install-handoff-skill.js"

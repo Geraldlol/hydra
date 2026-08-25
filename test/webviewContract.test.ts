@@ -62,7 +62,12 @@ const boundIds = [
   "editsRail",
   "fixClaudeBtn",
   "fixCodexBtn",
+  "flightPanelCount",
+  "flightRail",
+  "flightTraceDetail",
+  "flightTraceList",
   "handBackBtn",
+  "resolveReviewBtn",
   "handoffStrip",
   "handoffTitle",
   "handoffSource",
@@ -71,6 +76,15 @@ const boundIds = [
   "handoffPreviewBtn",
   "handoffDismissBtn",
   "messages",
+  "missionActiveBoard",
+  "missionCandidateBoard",
+  "missionDraft",
+  "missionDraftStatus",
+  "missionPanelCount",
+  "missionProposalBoard",
+  "missionProposeBtn",
+  "missionRail",
+  "missionResetDraftBtn",
   "modelRail",
   "nativeActionBoard",
   "nativeActionBtn",
@@ -157,15 +171,24 @@ const hostMessages = [
   "changeCapabilityProfile",
   "configureManyHeadsWorkers",
   "confirmHandoff",
+  "confirmMissionContract",
   "clearAttachment",
   "clearAttachments",
   "dismissHandoff",
+  "dismissMissionContractProposal",
+  "discardMissionProposalCandidate",
   "resetObjective",
   "testTelegram",
   "fixClaudePath",
   "fixCodexPath",
   "handBack",
+  "resolveReview",
   "nativeAction",
+  "admitMissionProposal",
+  "manageMissionContract",
+  "manageFlightRecorder",
+  "replayFlightTrace",
+  "createFlightEval",
   "openAgentCalls",
   "openBrowser",
   "openRunFailureFile",
@@ -179,8 +202,10 @@ const hostMessages = [
   "openVerification",
   "previewNextPrompt",
   "previewHandoff",
+  "proposeMissionContract",
   "copyRunFailurePromptSha",
   "requestReview",
+  "retireMissionContract",
   "resetStuckTurn",
   "runDoctor",
   "runNativeCommand",
@@ -207,8 +232,7 @@ const commandCenterActionCoverage: Record<CommandCenterActionId, readonly RegExp
   acceptDefaultDecision: [/id: "accept-default"/, /type: "acceptDefaultDecision"/],
   toggleAutoAdvanceActionableDefaults: [/id: "toggle-auto-accept-default"/, /type: "toggleAutoAdvanceActionableDefaults"/],
   archiveAndClearRoom: [/id: "archive-chat"/, /type: "archiveAndClearRoom"/],
-  assignCodex: [/id: "assign-codex"/, /type: "assignBuilder", builder: "codex"/],
-  assignClaude: [/id: "assign-claude"/, /type: "assignBuilder", builder: "claude"/],
+  assignBuilder: [/type: "assignBuilder", builder: def\.id/],
   assignParallelBuilders: [/id: "assign-both"/, /type: "assignParallelBuilders"/],
   chooseEffort: [/id: "choose-effort"/, /type: "chooseEffort"/],
   chooseModel: [/id: "choose-model"/, /type: "chooseModel"/],
@@ -222,6 +246,10 @@ const commandCenterActionCoverage: Record<CommandCenterActionId, readonly RegExp
   nativeAction: [/id: "native-action"/, /type: "nativeAction"/],
   pokeBothTerminalsWithDiff: [/id="pokeBothDiffBtn"/, /pokeBothDiffBtn\.addEventListener\("click"/],
   openObjective: [/id: "open-objective"/, /type: "openObjective"/],
+  manageMissionContract: [/id: "open-mission-panel"/, /type: "manageMissionContract"/],
+  manageFlightRecorder: [/id: "open-flight-panel"/, /type: "manageFlightRecorder"/],
+  replayFlightTrace: [/id: "replay-flight-trace"/, /type: "replayFlightTrace"/],
+  createFlightEval: [/id: "create-flight-eval"/, /type: "createFlightEval"/],
   openLastPrompt: [/id: "open-last-prompt"/, /type: "openLastPrompt"/],
   attachFiles: [/id: "attach-files"/, /type: "attachFiles"/],
   cleanWorkspaceState: [/id: "clean-workspace-state"/, /type: "cleanWorkspaceState"/],
@@ -384,12 +412,21 @@ describe("webview contract", () => {
     assert.match(surface, /acceptDefaultBtn\.classList\.toggle\("hidden", noAction\)/);
   });
 
-  test("uses compact status controls and names safe auto-advance and Claude fanout precisely", () => {
+  test("uses compact status controls and names agent-default auto-advance and Claude fanout precisely", () => {
     assert.match(html, /id="toggleRibbonsBtn"[^>]*>Hide status<\/button>/);
     assert.match(html, /data-ribbon-label="Verification"[^>]+aria-label="Collapse Verification status"/);
-    assert.match(surface, /Auto-advance safe defaults: On/);
+    assert.match(html, /id="autoAdvanceDefaultsBtn"[^>]*>Agent-default auto-advance: Off<\/button>/);
+    assert.match(surface, /Agent-default auto-advance: On/);
+    assert.match(surface, /Decision Packet defaults are agent-authored/);
+    assert.match(
+      surface,
+      /renderAutoAdvanceDefaults\(\s*!!state\.autoAdvanceActionableDefaultsConfigured,\s*!!state\.autoAdvanceActionableDefaultsEffective,\s*state\.isWorkspaceTrusted === true\s*\)/,
+    );
+    assert.match(surface, /On \(paused: untrusted workspace\)/);
+    assert.match(surface, /Click to revoke/i);
     assert.match(surface, /Toggle Claude Worker Fanout/);
     assert.match(surface, /does not add independent Hydra heads/);
+    assert.doesNotMatch(surface, /safe defaults/i);
     assert.doesNotMatch(surface, />Auto Accept: (?:On|Off)</);
   });
 
@@ -701,5 +738,56 @@ describe("webview contract", () => {
     assert.match(surface, /vscode\.postMessage\(\{ type: "confirmHandoff", action: [^}]+\}\)/);
     assert.match(surface, /vscode\.postMessage\(\{ type: "dismissHandoff" \}\)/);
     assert.match(surface, /vscode\.postMessage\(\{ type: "previewHandoff" \}\)/);
+  });
+
+  test("renders an accessible exact-hash Mission lifecycle inspector", () => {
+    assert.match(html, /data-view="mission"/);
+    assert.match(html, /<label class="mission-draft-label" for="missionDraft">/);
+    assert.match(html, /id="missionDraftStatus" role="status"/);
+    assert.match(html, /Agent candidates awaiting admission/);
+    assert.match(surface, /type: "proposeMissionContract"/);
+    assert.match(surface, /type: "admitMissionProposal"/);
+    assert.match(surface, /type: "confirmMissionContract"/);
+    assert.match(surface, /type: "dismissMissionContractProposal"/);
+    assert.match(surface, /type: "retireMissionContract"/);
+    assert.match(surface, /terms\.textContent = JSON\.stringify\(contract, null, 2\)/);
+    assert.match(surface, /missionDraftBaseBindingSha256 !== currentBase/);
+  });
+
+  test("renders an accessible exact-choice Flight inspector with fail-closed action gates", () => {
+    assert.match(html, /id="flightRail"[^>]+role="button"[^>]+tabindex="0"/);
+    assert.match(html, /id="flightTraceList"[^>]+aria-live="polite"/);
+    assert.match(html, /id="flightTraceDetail"[^>]+aria-live="polite"/);
+    assert.match(html, /\.flight-layout \{[\s\S]*grid-template-columns:/);
+    assert.match(surface, /postFlightChoice\("inspectFlightTrace"/);
+    assert.match(surface, /expectedRootSha256: trace\.expectedRootSha256/);
+    assert.match(surface, /expectedMissionBindingSha256: trace\.expectedMissionBindingSha256/);
+    assert.match(surface, /replay\.disabled = !trace\.replay \|\| !trace\.replay\.eligible/);
+    assert.match(surface, /evalButton\.disabled = !trace\.createEval \|\| !trace\.createEval\.eligible/);
+    assert.match(surface, /workspace Markdown mirror and discovery index are never used for eligibility/);
+    const rendererStart = scriptBody.indexOf("function renderFlightRecorder(");
+    const rendererEnd = scriptBody.indexOf("function addOptimisticUserMessage(", rendererStart);
+    const renderer = scriptBody.slice(rendererStart, rendererEnd);
+    assert.match(renderer, /replaceChildren\(/);
+    assert.match(renderer, /textContent =/);
+    assert.doesNotMatch(renderer, /innerHTML/);
+  });
+
+  test("renders an explicit keyboard-accessible human review resolution", () => {
+    assert.match(html, /<button id="resolveReviewBtn"[^>]*type="button"/);
+    assert.match(html, /Accept despite dissent/);
+    assert.match(surface, /resolveReviewBtn\.addEventListener\("click"/);
+    assert.match(surface, /type: "resolveReview"/);
+    assert.match(surface, /resolveReviewBtn\.classList\.toggle\("hidden", !state\.canResolveReview\)/);
+  });
+
+  test("usage cost tiles follow the seated roster and dynamic by-agent map", () => {
+    const start = scriptBody.indexOf("function renderUsagePanel(");
+    const end = scriptBody.indexOf("function usageStat(", start);
+    assert.ok(start >= 0 && end > start);
+    const body = scriptBody.slice(start, end);
+    assert.match(body, /for \(const head of currentRoster\)/);
+    assert.match(body, /Object\.keys\(agents\)/);
+    assert.doesNotMatch(body, /agents\.codex|agents\.claude/);
   });
 });

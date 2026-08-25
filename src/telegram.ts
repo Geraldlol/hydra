@@ -103,6 +103,18 @@ interface TelegramHttpResponse {
   json(): Promise<unknown>;
 }
 
+/** Keep Bot API credentials out of transcript/event errors and support state. */
+export function redactTelegramSecret(value: string, botToken: string): string {
+  const token = botToken.trim();
+  if (!token) return value;
+  let redacted = value.split(token).join("[telegram credential redacted]");
+  const encoded = encodeURIComponent(token);
+  if (encoded !== token) {
+    redacted = redacted.split(encoded).join("[telegram credential redacted]");
+  }
+  return redacted;
+}
+
 async function telegramRequest(url: string, options: TelegramRequestOptions): Promise<TelegramHttpResponse> {
   try {
     return await fetch(url, {
@@ -197,15 +209,26 @@ export async function sendTelegramMessage(
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      return { ok: false, status: res.status, error: text.slice(0, 500) || `HTTP ${res.status}` };
+      return {
+        ok: false,
+        status: res.status,
+        error: redactTelegramSecret(text.slice(0, 500), token) || `HTTP ${res.status}`,
+      };
     }
     const parsed = (await res.json().catch(() => ({}))) as { ok?: boolean; result?: { message_id?: number }; description?: string };
     if (parsed.ok === false) {
-      return { ok: false, status: res.status, error: parsed.description ?? "Telegram returned ok:false" };
+      return {
+        ok: false,
+        status: res.status,
+        error: redactTelegramSecret(parsed.description ?? "Telegram returned ok:false", token),
+      };
     }
     return { ok: true, status: res.status, messageId: parsed.result?.message_id };
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    return {
+      ok: false,
+      error: redactTelegramSecret(err instanceof Error ? err.message : String(err), token),
+    };
   }
 }
 
@@ -227,7 +250,12 @@ export async function getTelegramUpdates(
     const res = await telegramRequest(url, { method: "GET", signal: options.signal });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      return { ok: false, updates: [], status: res.status, error: text.slice(0, 500) || `HTTP ${res.status}` };
+      return {
+        ok: false,
+        updates: [],
+        status: res.status,
+        error: redactTelegramSecret(text.slice(0, 500), token) || `HTTP ${res.status}`,
+      };
     }
     const parsed = (await res.json().catch(() => ({}))) as {
       ok?: boolean;
@@ -235,7 +263,12 @@ export async function getTelegramUpdates(
       description?: string;
     };
     if (parsed.ok === false) {
-      return { ok: false, updates: [], status: res.status, error: parsed.description ?? "Telegram returned ok:false" };
+      return {
+        ok: false,
+        updates: [],
+        status: res.status,
+        error: redactTelegramSecret(parsed.description ?? "Telegram returned ok:false", token),
+      };
     }
     const updates = Array.isArray(parsed.result)
       ? parsed.result.map(parseTelegramUpdate).filter(isTelegramUpdate)
@@ -243,7 +276,11 @@ export async function getTelegramUpdates(
     return { ok: true, status: res.status, updates };
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") return { ok: false, updates: [], error: "aborted" };
-    return { ok: false, updates: [], error: err instanceof Error ? err.message : String(err) };
+    return {
+      ok: false,
+      updates: [],
+      error: redactTelegramSecret(err instanceof Error ? err.message : String(err), token),
+    };
   }
 }
 

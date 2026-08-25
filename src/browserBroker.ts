@@ -56,6 +56,37 @@ interface BrowserAuthorization {
   token: string;
 }
 
+export type BrowserFlightApprovalOutcome =
+  | "allowed"
+  | "denied"
+  | "expired"
+  | "revoked"
+  | "notRequired";
+
+export type BrowserFlightTelemetryEvent =
+  | {
+      readonly eventType: "requested";
+      readonly requestId: string;
+      readonly operation: BrowserOperation;
+      readonly targetSha256: string;
+      readonly approvalRequired: boolean;
+    }
+  | {
+      readonly eventType: "approval";
+      readonly requestId: string;
+      readonly outcome: BrowserFlightApprovalOutcome;
+    }
+  | {
+      readonly eventType: "finished";
+      readonly requestId: string;
+      readonly status: "succeeded" | "failed" | "cancelled";
+      readonly resultBytes: number;
+    };
+
+export type BrowserFlightTelemetrySink = (
+  event: BrowserFlightTelemetryEvent,
+) => void;
+
 interface JsonRpcRequest {
   jsonrpc?: unknown;
   id?: unknown;
@@ -80,6 +111,8 @@ export interface BrowserBrokerStatus {
 export class IntegratedBrowserBroker implements vscode.Disposable {
   private readonly tokens = new Map<string, AgentId>();
   private readonly issuedTokensByAgent = new Map<AgentId, Set<string>>();
+  private readonly flightTelemetryByToken = new Map<string, BrowserFlightTelemetrySink>();
+  private readonly flightInvocationsByToken = new Map<string, Set<Promise<void>>>();
   private readonly pagesByAgent = new Map<AgentId, Set<string>>();
   private readonly sharedPages = new Set<string>();
   private readonly activeCancellations = new Set<vscode.CancellationTokenSource>();
@@ -193,10 +226,16 @@ export class IntegratedBrowserBroker implements vscode.Disposable {
     await this.enableWithConfirmation();
   }
 
-  prepareAgentSpawn(agent: AgentId, agentKind: AgentKind, spawn: AgentSpawn): AgentSpawn {
+  prepareAgentSpawn(
+    agent: AgentId,
+    agentKind: AgentKind,
+    spawn: AgentSpawn,
+    flightTelemetry?: BrowserFlightTelemetrySink,
+  ): AgentSpawn {
     if (!this.enabled || vscode.workspace.isTrusted !== true || !this.endpoint || !this.mcpUrl) return spawn;
     const args = withBrowserMcpArgs(agentKind, spawn.args, this.mcpUrl);
     const token = this.issueToken(agent);
+    if (flightTelemetry) this.flightTelemetryByToken.set(token, flightTelemetry);
     const env = {
       ...(spawn.env ?? {}),
       HYDRA_BROWSER_ENDPOINT: this.endpoint,
@@ -215,6 +254,27 @@ export class IntegratedBrowserBroker implements vscode.Disposable {
     const token = spawn.env?.HYDRA_BROWSER_TOKEN;
     if (!token) return;
     this.revokeToken(token);
+  }
+
+  async waitForAgentSpawnDrain(
+    spawn: AgentSpawn,
+    timeoutMs = 5_000,
+  ): Promise<boolean> {
+    const token = spawn.env?.HYDRA_BROWSER_TOKEN;
+    if (!token) return true;
+    const pending = [...(this.flightInvocationsByToken.get(token) ?? [])];
+    if (pending.length === 0) return true;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        Promise.all(pending).then(() => true),
+        new Promise<false>((resolve) => {
+          timer = setTimeout(() => resolve(false), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   redactAgentText(_agent: AgentId, value: string): string {
@@ -270,6 +330,7 @@ export class IntegratedBrowserBroker implements vscode.Disposable {
     this.enabled = false;
     this.controlEpoch += 1;
     this.tokens.clear();
+    this.flightTelemetryByToken.clear();
     this.pagesByAgent.clear();
     this.sharedPages.clear();
     this.statusBar.dispose();
@@ -317,6 +378,7 @@ export class IntegratedBrowserBroker implements vscode.Disposable {
     this.enabled = false;
     this.controlEpoch += 1;
     this.tokens.clear();
+    this.flightTelemetryByToken.clear();
     this.pagesByAgent.clear();
     this.sharedPages.clear();
     this.statusBar.hide();
@@ -534,6 +596,22 @@ export class IntegratedBrowserBroker implements vscode.Disposable {
     if (this.pendingBrowserRequests >= MAX_PENDING_BROWSER_INVOCATIONS) {
       throw new Error("Hydra browser action queue is full; wait for an in-flight action to finish.");
     }
+    const flightRequestId = `browser-${crypto.randomUUID()}`;
+    const operation = request.operation as BrowserOperation;
+    // Capture the observational sink for the lifetime of this invocation.
+    // Token revocation deliberately removes future authorization, but the
+    // already-requested operation must still be able to record its cancelled
+    // terminal event instead of leaving an inaccurately open Flight child.
+    const flightTelemetry = this.flightTelemetryByToken.get(authorizationToken);
+    const targetSha256 = browserTargetSha256(operation, request.input);
+    const finishFlightInvocation = this.beginFlightInvocation(authorizationToken);
+    this.emitFlightTelemetry(flightTelemetry, {
+      eventType: "requested",
+      requestId: flightRequestId,
+      operation,
+      targetSha256,
+      approvalRequired: CONFIRMED_INTERACTIONS.has(operation),
+    });
     this.pendingBrowserRequests += 1;
     try {
       if (cancellation?.isCancellationRequested) throw new Error("The browser request was cancelled before confirmation.");
@@ -543,7 +621,29 @@ export class IntegratedBrowserBroker implements vscode.Disposable {
         }
         if (this.tokens.get(authorizationToken) !== agent) throw new Error("This browser dispatch token was revoked.");
         if (cancellation?.isCancellationRequested) throw new Error("The browser request was cancelled before it ran.");
-        await this.confirmInteraction(agent, request.operation as BrowserOperation, request.input, cancellation);
+        let approval: BrowserFlightApprovalOutcome;
+        try {
+          approval = await this.confirmInteraction(
+            agent,
+            operation,
+            request.input,
+            cancellation,
+          );
+        } catch (error) {
+          if (error instanceof BrowserInteractionApprovalError) {
+            this.emitFlightTelemetry(flightTelemetry, {
+              eventType: "approval",
+              requestId: flightRequestId,
+              outcome: error.outcome,
+            });
+          }
+          throw error;
+        }
+        this.emitFlightTelemetry(flightTelemetry, {
+          eventType: "approval",
+          requestId: flightRequestId,
+          outcome: approval,
+        });
         if (cancellation?.isCancellationRequested) throw new Error("The browser request was cancelled before it ran.");
         if (vscode.workspace.isTrusted !== true || !this.enabled || requestEpoch !== this.controlEpoch) {
           throw new Error("Hydra browser control is no longer trusted or enabled.");
@@ -562,9 +662,30 @@ export class IntegratedBrowserBroker implements vscode.Disposable {
         }
         pages.add(invocation.response.pageId);
       }
+      this.emitFlightTelemetry(flightTelemetry, {
+        eventType: "finished",
+        requestId: flightRequestId,
+        status: invocation.response.ok ? "succeeded" : "failed",
+        resultBytes: browserResultBytes(invocation.response),
+      });
       return invocation;
+    } catch (error) {
+      const revoked = this.tokens.get(authorizationToken) !== agent
+        || requestEpoch !== this.controlEpoch
+        || !this.enabled
+        || vscode.workspace.isTrusted !== true;
+      this.emitFlightTelemetry(flightTelemetry, {
+        eventType: "finished",
+        requestId: flightRequestId,
+        status: cancellation?.isCancellationRequested || revoked
+          ? "cancelled"
+          : "failed",
+        resultBytes: 0,
+      });
+      throw error;
     } finally {
       this.pendingBrowserRequests = Math.max(0, this.pendingBrowserRequests - 1);
+      finishFlightInvocation();
     }
   }
 
@@ -638,9 +759,14 @@ export class IntegratedBrowserBroker implements vscode.Disposable {
     operation: BrowserOperation,
     input: Record<string, unknown>,
     cancellation?: vscode.CancellationToken,
-  ): Promise<void> {
-    if (!CONFIRMED_INTERACTIONS.has(operation)) return;
-    if (cancellation?.isCancellationRequested) throw new Error(`Browser ${operation} confirmation was cancelled.`);
+  ): Promise<BrowserFlightApprovalOutcome> {
+    if (!CONFIRMED_INTERACTIONS.has(operation)) return "notRequired";
+    if (cancellation?.isCancellationRequested) {
+      throw new BrowserInteractionApprovalError(
+        "revoked",
+        `Browser ${operation} confirmation was cancelled.`,
+      );
+    }
     const verb = operation === "open"
       ? "open a new browser page"
       : operation === "navigate"
@@ -677,11 +803,22 @@ export class IntegratedBrowserBroker implements vscode.Disposable {
     let choice: string | undefined;
     try {
       choice = await Promise.race([confirmation, cancelled, timedOut]);
+    } catch (error) {
+      if (errorMessage(error).includes("expired")) {
+        throw new BrowserInteractionApprovalError("expired", errorMessage(error));
+      }
+      throw new BrowserInteractionApprovalError("revoked", errorMessage(error));
     } finally {
       if (confirmationTimeout) clearTimeout(confirmationTimeout);
       cancellationSubscription?.dispose();
     }
-    if (choice !== "Allow Once") throw new Error(`User denied browser ${operation}.`);
+    if (choice !== "Allow Once") {
+      throw new BrowserInteractionApprovalError(
+        "denied",
+        `User denied browser ${operation}.`,
+      );
+    }
+    return "allowed";
   }
 
   private async normalizeResult(
@@ -883,9 +1020,43 @@ export class IntegratedBrowserBroker implements vscode.Disposable {
   private revokeToken(token: string): void {
     const agent = this.tokens.get(token);
     this.tokens.delete(token);
+    this.flightTelemetryByToken.delete(token);
     for (const cancellation of this.cancellationsByToken.get(token) ?? []) cancellation.cancel();
     this.cancellationsByToken.delete(token);
     if (agent) this.pruneIssuedTokens(agent);
+  }
+
+  private emitFlightTelemetry(
+    sink: BrowserFlightTelemetrySink | undefined,
+    event: BrowserFlightTelemetryEvent,
+  ): void {
+    try {
+      sink?.(Object.freeze({ ...event }));
+    } catch {
+      // Flight projection is observational. Recorder failure must never change
+      // whether a browser action is authorized or executed.
+    }
+  }
+
+  private beginFlightInvocation(token: string): () => void {
+    let resolve!: () => void;
+    const pending = new Promise<void>((done) => {
+      resolve = done;
+    });
+    let invocations = this.flightInvocationsByToken.get(token);
+    if (!invocations) {
+      invocations = new Set<Promise<void>>();
+      this.flightInvocationsByToken.set(token, invocations);
+    }
+    invocations.add(pending);
+    let finished = false;
+    return () => {
+      if (finished) return;
+      finished = true;
+      resolve();
+      invocations?.delete(pending);
+      if (invocations?.size === 0) this.flightInvocationsByToken.delete(token);
+    };
   }
 
   private authenticate(header: string | undefined): BrowserAuthorization | undefined {
@@ -912,6 +1083,52 @@ export class IntegratedBrowserBroker implements vscode.Disposable {
       this.pendingInvocations = Math.max(0, this.pendingInvocations - 1);
     }
   }
+}
+
+class BrowserInteractionApprovalError extends Error {
+  constructor(
+    readonly outcome: Exclude<BrowserFlightApprovalOutcome, "allowed" | "notRequired">,
+    message: string,
+  ) {
+    super(message);
+    this.name = "BrowserInteractionApprovalError";
+  }
+}
+
+function browserTargetSha256(
+  operation: BrowserOperation,
+  input: Record<string, unknown>,
+): string {
+  return crypto.createHash("sha256")
+    .update("hydra.flight.browser-target.v1\u0000", "utf8")
+    .update(canonicalBrowserJson([operation, input]), "utf8")
+    .digest("hex");
+}
+
+function canonicalBrowserJson(value: unknown): string {
+  if (value === null || typeof value === "boolean" || typeof value === "string") {
+    return JSON.stringify(value);
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("Browser input contains a non-finite number.");
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalBrowserJson).join(",")}]`;
+  }
+  if (typeof value !== "object") {
+    throw new Error("Browser input contains a non-JSON value.");
+  }
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) =>
+    `${JSON.stringify(key)}:${canonicalBrowserJson(record[key])}`
+  ).join(",")}}`;
+}
+
+function browserResultBytes(response: BrowserBridgeResponse): number {
+  return typeof response.text === "string"
+    ? Buffer.byteLength(response.text, "utf8")
+    : 0;
 }
 
 function mcpRequestKey(token: string, id: unknown): string | undefined {

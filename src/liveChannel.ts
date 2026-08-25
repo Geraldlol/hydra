@@ -9,7 +9,7 @@ import type { AgentId } from "./phases";
 import type { Phase } from "./prompts";
 import { appendFileSafely, BoundedLineScanner, serializePerFile } from "./fileQueue";
 
-export type LiveChannelOutputMode = "plain" | "claudeStreamJson" | "codexJson";
+export type LiveChannelOutputMode = "plain" | "claudeStreamJson" | "codexJson" | "geminiJson";
 
 export interface LiveChannelWriter {
   /** Feed a raw stdout chunk. Writes are queued asynchronously and never throw from this call. */
@@ -51,7 +51,7 @@ export function liveChannelPath(workspaceRoot: string, requestId: string, agent:
 }
 
 export function createLiveChannelWriter(args: LiveChannelWriterArgs): LiveChannelWriter | undefined {
-  if (args.outputMode === "plain") return undefined;
+  if (args.outputMode === "plain" || args.outputMode === "geminiJson") return undefined;
   return args.outputMode === "claudeStreamJson" ? new ClaudeLiveChannelWriter(args) : new CodexLiveChannelWriter(args);
 }
 

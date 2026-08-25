@@ -127,8 +127,8 @@ describe("head-generated duel commitments", () => {
     assert.match(prompt, /do not modify, create, delete, or rename anything inside it/i);
     assert.match(prompt, /operating-system temp directory/i);
     assert.match(prompt, /Hydra compares bounded Git content plus project-entry metadata/i);
-    assert.match(prompt, /watches ordinary project mutations outside \.git and Hydra-owned \.hydra state/i);
-    assert.match(prompt, /change cancels the duel without Elo/i);
+    assert.match(prompt, /watches ordinary project mutations outside \.git and attributed Hydra-owned \.hydra state/i);
+    assert.match(prompt, /detected or unverifiable event cancels the duel without Elo/i);
     assert.match(prompt, /BEGIN UNTRUSTED SHARED EVIDENCE JSON STRING/);
     assert.match(prompt, /BEGIN UNTRUSTED DUEL DEFINITION JSON/);
     assert.match(prompt, /starting brief, not a closed-book limit/i);

@@ -15,6 +15,11 @@ import {
   type ArenaControllerProcessContext,
   type ArenaControllerProcessSpec,
 } from "../src/arenaController";
+import {
+  createArenaBrowserJourneyExecutionPlan,
+  createArenaVerificationExecutionPlan,
+} from "../src/arenaAcceptance";
+import { verifyArenaFlightProjection } from "../src/arenaFlightProjection";
 import type { ArenaFakeHeadRequest } from "../src/arenaFakeHeadCli";
 import {
   ArenaGitExecutor,
@@ -28,6 +33,7 @@ import {
 } from "../src/arenaRunManifest";
 import {
   arenaContestantArtifactPath,
+  FileArenaManifestStore,
   openFileArenaManifestStore,
 } from "../src/arenaStore";
 import {
@@ -36,11 +42,15 @@ import {
   sha256ArenaProcessUtf8,
 } from "../src/arenaProcessSupervisor";
 import { resolveGitExecutable } from "../src/gitExecutable";
+import { HANG_NET_TIMEOUT_MS } from "./testBudgets";
 
 const BASE_CONTENT = "Hydra Arena controller race base.\n";
 const HEAD_CONTENT = "Hydra Arena controller race result.\n";
 const UNTRACKED_CONTENT = "Hydra Arena controller race evidence.\n";
 const FIXTURE_PREFIX = "hydra-arena-controller-race-";
+const DUAL_HEAD_READY_TIMEOUT_MS = HANG_NET_TIMEOUT_MS * 2;
+const HANGING_HEAD_TIMEOUT_MS = HANG_NET_TIMEOUT_MS * 3;
+const DUAL_HEAD_RACE_TIMEOUT_MS = HANG_NET_TIMEOUT_MS * 6;
 
 const workspace = vscode.workspace as typeof vscode.workspace & {
   isTrusted?: boolean;
@@ -272,7 +282,7 @@ test(
         (await fs.readdir(artifactDirectory)).sort(),
         [
           "artifact-set.v1.json",
-          "inventory.v1.json",
+          "inventory.v2.json",
           "patch.bin",
         ],
       );
@@ -300,6 +310,23 @@ test(
     assert.equal(
       (leaseEvents.at(-1)?.payload as { readonly runId?: string }).runId,
       fixture.runId,
+    );
+    const retainedPatch = path.join(
+      arenaContestantArtifactPath(
+        fixture.privateRoot,
+        fixture.runId,
+        fixture.lock.contestants[0]!.contestantId,
+      ),
+      "patch.bin",
+    );
+    await fs.writeFile(retainedPatch, "tampered after cleanup\n", {
+      mode: 0o600,
+    });
+    await assert.rejects(
+      (await openFileArenaManifestStore(fixture.privateRoot)).load(
+        fixture.runId,
+      ),
+      /retained evidence .* missing or invalid/i,
     );
   },
 );
@@ -485,12 +512,92 @@ test(
 );
 
 test(
-  "aborting after both hanging heads edit yields quiescent evidence-bound cancellation and exact cleanup",
+  "a Stop after every contestant finished cannot rewrite the completed run",
   { timeout: 120_000 },
   async (t: TestContext) => {
-    const fixture = await createFixture(t, "cancel");
+    const fixture = await createFixture(t, "late-stop-after-finished");
     if (!fixture) return;
     const controller = new AbortController();
+    const originalAppend = FileArenaManifestStore.prototype.append;
+    let finishedCount = 0;
+    t.mock.method(
+      FileArenaManifestStore.prototype,
+      "append",
+      async function stopAfterEveryFinishedEvent(
+        this: FileArenaManifestStore,
+        ...args: Parameters<typeof originalAppend>
+      ) {
+        const event = await originalAppend.apply(this, args);
+        const payload = args[0].payload as {
+          readonly payloadType?: string;
+        };
+        if (payload.payloadType === "contestantFinished") {
+          finishedCount += 1;
+          if (finishedCount === fixture.lock.contestants.length) {
+            controller.abort(new Error("synthetic late local-user Stop"));
+          }
+        }
+        return event;
+      },
+    );
+
+    const result = await runArenaController({
+      runId: fixture.runId,
+      workspaceRoot: fixture.sourceRoot,
+      privateWorkspaceRoot: fixture.privateRoot,
+      repositoryLeaseRoot: fixture.leaseRoot,
+      gitResolutionRoot: process.cwd(),
+      lock: fixture.lock,
+      signal: controller.signal,
+      assertMissionAuthority: () => {},
+      createProcess: (context) => {
+        fixture.worktrees.add(context.worktree.worktreePath);
+        return fixture.processSpec(context, false);
+      },
+    });
+
+    assert.equal(finishedCount, fixture.lock.contestants.length);
+    assert.equal(controller.signal.aborted, true);
+    assert.equal(
+      result.contestantResults.every((contestant) =>
+        contestant.status === "succeeded"),
+      true,
+    );
+    assert.equal(result.replay.state, "cleanupComplete");
+    assert.deepEqual(result.replay.finalization?.payload, {
+      payloadType: "runFinalized",
+      outcome: "completed",
+      comparison: "comparable",
+      reasonCode: null,
+      evidenceMatrixSha256:
+        (result.replay.finalization?.payload as {
+          readonly evidenceMatrixSha256: string;
+        }).evidenceMatrixSha256,
+    });
+    assert.match(
+      (result.replay.finalization?.payload as {
+        readonly evidenceMatrixSha256?: string;
+      }).evidenceMatrixSha256 ?? "",
+      /^[a-f0-9]{64}$/u,
+    );
+  },
+);
+
+test(
+  "aborting after both hanging heads edit yields quiescent evidence-bound cancellation and exact cleanup",
+  { timeout: DUAL_HEAD_RACE_TIMEOUT_MS },
+  async (t: TestContext) => {
+    const controller = new AbortController();
+    let cleanupRun: Promise<unknown> | undefined;
+    // TestContext after hooks run in registration order. Register the drain
+    // before createFixture registers filesystem cleanup so an outer timeout or
+    // assertion failure cannot remove worktrees beneath a live controller.
+    t.after(async () => {
+      controller.abort(new Error("controller race test cleanup"));
+      await cleanupRun?.catch(() => undefined);
+    });
+    const fixture = await createFixture(t, "cancel");
+    if (!fixture) return;
     const worktrees = new Map<string, string>();
     const running = runArenaController({
       runId: fixture.runId,
@@ -499,7 +606,7 @@ test(
       repositoryLeaseRoot: fixture.leaseRoot,
       gitResolutionRoot: process.cwd(),
       lock: fixture.lock,
-      signal: controller.signal,
+      signal: AbortSignal.any([controller.signal, t.signal]),
       assertMissionAuthority: () => {},
       createProcess: (context) => {
         worktrees.set(
@@ -510,17 +617,49 @@ test(
         return fixture.processSpec(context, true);
       },
     });
+    cleanupRun = running;
+    let earlyFailure: { readonly error: unknown } | undefined;
+    void running.catch((error: unknown) => {
+      earlyFailure = { error };
+    });
+    let readinessDetail = "worktrees=0/2";
 
-    await waitFor(async () => {
-      if (worktrees.size !== 2) return false;
-      return (
-        await Promise.all([...worktrees.values()].map(async (worktreePath) =>
-          await readIfPresent(path.join(worktreePath, "fixture.txt"))
-            === HEAD_CONTENT
-          && await readIfPresent(path.join(worktreePath, "evidence.txt"))
-            === UNTRACKED_CONTENT))
-      ).every(Boolean);
-    }, "both fake heads to receive stdin and finish their edits");
+    try {
+      await waitFor(async () => {
+        if (earlyFailure) throw earlyFailure.error;
+        const states = await Promise.all([...worktrees.entries()].map(
+          async ([contestantId, worktreePath]) => {
+            const [fixtureBody, evidenceBody] = await Promise.all([
+              readIfPresent(path.join(worktreePath, "fixture.txt")),
+              readIfPresent(path.join(worktreePath, "evidence.txt")),
+            ]);
+            const fixtureState = fixtureBody === undefined
+              ? "missing"
+              : fixtureBody === HEAD_CONTENT ? "expected" : "other";
+            const evidenceState = evidenceBody === undefined
+              ? "missing"
+              : evidenceBody === UNTRACKED_CONTENT ? "expected" : "other";
+            return {
+              ready: fixtureState === "expected" && evidenceState === "expected",
+              summary: `${contestantId}:fixture=${fixtureState},evidence=${evidenceState}`,
+            };
+          },
+        ));
+        readinessDetail = `worktrees=${worktrees.size}/2; ${
+          states.map((state) => state.summary).join("; ") || "no contestants dispatched"
+        }`;
+        return worktrees.size === 2 && states.every((state) => state.ready);
+      }, () => (
+        `both fake heads to receive stdin and finish their edits (${readinessDetail})`
+      ), DUAL_HEAD_READY_TIMEOUT_MS, 100);
+    } catch (error) {
+      // A failed readiness assertion must not leave the controller running
+      // while test hooks remove its worktrees or the next test installs global
+      // prototype mocks. Abort and drain before surfacing the original error.
+      controller.abort(error);
+      await running.catch(() => undefined);
+      throw error;
+    }
     controller.abort(new Error("synthetic local-user Stop"));
     const result = await running;
 
@@ -568,9 +707,9 @@ test(
         (await fs.readdir(artifactDirectory)).sort(),
         [
           "artifact-set.v1.json",
-          "inventory.v1.json",
+          "inventory.v2.json",
           "patch.bin",
-          "untracked.v1.bin",
+          "untracked.v2.bin",
         ],
       );
       const worktreePath = worktrees.get(contestant.contestantId);
@@ -615,6 +754,250 @@ test(
       (leaseEvents.at(-1)?.payload as { readonly runId?: string }).runId,
       fixture.runId,
     );
+  },
+);
+
+test(
+  "a source mutation while postEvidence publication resolves is sealed as compromised",
+  { timeout: 120_000 },
+  async (t: TestContext) => {
+    const controller = new AbortController();
+    let cleanupRun: Promise<unknown> | undefined;
+    // Drain production work before createFixture removes any worktree state.
+    t.after(async () => {
+      controller.abort(new Error("controller race test cleanup"));
+      await cleanupRun?.catch(() => undefined);
+    });
+    const fixture = await createFixture(t, "post-evidence-publication");
+    if (!fixture) return;
+    const originalAppend = FileArenaManifestStore.prototype.append;
+    let injected = false;
+    t.mock.method(
+      FileArenaManifestStore.prototype,
+      "append",
+      async function injectDuringPublication(
+        this: FileArenaManifestStore,
+        ...args: Parameters<typeof originalAppend>
+      ) {
+        const event = await originalAppend.apply(this, args);
+        const payload = args[0].payload as {
+          readonly observationKind?: string;
+        };
+        if (!injected && payload.observationKind === "postEvidence") {
+          injected = true;
+          await fs.writeFile(
+            path.join(fixture.sourceRoot, "fixture.txt"),
+            "mutated while postEvidence append resolved\n",
+            "utf8",
+          );
+        }
+        return event;
+      },
+    );
+
+    const running = runArenaController({
+      runId: fixture.runId,
+      workspaceRoot: fixture.sourceRoot,
+      privateWorkspaceRoot: fixture.privateRoot,
+      repositoryLeaseRoot: fixture.leaseRoot,
+      gitResolutionRoot: process.cwd(),
+      lock: fixture.lock,
+      signal: AbortSignal.any([controller.signal, t.signal]),
+      assertMissionAuthority: () => {},
+      createProcess: (context) => {
+        fixture.worktrees.add(context.worktree.worktreePath);
+        return fixture.processSpec(context, false);
+      },
+    });
+    cleanupRun = running;
+    const result = await running;
+
+    assert.equal(injected, true);
+    assert.equal(result.replay.state, "cleanupComplete");
+    assert.equal(result.replay.compromised, true);
+    assert.equal(result.replay.promotionEligible, false);
+    assert.equal(
+      (result.replay.finalization?.payload as { comparison?: string })
+        .comparison,
+      "compromised",
+    );
+    const terminalObservation = result.replay.mainWorkspaceObservations.at(-1)
+      ?.payload as {
+        readonly observationKind?: string;
+        readonly status?: string;
+        readonly publicationOfEventSha256?: string;
+      };
+    assert.equal(terminalObservation.observationKind, "publicationSeal");
+    assert.equal(terminalObservation.status, "changed");
+    assert.match(
+      terminalObservation.publicationOfEventSha256 ?? "",
+      /^[a-f0-9]{64}$/u,
+    );
+  },
+);
+
+test(
+  "an ignored file created after capture cannot cross the evidence publication gap",
+  { timeout: 120_000 },
+  async (t: TestContext) => {
+    const fixture = await createFixture(t, "ignored-publication-gap");
+    if (!fixture) return;
+    const originalCapture =
+      ArenaGitExecutor.prototype.captureOwnedEvidenceState;
+    let injected = false;
+    t.mock.method(
+      ArenaGitExecutor.prototype,
+      "captureOwnedEvidenceState",
+      async function injectedIgnoredFile(
+        this: ArenaGitExecutor,
+        ...args: Parameters<typeof originalCapture>
+      ) {
+        const state = await originalCapture.apply(this, args);
+        if (!injected) {
+          injected = true;
+          await fs.writeFile(
+            path.join(args[0].worktreePath, "late-output.ignored"),
+            "created after staged evidence capture\n",
+            "utf8",
+          );
+        }
+        return state;
+      },
+    );
+
+    await assert.rejects(
+      runArenaController({
+        runId: fixture.runId,
+        workspaceRoot: fixture.sourceRoot,
+        privateWorkspaceRoot: fixture.privateRoot,
+        repositoryLeaseRoot: fixture.leaseRoot,
+        gitResolutionRoot: process.cwd(),
+        lock: fixture.lock,
+        assertMissionAuthority: () => {},
+        createProcess: (context) => {
+          fixture.worktrees.add(context.worktree.worktreePath);
+          return fixture.processSpec(context, false);
+        },
+      }),
+      /refuses ignored contestant files/i,
+    );
+    assert.equal(injected, true);
+  },
+);
+
+test(
+  "locked verification and browser plans execute in every contestant worktree and project to Flight",
+  { timeout: 120_000 },
+  async (t: TestContext) => {
+    const fixture = await createFixture(t, "acceptance-flight");
+    if (!fixture) return;
+    const verificationPlan = createArenaVerificationExecutionPlan({
+      checkId: "locked-check",
+      command: "hydra-test --locked-check",
+      controlSha256: digest("locked-check-control"),
+      timeoutMs: 30_000,
+      maxOutputChars: 8_192,
+    });
+    const browserPlan = createArenaBrowserJourneyExecutionPlan({
+      journeyId: "locked-journey",
+      journeyDefinitionSha256: digest("locked-journey-definition"),
+      timeoutMs: 30_000,
+    });
+    const lock: ArenaRunLockedPayload = {
+      ...fixture.lock,
+      verificationChecks: [{
+        checkId: verificationPlan.checkId,
+        planSha256: verificationPlan.planSha256,
+      }],
+      browserJourneys: [{
+        journeyId: browserPlan.journeyId,
+        planSha256: browserPlan.planSha256,
+      }],
+    };
+    const worktrees = new Map<string, string>();
+    const verifiedWorktrees: string[] = [];
+    const browserWorktrees: string[] = [];
+
+    const result = await runArenaController({
+      runId: fixture.runId,
+      workspaceRoot: fixture.sourceRoot,
+      privateWorkspaceRoot: fixture.privateRoot,
+      repositoryLeaseRoot: fixture.leaseRoot,
+      gitResolutionRoot: process.cwd(),
+      lock,
+      verificationPlans: [verificationPlan],
+      browserJourneyPlans: [browserPlan],
+      assertMissionAuthority: () => {},
+      createProcess: (context) => {
+        worktrees.set(
+          context.contestant.contestantId,
+          context.worktree.worktreePath,
+        );
+        fixture.worktrees.add(context.worktree.worktreePath);
+        return fixture.processSpec(context, false);
+      },
+      executeVerification: async (execution) => {
+        verifiedWorktrees.push(execution.worktreePath);
+        assert.equal(execution.command, verificationPlan.command);
+        return {
+          exitCode: 0,
+          timedOut: false,
+          cancelled: false,
+          durationMs: 5,
+          stdout: { bytes: 0, sha256: digest("") },
+          stderr: { bytes: 0, sha256: digest("") },
+          terminationConfirmed: true,
+          quiescenceReceiptSha256: digest(
+            `verification-quiescence:${execution.worktreePath}`,
+          ),
+        };
+      },
+      executeBrowserJourney: async (execution) => {
+        browserWorktrees.push(execution.worktreePath);
+        assert.equal(
+          execution.journeyDefinitionSha256,
+          browserPlan.journeyDefinitionSha256,
+        );
+        return {
+          status: "passed",
+          durationMs: 7,
+          actionCount: 2,
+          screenshotCount: 1,
+          executionStarted: true,
+          brokerReceiptSha256: digest(
+            `browser-broker:${execution.worktreePath}`,
+          ),
+          quiescenceReceiptSha256: digest(
+            `browser-quiescence:${execution.worktreePath}`,
+          ),
+        };
+      },
+    });
+
+    const expectedWorktrees = [...worktrees.values()].sort();
+    assert.deepEqual(verifiedWorktrees.sort(), expectedWorktrees);
+    assert.deepEqual(browserWorktrees.sort(), expectedWorktrees);
+    assert.equal(result.flightProjectionComplete, true);
+    assert.equal(
+      (result.replay.finalization?.payload as { readonly comparison?: string })
+        .comparison,
+      "comparable",
+    );
+    assert.equal(
+      result.replay.contestants.every((contestant) =>
+        contestant.verifications[0]?.attempts.length === 1
+        && contestant.browserJourneys[0]?.attempts.length === 1),
+      true,
+    );
+    const acceptanceFiles = await listPrivateFiles(path.join(
+      fixture.privateRoot,
+      "arena",
+      "support",
+      "acceptance",
+      fixture.runId,
+    ));
+    assert.equal(acceptanceFiles.length, lock.contestants.length * 2);
+    await verifyArenaFlightProjection(fixture.privateRoot, result.replay);
   },
 );
 
@@ -714,7 +1097,10 @@ async function createFixture(
         contextSha256: digest(
           `${runId}:${context.contestant.contestantId}:context`,
         ),
-        timeoutMs: 30_000,
+        // Hanging heads are stopped by the race under test. Their own timeout
+        // must outlive two-head Windows dispatch/readiness contention so it
+        // cannot win the race and change the asserted outcome.
+        timeoutMs: hang ? HANGING_HEAD_TIMEOUT_MS : HANG_NET_TIMEOUT_MS,
         bundledHelper: {
           scriptPath: fakeHelper,
           scriptFileIdentitySha256: fakeHelperIdentitySha256,
@@ -796,7 +1182,12 @@ async function initializeRepository(
     BASE_CONTENT,
     "utf8",
   );
-  await runGit(git, sourceRoot, ["add", "--", "fixture.txt"]);
+  await fs.writeFile(
+    path.join(sourceRoot, ".gitignore"),
+    "*.ignored\n",
+    "utf8",
+  );
+  await runGit(git, sourceRoot, ["add", "--", ".gitignore", "fixture.txt"]);
   await runGit(
     git,
     sourceRoot,
@@ -872,14 +1263,17 @@ async function readLeaseEvents(
 
 async function waitFor(
   predicate: () => Promise<boolean>,
-  label: string,
+  label: string | (() => string),
+  timeoutMs = HANG_NET_TIMEOUT_MS,
+  pollMs = 25,
 ): Promise<void> {
-  const deadline = Date.now() + 30_000;
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await predicate()) return;
-    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    await new Promise<void>((resolve) => setTimeout(resolve, pollMs));
   }
-  throw new Error(`Timed out waiting for ${label}.`);
+  const detail = typeof label === "function" ? label() : label;
+  throw new Error(`Timed out waiting for ${detail}.`);
 }
 
 async function readIfPresent(filePath: string): Promise<string | undefined> {

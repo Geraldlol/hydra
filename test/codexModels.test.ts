@@ -11,6 +11,7 @@ import {
   parseCodexDebugModels,
   runCodexDebugModels,
 } from "../src/codexModels";
+import { WINDOWS_PROCESS_TREE_JOB_BIND_TIMEOUT_MS } from "../src/processTreeBudgets";
 
 describe("parseCodexDebugModels", () => {
   test("extracts slug + display + reasoning + API support, drops base_instructions blob", () => {
@@ -133,10 +134,23 @@ describe("runCodexDebugModels", () => {
     );
   });
 
-  test("timeout kills a model-discovery grandchild before rejecting", async () => {
+  test("timeout kills a model-discovery grandchild before rejecting", async (t) => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-codex-model-tree-"));
     const pidFile = path.join(dir, "grandchild.pid");
-    const timeoutMs = 2_000;
+    let grandchildPid = 0;
+    t.after(async () => {
+      if (grandchildPid > 0) {
+        try {
+          process.kill(grandchildPid, "SIGKILL");
+        } catch {
+          // The verified teardown already removed it.
+        }
+      }
+      await fs.rm(dir, { recursive: true, force: true });
+    });
+    const timeoutMs = process.platform === "win32"
+      ? WINDOWS_PROCESS_TREE_JOB_BIND_TIMEOUT_MS + 2_000
+      : 2_000;
     const grandchildCode = "setInterval(() => {}, 1000);";
     const command = await fakeCodexCommand(
       dir,
@@ -154,9 +168,57 @@ describe("runCodexDebugModels", () => {
       runCodexDebugModels(command, { ...process.env }, timeoutMs),
       new RegExp(`timed out after ${timeoutMs}ms`)
     );
-    const grandchildPid = Number(await fs.readFile(pidFile, "utf8"));
+    grandchildPid = Number(await fs.readFile(pidFile, "utf8"));
     assert.equal(Number.isInteger(grandchildPid) && grandchildPid > 0, true);
     assert.equal(await waitForProcessExit(grandchildPid), true, "grandchild remained alive after model discovery rejected");
+  });
+
+  test("POSIX timeout force-kills a grandchild that ignores SIGTERM after its root closes", async (t) => {
+    if (process.platform === "win32") {
+      t.skip("POSIX process-group signal semantics");
+      return;
+    }
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-codex-model-stubborn-tree-"));
+    const pidFile = path.join(dir, "grandchild.pid");
+    let grandchildPid = 0;
+    t.after(async () => {
+      if (grandchildPid > 0) {
+        try {
+          process.kill(grandchildPid, "SIGKILL");
+        } catch {
+          // The verified process-group teardown already removed it.
+        }
+      }
+      await fs.rm(dir, { recursive: true, force: true });
+    });
+    const grandchildCode = [
+      'process.on("SIGTERM", () => {});',
+      "setInterval(() => {}, 1000);",
+    ].join("");
+    const command = await fakeCodexCommand(
+      dir,
+      [
+        'const cp = require("node:child_process");',
+        'const fs = require("node:fs");',
+        `const child = cp.spawn(${JSON.stringify(process.execPath)}, ["-e", ${JSON.stringify(grandchildCode)}], { stdio: "ignore" });`,
+        `fs.writeFileSync(${JSON.stringify(pidFile)}, String(child.pid));`,
+        "setInterval(() => {}, 1000);",
+      ].join("\n"),
+      "stubborn-tree",
+    );
+    const timeoutMs = 500;
+
+    await assert.rejects(
+      runCodexDebugModels(command, { ...process.env }, timeoutMs),
+      new RegExp(`timed out after ${timeoutMs}ms`),
+    );
+    grandchildPid = Number(await fs.readFile(pidFile, "utf8"));
+    assert.equal(Number.isInteger(grandchildPid) && grandchildPid > 0, true);
+    assert.equal(
+      await waitForProcessExit(grandchildPid),
+      true,
+      "SIGTERM-resistant grandchild survived after model discovery rejected",
+    );
   });
 
   test("refuses an oversized cached model snapshot", async () => {

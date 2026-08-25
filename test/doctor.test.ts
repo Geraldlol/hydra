@@ -204,6 +204,8 @@ describe("Hydra Doctor", () => {
       "telegramBotToken",
       "telegramChatId",
       "telegramInboundPollingEnabled",
+      "telegramLiveSteeringEnabled",
+      "telegramLiveSteeringCommandPrefix",
       "telegramInboundCommandPrefix",
       "telegramInboundPollIntervalSeconds",
       "manyHeadsClaudeWorkerCount",

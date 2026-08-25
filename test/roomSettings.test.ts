@@ -8,9 +8,12 @@ import {
   autoScorePassingBuilds,
   autoSkipCloserOnAgreement,
   autoVerifyAfterBuild,
+  configuredAutoAdvanceActionableDefaults,
   manyHeadsMode,
   normalizeRoomRoster,
   preferTerminalBridgeOnStart,
+  reviewConvergence,
+  reviewParticipation,
   roomRoster,
   shouldClearLegacyAgentTimeout,
   workspaceExecutionControlsAllowed,
@@ -53,6 +56,68 @@ describe("room settings", () => {
     } finally {
       if (previous === undefined) delete config.roomRoster;
       else config.roomRoster = previous;
+    }
+  });
+
+  test("reads review convergence and participation with safe fallbacks", () => {
+    const config = (vscode as unknown as { currentConfig: Record<string, unknown> }).currentConfig;
+    const previousConvergence = config.reviewConvergence;
+    const previousParticipation = config.reviewParticipation;
+    try {
+      config.reviewConvergence = "majority";
+      config.reviewParticipation = "single";
+      assert.equal(reviewConvergence(), "majority");
+      assert.equal(reviewParticipation(), "serial");
+
+      config.reviewConvergence = "invented";
+      config.reviewParticipation = "invented";
+      assert.equal(reviewConvergence(), "human");
+      assert.equal(reviewParticipation(), "all");
+    } finally {
+      if (previousConvergence === undefined) delete config.reviewConvergence;
+      else config.reviewConvergence = previousConvergence;
+      if (previousParticipation === undefined) delete config.reviewParticipation;
+      else config.reviewParticipation = previousParticipation;
+    }
+  });
+
+  test("defaults agent-default auto-advance off while preserving an explicit trusted opt-in", () => {
+    const workspace = vscode.workspace as typeof vscode.workspace & { isTrusted?: boolean };
+    const originalTrust = Object.getOwnPropertyDescriptor(workspace, "isTrusted");
+    const config = (vscode as unknown as { currentConfig: Record<string, unknown> }).currentConfig;
+    const previous = config.autoAdvanceActionableDefaults;
+    try {
+      Object.defineProperty(workspace, "isTrusted", { configurable: true, writable: true, value: true });
+      delete config.autoAdvanceActionableDefaults;
+      assert.equal(configuredAutoAdvanceActionableDefaults(), false);
+      assert.equal(autoAdvanceActionableDefaults(), false);
+
+      config.autoAdvanceActionableDefaults = true;
+      assert.equal(configuredAutoAdvanceActionableDefaults(), true);
+      assert.equal(autoAdvanceActionableDefaults(), true);
+
+      config.autoAdvanceActionableDefaults = false;
+      assert.equal(configuredAutoAdvanceActionableDefaults(), false);
+      assert.equal(autoAdvanceActionableDefaults(), false);
+
+      for (const malformed of ["true", "false", 1, { enabled: true }, [true]]) {
+        config.autoAdvanceActionableDefaults = malformed;
+        assert.equal(
+          configuredAutoAdvanceActionableDefaults(),
+          false,
+          `only the literal boolean true may arm auto-advance; rejected ${JSON.stringify(malformed)}`,
+        );
+        assert.equal(
+          autoAdvanceActionableDefaults(),
+          false,
+          `only the literal boolean true may enable auto-advance; rejected ${JSON.stringify(malformed)}`,
+        );
+      }
+    } finally {
+      if (previous === undefined) delete config.autoAdvanceActionableDefaults;
+      else config.autoAdvanceActionableDefaults = previous;
+      if (originalTrust) Object.defineProperty(workspace, "isTrusted", originalTrust);
+      else delete (workspace as unknown as { isTrusted?: boolean }).isTrusted;
     }
   });
 

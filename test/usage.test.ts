@@ -314,6 +314,23 @@ describe("resolveModelPrices", () => {
     assert.equal(luna.inputPerMTok, 1);
     assert.equal(luna.outputPerMTok, 6);
   });
+
+  test("prices current Gemini aliases and stable concrete fallbacks", () => {
+    const pro = resolveModelPrices("gemini", "pro");
+    const currentPro = resolveModelPrices("gemini", "gemini-3.1-pro-preview");
+    const flash = resolveModelPrices("gemini", "flash");
+    const stableFlash = resolveModelPrices("gemini", "gemini-2.5-flash");
+    assert.deepEqual(pro, currentPro);
+    assert.equal(pro.outputPerMTok, 18);
+    assert.equal(flash.outputPerMTok, 9);
+    assert.equal(stableFlash.inputPerMTok, 0.3);
+    assert.equal(stableFlash.outputPerMTok, 2.5);
+    assert.deepEqual(
+      resolveModelPrices("claude", "flash"),
+      DEFAULT_PRICES.claude,
+      "Gemini's generic CLI aliases must not leak into other agent families",
+    );
+  });
 });
 
 describe("buildUsageRecord stores the model and prices accordingly", () => {

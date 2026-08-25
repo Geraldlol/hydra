@@ -132,6 +132,22 @@ export function createNativeSteeringRunner(
     };
 
     try {
+      const cancelledBeforeDispatch = options.signal.aborted;
+      const timedOutBeforeDispatch = timeoutDeadlineMs !== undefined
+        && timeoutDeadlineMs <= Date.now();
+      if (cancelledBeforeDispatch || timedOutBeforeDispatch) {
+        result = {
+          stdout: "",
+          stderr: cancelledBeforeDispatch
+            ? "Native steering was cancelled before provider submission; Hydra did not start a fallback request."
+            : "Native steering exhausted the run timeout before provider submission; Hydra did not start a fallback request.",
+          exitCode: null,
+          timedOut: !cancelledBeforeDispatch,
+          cancelled: cancelledBeforeDispatch,
+          timeoutMs: options.timeoutMs,
+        };
+        return result;
+      }
       if (codexPlan?.kind === "supported") {
         try {
           reportTransport(options, "codexAppServer");

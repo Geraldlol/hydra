@@ -408,6 +408,31 @@ function appendUnchangedObservation(
   );
 }
 
+function appendPublicationSeal(
+  builder: ManifestBuilder,
+  postEvidenceObservation: ArenaManifestEvent,
+): ArenaManifestEvent {
+  const published = postEvidenceObservation.payload as
+    ArenaMainWorkspaceObservedPayload;
+  return builder.append("arenaMainWorkspaceObserved", {
+    payloadType: "mainWorkspaceObserved",
+    observationKind: "publicationSeal",
+    monitorEpochId: MONITOR_EPOCH_ID,
+    monitorReceiptSha256: digest(
+      `monitor-publication-seal-${builder.records.length + 1}`,
+    ),
+    status: "unchanged",
+    sourceWorkspaceFingerprintSha256:
+      builder.lock.base.sourceWorkspaceFingerprintSha256,
+    repositoryControlSha256: builder.lock.base.repositoryControlSha256,
+    head: builder.lock.base.revision,
+    watcherChanged: false,
+    reasonCode: null,
+    publicationOfEventSha256: postEvidenceObservation.eventSha256,
+    publicationOfReceiptSha256: published.monitorReceiptSha256,
+  }, `event-main-publication-seal-${builder.records.length + 1}`);
+}
+
 function contestantStartedPayload(
   builder: ManifestBuilder,
   contestantId: string,
@@ -480,6 +505,7 @@ function completeComparableRun(builder = new ManifestBuilder()): ManifestBuilder
     completeContestant(builder, contestant.contestantId);
   }
   const postEvidenceObservation = appendUnchangedObservation(builder);
+  appendPublicationSeal(builder, postEvidenceObservation);
   const finalized: ArenaRunFinalizedPayload = {
     payloadType: "runFinalized",
     outcome: "completed",
@@ -638,8 +664,26 @@ describe("Hydra Arena run manifest", () => {
     payload.quiescenceReceiptSha256 = null;
     payload.quiescenceWorkspaceFingerprintSha256 = null;
     payload.artifactSetSha256 = arenaArtifactSetSha256(payload);
+    const initiallyRechained = rechain(forged);
+    const rebound = structuredClone(initiallyRechained) as
+      DeepMutable<ArenaManifestEvent>[];
+    const published = rebound.find((event) =>
+      event.type === "arenaMainWorkspaceObserved"
+      && (event.payload as ArenaMainWorkspaceObservedPayload)
+        .observationKind === "postEvidence")!;
+    const seal = rebound.find((event) =>
+      event.type === "arenaMainWorkspaceObserved"
+      && (event.payload as ArenaMainWorkspaceObservedPayload)
+        .observationKind === "publicationSeal")!;
+    (seal.payload as DeepMutable<ArenaMainWorkspaceObservedPayload>)
+      .publicationOfEventSha256 = published.eventSha256;
+    (seal.payload as DeepMutable<ArenaMainWorkspaceObservedPayload>)
+      .publicationOfReceiptSha256 = (
+      published.payload as ArenaMainWorkspaceObservedPayload
+      ).monitorReceiptSha256;
+    const rechained = rechain(rebound);
     assert.throws(
-      () => replayArenaManifest(rechain(forged)),
+      () => replayArenaManifest(rechained),
       /completed requires successful executions and durable complete evidence/,
     );
   });
@@ -805,6 +849,7 @@ describe("Hydra Arena run manifest", () => {
       reasonCode: "watcherChanged",
     }, "event-main-changed");
     const postEvidenceObservation = appendUnchangedObservation(compromised);
+    appendPublicationSeal(compromised, postEvidenceObservation);
     compromised.append("arenaRunFinalized", {
       payloadType: "runFinalized",
       outcome: "completed",
@@ -1459,6 +1504,44 @@ describe("Hydra Arena run manifest", () => {
     assert.throws(
       () => replayArenaManifest(builder.records),
       /duplicates the single final postEvidence observation/,
+    );
+  });
+
+  test("requires and authenticates the post-publication seal", () => {
+    const missing = new ManifestBuilder();
+    for (const contestant of missing.lock.contestants) {
+      completeContestant(missing, contestant.contestantId);
+    }
+    const postEvidence = appendUnchangedObservation(missing, "postEvidence");
+    missing.append("arenaRunFinalized", {
+      payloadType: "runFinalized",
+      outcome: "completed",
+      comparison: "comparable",
+      reasonCode: null,
+      evidenceMatrixSha256: evidenceMatrixForBuilder(missing, postEvidence),
+    }, "event-finalized-without-seal");
+    assert.throws(
+      () => replayArenaManifest(missing.records),
+      /completed requires a publication seal/,
+    );
+
+    const forged = new ManifestBuilder();
+    for (const contestant of forged.lock.contestants) {
+      completeContestant(forged, contestant.contestantId);
+    }
+    const forgedPostEvidence = appendUnchangedObservation(
+      forged,
+      "postEvidence",
+    );
+    const seal = appendPublicationSeal(forged, forgedPostEvidence);
+    const mutable = structuredClone(forged.records) as
+      DeepMutable<ArenaManifestEvent>[];
+    const mutableSeal = mutable.find((event) => event.eventId === seal.eventId)!;
+    (mutableSeal.payload as DeepMutable<ArenaMainWorkspaceObservedPayload>)
+      .publicationOfEventSha256 = digest("wrong-publication");
+    assert.throws(
+      () => replayArenaManifest(rechain(mutable)),
+      /does not bind the published postEvidence event and receipt/,
     );
   });
 

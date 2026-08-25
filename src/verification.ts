@@ -6,7 +6,10 @@ import * as path from "node:path";
 import { resolveGitExecutable } from "./gitExecutable";
 import { findExecutableOnPath, windowsSystemExecutable } from "./executablePath";
 import {
+  bindProcessTreeIdentity,
   quoteForCmd,
+  releaseUnconfirmedChildProcess,
+  spawnIdentityBoundProcess,
   stripAnsi,
   terminateProcessTree,
   TERMINATION_CONFIRM_WINDOW_MS,
@@ -435,13 +438,14 @@ export async function runVerificationCommand(options: VerificationRunOptions): P
   }
   return new Promise<VerificationResultWithCancel>((resolve) => {
     const processSpec = verificationProcessForCommand(options.command);
-    const child = cp.spawn(processSpec.command, processSpec.args, {
+    const child = spawnIdentityBoundProcess(processSpec.command, processSpec.args, {
       cwd: options.cwd,
       shell: processSpec.shell,
       windowsHide: true,
       env: process.env,
       detached: process.platform !== "win32",
     });
+    bindProcessTreeIdentity(child);
     let stdout = "";
     let stderr = "";
     let stdoutBytes = 0;
@@ -523,6 +527,7 @@ export async function runVerificationCommand(options: VerificationRunOptions): P
         failureBackstop = setTimeout(() => {
           terminationFailed = true;
           appendStderr("\n[Hydra did not observe the verification process close; it may still be running.]\n");
+          releaseUnconfirmedChildProcess(child);
           finish(null);
         }, TERMINATION_CONFIRM_WINDOW_MS);
       }, TERMINATION_FORCE_GRACE_MS);
@@ -610,7 +615,12 @@ export async function captureGitHead(
   const gitExecutable = await resolveGitExecutable(cwd);
   if (!gitExecutable) return undefined;
   return new Promise<string | undefined>((resolve) => {
-    const child = cp.spawn(gitExecutable, ["rev-parse", "HEAD"], { cwd, windowsHide: true, env: process.env });
+    const child = spawnIdentityBoundProcess(
+      gitExecutable,
+      ["rev-parse", "HEAD"],
+      { cwd, windowsHide: true, env: process.env },
+    );
+    bindProcessTreeIdentity(child);
     let out = "";
     let settled = false;
     const boundedTimeoutMs = Number.isFinite(timeoutMs)
@@ -618,6 +628,7 @@ export async function captureGitHead(
       : 30_000;
     const timer = setTimeout(() => {
       void terminateProcessTree(child, true).catch(() => undefined);
+      releaseUnconfirmedChildProcess(child);
       finish(undefined);
     }, boundedTimeoutMs);
     const finish = (sha: string | undefined) => {

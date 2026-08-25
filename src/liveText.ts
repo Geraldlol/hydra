@@ -13,7 +13,7 @@ import { parseClaudeEventLine } from "./claudeEvents";
 import { parseCodexEventLine, type AgentMessageItem } from "./codexEvents";
 import { BoundedLineScanner } from "./fileQueue";
 
-export type LiveTextOutputMode = "plain" | "claudeStreamJson" | "codexJson";
+export type LiveTextOutputMode = "plain" | "claudeStreamJson" | "codexJson" | "geminiJson";
 
 export interface LiveTextExtractor {
   /** Feed a raw stdout chunk; returns displayable text extracted from it ("" if none). */
@@ -23,9 +23,17 @@ export interface LiveTextExtractor {
 export function createLiveTextExtractor(mode: LiveTextOutputMode): LiveTextExtractor | undefined {
   if (mode === "claudeStreamJson") return new ClaudeLiveTextExtractor();
   if (mode === "codexJson") return new CodexLiveTextExtractor();
+  if (mode === "geminiJson") return SUPPRESS_LIVE_TEXT;
   // plain stdout is already displayable; callers forward it untransformed.
   return undefined;
 }
+
+// Gemini's `json` mode emits one complete envelope, not JSONL deltas. Showing
+// those bytes would flash the protocol object (including usage metadata) in
+// the room; completion replaces the suppressed stream with `response`.
+const SUPPRESS_LIVE_TEXT: LiveTextExtractor = Object.freeze({
+  push: (_chunk: string): string => "",
+});
 
 // CLI stdout is untrusted (prompt-injectable from repo files), and the
 // agents.ts MAX_AGENT_STDOUT_BYTES cap bounds only the accumulated RunResult -

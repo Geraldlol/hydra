@@ -16,6 +16,7 @@ import {
   getTelegramUpdates,
   sendTelegramMessage,
   type TelegramConfig,
+  type TelegramUpdate,
 } from "./telegram";
 import {
   acknowledgeTelegramInboxRecord,
@@ -113,6 +114,14 @@ export interface TelegramInboundTurnOutcome {
   deferred: boolean;
 }
 
+export type TelegramInboundSteeringOutcome =
+  | { readonly kind: "notSteering" }
+  | {
+      readonly kind: "handled";
+      readonly status: "accepted" | "duplicate" | "unavailable" | "rejected";
+      readonly targetCount: number;
+    };
+
 // Narrow dependency surface the controller needs from the panel. Keeping this
 // explicit (rather than handing over the whole panel) documents exactly what
 // the untrusted-input boundary touches and keeps the panel's god-object
@@ -142,6 +151,15 @@ export interface TelegramControllerDeps {
     opener: AgentId,
     options: { telegramChatId?: string }
   ): Promise<TelegramInboundTurnOutcome>;
+  /**
+   * Optional live-steering branch. It runs only after the shared poller has
+   * enforced the existing bot/chat/fromIsBot/sender gates and the durable
+   * routing record has selected this exact room session.
+   */
+  handleInboundSteering?(
+    update: TelegramUpdate,
+    botKey: string,
+  ): Promise<TelegramInboundSteeringOutcome>;
 }
 
 /**
@@ -236,6 +254,33 @@ export class TelegramController {
           await this.deps.appendSystemMessage("Telegram inbound ignored: empty routed command.");
           await acknowledgeTelegramInboxRecord(this.deps.telegramInboundStateFsPath(), record.id);
           if (this.isInboundRunActive(generation, runAbort)) this.deps.postState();
+          continue;
+        }
+        const steering = await this.deps.handleInboundSteering?.({
+          updateId: record.updateId,
+          message: { ...record.message, text: record.command },
+        }, record.botKey) ?? { kind: "notSteering" as const };
+        if (steering.kind === "handled") {
+          // Relay admission is durable and idempotent before this acknowledgement.
+          // A host crash after enqueue but before ack therefore re-enters as a
+          // duplicate relay sequence instead of repeating provider delivery.
+          await acknowledgeTelegramInboxRecord(this.deps.telegramInboundStateFsPath(), record.id);
+          const label = steering.status === "accepted"
+            ? `Hydra accepted live steering for ${steering.targetCount} active target(s).`
+            : steering.status === "duplicate"
+              ? "Hydra already accepted this live-steering update."
+              : steering.status === "unavailable"
+                ? "Hydra could not find one active steerable turn for this routed room."
+                : "Hydra rejected live steering because its explicit authorization policy is not valid.";
+          await this.deps.appendSystemMessage(
+            `Telegram live steering ${steering.status} (update_id=${record.updateId}, message_id=${record.message.messageId ?? "?"}).`,
+          );
+          const sent = await sendTelegramMessage({ ...cfg, chatId: record.message.chatId }, label);
+          if (!sent.ok) {
+            await this.deps.recordEvent("error", `Telegram live-steering receipt failed: ${sent.error ?? "unknown"}`, {
+              status: sent.status ?? null,
+            });
+          }
           continue;
         }
         // System-role transcript entries are trusted prompt context. Never copy

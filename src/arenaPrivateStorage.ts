@@ -41,15 +41,22 @@ export async function prepareArenaPrivateStorage(
 ): Promise<ArenaPrivateStorageBoundary> {
   const logicalPrivateRoot = path.resolve(privateWorkspaceRoot);
   await fs.mkdir(logicalPrivateRoot, { recursive: true, mode: 0o700 });
+  await enforcePrivateDirectoryPermissions(
+    logicalPrivateRoot,
+    "Arena private workspace root",
+  );
   const privateStat = await fs.lstat(logicalPrivateRoot);
   if (!privateStat.isDirectory() || privateStat.isSymbolicLink()) {
     throw new Error("Arena private workspace root must be a real directory.");
   }
   const realPrivateRoot = await fs.realpath(logicalPrivateRoot);
   const logicalRoot = path.join(logicalPrivateRoot, "arena");
-  await fs.mkdir(logicalRoot, { mode: 0o700 }).catch((error: unknown) => {
+  const privateParentBefore = await fs.lstat(logicalPrivateRoot);
+  try {
+    await fs.mkdir(logicalRoot, { mode: 0o700 });
+  } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-  });
+  }
   const rootStat = await fs.lstat(logicalRoot);
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
     throw new Error("Arena private storage root must be a real directory.");
@@ -59,7 +66,24 @@ export async function prepareArenaPrivateStorage(
     || samePath(realPrivateRoot, realRoot)) {
     throw new Error("Arena private storage root escapes its workspace storage.");
   }
-  await fs.chmod(logicalRoot, 0o700).catch(() => undefined);
+  await enforcePrivateDirectoryPermissions(
+    logicalRoot,
+    "Arena private storage root",
+  );
+  const privateParentAfter = await fs.lstat(logicalPrivateRoot);
+  if (!privateParentAfter.isDirectory()
+    || privateParentAfter.isSymbolicLink()
+    || !sameFileIdentity(privateParentBefore, privateParentAfter)) {
+    throw new Error("Arena private workspace root changed during initialization.");
+  }
+  // Repeat the parent flush even when the entry already exists. A prior
+  // creation may have committed the name and then surfaced a transient fsync
+  // failure; an exact retry must not silently forget that uncertain window.
+  await syncArenaDirectoryEntry(
+    logicalPrivateRoot,
+    directoryIdentity(privateParentBefore),
+    "Arena private workspace root",
+  );
 
   for (const directory of FIXED_ARENA_DIRECTORIES) {
     await createCheckedPrivateDirectory(realRoot, path.join(logicalRoot, directory));
@@ -98,19 +122,7 @@ export async function ensureArenaPrivateDirectory(
     assertPrivateSegment(segment);
     const candidate = path.join(current, segment);
     assertLexicalContainment(boundary.logicalRoot, candidate);
-    await fs.mkdir(candidate, { mode: 0o700 }).catch((error: unknown) => {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    });
-    const stat = await fs.lstat(candidate);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) {
-      throw new Error(`Arena private directory is linked or invalid: ${candidate}`);
-    }
-    const realCandidate = await fs.realpath(candidate);
-    if (!isPathWithin(boundary.realRoot, realCandidate)
-      || samePath(boundary.realRoot, realCandidate)) {
-      throw new Error(`Arena private directory escapes storage root: ${candidate}`);
-    }
-    await fs.chmod(candidate, 0o700).catch(() => undefined);
+    await createCheckedPrivateDirectory(boundary.realRoot, candidate);
     current = candidate;
   }
   await assertArenaPrivateDirectory(current, boundary);
@@ -136,6 +148,11 @@ export async function assertArenaPrivateDirectory(
         `Arena private directory component is linked or invalid: ${current}`,
       );
     }
+    assertPrivateDirectoryPermissions(
+      component,
+      current,
+      "Arena private directory component",
+    );
   }
   const realDirectory = await fs.realpath(absolute);
   if (!isPathWithin(boundary.realRoot, realDirectory)
@@ -160,6 +177,21 @@ export async function assertArenaPrivateBoundary(
     || lockStat.isSymbolicLink()) {
     throw new Error("Arena private storage boundary became linked or invalid.");
   }
+  assertPrivateDirectoryPermissions(
+    privateStat,
+    boundary.privateWorkspaceRoot,
+    "Arena private workspace root",
+  );
+  assertPrivateDirectoryPermissions(
+    rootStat,
+    boundary.logicalRoot,
+    "Arena private storage root",
+  );
+  assertPrivateDirectoryPermissions(
+    lockStat,
+    boundary.logicalLockRoot,
+    "Arena private lock root",
+  );
   const [realPrivate, realRoot, realLockRoot] = await Promise.all([
     fs.realpath(boundary.privateWorkspaceRoot),
     fs.realpath(boundary.logicalRoot),
@@ -209,9 +241,16 @@ async function createCheckedPrivateDirectory(
   realRoot: string,
   candidate: string,
 ): Promise<void> {
-  await fs.mkdir(candidate, { mode: 0o700 }).catch((error: unknown) => {
+  const parentPath = path.dirname(candidate);
+  const parentBefore = await fs.lstat(parentPath);
+  if (!parentBefore.isDirectory() || parentBefore.isSymbolicLink()) {
+    throw new Error(`Arena private directory parent is linked or invalid: ${parentPath}`);
+  }
+  try {
+    await fs.mkdir(candidate, { mode: 0o700 });
+  } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-  });
+  }
   const stat = await fs.lstat(candidate);
   if (!stat.isDirectory() || stat.isSymbolicLink()) {
     throw new Error(`Arena private directory is linked or invalid: ${candidate}`);
@@ -221,7 +260,24 @@ async function createCheckedPrivateDirectory(
     || samePath(realRoot, realCandidate)) {
     throw new Error(`Arena private directory escapes storage root: ${candidate}`);
   }
-  await fs.chmod(candidate, 0o700).catch(() => undefined);
+  await enforcePrivateDirectoryPermissions(
+    candidate,
+    "Arena private directory",
+  );
+  const parentAfter = await fs.lstat(parentPath);
+  if (!parentAfter.isDirectory()
+    || parentAfter.isSymbolicLink()
+    || !sameFileIdentity(parentBefore, parentAfter)) {
+    throw new Error(`Arena private directory parent changed: ${parentPath}`);
+  }
+  // EEXIST can be the retry after mkdir succeeded but the first parent fsync
+  // failed. Always repeat the authenticated parent flush before accepting the
+  // directory as durable.
+  await syncArenaDirectoryEntry(
+    parentPath,
+    directoryIdentity(parentBefore),
+    "Arena private directory parent",
+  );
 }
 
 function directoryIdentity(stat: Stats): ArenaDirectoryIdentity {
@@ -229,6 +285,33 @@ function directoryIdentity(stat: Stats): ArenaDirectoryIdentity {
     dev: String(stat.dev),
     ino: String(stat.ino),
   });
+}
+
+async function enforcePrivateDirectoryPermissions(
+  directory: string,
+  label: string,
+): Promise<void> {
+  try {
+    await fs.chmod(directory, 0o700);
+  } catch (error) {
+    if (process.platform !== "win32") throw error;
+  }
+  const stat = await fs.lstat(directory);
+  assertPrivateDirectoryPermissions(stat, directory, label);
+}
+
+function assertPrivateDirectoryPermissions(
+  stat: Stats,
+  directory: string,
+  label: string,
+): void {
+  if (process.platform === "win32") return;
+  if ((stat.mode & 0o077) !== 0) {
+    throw new Error(`${label} permissions are not private: ${directory}`);
+  }
+  if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+    throw new Error(`${label} is owned by another user: ${directory}`);
+  }
 }
 
 function sameDirectoryIdentity(
@@ -254,9 +337,21 @@ export async function createArenaPrivateFile(
   filePath: string,
   content: Buffer | string,
   boundary: ArenaPrivateStorageBoundary,
+  options: {
+    /**
+     * Use only when the caller has just performed a domain-specific,
+     * identity-bound recovery scan of this exact parent directory. Large
+     * append-only directories cannot use the generic 4,096-entry sweep.
+     */
+    readonly orphanCreationTempsAlreadyRecovered?: boolean;
+  } = {},
 ): Promise<void> {
   const absoluteFilePath = path.resolve(filePath);
   await assertArenaPrivateParent(absoluteFilePath, boundary);
+  await recoverInterruptedPrivatePublication(absoluteFilePath, boundary);
+  if (!options.orphanCreationTempsAlreadyRecovered) {
+    await recoverOrphanPrivateCreationTemps(absoluteFilePath, boundary);
+  }
   const parentPath = path.dirname(absoluteFilePath);
   const parentIdentity = await capturePrivateDirectoryIdentity(
     parentPath,
@@ -272,25 +367,24 @@ export async function createArenaPrivateFile(
   let handle: fs.FileHandle | undefined;
   let temporaryIdentity: Stats | undefined;
   let primaryError: unknown;
+  let identityError: unknown;
   try {
     handle = await fs.open(tmpPath, "wx", 0o600);
+    const opened = await handle.stat();
+    assertSafePrivateFile(opened, tmpPath);
+    temporaryIdentity = opened;
     await assertExpectedPrivateDirectory(
       parentPath,
       parentIdentity,
       boundary,
     );
-    const [opened, entry] = await Promise.all([
-      handle.stat(),
-      fs.lstat(tmpPath),
-    ]);
-    assertSafePrivateFile(opened, tmpPath);
+    const entry = await fs.lstat(tmpPath);
     assertSafePrivateFile(entry, tmpPath);
     if (!sameFileIdentity(opened, entry)) {
       throw new Error(
         `Arena private temporary file changed while opening: ${tmpPath}`,
       );
     }
-    temporaryIdentity = opened;
     await handle.writeFile(content);
     await handle.chmod(0o600).catch(() => undefined);
     await handle.sync();
@@ -372,6 +466,15 @@ export async function createArenaPrivateFile(
     await syncPrivateDirectory(parentPath, parentIdentity, boundary);
   } catch (error) {
     primaryError = error;
+    if (handle && !temporaryIdentity) {
+      try {
+        const opened = await handle.stat();
+        assertSafePrivateFile(opened, tmpPath);
+        temporaryIdentity = opened;
+      } catch (captureError) {
+        identityError = captureError;
+      }
+    }
   }
 
   let cleanupError: unknown;
@@ -404,18 +507,23 @@ export async function createArenaPrivateFile(
         absoluteFilePath,
         boundary,
       );
+      // The existing name may be the committed result of a prior attempt
+      // whose parent flush failed. Confirm the directory entry before callers
+      // inspect and accept an exact idempotent publication.
+      await syncPrivateDirectory(parentPath, parentIdentity, boundary);
     } catch (error) {
       cleanupError = error;
     }
   }
-  if (primaryError && cleanupError) {
+  const publicationErrors = [primaryError, identityError, cleanupError]
+    .filter((error): error is {} => error !== undefined);
+  if (publicationErrors.length > 1) {
     throw new AggregateError(
-      [primaryError, cleanupError],
+      publicationErrors,
       `Arena private file publication and cleanup failed: ${absoluteFilePath}`,
     );
   }
-  if (primaryError) throw primaryError;
-  if (cleanupError) throw cleanupError;
+  if (publicationErrors.length === 1) throw publicationErrors[0];
 }
 
 async function capturePrivateDirectoryIdentity(
@@ -450,6 +558,7 @@ function assertPrivatePublicationLink(stat: Stats, filePath: string): void {
       `Arena private publication link is linked or invalid: ${filePath}`,
     );
   }
+  assertPrivateFilePermissions(stat, filePath);
 }
 
 async function removeExpectedPrivateFile(
@@ -474,6 +583,11 @@ async function removeExpectedPrivateFile(
       );
     }
     await fs.unlink(filePath);
+    await syncPrivateDirectory(
+      parentPath,
+      parentIdentity,
+      boundary,
+    );
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
@@ -485,14 +599,34 @@ async function syncPrivateDirectory(
   boundary: ArenaPrivateStorageBoundary,
 ): Promise<void> {
   await assertExpectedPrivateDirectory(directory, expected, boundary);
+  await syncArenaDirectoryEntry(
+    directory,
+    expected,
+    "Arena private directory",
+  );
+  await assertExpectedPrivateDirectory(directory, expected, boundary);
+}
+
+/**
+ * Flush one already-authenticated directory entry update where the platform
+ * exposes a directory handle. Windows Node builds commonly reject directory
+ * handles/FlushFileBuffers; those documented errors preserve the prior
+ * file-fsync + atomic-publication behavior, while every other failure remains
+ * visible to the authority writer.
+ */
+export async function syncArenaDirectoryEntry(
+  directory: string,
+  expected: ArenaDirectoryIdentity,
+  label: string,
+): Promise<void> {
   let handle: fs.FileHandle;
   try {
     handle = await fs.open(directory, fsConstants.O_RDONLY);
   } catch (error) {
     // Windows does not expose a portable directory FlushFileBuffers handle
     // through Node. The file itself is fsynced before publication and the
-    // no-replace hard-link commit remains atomic there. Some POSIX file
-    // systems likewise report directory fsync as unsupported.
+    // no-replace hard-link commit remains atomic there. Other platforms keep
+    // surfacing directory-open and directory-fsync failures to the writer.
     if (isUnsupportedDirectorySyncError(error)) return;
     throw error;
   }
@@ -506,7 +640,7 @@ async function syncPrivateDirectory(
       || !sameFileIdentity(opened, entry)
       || !sameDirectoryIdentity(directoryIdentity(opened), expected)) {
       throw new Error(
-        `Arena private directory changed while syncing: ${directory}`,
+        `${label} changed while syncing: ${directory}`,
       );
     }
     try {
@@ -696,12 +830,193 @@ async function recoverInterruptedPrivatePublication(
   }
 }
 
+async function recoverOrphanPrivateCreationTemps(
+  filePath: string,
+  boundary: ArenaPrivateStorageBoundary,
+): Promise<void> {
+  const absoluteFilePath = path.resolve(filePath);
+  await assertArenaPrivateParent(absoluteFilePath, boundary);
+  const parentPath = path.dirname(absoluteFilePath);
+  const parentIdentity = await capturePrivateDirectoryIdentity(
+    parentPath,
+    boundary,
+  );
+  const pattern = privateTemporaryNamePattern(
+    path.basename(absoluteFilePath),
+  );
+  const directory = await fs.opendir(parentPath);
+  const candidates: Array<{
+    readonly name: string;
+    readonly publisherPid: number;
+  }> = [];
+  let seen = 0;
+  try {
+    for await (const entry of directory) {
+      seen += 1;
+      if (seen > MAX_PRIVATE_DIRECTORY_ENTRIES) {
+        throw new Error(
+          `Arena private directory exceeds its creation recovery scan limit: ${parentPath}`,
+        );
+      }
+      const match = pattern.exec(entry.name);
+      if (!match) continue;
+      if (!entry.isFile() || entry.isSymbolicLink()) {
+        throw new Error(
+          `Arena private creation temporary is linked or invalid: ${entry.name}`,
+        );
+      }
+      const publisherPid = Number(match[1]);
+      if (!Number.isSafeInteger(publisherPid)
+        || publisherPid <= 0
+        || publisherPid > 0x7fff_ffff) {
+        throw new Error(
+          `Arena private creation temporary has an invalid publisher: ${entry.name}`,
+        );
+      }
+      candidates.push({ name: entry.name, publisherPid });
+    }
+  } finally {
+    await directory.close().catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code !== "ERR_DIR_CLOSED") {
+        throw error;
+      }
+    });
+  }
+  candidates.sort((left, right) =>
+    Buffer.compare(Buffer.from(left.name, "utf8"), Buffer.from(right.name, "utf8")));
+  for (const candidate of candidates) {
+    if (!isProcessDefinitelyGone(candidate.publisherPid)) {
+      throw new Error(
+        `Arena private creation publisher may still be alive: ${candidate.name}`,
+      );
+    }
+    await assertExpectedPrivateDirectory(
+      parentPath,
+      parentIdentity,
+      boundary,
+    );
+    const temporaryPath = path.join(parentPath, candidate.name);
+    const temporary = await fs.lstat(temporaryPath);
+    if (temporary.isSymbolicLink()
+      || !temporary.isFile()
+      || temporary.nlink !== 1) {
+      throw new Error(
+        `Arena private creation temporary has an unsafe link count: ${candidate.name}`,
+      );
+    }
+    await removeExpectedPrivateFile(
+      temporaryPath,
+      temporary,
+      parentPath,
+      parentIdentity,
+      boundary,
+    );
+  }
+}
+
 function privateTemporaryNamePattern(fileName: string): RegExp {
   const escaped = fileName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(
     `^\\.${escaped}\\.([1-9][0-9]*)-${PRIVATE_TEMP_UUID_PATTERN}\\.tmp$`,
     process.platform === "win32" ? "i" : "",
   );
+}
+
+function privateReplacementTemporaryNamePatterns(fileName: string): RegExp[] {
+  const escaped = fileName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const flags = process.platform === "win32" ? "i" : "";
+  return [
+    new RegExp(
+      `^\\.${escaped}\\.replace\\.([1-9][0-9]*)-${PRIVATE_TEMP_UUID_PATTERN}\\.tmp$`,
+      flags,
+    ),
+    // Recover the pre-protocol spelling emitted by early segmented builds.
+    new RegExp(
+      `^${escaped}\\.([1-9][0-9]*)-${PRIVATE_TEMP_UUID_PATTERN}\\.tmp$`,
+      flags,
+    ),
+  ];
+}
+
+async function recoverInterruptedPrivateReplacements(
+  filePath: string,
+  boundary: ArenaPrivateStorageBoundary,
+): Promise<void> {
+  const absoluteFilePath = path.resolve(filePath);
+  await assertArenaPrivateParent(absoluteFilePath, boundary);
+  const parentPath = path.dirname(absoluteFilePath);
+  const parentIdentity = await capturePrivateDirectoryIdentity(
+    parentPath,
+    boundary,
+  );
+  const patterns = privateReplacementTemporaryNamePatterns(
+    path.basename(absoluteFilePath),
+  );
+  const directory = await fs.opendir(parentPath);
+  const candidates: Array<{
+    readonly name: string;
+    readonly publisherPid: number;
+  }> = [];
+  let seen = 0;
+  try {
+    for await (const entry of directory) {
+      seen += 1;
+      if (seen > MAX_PRIVATE_DIRECTORY_ENTRIES) {
+        throw new Error(
+          `Arena private directory exceeds its replacement recovery scan limit: ${parentPath}`,
+        );
+      }
+      const match = patterns
+        .map((pattern) => pattern.exec(entry.name))
+        .find((candidate) => candidate !== null);
+      if (!match) continue;
+      if (!entry.isFile() || entry.isSymbolicLink()) {
+        throw new Error(
+          `Arena private replacement temporary is linked or invalid: ${entry.name}`,
+        );
+      }
+      const publisherPid = Number(match[1]);
+      if (!Number.isSafeInteger(publisherPid)
+        || publisherPid <= 0
+        || publisherPid > 0x7fff_ffff) {
+        throw new Error(
+          `Arena private replacement temporary has an invalid publisher: ${entry.name}`,
+        );
+      }
+      candidates.push({ name: entry.name, publisherPid });
+    }
+  } finally {
+    await directory.close().catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code !== "ERR_DIR_CLOSED") {
+        throw error;
+      }
+    });
+  }
+
+  candidates.sort((left, right) =>
+    Buffer.compare(Buffer.from(left.name, "utf8"), Buffer.from(right.name, "utf8")));
+  for (const candidate of candidates) {
+    if (!isProcessDefinitelyGone(candidate.publisherPid)) {
+      throw new Error(
+        `Arena private replacement publisher may still be alive: ${candidate.name}`,
+      );
+    }
+    await assertExpectedPrivateDirectory(
+      parentPath,
+      parentIdentity,
+      boundary,
+    );
+    const temporaryPath = path.join(parentPath, candidate.name);
+    const temporary = await fs.lstat(temporaryPath);
+    assertSafePrivateFile(temporary, temporaryPath);
+    await removeExpectedPrivateFile(
+      temporaryPath,
+      temporary,
+      parentPath,
+      parentIdentity,
+      boundary,
+    );
+  }
 }
 
 function isProcessDefinitelyGone(pid: number): boolean {
@@ -805,48 +1120,143 @@ export async function writeArenaPrivateFileAtomically(
   boundary: ArenaPrivateStorageBoundary,
 ): Promise<void> {
   await assertArenaPrivateParent(filePath, boundary);
+  await recoverInterruptedPrivateReplacements(filePath, boundary);
   await recoverInterruptedPrivatePublication(filePath, boundary);
-  const tmpPath = `${filePath}.${process.pid}-${randomUUID()}.tmp`;
-  let destinationExists = false;
+  const parentPath = path.dirname(filePath);
+  const parentIdentity = await capturePrivateDirectoryIdentity(
+    parentPath,
+    boundary,
+  );
+  const tmpPath = path.join(
+    parentPath,
+    `.${path.basename(filePath)}.replace.${process.pid}-${randomUUID()}.tmp`,
+  );
+  const expectedBytes = Buffer.isBuffer(content)
+    ? content.byteLength
+    : Buffer.byteLength(content, "utf8");
+  let priorDestination: Stats | undefined;
   try {
-    const destination = await fs.lstat(filePath);
-    assertSafePrivateFile(destination, filePath);
-    destinationExists = true;
+    priorDestination = await fs.lstat(filePath);
+    assertSafePrivateFile(priorDestination, filePath);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   const handle = await fs.open(tmpPath, "wx", 0o600);
+  let temporaryIdentity: Stats | undefined;
+  let primaryError: unknown;
+  let identityError: unknown;
   try {
+    const opened = await handle.stat();
+    assertSafePrivateFile(opened, tmpPath);
+    temporaryIdentity = opened;
     await assertArenaPrivateParent(tmpPath, boundary);
-    const [opened, entry] = await Promise.all([
-      handle.stat(),
-      fs.lstat(tmpPath),
-    ]);
+    const entry = await fs.lstat(tmpPath);
     assertSafePrivateFile(opened, tmpPath);
     assertSafePrivateFile(entry, tmpPath);
     if (!sameFileIdentity(opened, entry)) {
       throw new Error(`Arena private temporary file changed while opening: ${tmpPath}`);
     }
     await handle.writeFile(content);
-    await handle.sync();
     await handle.chmod(0o600).catch(() => undefined);
-  } catch (error) {
-    await handle.close().catch(() => undefined);
-    await removeRegularPrivateFile(tmpPath).catch(() => undefined);
-    throw error;
-  }
-  await handle.close();
-  try {
-    await assertArenaPrivateParent(filePath, boundary);
-    if (destinationExists) {
+    await handle.sync();
+    const sealed = await handle.stat();
+    const sealedEntry = await fs.lstat(tmpPath);
+    assertSafePrivateFile(sealed, tmpPath);
+    assertSafePrivateFile(sealedEntry, tmpPath);
+    if (!sameFileIdentity(opened, sealed)
+      || !sameFileIdentity(sealed, sealedEntry)
+      || sealed.size !== expectedBytes) {
+      throw new Error(
+        `Arena private temporary replacement changed before publication: ${tmpPath}`,
+      );
+    }
+    await assertExpectedPrivateDirectory(
+      parentPath,
+      parentIdentity,
+      boundary,
+    );
+    const beforeRename = await fs.lstat(tmpPath);
+    assertSafePrivateFile(beforeRename, tmpPath);
+    if (!sameFileIdentity(sealed, beforeRename)
+      || beforeRename.size !== expectedBytes) {
+      throw new Error(
+        `Arena private temporary replacement changed before rename: ${tmpPath}`,
+      );
+    }
+    if (priorDestination) {
       const destination = await fs.lstat(filePath);
       assertSafePrivateFile(destination, filePath);
+      if (!sameFileIdentity(priorDestination, destination)) {
+        throw new Error(
+          `Arena private destination changed before replacement: ${filePath}`,
+        );
+      }
     }
     await fs.rename(tmpPath, filePath);
+    const [openedAfterRename, published] = await Promise.all([
+      handle.stat(),
+      fs.lstat(filePath),
+    ]);
+    assertSafePrivateFile(openedAfterRename, filePath);
+    assertSafePrivateFile(published, filePath);
+    if (!sameFileIdentity(sealed, openedAfterRename)
+      || !sameFileIdentity(openedAfterRename, published)
+      || published.size !== expectedBytes) {
+      throw new Error(
+        `Arena private replacement changed during publication: ${filePath}`,
+      );
+    }
+    await syncPrivateDirectory(parentPath, parentIdentity, boundary);
+    const durable = await fs.lstat(filePath);
+    assertSafePrivateFile(durable, filePath);
+    if (!sameFileIdentity(published, durable)
+      || durable.size !== expectedBytes) {
+      throw new Error(
+        `Arena private replacement changed while flushing its parent: ${filePath}`,
+      );
+    }
   } catch (error) {
-    await removeRegularPrivateFile(tmpPath).catch(() => undefined);
-    throw error;
+    primaryError = error;
+    if (!temporaryIdentity) {
+      try {
+        const opened = await handle.stat();
+        assertSafePrivateFile(opened, tmpPath);
+        temporaryIdentity = opened;
+      } catch (captureError) {
+        identityError = captureError;
+      }
+    }
   }
+
+  let closeError: unknown;
+  try {
+    await handle.close();
+  } catch (error) {
+    closeError = error;
+  }
+  let cleanupError: unknown;
+  if (primaryError && temporaryIdentity) {
+    try {
+      await removeExpectedPrivateFile(
+        tmpPath,
+        temporaryIdentity,
+        parentPath,
+        parentIdentity,
+        boundary,
+      );
+    } catch (error) {
+      cleanupError = error;
+    }
+  }
+  const errors = [primaryError, identityError, closeError, cleanupError]
+    .filter((error): error is {} => error !== undefined);
+  if (errors.length > 1) {
+    throw new AggregateError(
+      errors,
+      `Arena private replacement and cleanup failed: ${filePath}`,
+    );
+  }
+  if (errors.length === 1) throw errors[0];
 }
 
 export function isArenaPathWithin(root: string, candidate: string): boolean {
@@ -879,21 +1289,21 @@ function assertSafePrivateFile(stat: Stats, filePath: string): void {
   if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) {
     throw new Error(`Arena private file is linked or invalid: ${filePath}`);
   }
+  assertPrivateFilePermissions(stat, filePath);
+}
+
+function assertPrivateFilePermissions(stat: Stats, filePath: string): void {
+  if (process.platform === "win32") return;
+  if ((stat.mode & 0o077) !== 0) {
+    throw new Error(`Arena private file permissions are unsafe: ${filePath}`);
+  }
+  if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+    throw new Error(`Arena private file is owned by another user: ${filePath}`);
+  }
 }
 
 function sameFileIdentity(left: Stats, right: Stats): boolean {
   return left.dev === right.dev && left.ino === right.ino;
-}
-
-async function removeRegularPrivateFile(filePath: string): Promise<void> {
-  try {
-    const stat = await fs.lstat(filePath);
-    if (stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1) {
-      await fs.unlink(filePath);
-    }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
 }
 
 function samePath(left: string, right: string): boolean {

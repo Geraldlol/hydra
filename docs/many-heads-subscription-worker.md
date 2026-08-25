@@ -1,7 +1,7 @@
 # Many Heads Subscription Worker
 
-Status: draft design note for Many Heads Mode after the Claude automation
-credit guard slices.
+Status: implemented for local one-shot Discussion, Build, and Review workers.
+Remote worker fleets remain a future option.
 
 ## Decision
 
@@ -113,17 +113,39 @@ interface ClaudeWorkerEvent {
 }
 ```
 
-The first implementation is a local wrapper around the current one-shot Claude
-spawn path for parallel discussion turns. When `hydraRoom.manyHeadsMode` is on
-and one-shot transport is active, Hydra plans one Codex worker plus
-`hydraRoom.manyHeadsClaudeWorkerCount` Claude workers. Each Claude worker still
-dispatches through `callAgent`, so the subscription credit guard runs before
-the official Claude runtime starts; each worker receives its own trace/live
-file, and Codex receives all Claude live-channel paths in its prompt.
+The local implementation wraps the current one-shot Claude spawn path. When
+`hydraRoom.manyHeadsMode` is on and one-shot transport is active, Hydra uses up
+to `hydraRoom.manyHeadsClaudeWorkerCount` subscription-backed Claude processes.
+Every process still dispatches through `callAgent`, so Mission authorization,
+Flight recording, cancellation, structured usage, and the subscription credit
+guard remain at the actual spawn boundary. Terminal bridge and untrusted
+workspaces keep the legacy single-call behavior.
 
-Build/review fanout can reuse the same worker contract later, but it should be a
-separate UI/state-machine slice because those phases carry editing/review
-ownership semantics beyond discussion.
+Discussion preserves the original worker model: the Claude roster seat expands
+to the configured number of workers, each gets a trace/live file, and Codex
+receives the Claude live-channel paths in its prompt.
+
+### Build ownership
+
+The configured count includes one lead. Any remaining Claude Build workers are
+advisers, not builders: Hydra runs them concurrently in separate temporary
+directories with a forced no-tool, plan-mode invocation, no inherited setting
+sources, plugins, MCP configuration, browser broker, or workspace `--add-dir`.
+Their bounded results are ordered by stable worker id and appended to the lead's
+prompt only after every adviser has drained. Hydra then starts exactly one
+ordinary lead Build in the real workspace. The explicit "Assign All Seated
+Builders" room action is not multiplied by Claude Worker Fanout.
+
+### Review convergence
+
+Claude Review fanout sends the same captured diff and verification evidence to
+isolated no-tool workers. These are duplicate attempts for one Claude roster
+identity, not extra room voters. Hydra collapses completed Claude worker
+verdicts unanimously and fail-closed, then contributes exactly one Claude
+verdict to the configured cross-head `human`, `unanimous`, or `majority`
+policy. The canonical worker remains an ordinary Claude dispatch; auxiliary
+workers are marked as fanout for the credit guard. A blocked or failed
+auxiliary does not erase a completed canonical verdict and does not vote.
 
 ## Dispatch Guard
 

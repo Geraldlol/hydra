@@ -66,23 +66,30 @@ suite("Hydra extension host", () => {
   test("runs the isolated Arena worktree smoke command in the extension host", async function () {
     this.timeout(210_000);
     const transcript = path.join(hydraDir, "transcript.md");
+    const startedAt = Date.now();
+    lastArenaSmokeProgress = "";
     let commandSettled = false;
     const command = vscode.commands.executeCommand(
       "hydraRoom.runArenaSmokeTest",
     ).finally(() => {
       commandSettled = true;
     });
+    const transcriptResult = waitForText(
+      transcript,
+      /Arena worktree smoke test passed\./,
+      150_000,
+      (content) => reportArenaSmokeProgress(content, startedAt),
+      /Arena worktree (?:lifecycle smoke failed:|smoke test skipped)/,
+    );
     try {
-      await withTimeout(
-        command,
-        150_000,
-        "Arena worktree smoke command exceeded its extension-host budget",
-      );
-      await waitForText(
-        transcript,
-        /Arena worktree smoke test passed\./,
-        10_000,
-      );
+      await Promise.all([
+        withTimeout(
+          command,
+          150_000,
+          "Arena worktree smoke command exceeded its extension-host budget",
+        ),
+        transcriptResult,
+      ]);
     } finally {
       if (!commandSettled) {
         await vscode.commands.executeCommand("hydraRoom.stop");
@@ -132,17 +139,34 @@ async function removeHydraDir(directory) {
   });
 }
 
-async function waitForText(filePath, pattern, timeoutMs = 15_000) {
+async function waitForText(
+  filePath,
+  pattern,
+  timeoutMs = 15_000,
+  onContent,
+  failurePattern,
+) {
   const deadline = Date.now() + timeoutMs;
   let lastContent = "";
   while (Date.now() < deadline) {
+    let content;
     try {
-      const content = await fs.readFile(filePath, "utf8");
-      lastContent = content;
-      if (pattern.test(content)) return;
+      content = await fs.readFile(filePath, "utf8");
     } catch {
       // The room may still be replacing its transcript atomically.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      continue;
     }
+    lastContent = content;
+    onContent?.(content);
+    if (failurePattern?.test(content)) {
+      assert.fail(
+        `observed ${failurePattern} while waiting for ${pattern} in ${filePath}; transcript tail: ${
+          content.slice(-2_000)
+        }`,
+      );
+    }
+    if (pattern.test(content)) return;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   assert.fail(
@@ -150,4 +174,16 @@ async function waitForText(filePath, pattern, timeoutMs = 15_000) {
       lastContent.slice(-2_000)
     }`,
   );
+}
+
+let lastArenaSmokeProgress = "";
+
+function reportArenaSmokeProgress(content, startedAt) {
+  const stages = [
+    ...content.matchAll(/Arena worktree lifecycle smoke: ([^.]+)\./g),
+  ];
+  const latest = stages.at(-1)?.[1];
+  if (!latest || latest === lastArenaSmokeProgress) return;
+  lastArenaSmokeProgress = latest;
+  console.log(`[Arena smoke +${Date.now() - startedAt}ms] ${latest}`);
 }

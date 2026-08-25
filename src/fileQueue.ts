@@ -10,6 +10,7 @@ import {
   type Stats,
 } from "node:fs";
 import { randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import * as path from "node:path";
 
 // In-process per-path mutex. Two concurrent writes against the same filePath
@@ -26,10 +27,78 @@ const CROSS_PROCESS_LOCK_WAIT_MS = 30_000;
 const CROSS_PROCESS_LOCK_TTL_MS = 2 * 60_000;
 const CROSS_PROCESS_MARKER_TTL_MS = 2 * 60_000;
 const CROSS_PROCESS_LOCK_HEARTBEAT_MS = 30_000;
+const CROSS_PROCESS_INSTANCE_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-interface CrossProcessLockRecord {
-  token: string;
-  createdAt: string;
+interface CrossProcessOwnerIdentity {
+  readonly ownerPid: number;
+  readonly ownerStartedAt: string;
+  readonly ownerInstanceId: string;
+}
+
+interface CrossProcessLockRecord extends CrossProcessOwnerIdentity {
+  readonly token: string;
+  readonly createdAt: string;
+}
+
+interface CrossProcessMarkerRecord extends CrossProcessOwnerIdentity {
+  readonly createdAt: string;
+}
+
+const CURRENT_PROCESS_OWNER: CrossProcessOwnerIdentity = Object.freeze({
+  ownerPid: process.pid,
+  // `uptime()` is monotonic for this process. Capturing the corresponding
+  // wall-clock instant once gives a stable process-start identity even when
+  // later wall-clock changes make a lock's mtime look stale.
+  ownerStartedAt: new Date(Math.floor(performance.timeOrigin)).toISOString(),
+  ownerInstanceId: randomUUID(),
+});
+
+export type ArtifactNamespaceDurability = "file-and-directory" | "file-only";
+
+/**
+ * POSIX acknowledges a namespace mutation only after syncing its directory.
+ * Node/libuv cannot reliably open or fsync directory handles on Windows, so
+ * Windows still gets synced file data plus an atomic rename/link, but the
+ * namespace itself has a deliberately documented weaker power-loss guarantee.
+ */
+export function artifactNamespaceDurability(
+  platform: NodeJS.Platform = process.platform,
+): ArtifactNamespaceDurability {
+  return platform === "win32" ? "file-only" : "file-and-directory";
+}
+
+export async function syncArtifactDirectory(
+  directoryPath: string,
+  platform: NodeJS.Platform = process.platform,
+): Promise<ArtifactNamespaceDurability> {
+  let handle: fs.FileHandle | undefined;
+  try {
+    handle = await fs.open(directoryPath, fsConstants.O_RDONLY);
+    await handle.sync();
+  } catch (error) {
+    if (platform !== "win32" || !isUnsupportedWindowsDirectorySync(error)) throw error;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+  return artifactNamespaceDurability(platform);
+}
+
+async function syncArtifactParentDirectory(
+  filePath: string,
+  platform: NodeJS.Platform = process.platform,
+): Promise<ArtifactNamespaceDurability> {
+  return syncArtifactDirectory(path.dirname(filePath), platform);
+}
+
+function isUnsupportedWindowsDirectorySync(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === "EPERM"
+    || code === "EACCES"
+    || code === "EISDIR"
+    || code === "EINVAL"
+    || code === "ENOTSUP"
+    || code === "EBADF";
 }
 
 export async function serializePerFile<T>(
@@ -78,9 +147,11 @@ export async function ensureFile(filePath: string, defaultContent = ""): Promise
   try {
     await assertSafeArtifactParent(filePath);
     await handle.writeFile(defaultContent, "utf8");
+    await handle.sync();
   } finally {
     await handle.close();
   }
+  await syncArtifactParentDirectory(filePath);
 }
 
 // Append through a validated file handle rather than a path-based appendFile.
@@ -106,9 +177,11 @@ export async function appendFileSafely(filePath: string, content: string): Promi
         try {
           await assertSafeArtifactParent(filePath);
           await created.writeFile(content, "utf8");
+          await created.sync();
         } finally {
           await created.close();
         }
+        await syncArtifactParentDirectory(filePath);
         return;
       } catch (createErr) {
         if ((createErr as NodeJS.ErrnoException).code === "EEXIST") continue;
@@ -145,6 +218,7 @@ export async function appendFileSafely(filePath: string, content: string): Promi
       }
       await assertSafeArtifactParent(filePath);
       await handle.writeFile(content, "utf8");
+      await handle.sync();
     } finally {
       await handle.close();
     }
@@ -192,19 +266,12 @@ async function withCrossProcessFileLock<T>(filePath: string, work: () => Promise
     let acquired = false;
     try {
       if (!(await hasLiveCrossProcessLockMarkers(lockPath, "recover"))) {
-        try {
-          ownedHandle = await fs.open(lockPath, "wx", 0o600);
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+        const published = await publishCrossProcessLock(lockPath, token);
+        if (!published) {
           sawExistingLock = true;
-        }
-
-        if (ownedHandle) {
-          const record: CrossProcessLockRecord = { token, createdAt: new Date().toISOString() };
-          await ownedHandle.writeFile(`${JSON.stringify(record)}\n`, "utf8");
-          await ownedHandle.sync();
-          owned = await ownedHandle.stat();
-          assertSafeArtifactFile(owned, lockPath);
+        } else {
+          ownedHandle = published.handle;
+          owned = published.stat;
 
           // A recoverer may have published its intent after our pre-open
           // check. Keep our acquisition marker until the candidate lock is
@@ -216,7 +283,12 @@ async function withCrossProcessFileLock<T>(filePath: string, work: () => Promise
             owned = undefined;
           } else {
             const inspected = await inspectCrossProcessLock(lockPath);
-            acquired = sameFileIdentity(owned, inspected.stat) && inspected.record?.token === token;
+            acquired = sameFileIdentity(owned, inspected.stat)
+              && inspected.record?.token === token
+              && sameCrossProcessOwner(
+                inspected.record,
+                CURRENT_PROCESS_OWNER,
+              );
             if (!acquired) {
               await ownedHandle.close();
               ownedHandle = undefined;
@@ -268,6 +340,13 @@ async function retireExpiredCrossProcessLock(lockPath: string, deadline: number)
     throw err;
   }
   if (!crossProcessLockEntryExpired(inspected.stat)) return false;
+  if (!inspected.record
+    || crossProcessOwnerLiveness(inspected.record) !== "dead") {
+    // Age is never proof of death. A suspended/debug-paused owner can miss
+    // arbitrary heartbeat intervals, and an invalid legacy record provides no
+    // liveness evidence at all. Both remain fenced for explicit recovery.
+    return false;
+  }
 
   const recoveryMarker = await createCrossProcessLockMarker(lockPath, "recover");
   try {
@@ -286,6 +365,10 @@ async function retireExpiredCrossProcessLock(lockPath: string, deadline: number)
       throw err;
     }
     if (!crossProcessLockEntryExpired(inspected.stat)) return false;
+    if (!inspected.record
+      || crossProcessOwnerLiveness(inspected.record) !== "dead") {
+      return false;
+    }
 
     const stalePath = `${lockPath}.stale-${randomUUID()}`;
     if (!(await moveCrossProcessLockIfIdentityMatches(lockPath, stalePath, inspected.stat))) return false;
@@ -304,7 +387,9 @@ async function releaseCrossProcessLock(lockPath: string, owned: Stats, token: st
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
     throw err;
   }
-  if (!sameFileIdentity(owned, inspected.stat) || inspected.record?.token !== token) return;
+  if (!sameFileIdentity(owned, inspected.stat)
+    || inspected.record?.token !== token
+    || !sameCrossProcessOwner(inspected.record, CURRENT_PROCESS_OWNER)) return;
   const releasedPath = `${lockPath}.released-${token}`;
   if (!(await moveCrossProcessLockIfIdentityMatches(lockPath, releasedPath, owned))) return;
   await removeCrossProcessLockEntry(releasedPath);
@@ -313,7 +398,8 @@ async function releaseCrossProcessLock(lockPath: string, owned: Stats, token: st
 async function inspectCrossProcessLock(
   lockPath: string,
 ): Promise<{ stat: Stats; record?: CrossProcessLockRecord }> {
-  const before = await fs.lstat(lockPath);
+  let before = await fs.lstat(lockPath);
+  before = await completeInterruptedCrossProcessLockPublication(lockPath, before);
   if (isDisappearingCrossProcessLockEntry(before)) {
     throw crossProcessLockEntryDisappeared(lockPath);
   }
@@ -329,20 +415,9 @@ async function inspectCrossProcessLock(
     if (!sameFileIdentity(before, opened)) {
       throw new Error(`Hydra artifact writer lock changed while opening: ${lockPath}`);
     }
-    const buffer = Buffer.alloc(4097);
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-    let record: CrossProcessLockRecord | undefined;
-    if (bytesRead <= 4096) {
-      try {
-        const parsed = JSON.parse(buffer.subarray(0, bytesRead).toString("utf8")) as Partial<CrossProcessLockRecord>;
-        if (typeof parsed.token === "string" && typeof parsed.createdAt === "string") {
-          record = { token: parsed.token, createdAt: parsed.createdAt };
-        }
-      } catch {
-        // An exclusive creator can be between open and write. Its fresh mtime
-        // keeps the incomplete lease active until it is released or expires.
-      }
-    }
+    const record = parseCrossProcessLockRecord(
+      await readCrossProcessRecord(handle),
+    );
     return { stat: opened, record };
   } finally {
     await handle.close();
@@ -355,19 +430,157 @@ function crossProcessLockEntryExpired(stat: Stats): boolean {
 
 type CrossProcessLockMarkerKind = "acquire" | "recover";
 
+async function publishCrossProcessLock(
+  lockPath: string,
+  token: string,
+): Promise<{ readonly handle: fs.FileHandle; readonly stat: Stats } | undefined> {
+  const temporaryPath = crossProcessLockPublicationPath(lockPath, token);
+  const record: CrossProcessLockRecord = {
+    token,
+    createdAt: new Date().toISOString(),
+    ...CURRENT_PROCESS_OWNER,
+  };
+  const temporaryHandle = await fs.open(temporaryPath, "wx", 0o600);
+  let temporaryIdentity: Stats | undefined;
+  try {
+    await temporaryHandle.writeFile(`${JSON.stringify(record)}\n`, "utf8");
+    await temporaryHandle.sync();
+    temporaryIdentity = await temporaryHandle.stat();
+    assertSafeArtifactFile(temporaryIdentity, temporaryPath);
+  } catch (error) {
+    await temporaryHandle.close().catch(() => undefined);
+    await unlinkIfRegularFile(temporaryPath).catch(() => undefined);
+    throw error;
+  }
+  await temporaryHandle.close();
+
+  let published = false;
+  try {
+    try {
+      await fs.link(temporaryPath, lockPath);
+      published = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return undefined;
+      throw error;
+    }
+    await unlinkIfRegularFile(temporaryPath);
+
+    const before = await fs.lstat(lockPath);
+    assertSafeArtifactFile(before, lockPath);
+    if (!temporaryIdentity || !sameFileIdentity(temporaryIdentity, before)) {
+      throw new Error(`Hydra artifact writer lock changed while publishing: ${lockPath}`);
+    }
+    const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
+    const handle = await fs.open(lockPath, fsConstants.O_RDWR | noFollow);
+    try {
+      const opened = await handle.stat();
+      assertSafeArtifactFile(opened, lockPath);
+      if (!sameFileIdentity(before, opened)) {
+        throw new Error(`Hydra artifact writer lock changed while opening: ${lockPath}`);
+      }
+      return { handle, stat: opened };
+    } catch (error) {
+      await handle.close().catch(() => undefined);
+      throw error;
+    }
+  } catch (error) {
+    if (published && temporaryIdentity) {
+      await removeCrossProcessEntryIfIdentityMatches(lockPath, temporaryIdentity)
+        .catch(() => undefined);
+    }
+    throw error;
+  } finally {
+    await unlinkIfRegularFile(temporaryPath).catch(() => undefined);
+  }
+}
+
+function crossProcessLockPublicationPath(lockPath: string, token: string): string {
+  return path.join(
+    path.dirname(lockPath),
+    `.${path.basename(lockPath)}.publish-${token}.tmp`,
+  );
+}
+
+async function completeInterruptedCrossProcessLockPublication(
+  lockPath: string,
+  initial: Stats,
+): Promise<Stats> {
+  if (!initial.isFile() || initial.isSymbolicLink() || initial.nlink !== 2) {
+    return initial;
+  }
+  const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
+  const handle = await fs.open(lockPath, fsConstants.O_RDONLY | noFollow);
+  let record: CrossProcessLockRecord | undefined;
+  try {
+    const opened = await handle.stat();
+    if (!sameFileIdentity(initial, opened)
+      || !opened.isFile()
+      || opened.isSymbolicLink()
+      || opened.nlink !== 2) {
+      return initial;
+    }
+    record = parseCrossProcessLockRecord(await readCrossProcessRecord(handle));
+  } finally {
+    await handle.close();
+  }
+  if (!record || !CROSS_PROCESS_INSTANCE_PATTERN.test(record.token)) return initial;
+
+  const temporaryPath = crossProcessLockPublicationPath(lockPath, record.token);
+  try {
+    const temporary = await fs.lstat(temporaryPath);
+    if (!temporary.isFile()
+      || temporary.isSymbolicLink()
+      || temporary.nlink !== 2
+      || !sameFileIdentity(initial, temporary)) {
+      return initial;
+    }
+    await fs.unlink(temporaryPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+
+  const completed = await fs.lstat(lockPath);
+  if (!sameFileIdentity(initial, completed)) {
+    throw new Error(`Hydra artifact writer lock changed while completing publication: ${lockPath}`);
+  }
+  return completed;
+}
+
 async function createCrossProcessLockMarker(
   lockPath: string,
   kind: CrossProcessLockMarkerKind,
 ): Promise<string> {
   const markerPath = `${lockPath}.${kind}-${randomUUID()}`;
-  const handle = await fs.open(markerPath, "wx", 0o600);
+  const temporaryPath = path.join(
+    path.dirname(markerPath),
+    `.${path.basename(markerPath)}.publish-${randomUUID()}.tmp`,
+  );
+  const record: CrossProcessMarkerRecord = {
+    createdAt: new Date().toISOString(),
+    ...CURRENT_PROCESS_OWNER,
+  };
+  const handle = await fs.open(temporaryPath, "wx", 0o600);
   try {
-    await handle.writeFile(`${process.pid}\n`, "utf8");
+    await handle.writeFile(`${JSON.stringify(record)}\n`, "utf8");
     await handle.sync();
   } finally {
     await handle.close();
   }
-  return markerPath;
+  let published = false;
+  try {
+    await fs.rename(temporaryPath, markerPath);
+    published = true;
+    const stat = await fs.lstat(markerPath);
+    assertSafeArtifactFile(stat, markerPath);
+    return markerPath;
+  } catch (error) {
+    if (published) {
+      await removeCrossProcessLockEntry(markerPath).catch(() => undefined);
+    } else {
+      await unlinkIfRegularFile(temporaryPath).catch(() => undefined);
+    }
+    throw error;
+  }
 }
 
 async function hasLiveCrossProcessLockMarkers(
@@ -400,13 +613,175 @@ async function hasLiveCrossProcessLockMarkers(
     // the same protocol state as ENOENT, not evidence of an unsafe hard link.
     if (isDisappearingCrossProcessLockEntry(stat)) continue;
     assertSafeArtifactFile(stat, markerPath);
-    if (Date.now() - stat.mtimeMs > CROSS_PROCESS_MARKER_TTL_MS) {
-      await removeCrossProcessLockEntry(markerPath);
+    if (Date.now() - stat.mtimeMs <= CROSS_PROCESS_MARKER_TTL_MS) {
+      live = true;
+      continue;
+    }
+
+    let inspected: { readonly stat: Stats; readonly record?: CrossProcessMarkerRecord };
+    try {
+      inspected = await inspectCrossProcessMarker(markerPath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw err;
+    }
+    if (!inspected.record
+      || crossProcessOwnerLiveness(inspected.record) !== "dead") {
+      live = true;
+      continue;
+    }
+    const stalePath = `${markerPath}.stale-${randomUUID()}`;
+    if (await moveCrossProcessLockIfIdentityMatches(
+      markerPath,
+      stalePath,
+      inspected.stat,
+    )) {
+      await removeCrossProcessLockEntry(stalePath);
     } else {
       live = true;
     }
   }
   return live;
+}
+
+async function inspectCrossProcessMarker(
+  markerPath: string,
+): Promise<{ readonly stat: Stats; readonly record?: CrossProcessMarkerRecord }> {
+  const before = await fs.lstat(markerPath);
+  if (isDisappearingCrossProcessLockEntry(before)) {
+    throw crossProcessLockEntryDisappeared(markerPath);
+  }
+  assertSafeArtifactFile(before, markerPath);
+  const noFollow = typeof fsConstants.O_NOFOLLOW === "number"
+    ? fsConstants.O_NOFOLLOW
+    : 0;
+  const handle = await fs.open(markerPath, fsConstants.O_RDONLY | noFollow);
+  try {
+    const opened = await handle.stat();
+    if (isDisappearingCrossProcessLockEntry(opened)) {
+      throw crossProcessLockEntryDisappeared(markerPath);
+    }
+    assertSafeArtifactFile(opened, markerPath);
+    if (!sameFileIdentity(before, opened)) {
+      throw new Error(
+        `Hydra artifact writer marker changed while opening: ${markerPath}`,
+      );
+    }
+    return {
+      stat: opened,
+      record: parseCrossProcessMarkerRecord(
+        await readCrossProcessRecord(handle),
+      ),
+    };
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readCrossProcessRecord(
+  handle: fs.FileHandle,
+): Promise<unknown> {
+  const buffer = Buffer.alloc(4097);
+  const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+  if (bytesRead > 4096) return undefined;
+  try {
+    return JSON.parse(buffer.subarray(0, bytesRead).toString("utf8"));
+  } catch {
+    // An exclusive creator can be between open and write. A malformed record
+    // is deliberately ambiguous and may never authorize stale retirement.
+    return undefined;
+  }
+}
+
+function parseCrossProcessLockRecord(
+  value: unknown,
+): CrossProcessLockRecord | undefined {
+  const owner = parseCrossProcessOwner(value);
+  if (!owner || !value || typeof value !== "object") return undefined;
+  const row = value as Record<string, unknown>;
+  if (typeof row.token !== "string"
+    || row.token.length < 1
+    || row.token.length > 256
+    || !validCrossProcessTimestamp(row.createdAt)) return undefined;
+  return {
+    token: row.token,
+    createdAt: row.createdAt as string,
+    ...owner,
+  };
+}
+
+function parseCrossProcessMarkerRecord(
+  value: unknown,
+): CrossProcessMarkerRecord | undefined {
+  const owner = parseCrossProcessOwner(value);
+  if (!owner || !value || typeof value !== "object") return undefined;
+  const row = value as Record<string, unknown>;
+  if (!validCrossProcessTimestamp(row.createdAt)) return undefined;
+  return {
+    createdAt: row.createdAt as string,
+    ...owner,
+  };
+}
+
+function parseCrossProcessOwner(
+  value: unknown,
+): CrossProcessOwnerIdentity | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const row = value as Record<string, unknown>;
+  if (!Number.isSafeInteger(row.ownerPid)
+    || (row.ownerPid as number) < 1
+    || (row.ownerPid as number) > 0x7fff_ffff
+    || !validCrossProcessTimestamp(row.ownerStartedAt)
+    || typeof row.ownerInstanceId !== "string"
+    || !CROSS_PROCESS_INSTANCE_PATTERN.test(row.ownerInstanceId)) {
+    return undefined;
+  }
+  return {
+    ownerPid: row.ownerPid as number,
+    ownerStartedAt: row.ownerStartedAt as string,
+    ownerInstanceId: row.ownerInstanceId,
+  };
+}
+
+function validCrossProcessTimestamp(value: unknown): value is string {
+  return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
+
+function sameCrossProcessOwner(
+  left: CrossProcessOwnerIdentity,
+  right: CrossProcessOwnerIdentity,
+): boolean {
+  return left.ownerPid === right.ownerPid
+    && left.ownerStartedAt === right.ownerStartedAt
+    && left.ownerInstanceId === right.ownerInstanceId;
+}
+
+function crossProcessOwnerLiveness(
+  owner: CrossProcessOwnerIdentity,
+): "alive" | "dead" | "ambiguous" {
+  if (owner.ownerPid === process.pid) {
+    if (owner.ownerStartedAt !== CURRENT_PROCESS_OWNER.ownerStartedAt) {
+      // The operating system has reused our PID after the recorded owner
+      // exited. This is the one cross-platform start-identity comparison Node
+      // can prove without consulting platform-specific process tables.
+      return "dead";
+    }
+    return owner.ownerInstanceId === CURRENT_PROCESS_OWNER.ownerInstanceId
+      ? "alive"
+      : "ambiguous";
+  }
+  try {
+    process.kill(owner.ownerPid, 0);
+    // The PID may belong to the recorded owner or to a newer process. Either
+    // way, Node cannot prove the old identity is gone, so retirement is unsafe.
+    return "ambiguous";
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ESRCH"
+      ? "dead"
+      : "ambiguous";
+  }
 }
 
 async function removeCrossProcessLockMarker(markerPath: string): Promise<void> {
@@ -421,6 +796,19 @@ async function removeCrossProcessLockEntry(entryPath: string): Promise<void> {
     await fs.unlink(entryPath);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+}
+
+async function removeCrossProcessEntryIfIdentityMatches(
+  entryPath: string,
+  expected: Stats,
+): Promise<void> {
+  try {
+    const current = await fs.lstat(entryPath);
+    if (!sameFileIdentity(current, expected)) return;
+    await fs.unlink(entryPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
 }
 
@@ -543,6 +931,7 @@ async function rewriteFileLinesAtomicallyUnsafe(
     : DEFAULT_JSONL_READ_BYTES;
   let outputPosition = 0;
   let completed = false;
+  let commit = false;
   const writeLine = async (line: string): Promise<void> => {
     const transformed = await transform(line.endsWith("\r") ? line.slice(0, -1) : line);
     if (transformed === undefined) return;
@@ -575,6 +964,8 @@ async function rewriteFileLinesAtomicallyUnsafe(
       }
       if (pending.length > 0) await writeLine(pending);
       completed = true;
+      commit = shouldCommit();
+      if (commit) await destination.sync();
     } finally {
       stream.destroy();
       await Promise.allSettled([source.close(), destination.close()]);
@@ -584,7 +975,7 @@ async function rewriteFileLinesAtomicallyUnsafe(
     throw err;
   }
 
-  if (!completed || !shouldCommit()) {
+  if (!completed || !commit) {
     await unlinkIfRegularFile(tmp);
     return;
   }
@@ -597,6 +988,7 @@ async function rewriteFileLinesAtomicallyUnsafe(
     }
     await assertSafeArtifactParent(filePath);
     await fs.rename(tmp, filePath);
+    await syncArtifactParentDirectory(filePath);
   } catch (err) {
     await unlinkIfRegularFile(tmp).catch(() => undefined);
     throw err;
@@ -619,12 +1011,14 @@ async function atomicWriteFileUnsafe(filePath: string, content: string): Promise
   try {
     await assertSafeArtifactParent(filePath);
     await handle.writeFile(content, "utf8");
+    await handle.sync();
   } finally {
     await handle.close();
   }
   try {
     await assertSafeArtifactParent(filePath);
     await fs.rename(tmp, filePath);
+    await syncArtifactParentDirectory(filePath);
   } catch (err) {
     await unlinkIfRegularFile(tmp).catch(() => undefined);
     throw err;

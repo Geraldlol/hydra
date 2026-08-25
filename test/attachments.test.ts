@@ -73,6 +73,9 @@ describe("room attachments", () => {
 
     const rendered = renderRoomAttachmentsForPrompt([attachment]);
     assert.match(rendered, /--- Uploaded files ---/);
+    assert.match(rendered, /native CLI heads with filesystem access/i);
+    assert.match(rendered, /bounded text previews/i);
+    assert.doesNotMatch(rendered, /both native CLIs/i);
     assert.match(rendered, /Path: \.hydra\/attachments\/turn\/notes\.md/);
     assert.match(rendered, /```text\nhello attached file/);
     assert.deepEqual(roomAttachmentSummaries([attachment]), [{

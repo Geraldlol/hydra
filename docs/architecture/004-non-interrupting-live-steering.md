@@ -1,6 +1,6 @@
 # ADR 004: Non-interrupting, capability-negotiated steering of active heads
 
-- Status: Accepted for staged implementation
+- Status: Accepted; implemented for supported capability-negotiated transports and authenticated relays
 - Date: 2026-07-24
 - Owners: Hydra maintainers
 
@@ -298,11 +298,14 @@ enforcement boundary. If the user wants to change either, Hydra uses the
 separate preview-and-confirm flow and starts or rebinds work as that flow
 requires.
 
-Only direct local-user sends are enabled for the MVP. Telegram may opt in later
-through its existing chat-id and command-prefix fence. Native `@hydra`, MCP,
-or other external mutations require the explicit confirmation policy already
-required by Hydra Everywhere. Agent-authored text and web content can never
-create a steering request.
+Only direct local-user sends enter `SteeringController` without a relay grant.
+The Telegram steering foundation is separately opt-in and is stricter than the
+legacy inbound-room path: a non-empty slash-command prefix, exact chat ID, and
+a non-empty exact sender-ID allowlist are all mandatory. Telegram text cannot
+select a run or supply Mission/authority metadata; the owner supplies those
+bindings from its authenticated target advertisement. Native `@hydra`, MCP,
+or other external mutations require an equivalent explicit grant. Agent-authored
+text and web content can never create a steering request.
 
 Steering consumes model work and counts against the active mission/session
 budget. The UI shows that fact before delivery. Automatic follow-up generation
@@ -357,10 +360,26 @@ Stop Current Turn remains the explicit cancellation operation. Steering never
 calls Stop as an implementation detail.
 
 Only the extension host that owns the native provider handle may deliver to it.
-Private storage uses an owner lease plus authenticated host-local IPC for a
-future cross-window forwarding path. Until that path exists, a second window
-shows the active run as remotely owned and rejects steering there; it never
-writes a shared file and claims delivery.
+`steeringRelayProtocol.ts` and `steeringRelay.ts` provide the cross-window
+backend: owners publish short-lived exact target snapshots, sending windows
+append HMAC-authenticated bounded envelopes to private extension storage, and
+only the destination owner may claim and forward them. Per-producer sequence
+IDs are monotonic and idempotent. A claimed message is never replayed after an
+ambiguous crash; it becomes `deliveryUnknown`. The state and every envelope
+are authenticated, queue/body/history cardinalities are bounded, and the key
+is supplied from outside the relay rather than written to state or diagnostics.
+
+`telegramSteering.ts` converts an already-polled, explicitly authorized update
+into the same workspace/owner/turn/run/Mission/authority-bound envelope without
+persisting the bot token, chat ID, or sender ID. The extension integration loads
+one per-workspace relay key from VS Code SecretStorage under a non-secret
+cross-process bootstrap lease, refreshes short-lived owner advertisements on
+both a timer and native-handle lifecycle changes, and pumps exact-owner claims
+into `SteeringController`. Telegram steering runs only after the existing
+bot/chat/bot-author/sender and durable room-routing boundary; it additionally
+requires a separate opt-in, slash prefix, and non-empty sender-ID allowlist.
+Real Telegram Bot API credentials remain an external operator prerequisite,
+not a permission that the transport infers.
 
 ## Consequences
 

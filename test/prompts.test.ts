@@ -312,3 +312,55 @@ describe("SOFT_APPROVAL_RE (legacy consensus signal)", () => {
     assert.ok(!SOFT_APPROVAL_RE.test("In summary, I'd approve"));
   });
 });
+
+describe("multi-head prompt preamble", () => {
+  test("names every peer in an N-way parallel turn", () => {
+    const prompt = buildPrompt({
+      agent: "codex",
+      otherAgent: "claude",
+      otherAgents: ["claude", "gemini"],
+      phase: "parallel",
+      transcript: TRANSCRIPT,
+    });
+    assert.match(prompt, /the other heads \(Claude, Gemini\)/);
+    assert.match(prompt, /Hydra is running Codex, Claude, and Gemini in parallel/);
+    assert.doesNotMatch(prompt, /The user addressed both agents/);
+  });
+
+  test("the default two-head opener preamble stays byte-compatible", () => {
+    const prompt = buildPrompt({
+      agent: "codex",
+      otherAgent: "claude",
+      phase: "opener",
+      transcript: TRANSCRIPT,
+    });
+    assert.match(prompt, /a 3-way collaboration with the user\nand Claude\./);
+    assert.match(prompt, /the other agent\./);
+    assert.doesNotMatch(prompt, /the other heads/);
+  });
+
+  test("passing the default two-head roster does not change a parallel prompt byte", () => {
+    const input = {
+      agent: "codex",
+      otherAgent: "claude",
+      phase: "parallel" as const,
+      transcript: TRANSCRIPT,
+    };
+    assert.equal(
+      buildPrompt({ ...input, otherAgents: ["codex", "claude"] }),
+      buildPrompt(input),
+    );
+  });
+
+  test("names an exactly-two custom roster instead of claiming Codex and Claude", () => {
+    const prompt = buildPrompt({
+      agent: "gemini",
+      otherAgent: "local-reviewer",
+      otherAgents: ["gemini", "local-reviewer"],
+      phase: "parallel",
+      transcript: TRANSCRIPT,
+    });
+    assert.match(prompt, /Hydra is running Gemini and local-reviewer in parallel/);
+    assert.doesNotMatch(prompt, /running Codex and Claude in parallel/);
+  });
+});

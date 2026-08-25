@@ -264,6 +264,74 @@ describe("TelegramController lifecycle", () => {
       environment.restore();
     }
   });
+
+  test("acknowledges durable live steering without dispatching an ordinary Telegram turn", async () => {
+    const environment = await useTempTelegramEnvironment();
+    const restoreSettings = installTelegramSettings(environment.botToken);
+    const telegramModule = require("../src/telegram") as Record<string, unknown>;
+    const originalGetUpdates = telegramModule.getTelegramUpdates;
+    const originalSendMessage = telegramModule.sendTelegramMessage;
+    telegramModule.getTelegramUpdates = async (): Promise<TelegramUpdatesResult> => ({ ok: true, updates: [] });
+    const replies: string[] = [];
+    telegramModule.sendTelegramMessage = async (_cfg: unknown, text: string) => {
+      replies.push(text);
+      return { ok: true, messageId: 44 };
+    };
+    const paths = telegramCoordinatorPaths(environment.botToken);
+    await ensureTelegramCoordinator(paths);
+    await appendTelegramInboxRecord(paths, {
+      id: "live-steering-1",
+      updateId: 18,
+      botKey: telegramBotKey(environment.botToken),
+      chatId: "chat",
+      roomSessionId: "session-1",
+      workspace: environment.workspace,
+      command: "/steer focus on the failing assertion",
+      message: {
+        chatId: "chat",
+        text: "/steer focus on the failing assertion",
+        messageId: 28,
+        fromId: "12345",
+      },
+      receivedAt: "2026-08-24T12:00:00.000Z",
+    });
+
+    let ordinaryTurns = 0;
+    const handled: Array<{ text: string; botKey: string }> = [];
+    const systemMessages: string[] = [];
+    const deps = controllerDeps(environment, async () => {
+      ordinaryTurns += 1;
+      return { beforeReplyAt: 0, cancelled: false, deferred: false };
+    });
+    deps.handleInboundSteering = async (update, botKey) => {
+      handled.push({ text: update.message?.text ?? "", botKey });
+      return { kind: "handled", status: "accepted", targetCount: 1 };
+    };
+    deps.appendSystemMessage = async (message) => { systemMessages.push(message); };
+    const controller = new TelegramController(deps);
+    const pollable = controller as unknown as PollableTelegramController;
+    pollable.inboundGeneration = 1;
+    try {
+      await pollable.pollInboundOnce(1);
+      assert.equal(ordinaryTurns, 0);
+      assert.deepEqual(handled, [{
+        text: "/steer focus on the failing assertion",
+        botKey: telegramBotKey(environment.botToken),
+      }]);
+      assert.equal((await readTelegramInboxForRoom(paths, {
+        roomSessionId: "session-1",
+        stateFile: environment.stateFile,
+      })).length, 0);
+      assert.deepEqual(replies, ["Hydra accepted live steering for 1 active target(s)."]);
+      assert.equal(systemMessages.some((message) => message.includes("failing assertion")), false);
+    } finally {
+      controller.dispose();
+      telegramModule.getTelegramUpdates = originalGetUpdates;
+      telegramModule.sendTelegramMessage = originalSendMessage;
+      restoreSettings();
+      environment.restore();
+    }
+  });
 });
 
 function controllerDeps(

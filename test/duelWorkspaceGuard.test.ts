@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { describe, test, type TestContext } from "node:test";
 import {
   captureDuelWorkspaceFingerprint,
+  classifyDuelWorkspaceWatchPath,
   describeWorkspaceLockFailure,
   DuelWorkspaceIntegrityError,
   watchDuelWorkspaceMutations,
@@ -170,23 +171,123 @@ describe("duel workspace integrity guard", () => {
     assert.equal(targetContentChanged.sha256, retargeted.sha256);
   });
 
-  test("live monitor catches write-then-revert activity while exempting Hydra state", async (t) => {
+  test("classifies watcher paths without confusing Hydra state and project evidence", () => {
+    const root = path.resolve(path.join(os.tmpdir(), "hydra-watcher-canonical"));
+    const logicalRoot = path.resolve(path.join(os.tmpdir(), "hydra-watcher-logical"));
+    assert.deepEqual(
+      classifyDuelWorkspaceWatchPath(root, logicalRoot, path.join(".hydra", "duels.md"), true),
+      { changed: false },
+    );
+    assert.deepEqual(
+      classifyDuelWorkspaceWatchPath(root, logicalRoot, path.join(".git", "index"), true),
+      { changed: false },
+    );
+    assert.deepEqual(
+      classifyDuelWorkspaceWatchPath(root, logicalRoot, path.join(".hydra", "contestant.txt"), false),
+      { changed: true, relative: ".hydra/contestant.txt" },
+    );
+    assert.deepEqual(
+      classifyDuelWorkspaceWatchPath(root, logicalRoot, path.join(logicalRoot, "project.txt"), true),
+      { changed: true, relative: "project.txt" },
+    );
+    assert.deepEqual(
+      classifyDuelWorkspaceWatchPath(root, logicalRoot, path.basename(root), true),
+      {
+        changed: true,
+        error: "Workspace watcher emitted an event without an in-root path.",
+      },
+    );
+    if (process.platform !== "win32") {
+      const projectName = String.raw`.hydra\evidence`;
+      assert.deepEqual(
+        classifyDuelWorkspaceWatchPath(root, logicalRoot, projectName, true),
+        { changed: true, relative: projectName },
+      );
+    }
+  });
+
+  test("live monitor catches write-then-revert activity and caps retained paths", async (t) => {
     const { root } = await createRepository(t);
     const projectFile = path.join(root, "ignored.log");
     await fs.writeFile(projectFile, "original\n", "utf8");
     const monitor = watchDuelWorkspaceMutations(root);
     t.after(() => monitor.close());
-
-    await fs.mkdir(path.join(root, ".hydra"));
-    await fs.writeFile(path.join(root, ".hydra", "duels.md"), "runtime mirror\n", "utf8");
     await monitor.settle();
-    assert.equal(monitor.changed, false);
-
     await fs.writeFile(projectFile, "temporary mutation\n", "utf8");
     await fs.writeFile(projectFile, "original\n", "utf8");
     await monitor.settle();
     assert.equal(monitor.changed, true);
-    assert.ok(monitor.changedPaths.some((entry) => entry === "ignored.log"));
+    assert.ok(
+      monitor.changedPaths.some((entry) => entry === "ignored.log") || monitor.error,
+      "the live mutation must be attributed or reported as an ambiguous fail-closed event",
+    );
+
+    await Promise.all(Array.from({ length: 64 }, (_value, index) =>
+      fs.writeFile(path.join(root, `mutation-${index}.txt`), "changed\n", "utf8")));
+    await monitor.settle();
+    assert.ok(monitor.changedPaths.length <= 20);
+  });
+
+  test("live monitor exempts attributed Hydra events and fails closed on ambiguous ones", async (t) => {
+    const { root } = await createRepository(t);
+    await fs.mkdir(path.join(root, ".hydra"));
+    const monitor = watchDuelWorkspaceMutations(root);
+    t.after(() => monitor.close());
+    await monitor.settle();
+
+    await fs.writeFile(path.join(root, ".hydra", "duels.md"), "runtime mirror\n", "utf8");
+    await monitor.settle();
+
+    assert.equal(
+      monitor.changed && monitor.error === undefined,
+      false,
+      "a Hydra path may be exempt or ambiguous, but must not be attributed as project evidence",
+    );
+    assert.equal(monitor.changedPaths.some((entry) => entry.startsWith(".hydra/")), false);
+  });
+
+  test("Arena-mode monitoring treats contestant .hydra writes as mutations", async (t) => {
+    const { root } = await createRepository(t);
+    const monitor = watchDuelWorkspaceMutations(root, {
+      excludeHydraState: false,
+    });
+    t.after(() => monitor.close());
+
+    await monitor.settle();
+    await fs.mkdir(path.join(root, ".hydra"), { recursive: true });
+    await fs.writeFile(
+      path.join(root, ".hydra", "unbound-output.txt"),
+      "contestant output\n",
+      "utf8",
+    );
+    await monitor.settle();
+
+    assert.equal(monitor.changed, true);
+    assert.ok(
+      monitor.changedPaths.some((entry) => entry.startsWith(".hydra/")) || monitor.error,
+      "the Arena mutation must be attributed or reported as an ambiguous fail-closed event",
+    );
+  });
+
+  test("live monitor does not exempt a POSIX backslash filename", async (t) => {
+    if (process.platform === "win32") {
+      t.skip("Windows path separators cannot be literal filename characters");
+      return;
+    }
+    const { root } = await createRepository(t);
+    const monitor = watchDuelWorkspaceMutations(root);
+    t.after(() => monitor.close());
+    await monitor.settle();
+
+    const projectName = String.raw`.hydra\evidence`;
+    await fs.writeFile(path.join(root, projectName), "project evidence\n", "utf8");
+    await monitor.settle();
+
+    assert.equal(monitor.changed, true);
+    assert.ok(
+      monitor.changedPaths.includes(projectName) || monitor.error,
+      "the project mutation must be attributed or reported as an ambiguous fail-closed event",
+    );
   });
 
   test("fails closed when individual, aggregate, file-count, or Git-output bounds are exceeded", async (t) => {

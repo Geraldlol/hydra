@@ -17,6 +17,10 @@ export type ConfigurableCapabilityProfileId = Exclude<CapabilityProfileId, "elev
 
 export type CapabilityWarningLevel = "safe" | "workspaceWrite" | "fullNative" | "custom";
 
+export const CLAUDE_READ_ONLY_TOOLS = "Read,Glob,Grep";
+export const CLAUDE_EDIT_ONLY_BUILD_TOOLS = "Read,Glob,Grep,Edit,Write,NotebookEdit";
+const CLAUDE_EMPTY_MCP_CONFIG = '{"mcpServers":{}}';
+
 export interface CapabilityProfilePreset {
   id: ConfigurableCapabilityProfileId;
   label: string;
@@ -58,7 +62,7 @@ const PRESETS: Record<ConfigurableCapabilityProfileId, CapabilityProfilePreset> 
   nativeBuild: {
     id: "nativeBuild",
     label: "Native Build",
-    detail: "Build profile with workspace-write authority.",
+    detail: "Safe-mode Build profile whose model tool surface is limited to read and workspace edits.",
     expectedAuthority: "workspaceWrite",
     warningLevel: "workspaceWrite",
     readsStdin: true,
@@ -253,8 +257,6 @@ function codexArgsForProfile(profile: ConfigurableCapabilityProfileId): string[]
         "exec",
         "--sandbox",
         "workspace-write",
-        "-c",
-        "sandbox_workspace_write.network_access=true",
         "--color",
         "never",
         "--cd",
@@ -275,15 +277,34 @@ function claudeArgsForProfile(profile: ConfigurableCapabilityProfileId): string[
   switch (profile) {
     case "safeDiscussion":
     case "nativeReview":
-      return [...claudePrintArgs(), "--permission-mode", "default", "--add-dir", "${workspaceFolder}"];
+      return claudeIsolatedArgs("plan", CLAUDE_READ_ONLY_TOOLS);
     case "nativeDiscussion":
     case "nativeBuild":
-      return [...claudePrintArgs(), "--permission-mode", "acceptEdits", "--add-dir", "${workspaceFolder}"];
+      return claudeIsolatedArgs("acceptEdits", CLAUDE_EDIT_ONLY_BUILD_TOOLS);
     case "fullNative":
       return [...claudePrintArgs(), "--dangerously-skip-permissions", "--add-dir", "${workspaceFolder}"];
     case "custom":
       return undefined;
   }
+}
+
+function claudeIsolatedArgs(permissionMode: "plan" | "acceptEdits", tools: string): string[] {
+  return [
+    ...claudePrintArgs(),
+    // Claude print mode skips its workspace-trust dialog. Safe mode prevents
+    // repository/user hooks, plugins, skills, commands, agents, MCP servers,
+    // memory, and CLAUDE.md from silently widening Hydra's bounded profile
+    // while preserving the operator's normal Claude authentication.
+    "--safe-mode",
+    "--permission-mode", permissionMode,
+    "--tools", tools,
+    "--strict-mcp-config",
+    "--mcp-config", CLAUDE_EMPTY_MCP_CONFIG,
+    "--disable-slash-commands",
+    "--no-session-persistence",
+    "--no-chrome",
+    "--add-dir", "${workspaceFolder}",
+  ];
 }
 
 function readsStdin(args: string[]): boolean {

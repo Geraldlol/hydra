@@ -30,6 +30,18 @@ const SHA_A = "a".repeat(64);
 const SHA_B = "b".repeat(64);
 const SHA_C = "c".repeat(64);
 
+async function removeTempDirectory(directory: string): Promise<void> {
+  await fs.rm(directory, {
+    recursive: true,
+    force: true,
+    // Windows can retain a just-exited child process's cwd handle briefly,
+    // especially while Node flushes test-coverage data. fs.rm retries EBUSY,
+    // ENOTEMPTY, and EPERM only when maxRetries is explicitly non-zero.
+    maxRetries: 10,
+    retryDelay: 100,
+  });
+}
+
 function codexSpawn(args: string[], cwd = path.resolve("C:\\repo")) {
   return { command: "codex", args, cwd, env: { HYDRA_TEST: "yes" } };
 }
@@ -245,7 +257,7 @@ describe("runCodexAppServerTurn", () => {
         .map((line) => (JSON.parse(line) as { method?: string }).method);
       assert.deepEqual(methods, ["initialize", "initialized", "thread/start"]);
     } finally {
-      await fs.rm(directory, { recursive: true, force: true });
+      await removeTempDirectory(directory);
     }
   });
 
@@ -296,7 +308,7 @@ describe("runCodexAppServerTurn", () => {
         .map((line) => (JSON.parse(line) as { method?: string }).method);
       assert.equal(methods.filter((method) => method === "turn/steer").length, 1);
     } finally {
-      await fs.rm(directory, { recursive: true, force: true });
+      await removeTempDirectory(directory);
     }
   });
 
@@ -329,7 +341,7 @@ describe("runCodexAppServerTurn", () => {
       assert.doesNotMatch(result.stdout, /"type":"item\.delta"/);
       assert.match(result.stdout, new RegExp(expected.slice(0, 64)));
     } finally {
-      await fs.rm(directory, { recursive: true, force: true });
+      await removeTempDirectory(directory);
     }
   });
 
@@ -424,7 +436,7 @@ describe("runCodexAppServerTurn", () => {
         [{ type: "text", text: "focus on tests", text_elements: [] }],
       );
     } finally {
-      await fs.rm(directory, { recursive: true, force: true });
+      await removeTempDirectory(directory);
     }
   });
 
@@ -449,7 +461,7 @@ describe("runCodexAppServerTurn", () => {
         .map((line) => (JSON.parse(line) as { method?: string }).method);
       assert.deepEqual(methods, ["initialize", "initialized", "thread/start"]);
     } finally {
-      await fs.rm(directory, { recursive: true, force: true });
+      await removeTempDirectory(directory);
     }
   });
 
@@ -474,7 +486,7 @@ describe("runCodexAppServerTurn", () => {
         .map((line) => (JSON.parse(line) as { method?: string }).method);
       assert.deepEqual(methods, ["initialize"]);
     } finally {
-      await fs.rm(directory, { recursive: true, force: true });
+      await removeTempDirectory(directory);
     }
   });
 
@@ -496,7 +508,7 @@ describe("runCodexAppServerTurn", () => {
       assert.match(result.stdout, /initial=initial prompt; steer=/);
       assert.match(result.stdout, /"input_tokens":11/);
     } finally {
-      await fs.rm(directory, { recursive: true, force: true });
+      await removeTempDirectory(directory);
     }
   });
 
@@ -534,7 +546,7 @@ describe("runCodexAppServerTurn", () => {
       assert.equal(kept.exitCode, 0);
       assert.equal(kept.timedOut, false);
     } finally {
-      await fs.rm(directory, { recursive: true, force: true });
+      await removeTempDirectory(directory);
     }
   });
   test("treats blank framing lines as framing, not malformed JSONL", async () => {
@@ -554,7 +566,7 @@ describe("runCodexAppServerTurn", () => {
       assert.equal(result.timedOut, false);
       assert.match(result.stdout, /"type":"turn.started"/);
     } finally {
-      await fs.rm(directory, { recursive: true, force: true });
+      await removeTempDirectory(directory);
     }
   });
   test("never advertises fallback after the model request may have been accepted", async () => {
@@ -591,7 +603,7 @@ describe("runCodexAppServerTurn", () => {
         );
       }
     } finally {
-      await fs.rm(directory, { recursive: true, force: true });
+      await removeTempDirectory(directory);
     }
   });
 
@@ -622,7 +634,7 @@ describe("runCodexAppServerTurn", () => {
       assert.equal(denial?.error?.code, -32_000);
       assert.match(denial?.error?.message ?? "", /does not support interactive server requests/);
     } finally {
-      await fs.rm(directory, { recursive: true, force: true });
+      await removeTempDirectory(directory);
     }
   });
 });

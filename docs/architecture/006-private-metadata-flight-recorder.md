@@ -1,6 +1,6 @@
 # ADR 006: Strict private metadata Flight Recorder
 
-- Status: Accepted for staged implementation
+- Status: Accepted; implemented with metadata-only Replay preparation
 - Date: 2026-07-24
 - Owners: Hydra maintainers
 
@@ -191,9 +191,18 @@ It never silently presents a partial trace as complete.
   receipt append terminalizes the operation as `incomplete/recorderFailure`,
   so a complete Flight trace cannot claim a receipt that was never durably
   accepted.
-- Browser, approval, and structured tool/edit controllers will receive narrow
-  recorder sinks in later stages; they must never pass content-bearing
-  payloads.
+- Browser authorization and execution use a narrow observational sink. It
+  emits an opaque request ID, target commitment, operation category, the
+  actual allow/deny/expiry/revocation outcome, and terminal status. The sink
+  never receives the URL, selector, typed text, page body, screenshot, or tool
+  result, and recorder failure cannot change browser authorization or
+  execution.
+- Structured Codex and Claude output is normalized from the authenticated/raw
+  transport stream before that stream is reduced to transcript reply text.
+  Only bounded tool categories, opaque provider-operation commitments, byte
+  counts, edit counts, and whole-workspace before/after commitments cross into
+  Flight. Plain, unsupported, malformed, and flooded streams record explicit
+  availability metadata.
 
 Provider floods produce `traceLimited` plus explicit completeness limits rather
 than unbounded cardinality or a false complete view.
@@ -285,14 +294,14 @@ exceptions, provider sessions, and sealed payloads. Initiating transition
 coverage includes user send, builder assignment, review request, hand-back,
 Stop, reservation failure, and auto-advance causal links exactly once.
 
-Roll out protocol/store/controller first, then agent and steering lifecycles,
-then phase/verification/usage/native projections and the extension-host smoke.
-Browser, approval, and structured tool/edit projections follow as separate
-controller integrations. Replay and eval remain unavailable until isolation,
-consent, cost, and retained-content gates land. Rollback disables recording
-and hides the mirror while preserving private traces for inspection.
+Implementation proceeded from protocol/store/controller through agent and
+steering lifecycles, then phase/verification/usage/native and provider/browser
+projections. The operator inspector, derived Replay preparation, and
+created-event eval ledger are implemented as downstream projections over
+strict private trace replay. Rollback disables recording and hides the mirror
+and inspector while preserving private traces for later strict inspection.
 
-### Current staged implementation
+### Current implementation
 
 The first runtime stage records one Mission-bound trace for each `runTurn`
 execution. Each participating provider head has exactly one terminal
@@ -365,9 +374,35 @@ operations. The test validates strict replay completeness, metadata-only
 storage, operation order, owner-lease shutdown, exact cleanup, and writes only
 a bounded latest diagnostic report outside the disposable run.
 
-This remains a strict partial timeline, not a complete regression receipt.
-Browser, approval, structured provider tool/edit normalization, Replay, and
-Create Eval still require their later controller sinks and safety gates.
+The operator-facing Flight inspector discovers traces by scanning the bounded
+authoritative private trace directory, strictly replays each file, and derives
+all lifecycle and action gates from that replay. The disposable Markdown
+mirror and rebuildable index are never consulted for eligibility. Every UI
+selection carries the exact trace root and recorded Mission binding back to
+the host; Replay and Create Eval reopen the file and reject a changed root or
+current Mission binding before mutation.
+
+Codex/Claude structured streams now project bounded tool and edit child
+operations from authenticated/raw transport output before reply normalization.
+Integrated Browser requests project browser children and nested approval
+children at the real confirmation boundary, including cancellation after
+token revocation. Provider floods force `traceLimited` and an incomplete
+terminal trace instead of silently dropping evidence.
+
+Replay currently implements the safe metadata-only path: after an explicit
+modal confirmation and replacement input, Hydra creates a detached worktree
+outside the source workspace at the trace's exact Git base, writes a private
+plan containing only the replacement-input hash and byte count, copies the
+replacement body to the clipboard, and opens a new VS Code window. It never
+submits the input or reuses a provider session; sending in the new room remains
+a separate authority, consent, and cost decision. Exact replay remains
+unavailable until separately retained opt-in content exists.
+
+Create Eval appends a canonical hash-chained `evalCaseCreated` event to the
+separate private eval ledger. The event binds the exact source root, active
+Mission binding/document, acceptance-plan commitment, and a human-selected
+expected outcome. Correction and void operator workflows remain future ledger
+event types; created events are never rewritten in place.
 
 ## Source anchors
 

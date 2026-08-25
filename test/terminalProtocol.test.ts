@@ -11,11 +11,24 @@ import {
   HYDRA_SYNTHETIC_ECHO_COMMAND,
   parseTerminalReply,
   quotePowerShell,
+  terminalBridgePlatformSupport,
   terminalProtocolPaths,
   terminalProtocolStoragePaths,
 } from "../src/terminalProtocol";
 
 describe("terminal bridge protocol", () => {
+  test("preflights the PowerShell-only bridge as unsupported off Windows", () => {
+    for (const platform of ["linux", "darwin"] as const) {
+      const support = terminalBridgePlatformSupport(platform);
+      assert.equal(support.supported, false);
+      assert.equal(support.platform, platform);
+      assert.match(support.message, /requires Windows PowerShell/i);
+      assert.match(support.message, /Safe One-Shot remains active/i);
+    }
+
+    assert.equal(terminalBridgePlatformSupport("win32").supported, true);
+  });
+
   test("expands workspace placeholders in terminal commands", () => {
     assert.equal(
       expandTerminalCommand('codex --cd "${workspaceFolder}"', "C:\\repo with spaces"),
@@ -29,6 +42,10 @@ describe("terminal bridge protocol", () => {
     assert.equal(paths.replyPath, path.join("C:\\repo", ".hydra", "replies", "turn-1-codex-opener.json"));
     assert.equal(paths.logPath, path.join("C:\\repo", ".hydra", "logs", "turn-1-codex-opener.log"));
     assert.equal(paths.dispatchPath, path.join("C:\\repo", ".hydra", "dispatch", "turn-1-codex-opener.ps1"));
+    assert.equal(
+      (paths as typeof paths & { replyKeyPath: string }).replyKeyPath,
+      path.join("C:\\repo", ".hydra", "reply-keys", "turn-1-codex-opener.key"),
+    );
     assert.equal(paths.lastMessagePath, path.join("C:\\repo", ".hydra", "replies", "turn-1-codex-opener.last.txt"));
   });
 
@@ -241,27 +258,61 @@ describe("terminal bridge protocol", () => {
   });
 
   test("dispatch invocation keeps terminal input short", () => {
-    const out = buildPowerShellDispatchInvocation("C:\\repo\\.hydra\\dispatch\\turn-1-codex-opener.ps1");
-    assert.equal(
-      out,
-      "\r\n; Remove-Item env:HYDRA_REPLY_NONCE -ErrorAction SilentlyContinue; $__hydraReplyKey = ''; try { Invoke-Expression (Get-Content -LiteralPath 'C:\\repo\\.hydra\\dispatch\\turn-1-codex-opener.ps1' -Raw) } finally { $__hydraReplyKey = $null; Remove-Variable __hydraReplyKey -ErrorAction SilentlyContinue; Remove-Item env:HYDRA_REPLY_NONCE -ErrorAction SilentlyContinue }; $null = $null"
+    const out = buildPowerShellDispatchInvocation(
+      "C:\\repo\\.hydra\\dispatch\\turn-1-codex-opener.ps1",
+      "a".repeat(64),
     );
+    assert.ok(out.length < 4_096);
+    assert.doesNotMatch(out, /\$__hydraReplyKey\s*=\s*'/);
     assert.doesNotMatch(out, /__HydraResolveCommand/);
     assert.doesNotMatch(out, /__hydraPrompt/);
   });
 
   test("dispatch invocation verifies launcher integrity before execution", () => {
-    const out = buildPowerShellDispatchInvocation("C:\\storage\\dispatch\\request.ps1", "nonce", "abc123");
+    const expectedSha256 = "a".repeat(64);
+    const out = buildPowerShellDispatchInvocation("C:\\storage\\dispatch\\request.ps1", expectedSha256);
     assert.match(out, /ReadAllBytes\('C:\\storage\\dispatch\\request\.ps1'\)/);
     assert.match(out, /SHA256\]::Create\(\)/);
-    assert.match(out, /-cne 'abc123'/);
+    assert.match(out, new RegExp(`-cne '${expectedSha256}'`));
     assert.match(out, /terminal dispatch integrity check failed/);
     assert.match(out, /UTF8Encoding\]::new\(\$false\)\.GetString/);
   });
 
+  test("dispatch invocation never embeds reply-key material in terminal input", () => {
+    const expectedSha256 = "a".repeat(64);
+    const out = buildPowerShellDispatchInvocation(
+      "C:\\storage\\dispatch\\request.ps1",
+      expectedSha256,
+    );
+
+    assert.doesNotMatch(out, /\$__hydraReplyKey\s*=\s*'[a-f0-9]+'/i);
+    assert.doesNotMatch(out, /\$env:HYDRA_REPLY_NONCE\s*=/);
+    assert.match(out, new RegExp(`-cne '${expectedSha256}'`));
+    assert.match(out, /terminal dispatch integrity check failed/);
+  });
+
+  test("dispatch script consumes a strictly validated private reply-key artifact before resolving the native command", () => {
+    const out = buildPowerShellDispatchCommand(
+      { command: "codex", args: ["exec", "-"], cwd: "C:\\repo" },
+      "C:\\storage\\prompts\\request.md",
+      "C:\\storage\\replies\\request.json",
+      "C:\\storage\\logs\\request.log",
+      "b".repeat(64),
+    );
+
+    assert.match(out, /C:\\storage\\reply-keys\\request\.key/);
+    assert.match(out, /reply key path escapes the private artifact root/i);
+    assert.match(out, /FileAttributes\]::ReparsePoint/);
+    assert.match(out, /reply key must contain exactly 32 bytes/i);
+    const consume = out.indexOf("Remove-Item -LiteralPath $__hydraReplyKeyPath");
+    const resolve = out.indexOf("__HydraResolveCommand $__hydraCommandName");
+    assert.ok(consume >= 0 && resolve > consume, "key deletion must precede native command resolution");
+  });
+
   test("dispatch invocation begins with a statement separator so back-to-back sendText calls parse cleanly even if the previous newline is dropped", () => {
-    const a = buildPowerShellDispatchInvocation("C:\\repo\\.hydra\\dispatch\\turn-1-codex-build.ps1");
-    const b = buildPowerShellDispatchInvocation("C:\\repo\\.hydra\\dispatch\\turn-2-codex-opener.ps1");
+    const digest = "a".repeat(64);
+    const a = buildPowerShellDispatchInvocation("C:\\repo\\.hydra\\dispatch\\turn-1-codex-build.ps1", digest);
+    const b = buildPowerShellDispatchInvocation("C:\\repo\\.hydra\\dispatch\\turn-2-codex-opener.ps1", digest);
     // Worst case: the pty drops the newline between two sendText calls. The
     // result must still tokenize as two separate Invoke-Expression statements,
     // not a single call where the second IE is read as a positional arg.

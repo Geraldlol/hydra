@@ -29,6 +29,19 @@ const messagesEl = document.getElementById("messages");
 const srAnnounce = document.getElementById("srAnnounce");
 const composer = document.getElementById("composer");
 const transportChip = document.getElementById("transportChip");
+const missionRail = document.getElementById("missionRail");
+const missionPanelCount = document.getElementById("missionPanelCount");
+const missionActiveBoard = document.getElementById("missionActiveBoard");
+const missionProposalBoard = document.getElementById("missionProposalBoard");
+const missionCandidateBoard = document.getElementById("missionCandidateBoard");
+const missionDraft = document.getElementById("missionDraft");
+const missionDraftStatus = document.getElementById("missionDraftStatus");
+const missionResetDraftBtn = document.getElementById("missionResetDraftBtn");
+const missionProposeBtn = document.getElementById("missionProposeBtn");
+const flightRail = document.getElementById("flightRail");
+const flightPanelCount = document.getElementById("flightPanelCount");
+const flightTraceList = document.getElementById("flightTraceList");
+const flightTraceDetail = document.getElementById("flightTraceDetail");
 const phaseChip = document.getElementById("phaseChip");
 const objectiveText = document.getElementById("objectiveText");
 const objectiveTextShim = document.getElementById("objectiveTextShim");
@@ -71,6 +84,7 @@ const archiveChatBtn = document.getElementById("archiveChatBtn");
 const builderButtons = document.getElementById("builderButtons");
 const assignBothBtn = document.getElementById("assignBothBtn");
 const reviewBtn = document.getElementById("reviewBtn");
+const resolveReviewBtn = document.getElementById("resolveReviewBtn");
 const handBackBtn = document.getElementById("handBackBtn");
 const nativeTerminalsBtn = document.getElementById("nativeTerminalsBtn");
 const openNativeTerminalsBtn = document.getElementById("openNativeTerminalsBtn");
@@ -167,6 +181,16 @@ if (duelsRail) {
   duelsRail.addEventListener("click", open);
   duelsRail.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } });
 }
+if (missionRail) {
+  const open = () => vscode.postMessage({ type: "manageMissionContract" });
+  missionRail.addEventListener("click", open);
+  missionRail.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } });
+}
+if (flightRail) {
+  const open = () => vscode.postMessage({ type: "manageFlightRecorder" });
+  flightRail.addEventListener("click", open);
+  flightRail.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } });
+}
 if (modelRail) {
   const open = () => vscode.postMessage({ type: "chooseModelOrEffort" });
   modelRail.addEventListener("click", open);
@@ -197,6 +221,9 @@ let lastHandoffKey = null;
 let transport = "oneShot";
 let lastNativeActions = [];
 let lastState = {};
+let lastMissionState = {};
+let missionDraftDirty = false;
+let missionDraftBaseBindingSha256 = "";
 /** Roster metadata ({id, displayName, colorIndex}) keyed by agent id, sent by
  *  the host in state.roster (see listAgentDefinitions in src/agentRegistry.ts).
  *  The ordered roster starts with the legacy two-head fallback; this lookup is
@@ -232,11 +259,12 @@ const ACTIONS = [
   { id: "clean-workspace-state", group: "Objective", name: "Clean Workspace State", what: "Compact old prompt bodies and prune stale .hydra diagnostics", run: () => vscode.postMessage({ type: "cleanWorkspaceState" }), enabled: () => !lastState.canOpenFolder },
   { id: "archive-chat", group: "Objective", name: "Archive Chat", what: "Archive transcript and clear room", run: () => archiveChatBtn.click(), enabled: () => !archiveChatBtn.disabled },
   { id: "accept-default", group: "Workflow", name: "Accept Default", what: "Run the latest decision default", run: () => acceptDefaultBtn.click(), enabled: () => !acceptDefaultBtn.disabled },
-  { id: "toggle-auto-accept-default", group: "Workflow", name: "Toggle Safe-default Auto-advance", what: "Turn automatic advancement of safe, unblocked defaults on or off", run: () => autoAdvanceDefaultsBtn.click(), enabled: () => !autoAdvanceDefaultsBtn.disabled },
+  { id: "toggle-auto-accept-default", group: "Workflow", name: "Toggle Agent-default Auto-advance", what: "Review or revoke the explicit opt-in for automatic execution of eligible agent-authored defaults", run: () => autoAdvanceDefaultsBtn.click(), enabled: () => !autoAdvanceDefaultsBtn.disabled },
   { id: "assign-codex", group: "Workflow", name: "Assign Builder: Codex", what: "Let Codex edit files", run: () => vscode.postMessage({ type: "assignBuilder", builder: "codex" }), enabled: () => canAssignRegisteredBuilder("codex") },
   { id: "assign-claude", group: "Workflow", name: "Assign Builder: Claude", what: "Let Claude edit files", run: () => vscode.postMessage({ type: "assignBuilder", builder: "claude" }), enabled: () => canAssignRegisteredBuilder("claude") },
   { id: "assign-both", group: "Workflow", name: "Assign Builders: All Configured Heads", what: "Run every configured Hydra head as a parallel Build worker", run: () => assignBothBtn.click(), enabled: () => !assignBothBtn.classList.contains("hidden") && !assignBothBtn.disabled },
   { id: "request-review", group: "Workflow", name: "Request Review", what: "Ask the non-builder to review the diff", run: () => reviewBtn.click(), enabled: () => !reviewBtn.classList.contains("hidden") && !reviewBtn.disabled },
+  { id: "resolve-review", group: "Workflow", name: "Accept despite dissent", what: "Explicitly accept a split human-policy review without hiding dissent", run: () => resolveReviewBtn.click(), enabled: () => !resolveReviewBtn.classList.contains("hidden") && !resolveReviewBtn.disabled },
   { id: "hand-back", group: "Workflow", name: "Hand Back to Builder", what: "Return review feedback to the builder", run: () => handBackBtn.click(), enabled: () => !handBackBtn.classList.contains("hidden") && !handBackBtn.disabled },
   { id: "reset-turn", group: "Workflow", name: "Reset Stuck Turn", what: "Recover from a stuck state", run: () => resetTurnBtn.click(), enabled: () => !resetTurnBtn.classList.contains("hidden") && !resetTurnBtn.disabled },
   { id: "native-action", group: "Terminals", name: "Native Action", what: "Choose a direct native terminal action", run: () => nativeActionBtn.click(), enabled: () => !nativeActionBtn.classList.contains("hidden") && !nativeActionBtn.disabled },
@@ -256,6 +284,10 @@ const ACTIONS = [
   { id: "open-decisions-panel", group: "Panels", name: "Open Decisions Panel", what: "Inspect decision packets", run: () => openPanel("decisions") },
   { id: "open-standings-panel", group: "Panels", name: "Open Evidence Scoreboard", what: "Inspect the passive, evidence-backed scoreboard and head standings", run: () => openPanel("standings") },
   { id: "open-duels-panel", group: "Panels", name: "Open Formal Duels", what: "Inspect agent-initiated domain competition without changing authority", run: () => openPanel("duels") },
+  { id: "open-mission-panel", group: "Panels", name: "Manage Mission Contract", what: "Review exact active terms, proposals, hashes, and local authority actions", run: () => vscode.postMessage({ type: "manageMissionContract" }), enabled: () => !lastState.canOpenFolder },
+  { id: "open-flight-panel", group: "Panels", name: "Inspect Flight Recorder", what: "Inspect authoritative private traces and exact Replay/Eval gates", run: () => vscode.postMessage({ type: "manageFlightRecorder" }), enabled: () => !lastState.canOpenFolder },
+  { id: "replay-flight-trace", group: "Workflow", name: "Replay Flight Trace", what: "Prepare an isolated derived regression from a complete exact trace", run: () => vscode.postMessage({ type: "replayFlightTrace" }), enabled: () => !lastState.canOpenFolder && !(lastState.canStop) },
+  { id: "create-flight-eval", group: "Workflow", name: "Create Eval from Flight", what: "Bind a human expected outcome to a complete exact trace", run: () => vscode.postMessage({ type: "createFlightEval" }), enabled: () => !lastState.canOpenFolder },
   { id: "open-usage-panel", group: "Panels", name: "Open Usage Panel", what: "Inspect session tokens, cache, reasoning, and estimated cost", run: () => openPanel("usage") },
   { id: "open-terminal-panel", group: "Panels", name: "Open Terminal Sessions Panel", what: "Inspect terminal sessions", run: () => openPanel("term") },
   { id: "toggle-ribbons", group: "Panels", name: "Toggle Status Ribbons", what: "Minimize or restore the status ribbons above the composer", run: () => toggleRibbonsBtn.click() },
@@ -278,7 +310,7 @@ const ACTIONS = [
   { id: "wiki-wrapup-now", group: "Files", name: "Run Wiki Wrapup Now", what: "Force a wiki wrapup from the latest completed room turn", run: () => vscode.postMessage({ type: "runWikiWrapupNow" }), enabled: () => !!lastState.canRunWikiWrapup },
   { id: "choose-model", group: "Settings", name: "Choose Model", what: "Pick Codex or Claude model overrides", run: () => vscode.postMessage({ type: "chooseModel" }), enabled: () => !lastState.canOpenFolder },
   { id: "choose-effort", group: "Settings", name: "Choose Thinking Level", what: "Pick Codex reasoning or Claude effort overrides", run: () => vscode.postMessage({ type: "chooseEffort" }), enabled: () => !lastState.canOpenFolder },
-  { id: "toggle-many-heads", group: "Settings", name: "Toggle Claude Worker Fanout", what: "Run parallel Claude workers; this does not add independent Hydra heads", run: () => vscode.postMessage({ type: "toggleManyHeadsMode" }), enabled: () => !lastState.canOpenFolder },
+  { id: "toggle-many-heads", group: "Settings", name: "Toggle Claude Worker Fanout", what: "Claude fanout does not add independent Hydra heads; it runs duplicate one-shot Discussion, Build adviser, and Review workers", run: () => vscode.postMessage({ type: "toggleManyHeadsMode" }), enabled: () => !lastState.canOpenFolder },
   { id: "many-heads-workers", group: "Settings", name: "Set Claude Fanout Workers", what: "Choose the local subscription-backed Claude worker count", run: () => vscode.postMessage({ type: "configureManyHeadsWorkers" }), enabled: () => !lastState.canOpenFolder },
   { id: "test-telegram", group: "Settings", name: "Send Test Telegram", what: "Verify Telegram decision notifications", run: () => vscode.postMessage({ type: "testTelegram" }), enabled: () => !lastState.canOpenFolder },
   { id: "change-profile", group: "Settings", name: "Change Capability Profile", what: "Pick safe, native build, review, full-native, or custom CLI profiles", run: () => profileBtn.click(), enabled: () => !profileBtn.disabled },
@@ -351,6 +383,7 @@ composer.addEventListener("keydown", (e) => {
 stopBtn.addEventListener("click", () => vscode.postMessage({ type: "stop" }));
 assignBothBtn.addEventListener("click", () => vscode.postMessage({ type: "assignParallelBuilders" }));
 reviewBtn.addEventListener("click", () => vscode.postMessage({ type: "requestReview" }));
+resolveReviewBtn.addEventListener("click", () => vscode.postMessage({ type: "resolveReview" }));
 acceptDefaultBtn.addEventListener("click", () => vscode.postMessage({ type: "acceptDefaultDecision" }));
 handoffConfirmBtn.addEventListener("click", () => {
   vscode.postMessage({ type: "confirmHandoff", action: handoffAction.value });
@@ -406,6 +439,80 @@ if (openStandingsBtn) openStandingsBtn.addEventListener("click", () => vscode.po
 if (openDuelAuditBtn) openDuelAuditBtn.addEventListener("click", () => vscode.postMessage({ type: "openDuelAudit" }));
 if (runDuelSmokeTestBtn) runDuelSmokeTestBtn.addEventListener("click", () => vscode.postMessage({ type: "runDuelReadinessSmokeTest" }));
 if (correctDuelResultBtn) correctDuelResultBtn.addEventListener("click", () => vscode.postMessage({ type: "correctDuelResult" }));
+if (missionDraft) missionDraft.addEventListener("input", () => {
+  missionDraftDirty = true;
+  updateMissionDraftState();
+});
+if (missionResetDraftBtn) missionResetDraftBtn.addEventListener("click", () => resetMissionDraft());
+if (missionProposeBtn) missionProposeBtn.addEventListener("click", () => {
+  if (!missionDraft || !missionDraftBaseBindingSha256) return;
+  vscode.postMessage({
+    type: "proposeMissionContract",
+    contractJson: missionDraft.value || "",
+    expectedBaseBindingSha256: missionDraftBaseBindingSha256
+  });
+});
+if (missionProposalBoard) missionProposalBoard.addEventListener("click", (event) => {
+  const target = event.target;
+  const button = target && target.closest ? target.closest("button[data-mission-action]") : undefined;
+  if (!button) return;
+  const proposal = (lastMissionState.proposals || []).find((item) => item && item.proposal && item.proposal.proposalId === (button.dataset.proposalId || ""));
+  if (!proposal) return;
+  const message = {
+    proposalId: proposal.proposal.proposalId,
+    expectedDocumentSha256: proposal.proposal.documentSha256,
+    expectedBaseBindingSha256: proposal.proposal.baseBindingSha256
+  };
+  if (button.dataset.missionAction === "confirm") vscode.postMessage(Object.assign({ type: "confirmMissionContract" }, message));
+  if (button.dataset.missionAction === "dismiss") vscode.postMessage(Object.assign({ type: "dismissMissionContractProposal" }, message));
+});
+if (missionCandidateBoard) missionCandidateBoard.addEventListener("click", (event) => {
+  const target = event.target;
+  const button = target && target.closest ? target.closest("button[data-mission-action]") : undefined;
+  if (!button) return;
+  const candidate = (lastMissionState.candidates || []).find((item) => item && item.candidateId === (button.dataset.candidateId || ""));
+  if (!candidate) return;
+  if (button.dataset.missionAction === "admit") {
+    vscode.postMessage({
+      type: "admitMissionProposal",
+      candidateId: candidate.candidateId,
+      expectedDocumentSha256: candidate.documentSha256,
+      expectedBaseBindingSha256: candidate.expectedBaseBindingSha256
+    });
+  }
+  if (button.dataset.missionAction === "discard") {
+    vscode.postMessage({ type: "discardMissionProposalCandidate", candidateId: candidate.candidateId });
+  }
+});
+if (missionActiveBoard) missionActiveBoard.addEventListener("click", (event) => {
+  const target = event.target;
+  const button = target && target.closest ? target.closest("button[data-mission-action='retire']") : undefined;
+  const binding = lastMissionState.binding;
+  if (!button || !binding || binding.state !== "active") return;
+  vscode.postMessage({
+    type: "retireMissionContract",
+    expectedMissionId: binding.missionId,
+    expectedRevision: binding.revision,
+    expectedDocumentSha256: binding.documentSha256,
+    expectedBindingSha256: binding.bindingSha256
+  });
+});
+if (flightTraceList) flightTraceList.addEventListener("click", (event) => {
+  const button = event.target && event.target.closest
+    ? event.target.closest("button[data-flight-trace-id]")
+    : undefined;
+  if (!button) return;
+  postFlightChoice("inspectFlightTrace", button.dataset.flightTraceId || "");
+});
+if (flightTraceDetail) flightTraceDetail.addEventListener("click", (event) => {
+  const button = event.target && event.target.closest
+    ? event.target.closest("button[data-flight-action]")
+    : undefined;
+  if (!button) return;
+  const traceId = button.dataset.flightTraceId || "";
+  if (button.dataset.flightAction === "replay") postFlightChoice("replayFlightTrace", traceId);
+  if (button.dataset.flightAction === "eval") postFlightChoice("createFlightEval", traceId);
+});
 nativeAgentFilter.addEventListener("change", () => renderNativeActions(lastState));
 nativeStatusFilter.addEventListener("change", () => renderNativeActions(lastState));
 clearNativeActionsBtn.addEventListener("click", () => {
@@ -481,10 +588,16 @@ window.addEventListener("message", (event) => {
   // for the rest of the session — guard the shape before reading msg.type.
   if (!msg || typeof msg !== "object") return;
   if (msg.type === "openPanel" && msg.panel === "duels") openPanel("duels");
+  else if (msg.type === "openPanel" && msg.panel === "mission") {
+    openPanel("mission");
+    if (msg.focus === "draft") setTimeout(() => focusEl(missionDraft), 0);
+  }
+  else if (msg.type === "openPanel" && msg.panel === "flight") openPanel("flight");
   else if (msg.type === "state") renderState(msg);
   else if (msg.type === "chunk") appendChunk(msg.messageId, msg.text);
   else if (msg.type === "replaceMessageText") replaceMessageText(msg.messageId, msg.text);
   else if (msg.type === "liveChannelEvent") appendLiveChannelEvent(msg.messageId, msg.event);
+  else if (msg.type === "missionProposalRecorded") resetMissionDraft();
   else if (msg.type === "setComposerText") {
     if (composer) {
       composer.value = msg.text || "";
@@ -616,7 +729,13 @@ function renderState(state) {
   renderWorkQueue(state);
   renderDecision(state.latestDecision, state.decisionsCount || 0, state.latestDecisionRisky, !!state.latestDecisionAccepted);
   renderHandoff(state.pendingHandoff);
-  renderAutoAdvanceDefaults(!!state.autoAdvanceActionableDefaults);
+  renderMissionContract(state.missionContract || {});
+  renderFlightRecorder(state.flightRecorder || {});
+  renderAutoAdvanceDefaults(
+    !!state.autoAdvanceActionableDefaultsConfigured,
+    !!state.autoAdvanceActionableDefaultsEffective,
+    state.isWorkspaceTrusted === true
+  );
   renderDecisionAction(state.decisionAction, !!state.canAcceptDefault, !!state.latestDecisionAccepted, !!state.canStop);
   renderStandings(state.standings || {});
   renderDuels(state.duels || {});
@@ -652,6 +771,7 @@ function renderState(state) {
   resetTurnBtn.classList.toggle("hidden", !state.canStop);
   renderBuilderButtons(!!state.canAssignBuilder, state.suggestedBuilder);
   reviewBtn.classList.toggle("hidden", !state.canRequestReview);
+  resolveReviewBtn.classList.toggle("hidden", !state.canResolveReview);
   handBackBtn.classList.toggle("hidden", !state.canHandBack);
   archiveChatBtn.disabled = !state.canArchiveRoom;
   nativeTerminalsBtn.classList.toggle("hidden", !!state.canOpenFolder);
@@ -711,6 +831,377 @@ function renderState(state) {
   renderPalette(paletteInput.value || "");
   applyCollapsedRibbons();
   updateRibbonMinimizedSummary(state);
+}
+
+function renderMissionContract(state) {
+  lastMissionState = state && typeof state === "object" ? state : {};
+  const ready = lastMissionState.status === "ready";
+  const binding = lastMissionState.binding;
+  const proposals = Array.isArray(lastMissionState.proposals) ? lastMissionState.proposals : [];
+  const candidates = Array.isArray(lastMissionState.candidates) ? lastMissionState.candidates : [];
+  const currentBase = binding && typeof binding.bindingSha256 === "string" ? binding.bindingSha256 : "";
+
+  if (missionRail) {
+    const label = !ready
+      ? "mission: unavailable"
+      : binding && binding.state === "active"
+        ? `mission: r${binding.revision}`
+        : "mission: unbound";
+    missionRail.textContent = label;
+    missionRail.title = binding && binding.state === "active"
+      ? `Mission ${binding.missionId} revision ${binding.revision}\nDocument SHA-256 ${binding.documentSha256}\nBinding SHA-256 ${binding.bindingSha256}`
+      : lastMissionState.error || "No active Mission Contract. Open the manager to propose one.";
+    missionRail.setAttribute("aria-label", `${label}. Open Mission Contract manager`);
+    missionRail.classList.toggle("error", !ready);
+  }
+  if (missionPanelCount) {
+    missionPanelCount.textContent = ready
+      ? `${proposals.length} pending · ${candidates.length} agent candidate${candidates.length === 1 ? "" : "s"}`
+      : "unavailable";
+  }
+
+  renderMissionActive(binding, ready, lastMissionState.error || "");
+  renderMissionProposals(proposals);
+  renderMissionCandidates(candidates, ready);
+
+  if (!missionDraftDirty || !missionDraftBaseBindingSha256) {
+    if (missionDraft) missionDraft.value = typeof lastMissionState.draftContractJson === "string" ? lastMissionState.draftContractJson : "";
+    missionDraftBaseBindingSha256 = currentBase;
+    missionDraftDirty = false;
+  }
+  updateMissionDraftState();
+}
+
+function renderMissionActive(binding, ready, error) {
+  if (!missionActiveBoard) return;
+  missionActiveBoard.replaceChildren();
+  if (!ready) {
+    missionActiveBoard.append(missionEmptyCard(error || "Mission Contract authority is unavailable. Bound work remains disabled."));
+    return;
+  }
+  if (!binding || binding.state !== "active") {
+    missionActiveBoard.append(missionEmptyCard("Explicitly unbound. Ordinary legacy room Build remains available, but no contract-dependent feature may claim Mission coverage."));
+    return;
+  }
+  const card = missionCard(binding.contract.title, `active · revision ${binding.revision}`, [
+    `Mission ID: ${binding.missionId}`,
+    `Document SHA-256: ${binding.documentSha256}`,
+    `Binding SHA-256: ${binding.bindingSha256}`
+  ], binding.contract);
+  card.classList.add("active");
+  const actions = document.createElement("div");
+  actions.className = "mission-card-actions";
+  const retire = missionButton("Retire exact revision", "danger", "retire");
+  actions.append(retire);
+  card.append(actions);
+  missionActiveBoard.append(card);
+}
+
+function renderMissionProposals(proposals) {
+  if (!missionProposalBoard) return;
+  missionProposalBoard.replaceChildren();
+  if (proposals.length === 0) {
+    missionProposalBoard.append(missionEmptyCard("No pending admitted proposals."));
+    return;
+  }
+  for (const state of proposals) {
+    const proposal = state && state.proposal;
+    if (!proposal || !proposal.contract) continue;
+    const source = proposal.proposedBy && proposal.proposedBy.kind === "agent"
+      ? `agent ${proposal.proposedBy.agentId}`
+      : "local operator";
+    const card = missionCard(proposal.contract.title, `pending · ${source}`, [
+      `Proposal ID: ${proposal.proposalId}`,
+      `Mission ID: ${proposal.missionId}`,
+      `Base binding SHA-256: ${proposal.baseBindingSha256}`,
+      `Document SHA-256: ${proposal.documentSha256}`
+    ], proposal.contract);
+    const actions = document.createElement("div");
+    actions.className = "mission-card-actions";
+    const dismiss = missionButton("Dismiss", "secondary", "dismiss");
+    const confirm = missionButton("Confirm exact proposal", "suggested", "confirm");
+    dismiss.dataset.proposalId = proposal.proposalId;
+    confirm.dataset.proposalId = proposal.proposalId;
+    actions.append(dismiss, confirm);
+    card.append(actions);
+    missionProposalBoard.append(card);
+  }
+}
+
+function renderMissionCandidates(candidates, ready) {
+  if (!missionCandidateBoard) return;
+  missionCandidateBoard.replaceChildren();
+  if (candidates.length === 0) {
+    missionCandidateBoard.append(missionEmptyCard("No successful top-level agent reply has supplied a valid proposal control record this session."));
+    return;
+  }
+  for (const candidate of candidates) {
+    if (!candidate || !candidate.contract || !candidate.source) continue;
+    const currentBindingSha256 = lastMissionState.binding && lastMissionState.binding.bindingSha256;
+    const stale = !ready || (!!currentBindingSha256 && candidate.expectedBaseBindingSha256 !== currentBindingSha256);
+    const card = missionCard(candidate.contract.title, `${stale ? "stale" : "ephemeral"} · ${candidate.source.agentId}`, [
+      `Candidate ID: ${candidate.candidateId}`,
+      `Call ID: ${candidate.source.callId}`,
+      `Message ID: ${candidate.source.messageId}`,
+      `Response SHA-256: ${candidate.source.responseSha256}`,
+      `Base binding SHA-256: ${candidate.expectedBaseBindingSha256}`,
+      `Document SHA-256: ${candidate.documentSha256}`
+    ], candidate.contract);
+    const actions = document.createElement("div");
+    actions.className = "mission-card-actions";
+    const discard = missionButton("Discard", "secondary", "discard");
+    const admit = missionButton("Admit Mission Proposal", "suggested", "admit");
+    admit.disabled = stale;
+    if (stale) admit.title = "The Mission binding changed after this reply. Ask the agent for a fresh proposal.";
+    discard.dataset.candidateId = candidate.candidateId;
+    admit.dataset.candidateId = candidate.candidateId;
+    actions.append(discard, admit);
+    card.append(actions);
+    missionCandidateBoard.append(card);
+  }
+}
+
+function missionCard(titleText, stateText, metaLines, contract) {
+  const card = document.createElement("article");
+  card.className = "mission-card";
+  const head = document.createElement("div");
+  head.className = "mission-card-head";
+  const title = document.createElement("span");
+  title.className = "mission-card-title";
+  title.textContent = titleText || "Untitled Mission";
+  const state = document.createElement("span");
+  state.className = "mission-state";
+  state.textContent = stateText || "";
+  head.append(title, state);
+  const meta = document.createElement("div");
+  meta.className = "mission-meta";
+  meta.textContent = metaLines.join("\n");
+  const terms = document.createElement("pre");
+  terms.className = "mission-terms";
+  terms.textContent = JSON.stringify(contract, null, 2);
+  card.append(head, meta, terms);
+  return card;
+}
+
+function missionEmptyCard(text) {
+  const card = document.createElement("div");
+  card.className = "mission-card mission-meta";
+  card.textContent = text;
+  return card;
+}
+
+function missionButton(label, className, action) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = className;
+  button.textContent = label;
+  button.dataset.missionAction = action;
+  return button;
+}
+
+function resetMissionDraft() {
+  const binding = lastMissionState.binding;
+  missionDraftBaseBindingSha256 = binding && typeof binding.bindingSha256 === "string" ? binding.bindingSha256 : "";
+  if (missionDraft) missionDraft.value = typeof lastMissionState.draftContractJson === "string" ? lastMissionState.draftContractJson : "";
+  missionDraftDirty = false;
+  updateMissionDraftState();
+  focusEl(missionDraft);
+}
+
+function updateMissionDraftState() {
+  const binding = lastMissionState.binding;
+  const currentBase = binding && typeof binding.bindingSha256 === "string" ? binding.bindingSha256 : "";
+  const ready = lastMissionState.status === "ready";
+  const stale = !!missionDraftBaseBindingSha256 && !!currentBase && missionDraftBaseBindingSha256 !== currentBase;
+  if (missionDraftStatus) {
+    missionDraftStatus.textContent = !ready
+      ? (lastMissionState.error || "Mission Contract controller is unavailable.")
+      : stale
+        ? "The active binding changed while you edited. Reset the draft, review the current terms, then propose again."
+        : `Draft base binding SHA-256: ${missionDraftBaseBindingSha256 || "unavailable"}. Recording creates a pending proposal only.`;
+  }
+  if (missionDraft) missionDraft.disabled = !ready;
+  if (missionResetDraftBtn) missionResetDraftBtn.disabled = !ready;
+  if (missionProposeBtn) missionProposeBtn.disabled = !ready || stale || !missionDraft || !missionDraft.value.trim();
+}
+
+function renderFlightRecorder(state) {
+  const recorder = state && typeof state === "object" ? state : {};
+  const traces = Array.isArray(recorder.traces) ? recorder.traces : [];
+  const selected = traces.find((trace) => trace && trace.traceId === recorder.selectedTraceId) || traces[0];
+  if (flightRail) {
+    const ready = recorder.status === "ready";
+    const idle = recorder.status === "idle";
+    const complete = traces.filter((trace) => trace && trace.completeness === "complete").length;
+    flightRail.textContent = ready
+      ? `flight: ${complete}/${traces.length} complete`
+      : idle
+        ? "flight: ready"
+        : "flight: unavailable";
+    flightRail.title = ready
+      ? `${traces.length} authoritative private trace${traces.length === 1 ? "" : "s"}; ${complete} complete`
+      : idle
+        ? "Open the inspector to strictly load authoritative private traces."
+        : recorder.error || "Flight Recorder is unavailable.";
+    flightRail.setAttribute("aria-label", `${flightRail.textContent}. Open Flight trace inspector`);
+    flightRail.classList.toggle("error", !ready && !idle);
+  }
+  if (flightPanelCount) flightPanelCount.textContent = recorder.status === "ready"
+    ? `${traces.length} validated file${traces.length === 1 ? "" : "s"}`
+    : recorder.status === "idle" ? "open to load" : "unavailable";
+  renderFlightTraceList(traces, selected && selected.traceId, recorder.error || "");
+  renderFlightTraceDetail(selected, recorder.status === "ready", recorder.error || "");
+}
+
+function renderFlightTraceList(traces, selectedTraceId, error) {
+  if (!flightTraceList) return;
+  flightTraceList.replaceChildren();
+  if (traces.length === 0) {
+    flightTraceList.append(flightEmpty(error || "No authoritative Flight traces have finished in this workspace yet."));
+    return;
+  }
+  for (const trace of traces) {
+    if (!trace || typeof trace.traceId !== "string") continue;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `flight-trace-choice${trace.completeness === "invalid" ? " invalid" : ""}`;
+    button.dataset.flightTraceId = trace.traceId;
+    button.setAttribute("aria-current", String(trace.traceId === selectedTraceId));
+    button.disabled = trace.completeness === "invalid";
+    const title = document.createElement("span");
+    title.className = "flight-trace-title";
+    const phase = document.createElement("strong");
+    phase.textContent = trace.phase || "Unknown phase";
+    const status = document.createElement("span");
+    status.className = `status ${trace.completeness || "invalid"}`;
+    status.textContent = trace.completeness || "invalid";
+    title.append(phase, status);
+    const id = document.createElement("span");
+    id.className = "flight-trace-meta";
+    id.textContent = trace.traceId;
+    const meta = document.createElement("span");
+    meta.className = "flight-trace-meta";
+    meta.textContent = `${trace.source || "unknown"} · ${trace.recordCount || 0} records · ${formatFlightTime(trace.finishedAt || trace.startedAt)}`;
+    button.append(title, id, meta);
+    flightTraceList.append(button);
+  }
+}
+
+function renderFlightTraceDetail(trace, ready, error) {
+  if (!flightTraceDetail) return;
+  flightTraceDetail.replaceChildren();
+  if (!ready || !trace) {
+    flightTraceDetail.append(flightEmpty(error || "Choose an authoritative trace to inspect."));
+    return;
+  }
+  const summary = document.createElement("article");
+  summary.className = "flight-detail-card";
+  const heading = document.createElement("h4");
+  heading.textContent = `${trace.phase || "Unknown phase"} · ${trace.completeness}`;
+  const identity = document.createElement("div");
+  identity.className = "flight-hash";
+  identity.textContent = [
+    `Trace ID: ${trace.traceId}`,
+    `Trace root SHA-256: ${trace.expectedRootSha256}`,
+    `Mission binding SHA-256: ${trace.expectedMissionBindingSha256}`,
+    `Git base: ${trace.baseRevisionSha || "not recorded"}`,
+    `Lifecycle: ${trace.startedAt || "unknown"} → ${trace.finishedAt || "active"}`,
+    `Terminal status: ${trace.terminalStatus || "not terminal"}`,
+    `Content capture: ${trace.contentCapture || "off"}`
+  ].join("\n");
+  const policy = document.createElement("p");
+  policy.className = "flight-gate";
+  policy.textContent = "Private per-trace files are authoritative. The workspace Markdown mirror and discovery index are never used for eligibility.";
+  const gates = document.createElement("div");
+  gates.className = "flight-gates";
+  gates.append(flightGate("Replay", trace.replay), flightGate("Create Eval", trace.createEval));
+  const actions = document.createElement("div");
+  actions.className = "flight-actions";
+  const replay = flightActionButton("Prepare Isolated Replay", "replay", trace);
+  replay.disabled = !trace.replay || !trace.replay.eligible;
+  replay.title = trace.replay && trace.replay.reason ? trace.replay.reason : "Replay unavailable";
+  const evalButton = flightActionButton("Create Eval Case", "eval", trace);
+  evalButton.disabled = !trace.createEval || !trace.createEval.eligible;
+  evalButton.title = trace.createEval && trace.createEval.reason ? trace.createEval.reason : "Create Eval unavailable";
+  actions.append(replay, evalButton);
+  summary.append(heading, identity, policy, gates, actions);
+  flightTraceDetail.append(summary);
+
+  const operations = document.createElement("section");
+  operations.className = "flight-detail-card";
+  const opHeading = document.createElement("h4");
+  opHeading.textContent = `Causal operations · ${trace.operationCount || 0}`;
+  const list = document.createElement("div");
+  list.className = "flight-operation-list";
+  const rows = Array.isArray(trace.operations) ? trace.operations.slice(0, 256) : [];
+  if (rows.length === 0) {
+    list.append(flightEmpty(trace.issue || "No operation records are available."));
+  } else {
+    for (const operation of rows) {
+      const row = document.createElement("div");
+      row.className = "flight-operation";
+      const kind = document.createElement("strong");
+      kind.textContent = operation.operationKind || "operation";
+      const label = document.createElement("span");
+      label.textContent = operation.label || "Recorded operation";
+      const lifecycle = document.createElement("span");
+      lifecycle.className = `status ${operation.lifecycle || "open"}`;
+      lifecycle.textContent = operation.lifecycle || "open";
+      const meta = document.createElement("span");
+      meta.className = "flight-operation-meta";
+      meta.textContent = `seq ${operation.startedSequence}${operation.finishedSequence ? `–${operation.finishedSequence}` : ""} · ${operation.operationId}`;
+      row.append(kind, label, lifecycle, meta);
+      list.append(row);
+    }
+    if ((trace.operationCount || 0) > rows.length) {
+      list.append(flightEmpty(`Showing ${rows.length} bounded operations from ${trace.operationCount}; the authoritative private trace retains the full lifecycle.`));
+    }
+  }
+  operations.append(opHeading, list);
+  flightTraceDetail.append(operations);
+}
+
+function flightGate(label, gate) {
+  const element = document.createElement("p");
+  element.className = `flight-gate${gate && gate.eligible ? " eligible" : ""}`;
+  element.textContent = `${label}: ${gate && gate.eligible ? "eligible" : "blocked"}. ${gate && gate.reason ? gate.reason : "No eligibility receipt."}`;
+  return element;
+}
+
+function flightActionButton(label, action, trace) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = action === "replay" ? "suggested" : "secondary";
+  button.textContent = label;
+  button.dataset.flightAction = action;
+  button.dataset.flightTraceId = trace.traceId;
+  return button;
+}
+
+function flightEmpty(text) {
+  const empty = document.createElement("div");
+  empty.className = "flight-empty";
+  empty.textContent = text;
+  return empty;
+}
+
+function postFlightChoice(type, traceId) {
+  const traces = lastState && lastState.flightRecorder && Array.isArray(lastState.flightRecorder.traces)
+    ? lastState.flightRecorder.traces
+    : [];
+  const trace = traces.find((candidate) => candidate && candidate.traceId === traceId);
+  if (!trace) return;
+  vscode.postMessage({
+    type,
+    traceId: trace.traceId,
+    expectedRootSha256: trace.expectedRootSha256,
+    expectedMissionBindingSha256: trace.expectedMissionBindingSha256
+  });
+}
+
+function formatFlightTime(value) {
+  const time = Date.parse(value || "");
+  return Number.isFinite(time) ? new Date(time).toLocaleString() : "unknown time";
 }
 
 function addOptimisticUserMessage(text) {
@@ -2333,12 +2824,24 @@ function renderDecisionAction(action, canAccept, accepted, running) {
   acceptDefaultBtn.classList.toggle("suggested", !!canAccept && !accepted);
   acceptDefaultBtn.classList.toggle("hidden", noAction);
 }
-function renderAutoAdvanceDefaults(enabled) {
-  autoAdvanceDefaultsBtn.textContent = enabled ? "Auto-advance safe defaults: On" : "Auto-advance safe defaults: Off";
-  autoAdvanceDefaultsBtn.setAttribute("aria-pressed", String(enabled));
-  autoAdvanceDefaultsBtn.title = enabled
-    ? "Turn off automatic advancement of safe, unblocked decision defaults"
-    : "Turn on automatic advancement of safe, unblocked decision defaults";
+function renderAutoAdvanceDefaults(configured, effective, trusted) {
+  if (configured && !effective) {
+    autoAdvanceDefaultsBtn.textContent = trusted
+      ? "Agent-default auto-advance: On (paused)"
+      : "Agent-default auto-advance: On (paused: untrusted workspace)";
+    autoAdvanceDefaultsBtn.title = trusted
+      ? "The global opt-in is currently paused. Click to revoke it."
+      : "The global opt-in is suspended while this workspace is untrusted. Click to revoke it; automatic execution remains blocked.";
+  } else {
+    autoAdvanceDefaultsBtn.textContent = configured
+      ? "Agent-default auto-advance: On"
+      : "Agent-default auto-advance: Off";
+    autoAdvanceDefaultsBtn.title = configured
+      ? "Turn off automatic execution of eligible agent-authored Decision Packet defaults"
+      : "Decision Packet defaults are agent-authored; enabling automatic execution requires an explicit modal opt-in";
+  }
+  autoAdvanceDefaultsBtn.setAttribute("aria-pressed", String(configured));
+  autoAdvanceDefaultsBtn.dataset.effective = String(effective);
 }
 function renderDecisionBoard(decisions) {
   decisionPanelCount.textContent = decisions.length + " decisions";
@@ -2534,6 +3037,7 @@ function isSuggested(action) {
   if (lastState.canAcceptDefault && action.id === "accept-default") return true;
   if (lastState.canAssignBuilder && action.id.indexOf("assign-") === 0) return true;
   if (lastState.canRequestReview && action.id === "request-review") return true;
+  if (lastState.canResolveReview && action.id === "resolve-review") return true;
   if (String(lastState.verificationSummary || "").toLowerCase().includes("fail") && (action.id === "verification" || action.id === "open-verify")) return true;
   if (lastState.canSend && (action.id === "send" || action.id === "pin-objective")) return true;
   return false;
@@ -2547,6 +3051,7 @@ function disabledReason(action) {
   if (action.id === "choose-model" || action.id === "choose-effort" || action.id === "toggle-many-heads" || action.id === "many-heads-workers" || action.id === "test-telegram" || action.id === "open-objective" || action.id === "open-agent-calls" || action.id === "clean-workspace-state") return "open a workspace folder first";
   if (action.id.indexOf("assign-") === 0) return "builder assignment unavailable";
   if (action.id === "request-review") return "no build ready for review";
+  if (action.id === "resolve-review") return "no split review awaiting human resolution";
   if (action.id.indexOf("poke-") === 0 || action.id.indexOf("-command") > 0 || action.id.indexOf("-raw") > 0 || action.id === "native-action") return "native terminal actions unavailable";
   if (action.id.indexOf("verification") >= 0) return "verification unavailable in this state";
   return "not available in this state";

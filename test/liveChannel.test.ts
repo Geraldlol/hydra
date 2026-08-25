@@ -24,6 +24,16 @@ describe("live channel writer", () => {
     }), undefined);
   });
 
+  test("returns undefined for Gemini's non-streaming JSON envelope", () => {
+    assert.equal(createLiveChannelWriter({
+      workspaceRoot: tempRoot(),
+      requestId: "req",
+      agent: "gemini",
+      phase: "build",
+      outputMode: "geminiJson",
+    }), undefined);
+  });
+
   test("writes Claude text, task, tool, and done events from split JSONL chunks", async () => {
     const root = tempRoot();
     const taskOutputPath = path.join(root, "task-output.txt");

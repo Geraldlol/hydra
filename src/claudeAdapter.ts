@@ -5,6 +5,17 @@ import { insertBeforeStdinDash, withModelArgs, withEffortArgs, isBuiltinAgentId 
 import { classifyAgentAuthority } from "./authority";
 import { usageFromClaudeSummary, resolveModelPrices, coerceModelPrices } from "./usage";
 import { parseClaudeEventStream, summarizeClaudeEvents } from "./claudeEvents";
+import { CLAUDE_EDIT_ONLY_BUILD_TOOLS, CLAUDE_READ_ONLY_TOOLS } from "./capabilityProfiles";
+
+function isHydraIsolatedProfile(args: readonly string[]): boolean {
+  const toolsIndex = args.indexOf("--tools");
+  return toolsIndex >= 0
+    && [CLAUDE_READ_ONLY_TOOLS, CLAUDE_EDIT_ONLY_BUILD_TOOLS].includes(args[toolsIndex + 1] ?? "")
+    && args.includes("--safe-mode")
+    && args.includes("--strict-mcp-config")
+    && args.includes("--disable-slash-commands")
+    && args.includes("--no-chrome");
+}
 
 export const claudeAdapter: AgentAdapter = {
   kind: "claude",
@@ -25,7 +36,13 @@ export const claudeAdapter: AgentAdapter = {
       spawn = { ...spawn, args: insertBeforeStdinDash(spawn.args, ["--model", def.model]) };
     }
     spawn = withEffortArgs(spawn, def.id, ctx.phase);
-    return { transport: "spawn", command: spawn.command, args: spawn.args, stdin: ctx.prompt };
+    return {
+      transport: "spawn",
+      command: spawn.command,
+      args: spawn.args,
+      stdin: ctx.prompt,
+      ...(isHydraIsolatedProfile(ctx.rawArgs) ? { disableBrowserBroker: true } : {}),
+    };
   },
   parseReply(raw: AdapterRawOutput): string {
     return raw.stdout;
@@ -39,6 +56,6 @@ export const claudeAdapter: AgentAdapter = {
     return coerceModelPrices(def.pricing, base);
   },
   authority(def: AgentDefinition, ctx: InvocationContext) {
-    return classifyAgentAuthority(def.id, ctx.phase, ctx.rawArgs);
+    return classifyAgentAuthority(def.id, ctx.phase, ctx.rawArgs, def.kind);
   },
 };

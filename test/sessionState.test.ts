@@ -21,6 +21,11 @@ describe("terminal session state", () => {
     assert.equal(session.updatedAt, now.toISOString());
   });
 
+  test("uses the declared Gemini terminal name and a safe custom fallback", () => {
+    assert.equal(createTerminalSession("gemini").terminalName, "Hydra Gemini");
+    assert.equal(createTerminalSession("custom-head").terminalName, "custom-head");
+  });
+
   test("updates activity timestamps and clears old errors on dispatch", () => {
     const first = new Date("2026-05-09T10:00:00.000Z");
     const second = new Date("2026-05-09T10:01:00.000Z");

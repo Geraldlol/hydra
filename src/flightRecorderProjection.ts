@@ -2,6 +2,10 @@ import { createHash } from "node:crypto";
 import type { NativeActionReceipt } from "./nativeActions";
 import type { FlightRecordedOutcome } from "./flightRecorderRuntime";
 import type {
+  FlightEditBatchSubject,
+  FlightOperationObservation,
+  FlightToolCallResultObservation,
+  FlightToolCallSubject,
   FlightNativeActionReceiptObservation,
   FlightNativeActionSubject,
   FlightSteeringChainMetadata,
@@ -10,6 +14,10 @@ import type {
   FlightVerificationReceiptObservation,
   FlightVerificationSubject,
 } from "./flightRecorderProtocol";
+import type {
+  ProviderTelemetryObservation,
+  ProviderToolCategory,
+} from "./providerTelemetry";
 import type { UsageRecord } from "./usage";
 import {
   verificationProcessForCommand,
@@ -82,6 +90,21 @@ export interface FlightNativeActionProjection {
   readonly subject: FlightNativeActionSubject;
   readonly observation: FlightNativeActionReceiptObservation;
   readonly outcome: FlightRecordedOutcome;
+}
+
+export interface FlightProviderChildProjection {
+  readonly subject: FlightToolCallSubject | FlightEditBatchSubject;
+  readonly observation: FlightToolCallResultObservation
+    | Extract<FlightOperationObservation, { readonly kind: "editBatch" }>;
+  readonly outcome: FlightRecordedOutcome;
+}
+
+export interface FlightProviderTelemetryProjection {
+  readonly agentObservations: readonly Extract<
+    FlightOperationObservation,
+    { readonly kind: "agentRun" }
+  >[];
+  readonly childOperations: readonly FlightProviderChildProjection[];
 }
 
 export function buildFlightVerificationProjection(
@@ -270,6 +293,185 @@ export function buildFlightNativeActionProjection(
     }),
     outcome: Object.freeze(outcome),
   });
+}
+
+/**
+ * Convert the content-free provider normalizer stream into strict Flight
+ * child operations. Provider IDs are already one-way hashes and tool names
+ * are low-cardinality categories; raw arguments/results never cross this API.
+ */
+export function buildFlightProviderTelemetryProjection(
+  observations: readonly ProviderTelemetryObservation[],
+  workspaceBeforeSha256?: string,
+  workspaceAfterSha256?: string,
+): FlightProviderTelemetryProjection {
+  const agentObservations: Array<Extract<
+    FlightOperationObservation,
+    { readonly kind: "agentRun" }
+  >> = [];
+  const childOperations: FlightProviderChildProjection[] = [];
+  const tools = new Map<string, {
+    provider: string;
+    category: ProviderToolCategory;
+    argumentBytes: number;
+  }>();
+  const finished = new Set<string>();
+
+  for (const observation of observations) {
+    switch (observation.observationType) {
+      case "providerToolStarted":
+        if (!tools.has(observation.providerOperationIdSha256)) {
+          tools.set(observation.providerOperationIdSha256, {
+            provider: observation.provider,
+            category: observation.toolCategory,
+            argumentBytes: observation.argumentBytes,
+          });
+        }
+        break;
+      case "providerToolFinished": {
+        if (finished.has(observation.providerOperationIdSha256)) break;
+        const started = tools.get(observation.providerOperationIdSha256);
+        const lifecycleComplete = started !== undefined
+          && started.provider === observation.provider
+          && started.category === observation.toolCategory;
+        childOperations.push(toolProjection({
+          provider: started?.provider ?? observation.provider,
+          category: started?.category ?? observation.toolCategory,
+          providerOperationIdSha256: observation.providerOperationIdSha256,
+          argumentBytes: started?.argumentBytes ?? 0,
+          status: observation.status,
+          resultBytes: observation.resultBytes,
+          lifecycleComplete,
+        }));
+        if (!lifecycleComplete) {
+          addAvailability(agentObservations, "unavailable", "malformed");
+        }
+        tools.delete(observation.providerOperationIdSha256);
+        finished.add(observation.providerOperationIdSha256);
+        break;
+      }
+      case "providerEditBatch":
+        if (isDigest(workspaceBeforeSha256) && isDigest(workspaceAfterSha256)) {
+          childOperations.push(Object.freeze({
+            subject: Object.freeze({
+              kind: "editBatch",
+              provider: observation.provider,
+              createCount: observation.createCount,
+              updateCount: observation.updateCount,
+              deleteCount: observation.deleteCount,
+              pathCount: observation.pathCount,
+              workspaceBeforeSha256,
+              evidenceClass: "providerObserved",
+            }),
+            observation: Object.freeze({
+              kind: "editBatch",
+              observationType: "workspaceMutation",
+              createCount: observation.createCount,
+              updateCount: observation.updateCount,
+              deleteCount: observation.deleteCount,
+              pathCount: observation.pathCount,
+              workspaceAfterSha256,
+              evidenceClass: "providerObserved",
+            }),
+            outcome: Object.freeze({
+              status: "succeeded",
+              failureCode: null,
+            }),
+          }));
+        } else {
+          addAvailability(agentObservations, "unavailable", "unsupported");
+        }
+        break;
+      case "providerTelemetryLimited":
+        addAvailability(agentObservations, "limited", "providerFlood");
+        break;
+      case "providerTelemetryUnavailable":
+        addAvailability(agentObservations, "unavailable", observation.reason);
+        break;
+      case "providerPermissionSummary":
+        if (observation.deniedCount > 0) {
+          addAvailability(agentObservations, "limited", "unsupported");
+        }
+        break;
+      case "providerLifecycle":
+      case "providerUsage":
+        break;
+    }
+  }
+
+  for (const [providerOperationIdSha256, started] of tools) {
+    childOperations.push(toolProjection({
+      provider: started.provider,
+      category: started.category,
+      providerOperationIdSha256,
+      argumentBytes: started.argumentBytes,
+      status: "unknown",
+      resultBytes: 0,
+      lifecycleComplete: false,
+    }));
+  }
+  return Object.freeze({
+    agentObservations: Object.freeze(agentObservations),
+    childOperations: Object.freeze(childOperations),
+  });
+}
+
+function toolProjection(input: {
+  readonly provider: string;
+  readonly category: ProviderToolCategory;
+  readonly providerOperationIdSha256: string;
+  readonly argumentBytes: number;
+  readonly status: "succeeded" | "failed" | "unknown";
+  readonly resultBytes: number;
+  readonly lifecycleComplete: boolean;
+}): FlightProviderChildProjection {
+  const outcome: FlightRecordedOutcome = !input.lifecycleComplete
+    ? { status: "incomplete", failureCode: "unknown" }
+    : input.status === "succeeded"
+    ? { status: "succeeded", failureCode: null }
+    : input.status === "failed"
+      ? { status: "failed", failureCode: "providerFailure" }
+      : { status: "incomplete", failureCode: "unknown" };
+  return Object.freeze({
+    subject: Object.freeze({
+      kind: "toolCall",
+      provider: input.provider,
+      toolName: input.category,
+      providerOperationIdSha256: input.providerOperationIdSha256,
+      argumentBytes: input.argumentBytes,
+      evidenceClass: "providerObserved",
+    }),
+    observation: Object.freeze({
+      kind: "toolCall",
+      observationType: "toolCallResult",
+      status: input.status,
+      resultBytes: input.resultBytes,
+      evidenceClass: "providerObserved",
+    }),
+    outcome: Object.freeze(outcome),
+  });
+}
+
+function addAvailability(
+  target: Array<Extract<FlightOperationObservation, { readonly kind: "agentRun" }>>,
+  detail: "unavailable" | "limited",
+  reason: "plainOutput" | "unsupported" | "malformed" | "providerFlood",
+): void {
+  if (target.some((observation) =>
+    observation.observationType === "telemetryAvailability"
+    && observation.detail === detail
+    && observation.reason === reason
+  )) return;
+  target.push(Object.freeze({
+    kind: "agentRun",
+    observationType: "telemetryAvailability",
+    detail,
+    reason,
+  }));
+}
+
+function isDigest(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 }
 
 function mapVerificationOutcome(

@@ -45,7 +45,7 @@ export const codexAdapter: AgentAdapter = {
     return coerceModelPrices(def.pricing, base);
   },
   authority(def: AgentDefinition, ctx: InvocationContext) {
-    return classifyAgentAuthority(def.id, ctx.phase, ctx.rawArgs);
+    return classifyAgentAuthority(def.id, ctx.phase, ctx.rawArgs, def.kind);
   },
 };
 

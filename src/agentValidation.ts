@@ -12,6 +12,7 @@ export function isEnvVarName(value: string): boolean {
 // A `${env:NAME}` placeholder is explicitly NOT a secret (it's a reference).
 const ENV_PLACEHOLDER = /^\$\{env:[^}]+\}$/;
 const ENV_PLACEHOLDER_GLOBAL = /\$\{env:[^}]+\}/g;
+const MAX_URL_PERCENT_DECODE_PASSES = 4;
 
 /** Heuristic: does this literal look like an inlined credential? Conservative —
  *  only flags shapes that are clearly keys/tokens, never ordinary model ids. */
@@ -75,7 +76,17 @@ export function baseUrlAllowed(baseUrl: string): { ok: true } | { ok: false; mes
   try {
     url = new URL(baseUrl);
   } catch {
-    return { ok: false, message: `baseUrl "${baseUrl}" is not a valid URL` };
+    return { ok: false, message: "baseUrl is not a valid URL" };
+  }
+  for (const [label, component] of [
+    ["username", url.username],
+    ["password", url.password],
+    ["path", url.pathname],
+    ["query", url.search],
+    ["fragment", url.hash],
+  ] as const) {
+    const inspected = inspectUrlComponent(component, label);
+    if (!inspected.ok) return inspected;
   }
   // Why: a userinfo-bearing baseUrl (https://user:sk-live-x@host/v1) would
   // durably persist the credential into .hydra/agent-calls.jsonl, which logs
@@ -83,21 +94,46 @@ export function baseUrlAllowed(baseUrl: string): { ok: true } | { ok: false; mes
   if (url.username || url.password) {
     return { ok: false, message: `baseUrl must not contain inline credentials (user:pass@host); use apiKeyEnv instead` };
   }
-  let pathAndQuery = `${url.pathname}${url.search}`;
-  try {
-    pathAndQuery = decodeURIComponent(pathAndQuery);
-  } catch {
-    // Malformed percent-encoding — fall back to scanning the raw (still-encoded) string.
-  }
-  if (isSecretShaped(pathAndQuery)) {
-    return { ok: false, message: `baseUrl "${baseUrl}" appears to inline a secret in its path/query; use apiKeyEnv instead` };
-  }
   if (url.protocol === "https:") return { ok: true };
   if (url.protocol === "http:") {
     if (isLoopbackOrPrivateHost(url.hostname)) return { ok: true };
     return { ok: false, message: `baseUrl must be https:// for non-local hosts (got http://${url.hostname})` };
   }
   return { ok: false, message: `baseUrl must use http(s); got ${url.protocol}` };
+}
+
+function inspectUrlComponent(
+  component: string,
+  label: "username" | "password" | "path" | "query" | "fragment",
+): { ok: true } | { ok: false; message: string } {
+  let current = component;
+  for (let pass = 0; pass <= MAX_URL_PERCENT_DECODE_PASSES; pass += 1) {
+    if (isSecretShaped(current)) {
+      return {
+        ok: false,
+        message: `baseUrl appears to inline a secret in its ${label}; use apiKeyEnv instead`,
+      };
+    }
+
+    const hasEncodedOctet = /%[0-9A-Fa-f]{2}/.test(current);
+    if (!hasEncodedOctet) {
+      // A raw malformed escape is invalid. A lone percent produced by decoding
+      // a valid %25 is a terminal literal and need not be decoded again.
+      if (pass === 0 && current.includes("%")) {
+        return { ok: false, message: `baseUrl ${label} contains malformed percent-encoding` };
+      }
+      return { ok: true };
+    }
+    if (pass === MAX_URL_PERCENT_DECODE_PASSES) {
+      return { ok: false, message: `baseUrl ${label} exceeds the percent-encoding depth limit` };
+    }
+    try {
+      current = decodeURIComponent(current);
+    } catch {
+      return { ok: false, message: `baseUrl ${label} contains malformed percent-encoding` };
+    }
+  }
+  return { ok: false, message: `baseUrl ${label} exceeds the percent-encoding depth limit` };
 }
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
@@ -110,6 +146,7 @@ export function isValidAgentId(value: unknown): value is string {
     && !RESERVED_AGENT_IDS.has(value.toLowerCase());
 }
 const PRICE_KEYS = ["inputPerMTok", "outputPerMTok", "cacheReadPerMTok", "cacheCreatePerMTok"] as const;
+const MAX_OPENAI_COMPATIBLE_OUTPUT_TOKENS = 131_072;
 
 function validateConfiguredPricing(raw: unknown): { pricing?: Partial<ModelPrices>; error?: string } {
   if (raw === undefined) return {};
@@ -181,6 +218,17 @@ export function validateAgentDefinition(
   if (d.apiKeyEnv !== undefined && (typeof d.apiKeyEnv !== "string" || !isEnvVarName(d.apiKeyEnv))) {
     return { error: `agent "${id}" apiKeyEnv must be an environment-variable NAME (e.g. OPENAI_API_KEY), not a key value` };
   }
+  if (d.maxOutputTokens !== undefined && (
+    kind !== "openai-compatible"
+    || typeof d.maxOutputTokens !== "number"
+    || !Number.isSafeInteger(d.maxOutputTokens)
+    || d.maxOutputTokens < 1
+    || d.maxOutputTokens > MAX_OPENAI_COMPATIBLE_OUTPUT_TOKENS
+  )) {
+    return {
+      error: `agent "${id}" maxOutputTokens must be an integer from 1 through ${MAX_OPENAI_COMPATIBLE_OUTPUT_TOKENS} for an openai-compatible head`,
+    };
+  }
   const configuredHeaders = validateConfiguredHeaders(d.headers);
   if (configuredHeaders.error) {
     return { error: `agent "${id}" ${configuredHeaders.error}` };
@@ -206,6 +254,7 @@ export function validateAgentDefinition(
   if (typeof d.colorIndex === "number") def.colorIndex = d.colorIndex;
   if (typeof d.baseUrl === "string") def.baseUrl = d.baseUrl.trim();
   if (typeof d.apiKeyEnv === "string") def.apiKeyEnv = d.apiKeyEnv;
+  if (typeof d.maxOutputTokens === "number") def.maxOutputTokens = d.maxOutputTokens;
   if (configuredHeaders.headers) def.headers = configuredHeaders.headers;
   if (typeof d.command === "string") def.command = d.command;
   if (Array.isArray(d.argsTemplate)) def.argsTemplate = d.argsTemplate as string[];

@@ -1,6 +1,7 @@
 import { describe, test } from "node:test";
 import * as assert from "node:assert/strict";
 import { startPersistentAgentProcess } from "../src/persistentAgentProcess";
+import { HANG_NET_TIMEOUT_MS } from "./testBudgets";
 
 function spawnInline(script: string) {
   return {
@@ -24,7 +25,7 @@ describe("startPersistentAgentProcess", () => {
         "process.stdin.on('data', (chunk) => { body += chunk; });",
         "process.stdin.on('end', () => { process.stdout.write(body); });",
       ].join("")),
-      5_000,
+      HANG_NET_TIMEOUT_MS,
       (chunk) => chunks.push(chunk),
       new AbortController().signal,
     );
@@ -50,7 +51,7 @@ describe("startPersistentAgentProcess", () => {
   test("endInput is idempotent after the child has closed", async () => {
     const processHandle = startPersistentAgentProcess(
       spawnInline("process.stdin.resume(); process.stdin.on('end', () => process.exit(0));"),
-      5_000,
+      HANG_NET_TIMEOUT_MS,
       () => undefined,
       new AbortController().signal,
     );
@@ -76,7 +77,7 @@ describe("startPersistentAgentProcess", () => {
         "process.stderr.write(Buffer.from([0x90,0x8d,0x0a]));",
         "}, 20);",
       ].join("")),
-      5_000,
+      HANG_NET_TIMEOUT_MS,
       (chunk) => chunks.push(chunk),
       new AbortController().signal,
     );
@@ -98,7 +99,7 @@ describe("startPersistentAgentProcess", () => {
         args: [],
         cwd: process.cwd(),
       },
-      5_000,
+      HANG_NET_TIMEOUT_MS,
       () => undefined,
       new AbortController().signal,
     );

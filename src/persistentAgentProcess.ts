@@ -1,12 +1,15 @@
 import * as cp from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import {
+  bindProcessTreeIdentity,
   MAX_AGENT_STDERR_BYTES,
   MAX_AGENT_STDOUT_BYTES,
   TERMINATION_CONFIRM_WINDOW_MS,
   TERMINATION_FORCE_GRACE_MS,
   appendBoundedStream,
   isWindowsBatchCommand,
+  releaseUnconfirmedChildProcess,
+  spawnIdentityBoundProcess,
   spawnViaCmdShim,
   stripAnsi,
   terminateProcessTree,
@@ -178,6 +181,7 @@ export function startPersistentAgentProcess(
         appendTerminationDiagnostic(
           "[Hydra did not observe the native agent process close; it may still be running. Restart VS Code before starting more Hydra work.]",
         );
+        releaseUnconfirmedChildProcess(child);
         finish(null);
       }, TERMINATION_CONFIRM_WINDOW_MS);
     }, TERMINATION_FORCE_GRACE_MS);
@@ -295,12 +299,14 @@ function spawnPersistentChild(spawn: AgentSpawn): cp.ChildProcess {
       env: { ...process.env, ...(spawn.env ?? {}) },
     });
   }
-  return cp.spawn(spawn.command, spawn.args, {
+  const child = spawnIdentityBoundProcess(spawn.command, spawn.args, {
     cwd: spawn.cwd,
     windowsHide: true,
     env: { ...process.env, ...(spawn.env ?? {}) },
     detached: process.platform !== "win32",
   });
+  bindProcessTreeIdentity(child);
+  return child;
 }
 
 function formatSpawnError(spawn: AgentSpawn, err: unknown): string {

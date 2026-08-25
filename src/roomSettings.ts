@@ -13,7 +13,8 @@
 
 import * as vscode from "vscode";
 import type { Phase } from "./prompts";
-import { DEFAULT_ROSTER, type AgentId, type DiscussionMode } from "./phases";
+import { DEFAULT_ROSTER, type AgentId, type DiscussionMode, type ParticipationPolicy } from "./phases";
+import { REVIEW_CONVERGENCE_MODES, type ReviewConvergenceMode } from "./reviewConvergence";
 import { isValidAgentId } from "./agentValidation";
 import type { TelegramConfig } from "./telegram";
 import { CLAUDE_AUTOMATION_GUARD_MODES, type ClaudeAutomationGuardMode } from "./claudeAuth";
@@ -123,6 +124,20 @@ export function discussionMode(): DiscussionMode {
   return raw === "serial" || raw === "parallel" ? raw : "parallelOnBoth";
 }
 
+// Review policy is application-scoped because a workspace override can change
+// both the paid dispatch cardinality and the approval threshold.
+export function reviewConvergence(): ReviewConvergenceMode {
+  const raw = vscode.workspace.getConfiguration("hydraRoom").get<string>("reviewConvergence", "human");
+  return (REVIEW_CONVERGENCE_MODES as readonly string[]).includes(raw)
+    ? raw as ReviewConvergenceMode
+    : "human";
+}
+
+export function reviewParticipation(): ParticipationPolicy {
+  const raw = vscode.workspace.getConfiguration("hydraRoom").get<string>("reviewParticipation", "all");
+  return raw === "single" ? "serial" : "all";
+}
+
 export function autoRequestReviewAfterPassingVerification(): boolean {
   if (!workspaceExecutionControlsAllowed()) return false;
   return vscode.workspace
@@ -130,9 +145,19 @@ export function autoRequestReviewAfterPassingVerification(): boolean {
     .get<boolean>("autoRequestReviewAfterPassingVerification", false);
 }
 
+/** The persisted application-scoped opt-in, independent of current trust. */
+export function configuredAutoAdvanceActionableDefaults(): boolean {
+  // Configuration.get<T>() is generic only at compile time. Fail closed for
+  // malformed/synced values such as the truthy string "false"; only the exact
+  // legacy boolean true represents an existing operator opt-in.
+  return vscode.workspace
+    .getConfiguration("hydraRoom")
+    .get<unknown>("autoAdvanceActionableDefaults", false) === true;
+}
+
 export function autoAdvanceActionableDefaults(): boolean {
   if (!workspaceExecutionControlsAllowed()) return false;
-  return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("autoAdvanceActionableDefaults", true);
+  return configuredAutoAdvanceActionableDefaults();
 }
 
 /**
@@ -273,6 +298,16 @@ export function telegramInboundPollIntervalMs(): number {
 
 export function telegramInboundPrefix(): string {
   return vscode.workspace.getConfiguration("hydraRoom").get<string>("telegramInboundCommandPrefix", "/hydra").trim();
+}
+
+/** Paid live-provider writes require a second, application-scoped opt-in. */
+export function telegramLiveSteeringEnabled(): boolean {
+  if (!workspaceExecutionControlsAllowed()) return false;
+  return vscode.workspace.getConfiguration("hydraRoom").get<boolean>("telegramLiveSteeringEnabled", false);
+}
+
+export function telegramLiveSteeringPrefix(): string {
+  return vscode.workspace.getConfiguration("hydraRoom").get<string>("telegramLiveSteeringCommandPrefix", "/steer").trim();
 }
 
 // Optional per-sender allowlist for inbound Telegram. Empty (default) means

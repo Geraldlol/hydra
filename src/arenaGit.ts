@@ -1,12 +1,18 @@
 import * as cp from "node:child_process";
 import { createHash } from "node:crypto";
-import { type Stats } from "node:fs";
+import { constants as fsConstants, type Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TextDecoder } from "node:util";
-import { terminateProcessTree } from "./agents";
+import {
+  bindProcessTreeIdentity,
+  releaseUnconfirmedChildProcess,
+  terminateProcessTree,
+  waitForPosixProcessGroupQuiescence,
+} from "./agents";
 import {
   captureDuelWorkspaceFingerprint,
+  watchDuelWorkspaceMutations,
   type DuelWorkspaceFingerprint,
 } from "./duelWorkspaceGuard";
 import {
@@ -14,9 +20,11 @@ import {
   workspaceGitExecutionAllowed,
 } from "./gitExecutable";
 import {
+  arenaContestantArtifactPath,
   arenaContestantWorktreePath,
   openFileArenaManifestStore,
 } from "./arenaStore";
+import { arenaPhysicalWorktreeSegment } from "./arenaPathBudget";
 import {
   assertArenaPrivateDirectory,
   ensureArenaPrivateDirectory,
@@ -24,13 +32,20 @@ import {
   prepareArenaPrivateStorage,
   sameArenaPath,
   serializeArenaPrivateWork,
+  syncArenaDirectoryEntry,
   type ArenaPrivateStorageBoundary,
 } from "./arenaPrivateStorage";
+import {
+  recoverArenaEvidenceStageTemps,
+  releaseArenaEvidenceStageName,
+  reserveArenaEvidenceStageName,
+} from "./arenaEvidenceStageRecovery";
 import {
   FileArenaRepositoryRunLeaseStore,
   prepareArenaRepositoryLeaseRoot,
   type ArenaRepositoryRunClaim,
 } from "./arenaRepositoryLease";
+import type { ArenaRecoveryActionProof } from "./arenaRecovery";
 import {
   arenaWorktreeRegistrationPaths,
   FileArenaWorktreeRegistrationStore,
@@ -47,6 +62,14 @@ import type {
   ArenaCleanupPostcondition,
   ArenaCleanupStep,
 } from "./arenaCleanup";
+import type {
+  ArenaPromotionPatchCheck,
+  ArenaPromotionWorkspaceSnapshot,
+} from "./arenaPromotion";
+import type {
+  ArenaPromotionCandidate,
+  ArenaPromotionUntrackedEntry,
+} from "./arenaPromotionCandidate";
 import {
   ARENA_TRACKED_PATHS_MAX_BYTES,
   ArenaPathBudgetError,
@@ -173,8 +196,14 @@ export interface ArenaVerifiedWorktree {
 export interface ArenaOwnedEvidenceState {
   readonly finalHead: ArenaGitObjectId;
   readonly fingerprint: DuelWorkspaceFingerprint;
-  readonly patch: Buffer;
-  readonly untrackedPathsZ: Buffer;
+  readonly patch: ArenaStagedEvidenceFile;
+  readonly untrackedPaths: ArenaStagedEvidenceFile;
+}
+
+export interface ArenaStagedEvidenceFile {
+  readonly path: string;
+  readonly bytes: number;
+  readonly sha256: string;
 }
 
 export interface ArenaProvisionWorktreeInput {
@@ -210,6 +239,13 @@ export interface ArenaGitCommandOptions {
   readonly maxStderrBytes?: number;
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
+  /** Exact bounded bytes written directly to Git stdin without a shell. */
+  readonly stdin?: Buffer;
+  /**
+   * Consume stdout with backpressure instead of retaining it in memory.
+   * The byte limit is enforced before each chunk reaches the sink.
+   */
+  readonly stdoutSink?: (chunk: Buffer) => Promise<void>;
 }
 
 export class ArenaGitExecutor {
@@ -391,9 +427,8 @@ export class ArenaGitExecutor {
         admission.baseRevision,
       ),
       manifestLockEventSha256: lockEvent.eventSha256,
-      // Stage-2 worktree integration deliberately has no restart takeover.
-      // A future process supervisor must provide a typed, run/generation-bound
-      // quiescence receipt before this may become non-null.
+      // Fresh claims never carry restart authority. Recovery uses the separate
+      // typed proof path after strict process-generation replay.
       recoveryProofSha256: null,
     } as const;
     const releasedCompletion =
@@ -419,6 +454,96 @@ export class ArenaGitExecutor {
       status: "active",
       ownerId: claim.ownerId,
       claimSha256: claim.claimSha256,
+    });
+  }
+
+  async recoverRepositoryRun(
+    runId: string,
+    admission: ArenaGitAdmission,
+    proof: ArenaRecoveryActionProof,
+  ): Promise<{
+    readonly status: "active";
+    readonly ownerId: string;
+    readonly claimSha256: string;
+    readonly authorizedAction: ArenaRecoveryActionProof["action"];
+  }> {
+    this.assertAdmissionMatchesExecutor(admission);
+    if (this.runClaims.has(runId)) {
+      throw new ArenaGitError(
+        "registrationMismatch",
+        "Arena repository run is already claimed by this executor.",
+      );
+    }
+    const manifest = await (await openFileArenaManifestStore(
+      this.privateWorkspaceRoot,
+    )).load(runId);
+    const lockEvent = manifest?.records[0];
+    if (!manifest
+      || !lockEvent
+      || lockEvent.type !== "arenaRunLocked"
+      || proof.runId !== runId
+      || proof.manifestLockEventSha256 !== lockEvent.eventSha256
+      || manifest.lock.base.repositoryIdentitySha256
+        !== admission.repositoryIdentitySha256
+      || manifest.lock.base.sourceWorkspaceFingerprintSha256
+        !== admission.sourceWorkspaceFingerprintSha256
+      || manifest.lock.base.baseContentSha256 !== admission.baseContentSha256
+      || manifest.lock.base.revision.objectFormat
+        !== admission.baseRevision.objectFormat
+      || manifest.lock.base.revision.oid !== admission.baseRevision.oid) {
+      throw new ArenaGitError(
+        "registrationMismatch",
+        "Arena restart recovery requires the exact locked source and proof.",
+      );
+    }
+    const repositoryControls = await this.captureRegisteredRunControlWithoutLease(
+      runId,
+      admission.repositoryIdentitySha256,
+      undefined,
+      true,
+    );
+    if (repositoryControls !== manifest.lock.base.repositoryControlSha256) {
+      throw new ArenaGitError(
+        "registrationMismatch",
+        "Arena restart recovery repository controls do not match the lock.",
+      );
+    }
+    const claimInput = {
+      runId,
+      repositoryIdentitySha256: admission.repositoryIdentitySha256,
+      sourceDirectoryIdentitySha256: admission.sourceDirectoryIdentitySha256,
+      privateStorageIdentitySha256: hashCanonical(
+        "hydra.arena.private-storage-identity.v1\u0000",
+        {
+          realRoot: canonicalPath(this.boundary.realRoot),
+          privateWorkspaceIdentity: this.boundary.privateWorkspaceIdentity,
+          rootIdentity: this.boundary.rootIdentity,
+        },
+      ),
+      repositoryControlSha256: manifest.lock.base.repositoryControlSha256,
+      baseRevisionSha256: hashCanonical(
+        "hydra.arena.git.base-revision.v1\u0000",
+        admission.baseRevision,
+      ),
+      manifestLockEventSha256: lockEvent.eventSha256,
+      recoveryProofSha256: proof.recoveryProofSha256,
+    } as const;
+    let claim: ArenaRepositoryRunClaim;
+    try {
+      claim = await this.repositoryLeases.recover(claimInput, proof);
+    } catch (error) {
+      throw new ArenaGitError(
+        "registrationMismatch",
+        error instanceof Error ? error.message : "Arena repository recovery failed.",
+        { cause: error },
+      );
+    }
+    this.runClaims.set(runId, claim);
+    return Object.freeze({
+      status: "active" as const,
+      ownerId: claim.ownerId,
+      claimSha256: claim.claimSha256,
+      authorizedAction: proof.action,
     });
   }
 
@@ -982,6 +1107,7 @@ export class ArenaGitExecutor {
     signal?: AbortSignal,
   ): Promise<{
     readonly sourceWorkspaceFingerprintSha256: string;
+    readonly contentFingerprintSha256: string;
     readonly repositoryControlSha256: string;
     readonly head: ArenaGitObjectId;
   }> {
@@ -1016,12 +1142,130 @@ export class ArenaGitExecutor {
           sourceDirectoryIdentitySha256,
         },
       ),
+      contentFingerprintSha256: fingerprint.sha256,
       repositoryControlSha256,
       head: {
         objectFormat: admission.objectFormat,
         oid: fingerprint.head,
       },
     });
+  }
+
+  async inspectPromotionWorkspace(
+    admission: ArenaGitAdmission,
+    runId: string,
+    signal?: AbortSignal,
+  ): Promise<ArenaPromotionWorkspaceSnapshot> {
+    this.assertAdmissionMatchesExecutor(admission);
+    const before = await this.captureSourceState(admission, undefined, signal);
+    const status = await this.git(
+      this.workspaceRoot,
+      [
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+        "--ignore-submodules=none",
+        "--no-renames",
+      ],
+      { signal },
+    );
+    const [registrationStates, worktrees, after] = await Promise.all([
+      this.registrations.listRun(runId),
+      this.listWorktrees(signal),
+      this.captureSourceState(admission, undefined, signal),
+    ]);
+    if (canonicalJson(before) !== canonicalJson(after)) {
+      throw new ArenaGitError(
+        "worktreeStateMismatch",
+        "Arena promotion source state changed during inspection.",
+      );
+    }
+    const registeredPaths = new Set(registrationStates.map((state) =>
+      canonicalPath(state.intent.worktreePath)));
+    const arenaWorktreesAbsent = worktrees.every((entry) =>
+      !registeredPaths.has(canonicalPath(entry.path)));
+    return Object.freeze({
+      head: after.head,
+      sourceWorkspaceFingerprintSha256:
+        after.sourceWorkspaceFingerprintSha256,
+      contentFingerprintSha256: after.contentFingerprintSha256,
+      repositoryControlSha256: after.repositoryControlSha256,
+      arenaWorktreesAbsent,
+      workspaceClean: status.stdout.length === 0,
+    });
+  }
+
+  async runPromotionExclusive<T>(
+    admission: ArenaGitAdmission,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    this.assertAdmissionMatchesExecutor(admission);
+    return this.repositoryLeases.withUnownedRepository(
+      admission.repositoryIdentitySha256,
+      work,
+    );
+  }
+
+  async checkPromotionCandidate(
+    candidateInput: ArenaPromotionCandidate,
+    signal?: AbortSignal,
+  ): Promise<ArenaPromotionPatchCheck> {
+    const candidate = validatePromotionCandidate(candidateInput);
+    const conflicts = await promotionUntrackedConflicts(
+      this.workspaceRoot,
+      candidate.untrackedEntries,
+    );
+    let applicable = true;
+    if (candidate.patch.byteLength > 0) {
+      const result = await this.git(
+        this.workspaceRoot,
+        ["apply", "--check", "--binary", "--whitespace=nowarn", "-"],
+        { allowedExitCodes: [0, 1], stdin: candidate.patch, signal },
+      );
+      applicable = result.exitCode === 0;
+    }
+    return Object.freeze({
+      applicable,
+      conflictPaths: Object.freeze([]),
+      untrackedConflictPaths: conflicts,
+    });
+  }
+
+  async applyPromotionCandidate(
+    candidateInput: ArenaPromotionCandidate,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const candidate = validatePromotionCandidate(candidateInput);
+    const check = await this.checkPromotionCandidate(candidate, signal);
+    if (!check.applicable
+      || check.conflictPaths.length > 0
+      || check.untrackedConflictPaths.length > 0) {
+      throw new ArenaGitError(
+        "worktreeStateMismatch",
+        "Arena promotion candidate no longer applies without conflicts.",
+      );
+    }
+    if (candidate.patch.byteLength > 0) {
+      await this.git(
+        this.workspaceRoot,
+        ["apply", "--binary", "--whitespace=nowarn", "-"],
+        { stdin: candidate.patch, signal },
+      );
+    }
+    const conflicts = await promotionUntrackedConflicts(
+      this.workspaceRoot,
+      candidate.untrackedEntries,
+    );
+    if (conflicts.length > 0) {
+      throw new ArenaGitError(
+        "worktreeStateMismatch",
+        "Arena promotion untracked targets changed during application.",
+      );
+    }
+    for (const entry of candidate.untrackedEntries) {
+      await publishPromotionUntrackedEntry(this.workspaceRoot, entry);
+    }
   }
 
   /**
@@ -1039,15 +1283,59 @@ export class ArenaGitExecutor {
       async () => {
         await this.authenticateDurableWorktree(owned);
         await this.assertOwnedRegistration(owned, signal, false);
-        const [headText, fingerprint, patchResult, untrackedResult] =
-          await Promise.all([
-            this.gitText(
-              owned.worktreePath,
-              ["rev-parse", "--verify", "HEAD^{commit}"],
-              signal,
-            ),
-            this.captureFingerprint(owned.worktreePath, signal),
-            this.git(
+        const artifactDirectory = arenaContestantArtifactPath(
+          this.privateWorkspaceRoot,
+          owned.runId,
+          owned.contestantId,
+        );
+        await ensureArenaPrivateDirectory(
+          this.boundary,
+          ["artifacts", owned.runId, owned.contestantId],
+        );
+        await assertArenaPrivateDirectory(artifactDirectory, this.boundary);
+        await recoverArenaEvidenceStageTemps(
+          artifactDirectory,
+          ["patch.bin", "untracked-paths.v1.bin"],
+          this.boundary,
+        );
+        const patch = await createArenaEvidenceStage(
+          artifactDirectory,
+          "patch.bin",
+          this.boundary,
+        );
+        let untrackedPaths: MutableArenaEvidenceStage;
+        try {
+          untrackedPaths = await createArenaEvidenceStage(
+            artifactDirectory,
+            "untracked-paths.v1.bin",
+            this.boundary,
+          );
+        } catch (error) {
+          try {
+            await discardArenaEvidenceStage(patch, this.boundary);
+          } catch (cleanupError) {
+            throw new AggregateError(
+              [error, cleanupError],
+              "Arena evidence staging and cleanup both failed.",
+            );
+          }
+          throw error;
+        }
+        const patchHash = createHash("sha256");
+        const untrackedHash = createHash("sha256");
+        let mutationMonitor: ReturnType<typeof watchDuelWorkspaceMutations>
+          | undefined;
+        let operations: readonly Promise<unknown>[] = [];
+        try {
+          mutationMonitor = watchDuelWorkspaceMutations(
+            owned.worktreePath,
+            { excludeHydraState: false },
+          );
+          const before = await this.captureFingerprint(
+            owned.worktreePath,
+            signal,
+          );
+          const patchWork = this.git(
               owned.worktreePath,
               [
                 "diff",
@@ -1061,22 +1349,160 @@ export class ArenaGitExecutor {
               {
                 maxStdoutBytes: MAX_ARENA_PATCH_BYTES,
                 signal,
+                stdoutSink: async (chunk) => {
+                  patchHash.update(chunk);
+                  await writeArenaEvidenceChunk(patch.handle, chunk);
+                },
               },
-            ),
-            this.git(
+            );
+          const untrackedWork = this.git(
               owned.worktreePath,
               ["ls-files", "--others", "--exclude-standard", "-z", "--"],
               {
                 maxStdoutBytes: MAX_ARENA_UNTRACKED_PATH_BYTES,
                 signal,
+                stdoutSink: async (chunk) => {
+                  untrackedHash.update(chunk);
+                  await writeArenaEvidenceChunk(untrackedPaths.handle, chunk);
+                },
               },
-            ),
+            );
+          const ignoredWork = this.git(
+            owned.worktreePath,
+            [
+              "ls-files",
+              "--others",
+              "--ignored",
+              "--exclude-standard",
+              "-z",
+              "--",
+            ],
+            {
+              maxStdoutBytes: MAX_ARENA_UNTRACKED_PATH_BYTES,
+              signal,
+            },
+          );
+          operations = [patchWork, untrackedWork, ignoredWork];
+          await Promise.all(operations);
+          const ignored = await ignoredWork;
+          if (ignored.stdout.byteLength > 0) {
+            throw new ArenaGitError(
+              "worktreeStateMismatch",
+              "Arena stage 3 refuses ignored contestant files because their bytes are outside the retained evidence set.",
+            );
+          }
+          const fingerprint = await this.captureFingerprint(
+            owned.worktreePath,
+            signal,
+          );
+          await mutationMonitor.settle();
+          if (mutationMonitor.error || mutationMonitor.changed) {
+            throw new ArenaGitError(
+              "worktreeStateMismatch",
+              `Arena contestant changed during evidence capture${
+                mutationMonitor.changedPaths.length > 0
+                  ? `: ${mutationMonitor.changedPaths.join(", ")}`
+                  : "."
+              }`,
+            );
+          }
+          if (before.sha256 !== fingerprint.sha256
+            || before.head !== fingerprint.head) {
+            throw new ArenaGitError(
+              "worktreeStateMismatch",
+              "Arena contestant fingerprint changed during evidence capture.",
+            );
+          }
+          const sealedPatch = await sealArenaEvidenceStage(
+            patch,
+            patchHash.digest("hex"),
+            this.boundary,
+          );
+          const sealedUntrackedPaths = await sealArenaEvidenceStage(
+            untrackedPaths,
+            untrackedHash.digest("hex"),
+            this.boundary,
+          );
+          assertObjectId(
+            owned.head.objectFormat,
+            fingerprint.head,
+            "contestant HEAD",
+          );
+          return Object.freeze({
+            finalHead: {
+              objectFormat: owned.head.objectFormat,
+              oid: fingerprint.head,
+            },
+            fingerprint,
+            patch: sealedPatch,
+            untrackedPaths: sealedUntrackedPaths,
+          });
+        } catch (error) {
+          await Promise.allSettled(operations);
+          const cleanup = await Promise.allSettled([
+            discardArenaEvidenceStage(patch, this.boundary),
+            discardArenaEvidenceStage(untrackedPaths, this.boundary),
           ]);
+          const cleanupErrors = cleanup.flatMap((result) =>
+            result.status === "rejected" ? [result.reason] : []);
+          if (cleanupErrors.length > 0) {
+            throw new AggregateError(
+              [error, ...cleanupErrors],
+              "Arena evidence capture and cleanup both failed.",
+            );
+          }
+          throw error;
+        } finally {
+          mutationMonitor?.close();
+        }
+      },
+    );
+  }
+
+  async captureOwnedEvidenceIdentity(
+    owned: ArenaOwnedWorktree,
+    signal?: AbortSignal,
+  ): Promise<Pick<ArenaOwnedEvidenceState, "finalHead" | "fingerprint">> {
+    return this.withRepositoryLease(
+      owned.repositoryIdentitySha256,
+      owned.runId,
+      async () => {
+        await this.authenticateDurableWorktree(owned);
+        await this.assertOwnedRegistration(owned, signal, false);
+        const [headText, fingerprint, ignored] = await Promise.all([
+          this.gitText(
+            owned.worktreePath,
+            ["rev-parse", "--verify", "HEAD^{commit}"],
+            signal,
+          ),
+          this.captureFingerprint(owned.worktreePath, signal),
+          this.git(
+            owned.worktreePath,
+            [
+              "ls-files",
+              "--others",
+              "--ignored",
+              "--exclude-standard",
+              "-z",
+              "--",
+            ],
+            {
+              maxStdoutBytes: MAX_ARENA_UNTRACKED_PATH_BYTES,
+              signal,
+            },
+          ),
+        ]);
+        if (ignored.stdout.byteLength > 0) {
+          throw new ArenaGitError(
+            "worktreeStateMismatch",
+            "Arena stage 3 refuses ignored contestant files because their bytes are outside the retained evidence set.",
+          );
+        }
         assertObjectId(owned.head.objectFormat, headText, "contestant HEAD");
         if (fingerprint.head !== headText) {
           throw new ArenaGitError(
             "worktreeStateMismatch",
-            "Arena contestant HEAD changed during evidence capture.",
+            "Arena contestant HEAD changed during evidence recheck.",
           );
         }
         return Object.freeze({
@@ -1085,8 +1511,6 @@ export class ArenaGitExecutor {
             oid: headText,
           },
           fingerprint,
-          patch: Buffer.from(patchResult.stdout),
-          untrackedPathsZ: Buffer.from(untrackedResult.stdout),
         });
       },
     );
@@ -1314,6 +1738,26 @@ export class ArenaGitExecutor {
             ],
             { signal, timeoutMs: 120_000 },
           );
+        }
+
+        if (entries.length === 0 || targetExists) {
+          const privateWorktreePath = await ensureArenaPrivateDirectory(
+            this.boundary,
+            [
+              "worktrees",
+              "p",
+              arenaPhysicalWorktreeSegment(
+                intent.runId,
+                intent.contestantId,
+              ),
+            ],
+          );
+          if (!sameArenaPath(privateWorktreePath, intent.worktreePath)) {
+            throw new ArenaGitError(
+              "registrationMismatch",
+              "Arena worktree target does not match its private directory binding.",
+            );
+          }
         }
 
         const verified = await this.verifyRegisteredWorktree({
@@ -1636,6 +2080,10 @@ export class ArenaGitExecutor {
           "registrationMismatch",
           "Arena must recover an earlier unreceipted worktree before provisioning another contestant.",
         );
+      }
+      if (!state.receipt) {
+        ownedPaths.set(canonicalPath(state.intent.worktreePath), state);
+        continue;
       }
       await this.verifyRegisteredWorktree({
         runId: state.intent.runId,
@@ -1980,52 +2428,63 @@ export class ArenaGitExecutor {
     return this.withRepositoryLease(
       localClaim.repositoryIdentitySha256,
       runId,
-      async () => {
-        const states = await this.registrations.listRun(runId);
-        if (states.length === 0) {
+      () => this.captureRegisteredRunControlWithoutLease(
+        runId,
+        localClaim.repositoryIdentitySha256,
+        signal,
+      ),
+    );
+  }
+
+  private async captureRegisteredRunControlWithoutLease(
+    runId: string,
+    repositoryIdentitySha256: string,
+    signal?: AbortSignal,
+    allowNoIntents = false,
+  ): Promise<string> {
+    const states = await this.registrations.listRun(runId);
+    if (states.length === 0) {
+      if (allowNoIntents) {
+        return this.captureExactRepositoryControlSha256(signal);
+      }
+      throw new ArenaGitError(
+        "registrationMismatch",
+        "Arena cannot exclude repository controls for a run without durable intents.",
+      );
+    }
+    const worktrees = await this.listWorktrees(signal);
+    const owned = new Set<string>();
+    for (const state of states) {
+      if (state.intent.repositoryIdentitySha256 !== repositoryIdentitySha256) {
+        throw new ArenaGitError(
+          "registrationMismatch",
+          "Arena run registrations cross repository identities.",
+        );
+      }
+      const registered = worktrees.some((entry) =>
+        sameArenaPath(entry.path, state.intent.worktreePath));
+      if (!state.receipt) {
+        if (registered) {
           throw new ArenaGitError(
             "registrationMismatch",
-            "Arena cannot exclude repository controls for a run without durable intents.",
+            "Arena cannot exclude an unreceipted worktree registration.",
           );
         }
-        const repositoryIdentitySha256 =
-          localClaim.repositoryIdentitySha256;
-        const worktrees = await this.listWorktrees(signal);
-        const owned = new Set<string>();
-        for (const state of states) {
-          if (state.intent.repositoryIdentitySha256
-              !== repositoryIdentitySha256) {
-            throw new ArenaGitError(
-              "registrationMismatch",
-              "Arena run registrations cross repository identities.",
-            );
-          }
-          const registered = worktrees.some((entry) =>
-            sameArenaPath(entry.path, state.intent.worktreePath));
-          if (!state.receipt) {
-            if (registered) {
-              throw new ArenaGitError(
-                "registrationMismatch",
-                "Arena cannot exclude an unreceipted worktree registration.",
-              );
-            }
-            continue;
-          }
-          await this.verifyMonitoredOwnedWorktree(
-            state.intent,
-            state.receipt,
-            signal,
-          );
-          owned.add(canonicalPath(state.intent.worktreePath));
-        }
-        const repositoryStaticControlSha256 =
-          await this.captureRepositoryStaticControlSha256(signal);
-        return arenaRepositoryControlSha256(
-          repositoryStaticControlSha256,
-          arenaWorktreeRegistrySha256(worktrees.filter((entry) =>
-            !owned.has(canonicalPath(entry.path)))),
-        );
-      },
+        continue;
+      }
+      await this.verifyMonitoredOwnedWorktree(
+        state.intent,
+        state.receipt,
+        signal,
+      );
+      owned.add(canonicalPath(state.intent.worktreePath));
+    }
+    const repositoryStaticControlSha256 =
+      await this.captureRepositoryStaticControlSha256(signal);
+    return arenaRepositoryControlSha256(
+      repositoryStaticControlSha256,
+      arenaWorktreeRegistrySha256(worktrees.filter((entry) =>
+        !owned.has(canonicalPath(entry.path)))),
     );
   }
 
@@ -2433,52 +2892,58 @@ export class ArenaGitExecutor {
       const pending = [{ directory: candidate, depth: 0 }];
       while (pending.length > 0) {
         const current = pending.pop()!;
-        const entries = await fs.readdir(current.directory, {
-          withFileTypes: true,
-        });
-        for (const entry of entries) {
-          scanned += 1;
-          if (scanned > MAX_GIT_CONTROL_SCAN_ENTRIES) {
-            throw new ArenaGitError(
-              "unsupportedRepository",
-              "Arena Git control scan exceeds its bounded entry limit.",
-            );
-          }
-          const entryPath = path.join(current.directory, entry.name);
-          const entryStat = await fs.lstat(entryPath);
-          if (entryStat.isSymbolicLink()) {
-            throw new ArenaGitError(
-              "unsupportedRepository",
-              "Arena Git control scan refuses linked entries.",
-            );
-          }
-          if (entry.isDirectory()) {
-            if (root.recursive) {
-              if (current.depth >= MAX_GIT_CONTROL_SCAN_DEPTH) {
-                throw new ArenaGitError(
-                  "unsupportedRepository",
-                  "Arena Git control scan exceeds its depth limit.",
-                );
-              }
-              pending.push({
-                directory: entryPath,
-                depth: current.depth + 1,
-              });
+        const directory = await fs.opendir(current.directory);
+        try {
+          for await (const entry of directory) {
+            scanned += 1;
+            if (scanned > MAX_GIT_CONTROL_SCAN_ENTRIES) {
+              throw new ArenaGitError(
+                "unsupportedRepository",
+                "Arena Git control scan exceeds its bounded entry limit.",
+              );
             }
-            continue;
+            const entryPath = path.join(current.directory, entry.name);
+            const entryStat = await fs.lstat(entryPath);
+            if (entryStat.isSymbolicLink()) {
+              throw new ArenaGitError(
+                "unsupportedRepository",
+                "Arena Git control scan refuses linked entries.",
+              );
+            }
+            if (entry.isDirectory()) {
+              if (root.recursive) {
+                if (current.depth >= MAX_GIT_CONTROL_SCAN_DEPTH) {
+                  throw new ArenaGitError(
+                    "unsupportedRepository",
+                    "Arena Git control scan exceeds its depth limit.",
+                  );
+                }
+                pending.push({
+                  directory: entryPath,
+                  depth: current.depth + 1,
+                });
+              }
+              continue;
+            }
+            const inPackDirectory = root.relative
+              === path.join("objects", "pack");
+            if (entry.name.endsWith(".lock")
+              || (inPackDirectory && entry.name.startsWith("tmp_"))) {
+              throw new ArenaGitError(
+                "sequencerActive",
+                `Arena refuses active Git control file ${path.relative(
+                  realCommonDirectory,
+                  entryPath,
+                )}.`,
+              );
+            }
           }
-          const inPackDirectory = root.relative
-            === path.join("objects", "pack");
-          if (entry.name.endsWith(".lock")
-            || (inPackDirectory && entry.name.startsWith("tmp_"))) {
-            throw new ArenaGitError(
-              "sequencerActive",
-              `Arena refuses active Git control file ${path.relative(
-                realCommonDirectory,
-                entryPath,
-              )}.`,
-            );
-          }
+        } finally {
+          await directory.close().catch((error: unknown) => {
+            if ((error as NodeJS.ErrnoException).code !== "ERR_DIR_CLOSED") {
+              throw error;
+            }
+          });
         }
       }
     }
@@ -2721,6 +3186,179 @@ export class ArenaGitExecutor {
   }
 }
 
+function validatePromotionCandidate(
+  value: ArenaPromotionCandidate,
+): ArenaPromotionCandidate {
+  if (!value
+    || !Buffer.isBuffer(value.patch)
+    || value.patch.byteLength > MAX_ARENA_PATCH_BYTES
+    || !/^[a-f0-9]{64}$/u.test(value.patchSha256)
+    || createHash("sha256").update(value.patch).digest("hex")
+      !== value.patchSha256
+    || !/^[a-f0-9]{64}$/u.test(value.artifactSetSha256)
+    || !Array.isArray(value.untrackedEntries)
+    || value.untrackedEntries.length > 10_000) {
+    throw new ArenaGitError(
+      "worktreeStateMismatch",
+      "Arena promotion candidate is invalid or oversized.",
+    );
+  }
+  const seen = new Set<string>();
+  const entries = value.untrackedEntries.map((entry) => {
+    const gitPath = validatePromotionGitPath(entry.path);
+    const key = process.platform === "win32" ? gitPath.toLowerCase() : gitPath;
+    if (seen.has(key)
+      || !Buffer.isBuffer(entry.content)
+      || !Number.isSafeInteger(entry.bytes)
+      || entry.bytes < 0
+      || entry.bytes !== entry.content.byteLength
+      || !Number.isSafeInteger(entry.mode)
+      || entry.mode < 0
+      || entry.mode > 0o777
+      || !/^[a-f0-9]{64}$/u.test(entry.sha256)
+      || createHash("sha256").update(entry.content).digest("hex")
+        !== entry.sha256) {
+      throw new ArenaGitError(
+        "worktreeStateMismatch",
+        "Arena promotion untracked entry is invalid.",
+      );
+    }
+    seen.add(key);
+    return Object.freeze({ ...entry, path: gitPath, content: Buffer.from(entry.content) });
+  });
+  return Object.freeze({
+    patch: Buffer.from(value.patch),
+    patchSha256: value.patchSha256,
+    artifactSetSha256: value.artifactSetSha256,
+    untrackedEntries: Object.freeze(entries),
+  });
+}
+
+async function promotionUntrackedConflicts(
+  workspaceRoot: string,
+  entries: readonly ArenaPromotionUntrackedEntry[],
+): Promise<readonly string[]> {
+  const conflicts: string[] = [];
+  for (const entry of entries) {
+    const target = promotionTarget(workspaceRoot, entry.path);
+    await assertPromotionParents(workspaceRoot, target, false);
+    try {
+      await fs.lstat(target);
+      if (conflicts.length < 256) conflicts.push(entry.path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  return Object.freeze(conflicts);
+}
+
+async function publishPromotionUntrackedEntry(
+  workspaceRoot: string,
+  entry: ArenaPromotionUntrackedEntry,
+): Promise<void> {
+  const target = promotionTarget(workspaceRoot, entry.path);
+  await assertPromotionParents(workspaceRoot, target, true);
+  const noFollow = typeof fsConstants.O_NOFOLLOW === "number"
+    ? fsConstants.O_NOFOLLOW
+    : 0;
+  const handle = await fs.open(
+    target,
+    fsConstants.O_WRONLY
+      | fsConstants.O_CREAT
+      | fsConstants.O_EXCL
+      | noFollow,
+    entry.mode,
+  );
+  try {
+    await handle.writeFile(entry.content);
+    await handle.sync();
+    const written = await handle.stat();
+    if (!written.isFile()
+      || written.isSymbolicLink()
+      || written.nlink !== 1
+      || written.size !== entry.bytes) {
+      throw new ArenaGitError(
+        "worktreeStateMismatch",
+        "Arena promotion could not verify a newly created untracked file.",
+      );
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
+async function assertPromotionParents(
+  workspaceRoot: string,
+  target: string,
+  createMissing: boolean,
+): Promise<void> {
+  const relativeParent = path.relative(workspaceRoot, path.dirname(target));
+  const segments = relativeParent === "" ? [] : relativeParent.split(path.sep);
+  let current = workspaceRoot;
+  await assertRealDirectory(current, "Arena promotion workspace");
+  for (const segment of segments) {
+    current = path.join(current, segment);
+    try {
+      const stat = await fs.lstat(current);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) {
+        throw new ArenaGitError(
+          "unsafePath",
+          "Arena promotion untracked parent is linked or invalid.",
+        );
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      if (!createMissing) continue;
+      try {
+        await fs.mkdir(current, { mode: 0o700 });
+      } catch (mkdirError) {
+        if ((mkdirError as NodeJS.ErrnoException).code !== "EEXIST") {
+          throw mkdirError;
+        }
+      }
+      const created = await fs.lstat(current);
+      if (!created.isDirectory() || created.isSymbolicLink()) {
+        throw new ArenaGitError(
+          "unsafePath",
+          "Arena promotion untracked parent changed during creation.",
+        );
+      }
+    }
+  }
+}
+
+function promotionTarget(workspaceRoot: string, gitPath: string): string {
+  const safe = validatePromotionGitPath(gitPath);
+  const target = path.resolve(workspaceRoot, ...safe.split("/"));
+  const relative = path.relative(workspaceRoot, target);
+  if (relative === ""
+    || relative === ".."
+    || relative.startsWith(`..${path.sep}`)
+    || path.isAbsolute(relative)) {
+    throw new ArenaGitError("unsafePath", "Arena promotion path escapes the workspace.");
+  }
+  return target;
+}
+
+function validatePromotionGitPath(value: string): string {
+  if (typeof value !== "string"
+    || value.length === 0
+    || Buffer.byteLength(value, "utf8") > 4_096
+    || value.startsWith("/")
+    || value.includes("\\")
+    || /[\u0000-\u001f\u007f:]/u.test(value)
+    || value.split("/").some((segment) =>
+      segment.length === 0
+      || segment === "."
+      || segment === ".."
+      || segment.toLowerCase() === ".git"
+      || /[. ]$/u.test(segment)
+      || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(segment))) {
+    throw new ArenaGitError("unsafePath", "Arena promotion path is unsafe.");
+  }
+  return value;
+}
+
 export function arenaWorktreeLockReason(
   runId: string,
   contestantId: string,
@@ -2900,6 +3538,13 @@ export async function runArenaGitCommand(
   );
   const timeoutMs = positiveBound(options.timeoutMs, DEFAULT_GIT_TIMEOUT_MS);
   const allowedExitCodes = new Set(options.allowedExitCodes ?? [0]);
+  if (options.stdin !== undefined
+    && options.stdin.byteLength > MAX_ARENA_PATCH_BYTES) {
+    throw new ArenaGitError(
+      "gitOutputTooLarge",
+      `Arena Git stdin exceeded ${MAX_ARENA_PATCH_BYTES} bytes.`,
+    );
+  }
   if (options.signal?.aborted) {
     throw new ArenaGitError("gitCancelled", "Arena Git command was cancelled before spawn.");
   }
@@ -2911,9 +3556,10 @@ export async function runArenaGitCommand(
         windowsHide: true,
         shell: false,
         detached: process.platform !== "win32",
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: [options.stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
         env: sanitizedArenaGitEnvironment(),
       });
+      bindProcessTreeIdentity(child);
     } catch (error) {
       reject(new ArenaGitError(
         "gitFailed",
@@ -2928,36 +3574,89 @@ export async function runArenaGitCommand(
     let stderrBytes = 0;
     let settled = false;
     let stopReason: ArenaGitError | undefined;
-    let stopStarted = false;
+    let terminationWork: Promise<boolean> | undefined;
+    let stdoutSinkWork: Promise<void> = Promise.resolve();
+    let stdoutSinkFailure: ArenaGitError | undefined;
+    let rejectionWork: Promise<void> | undefined;
+    let unconfirmedChildReleased = false;
 
     const cleanup = () => {
       clearTimeout(timer);
       options.signal?.removeEventListener("abort", onAbort);
     };
+    const releaseUnconfirmedChild = () => {
+      if (unconfirmedChildReleased) return;
+      unconfirmedChildReleased = true;
+      releaseUnconfirmedChildProcess(child);
+    };
     const finishReject = (error: ArenaGitError) => {
       if (settled) return;
       settled = true;
       cleanup();
+      if (error.code === "terminationUnconfirmed") {
+        releaseUnconfirmedChild();
+      }
       reject(error);
+    };
+    const finishRejectAfterStreamDrain = (error: ArenaGitError) => {
+      if (settled || rejectionWork) return;
+      rejectionWork = (async () => {
+        // Make the sink chain finite before any caller is allowed to close or
+        // unlink its destination. Data callbacks already queued have appended
+        // their work synchronously; pausing and detaching prevents new ones.
+        child.stdout?.pause();
+        child.stdout?.removeAllListeners("data");
+        child.stdout?.destroy();
+        child.stderr?.removeAllListeners("data");
+        child.stderr?.destroy();
+        if (error.code === "terminationUnconfirmed") {
+          // Release local ownership before a slow or failed evidence sink can
+          // strand this explicitly unconfirmed native process indefinitely.
+          releaseUnconfirmedChild();
+        }
+        await stdoutSinkWork;
+        finishReject(error);
+      })();
+      void rejectionWork.catch((drainError: unknown) => {
+        finishReject(new ArenaGitError(
+          "gitFailed",
+          "Arena Git output shutdown failed.",
+          { cause: drainError },
+        ));
+      });
     };
     const stop = (reason: ArenaGitError) => {
       stopReason ??= reason;
-      if (stopStarted) return;
-      stopStarted = true;
-      void (async () => {
-        await terminateProcessTree(child, false);
-        await waitFor(250);
-        if (settled) return;
-        await terminateProcessTree(child, true);
-        await waitFor(1_500);
-        if (!settled) {
-          finishReject(new ArenaGitError(
+      if (terminationWork) return;
+      terminationWork = (async () => {
+        try {
+          const firstRequest = await terminateProcessTree(child, false);
+          if (process.platform === "win32") {
+            if (firstRequest) return true;
+            await waitFor(250);
+            return terminateProcessTree(child, true);
+          }
+          if (child.pid
+            && await waitForPosixProcessGroupQuiescence(child.pid, 250)) {
+            return true;
+          }
+          await terminateProcessTree(child, true);
+          return child.pid
+            ? waitForPosixProcessGroupQuiescence(child.pid, 1_500)
+            : false;
+        } catch {
+          return false;
+        }
+      })();
+      void terminationWork.then((confirmed) => {
+        if (!confirmed && !settled) {
+          finishRejectAfterStreamDrain(new ArenaGitError(
             "terminationUnconfirmed",
             "Arena could not confirm Git process-tree termination.",
             { cause: stopReason },
           ));
         }
-      })();
+      });
     };
     const onAbort = () => stop(new ArenaGitError(
       "gitCancelled",
@@ -2970,6 +3669,17 @@ export async function runArenaGitCommand(
       ));
     }, timeoutMs);
     options.signal?.addEventListener("abort", onAbort, { once: true });
+    if (options.stdin !== undefined) {
+      child.stdin?.once("error", (error) => {
+        if (settled) return;
+        stop(new ArenaGitError(
+          "gitFailed",
+          "Arena could not write exact bytes to Git stdin.",
+          { cause: error },
+        ));
+      });
+      child.stdin?.end(options.stdin);
+    }
 
     child.stdout?.on("data", (value: Buffer | string) => {
       const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
@@ -2981,7 +3691,27 @@ export async function runArenaGitCommand(
         ));
         return;
       }
-      stdout.push(Buffer.from(chunk));
+      if (!options.stdoutSink) {
+        stdout.push(Buffer.from(chunk));
+        return;
+      }
+      child.stdout?.pause();
+      stdoutSinkWork = stdoutSinkWork
+        .then(async () => {
+          if (stdoutSinkFailure) return;
+          await options.stdoutSink!(Buffer.from(chunk));
+        })
+        .catch((error: unknown) => {
+          stdoutSinkFailure = new ArenaGitError(
+            "gitFailed",
+            "Arena Git stdout evidence sink failed.",
+            { cause: error },
+          );
+          stop(stdoutSinkFailure);
+        })
+        .then(() => {
+          if (!stopReason && !settled) child.stdout?.resume();
+        });
     });
     child.stderr?.on("data", (value: Buffer | string) => {
       const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
@@ -2991,16 +3721,44 @@ export async function runArenaGitCommand(
       stderrBytes += retained.length;
     });
     child.once("error", (error) => {
-      finishReject(new ArenaGitError(
+      const processError = new ArenaGitError(
         "gitFailed",
         "Arena Git process failed before completion.",
         { cause: error },
-      ));
+      );
+      if (!child.pid) {
+        finishRejectAfterStreamDrain(processError);
+        return;
+      }
+      stop(processError);
+      void terminationWork!.then((confirmed) => {
+        finishRejectAfterStreamDrain(confirmed
+          ? processError
+          : new ArenaGitError(
+              "terminationUnconfirmed",
+              "Arena could not confirm Git process-tree termination after a process error.",
+              { cause: processError },
+            ));
+      });
     });
-    child.once("close", (code) => {
+    child.once("close", (code) => void (async () => {
+      await stdoutSinkWork;
       if (settled) return;
       if (stopReason) {
-        finishReject(stopReason);
+        const terminationConfirmed = await (
+          terminationWork ?? Promise.resolve(false)
+        );
+        finishReject(terminationConfirmed
+          ? stopReason
+          : new ArenaGitError(
+              "terminationUnconfirmed",
+              "Arena could not confirm Git process-tree termination.",
+              { cause: stopReason },
+            ));
+        return;
+      }
+      if (stdoutSinkFailure) {
+        finishReject(stdoutSinkFailure);
         return;
       }
       const exitCode = code ?? -1;
@@ -3020,12 +3778,282 @@ export async function runArenaGitCommand(
       settled = true;
       cleanup();
       resolve({
-        stdout: Buffer.concat(stdout, stdoutBytes),
+        stdout: options.stdoutSink
+          ? Buffer.alloc(0)
+          : Buffer.concat(stdout, stdoutBytes),
         stderr: Buffer.concat(stderr, stderrBytes),
         exitCode,
       });
-    });
+    })());
   });
+}
+
+interface MutableArenaEvidenceStage {
+  readonly path: string;
+  readonly handle: fs.FileHandle;
+  readonly identity: Stats;
+  readonly parentIdentity: Stats;
+}
+
+async function createArenaEvidenceStage(
+  artifactDirectory: string,
+  artifactName: string,
+  boundary: ArenaPrivateStorageBoundary,
+): Promise<MutableArenaEvidenceStage> {
+  await assertArenaPrivateDirectory(artifactDirectory, boundary);
+  const parentIdentity = await fs.lstat(artifactDirectory);
+  if (!parentIdentity.isDirectory() || parentIdentity.isSymbolicLink()) {
+    throw new ArenaGitError(
+      "unsafePath",
+      "Arena evidence artifact directory is linked or invalid.",
+    );
+  }
+  const reservation = reserveArenaEvidenceStageName(artifactName);
+  const stagePath = path.join(artifactDirectory, reservation.name);
+  let handle: fs.FileHandle;
+  try {
+    handle = await fs.open(stagePath, "wx", 0o600);
+  } catch (error) {
+    releaseArenaEvidenceStageName(stagePath);
+    throw error;
+  }
+  try {
+    const [opened, entry] = await Promise.all([
+      handle.stat(),
+      fs.lstat(stagePath),
+    ]);
+    if (!opened.isFile()
+      || opened.isSymbolicLink()
+      || opened.nlink !== 1
+      || !isArenaEvidenceFilePermissionSafe(opened)
+      || !entry.isFile()
+      || entry.isSymbolicLink()
+      || entry.nlink !== 1
+      || !isArenaEvidenceFilePermissionSafe(entry)
+      || !sameArenaEvidenceFileIdentity(opened, entry)) {
+      throw new ArenaGitError(
+        "unsafePath",
+        "Arena evidence staging file is linked or changed identity.",
+      );
+    }
+    await assertArenaEvidenceStageParent(
+      artifactDirectory,
+      parentIdentity,
+      boundary,
+    );
+    await handle.chmod(0o600).catch(() => undefined);
+    return Object.freeze({
+      path: stagePath,
+      handle,
+      identity: opened,
+      parentIdentity,
+    });
+  } catch (error) {
+    const cleanupErrors: unknown[] = [];
+    let opened: Stats | undefined;
+    try {
+      opened = await handle.stat();
+    } catch (cleanupError) {
+      cleanupErrors.push(cleanupError);
+    }
+    try {
+      await handle.close();
+    } catch (cleanupError) {
+      cleanupErrors.push(cleanupError);
+    }
+    try {
+      await assertArenaEvidenceStageParent(
+        artifactDirectory,
+        parentIdentity,
+        boundary,
+      );
+      const entry = await fs.lstat(stagePath);
+      if (!opened
+        || !isArenaEvidenceFilePermissionSafe(opened)
+        || !isArenaEvidenceFilePermissionSafe(entry)
+        || !sameArenaEvidenceFileIdentity(opened, entry)) {
+        throw new ArenaGitError(
+          "unsafePath",
+          "Arena evidence staging file changed before failed-open cleanup.",
+        );
+      }
+      await fs.unlink(stagePath);
+      await syncArenaDirectoryEntry(
+        artifactDirectory,
+        arenaEvidenceDirectoryIdentity(parentIdentity),
+        "Arena evidence artifact directory",
+      );
+    } catch (cleanupError) {
+      if ((cleanupError as NodeJS.ErrnoException).code !== "ENOENT") {
+        cleanupErrors.push(cleanupError);
+      }
+    }
+    releaseArenaEvidenceStageName(stagePath);
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError(
+        [error, ...cleanupErrors],
+        "Arena evidence stage creation and cleanup both failed.",
+      );
+    }
+    throw error;
+  }
+}
+
+async function sealArenaEvidenceStage(
+  stage: MutableArenaEvidenceStage,
+  sha256: string,
+  boundary: ArenaPrivateStorageBoundary,
+): Promise<ArenaStagedEvidenceFile> {
+  let result: ArenaStagedEvidenceFile | undefined;
+  let primaryError: unknown;
+  try {
+    await assertArenaEvidenceStageParent(
+      path.dirname(stage.path),
+      stage.parentIdentity,
+      boundary,
+    );
+    await stage.handle.sync();
+    const [sealed, entry] = await Promise.all([
+      stage.handle.stat(),
+      fs.lstat(stage.path),
+    ]);
+    if (!sealed.isFile()
+      || sealed.isSymbolicLink()
+      || sealed.nlink !== 1
+      || !isArenaEvidenceFilePermissionSafe(sealed)
+      || !entry.isFile()
+      || entry.isSymbolicLink()
+      || entry.nlink !== 1
+      || !isArenaEvidenceFilePermissionSafe(entry)
+      || !sameArenaEvidenceFileIdentity(stage.identity, sealed)
+      || !sameArenaEvidenceFileIdentity(sealed, entry)
+      || !/^[a-f0-9]{64}$/u.test(sha256)) {
+      throw new ArenaGitError(
+        "unsafePath",
+        "Arena evidence staging file changed before sealing.",
+      );
+    }
+    await assertArenaEvidenceStageParent(
+      path.dirname(stage.path),
+      stage.parentIdentity,
+      boundary,
+    );
+    result = Object.freeze({
+      path: stage.path,
+      bytes: sealed.size,
+      sha256,
+    });
+  } catch (error) {
+    primaryError = error;
+  }
+  let closeError: unknown;
+  try {
+    await stage.handle.close();
+  } catch (error) {
+    closeError = error;
+  }
+  if (primaryError && closeError) {
+    throw new AggregateError(
+      [primaryError, closeError],
+      "Arena evidence stage sealing and close both failed.",
+    );
+  }
+  if (primaryError) throw primaryError;
+  if (closeError) throw closeError;
+  return result!;
+}
+
+async function discardArenaEvidenceStage(
+  stage: MutableArenaEvidenceStage,
+  boundary: ArenaPrivateStorageBoundary,
+): Promise<void> {
+  const errors: unknown[] = [];
+  try {
+    await stage.handle.close();
+  } catch (error) {
+    errors.push(error);
+  }
+  const parentPath = path.dirname(stage.path);
+  try {
+    await assertArenaEvidenceStageParent(
+      parentPath,
+      stage.parentIdentity,
+      boundary,
+    );
+    const entry = await fs.lstat(stage.path);
+    if (!isArenaEvidenceFilePermissionSafe(entry)
+      || !sameArenaEvidenceFileIdentity(stage.identity, entry)) {
+      throw new ArenaGitError(
+        "unsafePath",
+        "Arena evidence staging file changed before cleanup.",
+      );
+    }
+    await fs.unlink(stage.path);
+    await syncArenaDirectoryEntry(
+      parentPath,
+      arenaEvidenceDirectoryIdentity(stage.parentIdentity),
+      "Arena evidence artifact directory",
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      errors.push(error);
+    }
+  }
+  releaseArenaEvidenceStageName(stage.path);
+  if (errors.length > 0) {
+    throw new AggregateError(
+      errors,
+      "Arena evidence stage cleanup failed.",
+    );
+  }
+}
+
+function arenaEvidenceDirectoryIdentity(stat: Stats): {
+  readonly dev: string;
+  readonly ino: string;
+} {
+  return Object.freeze({ dev: String(stat.dev), ino: String(stat.ino) });
+}
+
+async function assertArenaEvidenceStageParent(
+  artifactDirectory: string,
+  expected: Stats,
+  boundary: ArenaPrivateStorageBoundary,
+): Promise<void> {
+  await assertArenaPrivateDirectory(artifactDirectory, boundary);
+  const current = await fs.lstat(artifactDirectory);
+  if (!current.isDirectory()
+    || current.isSymbolicLink()
+    || !sameArenaEvidenceFileIdentity(expected, current)) {
+    throw new ArenaGitError(
+      "unsafePath",
+      "Arena evidence artifact directory changed identity.",
+    );
+  }
+}
+
+async function writeArenaEvidenceChunk(
+  handle: fs.FileHandle,
+  chunk: Buffer,
+): Promise<void> {
+  let offset = 0;
+  while (offset < chunk.byteLength) {
+    const write = await handle.write(chunk.subarray(offset));
+    if (write.bytesWritten <= 0) {
+      throw new Error("Arena evidence staging write made no progress.");
+    }
+    offset += write.bytesWritten;
+  }
+}
+
+function sameArenaEvidenceFileIdentity(left: Stats, right: Stats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function isArenaEvidenceFilePermissionSafe(stat: Stats): boolean {
+  if (process.platform === "win32") return true;
+  if ((stat.mode & 0o077) !== 0) return false;
+  return typeof process.getuid !== "function" || stat.uid === process.getuid();
 }
 
 interface MutableWorktreeEntry {
