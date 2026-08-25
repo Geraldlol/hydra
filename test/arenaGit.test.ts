@@ -1192,15 +1192,11 @@ describe("Arena bounded process runner", () => {
     );
   });
 
-  test("terminates a child whose stdout exceeds the configured bound", async (t) => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-arena-runner-"));
-    t.after(async () => {
-      await fs.rm(root, { recursive: true, force: true });
-    });
+  test("terminates a child whose stdout exceeds the configured bound", async () => {
     await assert.rejects(
       runArenaGitCommand(
         process.execPath,
-        root,
+        process.cwd(),
         ["-e", "process.stdout.write('x'.repeat(65536)); setInterval(() => {}, 1000)"],
         {
           maxStdoutBytes: 32,

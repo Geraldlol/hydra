@@ -1,6 +1,16 @@
 import * as cp from "node:child_process";
 import * as path from "node:path";
 import { windowsSystemExecutable } from "./executablePath";
+import {
+  TERMINATION_CONFIRM_WINDOW_MS,
+  TERMINATION_FORCE_GRACE_MS,
+  WINDOWS_PROCESS_TREE_TERMINATION_HELPER_TIMEOUT_MS,
+} from "./processTreeBudgets";
+
+export {
+  TERMINATION_CONFIRM_WINDOW_MS,
+  TERMINATION_FORCE_GRACE_MS,
+} from "./processTreeBudgets";
 
 // Cap accumulated agent stdout per call. A poisoned CLAUDE.md / AGENTS.md
 // can prompt-inject the CLI into emitting hundreds of MB of stream-json
@@ -17,18 +27,6 @@ export const MAX_AGENT_STDOUT_BYTES = 16 * 1024 * 1024;
 // channel, so legitimate output is rarely more than a few KB. Same UTF-16
 // char accounting as the stdout cap above.
 export const MAX_AGENT_STDERR_BYTES = 1 * 1024 * 1024;
-
-// Grace between asking a process tree to die and force-killing it. Short on
-// purpose: a cooperative child exits well inside this, and escalating quickly
-// is what actually reclaims the inherited pipes.
-export const TERMINATION_FORCE_GRACE_MS = 1_000;
-// Why 10s and not 1s: `close` fires only once every inherited stdio handle in
-// the tree is released. A Windows agent CLI runs behind a cmd.exe shim over a
-// deep child tree (powershell, subagent threads), and after identity-bound tree
-// termination those handles can take seconds to drain. A 1s window declared such runs "termination
-// unconfirmed", which latches a host-wide automation block that only a window
-// reload clears - so a merely slow reap bricked the room.
-export const TERMINATION_CONFIRM_WINDOW_MS = 10_000;
 
 export interface BoundedStreamState {
   text: string;
@@ -632,6 +630,8 @@ export async function captureWindowsProcessCreationIdentity(
       } catch {
         // The identity probe may have exited between timeout and termination.
       }
+      probe.stdout?.destroy();
+      probe.unref();
       finish(undefined);
     }, 2_000);
     probe.once("error", () => finish(undefined));
@@ -871,8 +871,9 @@ export async function terminateWindowsProcessTreeSnapshot(
       } catch {
         // The helper may have exited between the timeout and this kill.
       }
+      killer.unref();
       finish(false);
-    }, 5_000);
+    }, WINDOWS_PROCESS_TREE_TERMINATION_HELPER_TIMEOUT_MS);
     killer.on("error", () => finish(false));
     // A PID snapshot can safely identity-bind every process it saw, but it
     // cannot prove that the root did not create and orphan a new descendant

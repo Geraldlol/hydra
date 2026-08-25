@@ -12,10 +12,17 @@ import {
   RunResult,
   spawnIdentityBoundProcess,
   stripAnsi,
+  TERMINATION_CONFIRM_WINDOW_MS,
+  TERMINATION_FORCE_GRACE_MS,
   terminateProcessTree,
   terminateWindowsProcessTreeSnapshot,
   waitForPosixProcessGroupQuiescence,
 } from "../src/agents";
+import {
+  WINDOWS_PROCESS_TREE_JOB_BIND_TIMEOUT_MS,
+  WINDOWS_PROCESS_TREE_TERMINATION_HELPER_TIMEOUT_MS,
+} from "../src/processTreeBudgets";
+import { HANG_NET_TIMEOUT_MS } from "./testBudgets";
 
 const MOCK_CLI = path.join(__dirname, "fixtures", "mock-cli.js");
 
@@ -28,12 +35,21 @@ function spawnBlockedBySandbox(result: RunResult): boolean {
 }
 
 describe("runAgent", () => {
+  test("keeps Windows cold bootstrap inside the termination confirmation window", () => {
+    assert.ok(
+      TERMINATION_FORCE_GRACE_MS + TERMINATION_CONFIRM_WINDOW_MS
+        > WINDOWS_PROCESS_TREE_JOB_BIND_TIMEOUT_MS
+          + WINDOWS_PROCESS_TREE_TERMINATION_HELPER_TIMEOUT_MS,
+      "the final lifecycle backstop must outlive cold binding plus identity-bound teardown",
+    );
+  });
+
   test("streams chunks via onChunk and resolves with full stdout", async () => {
     const chunks: string[] = [];
     const result: RunResult = await runAgent(
       nodeSpawn(["--emit", "hello ", "world"]),
       "",
-      5000,
+      HANG_NET_TIMEOUT_MS,
       (c) => chunks.push(c),
       new AbortController().signal
     );
@@ -51,7 +67,7 @@ describe("runAgent", () => {
     const result = await runAgent(
       nodeSpawn(["--emit", "ok"]),
       "this is the prompt body",
-      5000,
+      HANG_NET_TIMEOUT_MS,
       () => {},
       new AbortController().signal
     );
@@ -67,7 +83,7 @@ describe("runAgent", () => {
     const result = await runAgent(
       { ...echo, stdin: "from-spawn-stdin" },
       "prompt-arg-must-not-be-piped",
-      5000,
+      HANG_NET_TIMEOUT_MS,
       () => {},
       new AbortController().signal
     );
@@ -81,7 +97,7 @@ describe("runAgent", () => {
     const result = await runAgent(
       { ...echo, stdin: "" },
       "prompt-arg-must-not-be-piped",
-      5000,
+      HANG_NET_TIMEOUT_MS,
       () => {},
       new AbortController().signal
     );
@@ -94,7 +110,7 @@ describe("runAgent", () => {
     const result = await runAgent(
       nodeSpawn(["--emit", "boom", "--fail"]),
       "",
-      5000,
+      HANG_NET_TIMEOUT_MS,
       () => {},
       new AbortController().signal
     );
@@ -436,7 +452,7 @@ describe("runAgent", () => {
     const result = await runAgent(
       { command: "hydra-definitely-missing-cli", args: [], cwd: process.cwd() },
       "",
-      5000,
+      HANG_NET_TIMEOUT_MS,
       () => {},
       new AbortController().signal
     );
@@ -452,7 +468,7 @@ describe("runAgent", () => {
     const result = await runAgent(
       nodeSpawn(["--emit", "before ", "after"]),
       "",
-      5000,
+      HANG_NET_TIMEOUT_MS,
       (_c) => {
         if (!firstChunkSeen) {
           firstChunkSeen = true;
@@ -473,7 +489,7 @@ describe("runAgent", () => {
     const result = await runAgent(
       nodeSpawn(["--hang"]),
       "",
-      5000,
+      HANG_NET_TIMEOUT_MS,
       () => {},
       ctrl.signal
     );

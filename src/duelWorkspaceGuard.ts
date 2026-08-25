@@ -284,8 +284,65 @@ export interface DuelWorkspaceMutationMonitor {
 }
 
 export interface DuelWorkspaceMutationMonitorOptions {
-  /** Keep Hydra's own live mirror quiet in the main workspace. */
+  /** Ignore attributed Hydra-state paths; unattributed OS events still fail closed. */
   readonly excludeHydraState?: boolean;
+}
+
+/** @internal Exposed so watcher path semantics can be tested without relying on OS event delivery. */
+export interface DuelWorkspaceWatchPathClassification {
+  readonly changed: boolean;
+  readonly relative?: string;
+  readonly error?: string;
+}
+
+/** @internal */
+export function classifyDuelWorkspaceWatchPath(
+  root: string,
+  logicalRoot: string,
+  received: string,
+  excludeHydraState: boolean,
+): DuelWorkspaceWatchPathClassification {
+  const ambiguousPathError = "Workspace watcher emitted an event without an in-root path.";
+  if (!received || received === path.basename(root)) {
+    return { changed: true, error: ambiguousPathError };
+  }
+  try {
+    let nativeRelative: string;
+    if (path.isAbsolute(received)) {
+      nativeRelative = path.relative(root, received);
+      if (!isInRootWatcherPath(nativeRelative)) {
+        const logicalRelative = path.relative(logicalRoot, received);
+        if (!isInRootWatcherPath(logicalRelative)) {
+          return { changed: true, error: ambiguousPathError };
+        }
+        nativeRelative = logicalRelative;
+      }
+    } else {
+      nativeRelative = path.relative(root, path.resolve(root, received));
+    }
+    if (!isInRootWatcherPath(nativeRelative)) {
+      return { changed: true, error: ambiguousPathError };
+    }
+    const top = nativeRelative.split(path.sep, 1)[0]?.toLowerCase() ?? "";
+    if (top === ".git" || (excludeHydraState && top === ".hydra")) {
+      return { changed: false };
+    }
+    return {
+      changed: true,
+      relative: process.platform === "win32"
+        ? nativeRelative.replace(/\\/g, "/")
+        : nativeRelative,
+    };
+  } catch {
+    return { changed: true, error: "Workspace watcher emitted an invalid path." };
+  }
+}
+
+function isInRootWatcherPath(relative: string): boolean {
+  return !!relative
+    && relative !== ".."
+    && !relative.startsWith(`..${path.sep}`)
+    && !path.isAbsolute(relative);
 }
 
 /**
@@ -308,37 +365,17 @@ export function watchDuelWorkspaceMutations(
   try {
     root = path.resolve(realpathSync.native(logicalRoot));
     watcher = watchFileSystem(root, { recursive: true }, (_eventType, filename) => {
-      const received = typeof filename === "string" ? filename : "";
-      let relative = "";
-      let top = "";
-      try {
-        const candidate = path.resolve(root, received);
-        const nativeRelative = path.relative(root, candidate);
-        if (!received
-          || !nativeRelative
-          || nativeRelative === ".."
-          || nativeRelative.startsWith(`..${path.sep}`)
-          || path.isAbsolute(nativeRelative)) {
-          changed = true;
-          watcherError ??= "Workspace watcher emitted an event without an in-root path.";
-          return;
-        }
-        top = nativeRelative.split(path.sep, 1)[0]?.toLowerCase() ?? "";
-        relative = process.platform === "win32"
-          ? nativeRelative.replace(/\\/g, "/")
-          : nativeRelative;
-      } catch {
-        changed = true;
-        watcherError ??= "Workspace watcher emitted an invalid path.";
-        return;
-      }
-      // Git metadata may be refreshed by read-only Git commands, and .hydra
-      // is Hydra's own live state/mirror surface. Project evidence elsewhere
-      // is never exempt, even when ignored by Git.
-      if (top === ".git" || (excludeHydraState && top === ".hydra")) return;
+      const classification = classifyDuelWorkspaceWatchPath(
+        root,
+        logicalRoot,
+        typeof filename === "string" ? filename : "",
+        excludeHydraState,
+      );
+      if (!classification.changed) return;
       changed = true;
-      if (changedPaths.size < maxRetainedChangedPaths) {
-        changedPaths.add(relative.slice(0, 512));
+      watcherError ??= classification.error;
+      if (classification.relative && changedPaths.size < maxRetainedChangedPaths) {
+        changedPaths.add(classification.relative.slice(0, 512));
       }
     });
   } catch (error) {
@@ -356,7 +393,13 @@ export function watchDuelWorkspaceMutations(
     get changedPaths() { return [...changedPaths].sort(compareGitPaths); },
     get error() { return watcherError; },
     async settle() {
-      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      // libuv batches macOS directory events through FSEvents with a 50ms
+      // latency and exposes no readiness event. This is a conservative drain,
+      // while the before/after fingerprint remains the authoritative barrier.
+      await new Promise<void>((resolve) => setTimeout(
+        resolve,
+        process.platform === "darwin" ? 200 : 25,
+      ));
     },
     close() {
       watcher.close();

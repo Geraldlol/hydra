@@ -2,6 +2,7 @@ import * as cp from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { windowsSystemExecutable } from "./executablePath";
+import { WINDOWS_PROCESS_TREE_JOB_BIND_TIMEOUT_MS } from "./processTreeBudgets";
 
 const HOST_SPEC_ENV = "HYDRA_WINDOWS_PROCESS_TREE_HOST_V1";
 const MAX_HOST_SPEC_BYTES = 256 * 1024;
@@ -181,11 +182,14 @@ async function bindSelfToKillOnCloseJob(): Promise<string> {
       settled = true;
       clearTimeout(timeout);
       try { keeper.kill(); } catch { /* already closed */ }
+      keeper.stdout?.destroy();
+      keeper.stderr?.destroy();
+      keeper.unref();
       reject(new Error(message));
     };
     const timeout = setTimeout(() => {
       finishFailure("timed out while binding the kill-on-close Job Object");
-    }, 5_000);
+    }, WINDOWS_PROCESS_TREE_JOB_BIND_TIMEOUT_MS);
     keeper.stdout?.on("data", (chunk: Buffer | string) => {
       if (settled || stdout.length >= 64) return;
       stdout += (Buffer.isBuffer(chunk) ? chunk.toString("ascii") : chunk)

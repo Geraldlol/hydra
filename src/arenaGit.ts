@@ -3600,6 +3600,15 @@ export async function runArenaGitCommand(
         child.stderr?.removeAllListeners("data");
         child.stderr?.destroy();
         await stdoutSinkWork;
+        if (error.code === "terminationUnconfirmed") {
+          // Snapshot teardown already failed closed. One last retained-handle
+          // kill is generation-safe for the direct child; releasing the local
+          // handles then prevents an unconfirmed child from pinning the
+          // extension host or a test worker indefinitely.
+          try { child.kill("SIGKILL"); } catch { /* already closed */ }
+          child.stdin?.destroy();
+          child.unref();
+        }
         finishReject(error);
       })();
       void rejectionWork.catch((drainError: unknown) => {
