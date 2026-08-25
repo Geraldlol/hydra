@@ -64,18 +64,51 @@ suite("Hydra extension host", () => {
   });
 
   test("runs the isolated Arena worktree smoke command in the extension host", async function () {
-    this.timeout(180_000);
+    this.timeout(210_000);
     const transcript = path.join(hydraDir, "transcript.md");
-    await vscode.commands.executeCommand(
+    let commandSettled = false;
+    const command = vscode.commands.executeCommand(
       "hydraRoom.runArenaSmokeTest",
-    );
-    await waitForText(
-      transcript,
-      /Arena worktree smoke test passed\./,
-      150_000,
-    );
+    ).finally(() => {
+      commandSettled = true;
+    });
+    try {
+      await withTimeout(
+        command,
+        150_000,
+        "Arena worktree smoke command exceeded its extension-host budget",
+      );
+      await waitForText(
+        transcript,
+        /Arena worktree smoke test passed\./,
+        10_000,
+      );
+    } finally {
+      if (!commandSettled) {
+        await vscode.commands.executeCommand("hydraRoom.stop");
+        await withTimeout(
+          command.catch(() => undefined),
+          40_000,
+          "Arena worktree smoke did not settle after cancellation",
+        );
+      }
+    }
   });
 });
+
+async function withTimeout(promise, timeoutMs, message) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 async function waitForFile(filePath) {
   const deadline = Date.now() + 10_000;
