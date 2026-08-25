@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { TextDecoder } from "node:util";
 import {
   bindProcessTreeIdentity,
+  releaseUnconfirmedChildProcess,
   terminateProcessTree,
   waitForPosixProcessGroupQuiescence,
 } from "./agents";
@@ -3577,15 +3578,24 @@ export async function runArenaGitCommand(
     let stdoutSinkWork: Promise<void> = Promise.resolve();
     let stdoutSinkFailure: ArenaGitError | undefined;
     let rejectionWork: Promise<void> | undefined;
+    let unconfirmedChildReleased = false;
 
     const cleanup = () => {
       clearTimeout(timer);
       options.signal?.removeEventListener("abort", onAbort);
     };
+    const releaseUnconfirmedChild = () => {
+      if (unconfirmedChildReleased) return;
+      unconfirmedChildReleased = true;
+      releaseUnconfirmedChildProcess(child);
+    };
     const finishReject = (error: ArenaGitError) => {
       if (settled) return;
       settled = true;
       cleanup();
+      if (error.code === "terminationUnconfirmed") {
+        releaseUnconfirmedChild();
+      }
       reject(error);
     };
     const finishRejectAfterStreamDrain = (error: ArenaGitError) => {
@@ -3599,16 +3609,12 @@ export async function runArenaGitCommand(
         child.stdout?.destroy();
         child.stderr?.removeAllListeners("data");
         child.stderr?.destroy();
-        await stdoutSinkWork;
         if (error.code === "terminationUnconfirmed") {
-          // Snapshot teardown already failed closed. One last retained-handle
-          // kill is generation-safe for the direct child; releasing the local
-          // handles then prevents an unconfirmed child from pinning the
-          // extension host or a test worker indefinitely.
-          try { child.kill("SIGKILL"); } catch { /* already closed */ }
-          child.stdin?.destroy();
-          child.unref();
+          // Release local ownership before a slow or failed evidence sink can
+          // strand this explicitly unconfirmed native process indefinitely.
+          releaseUnconfirmedChild();
         }
+        await stdoutSinkWork;
         finishReject(error);
       })();
       void rejectionWork.catch((drainError: unknown) => {

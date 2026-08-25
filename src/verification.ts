@@ -8,6 +8,7 @@ import { findExecutableOnPath, windowsSystemExecutable } from "./executablePath"
 import {
   bindProcessTreeIdentity,
   quoteForCmd,
+  releaseUnconfirmedChildProcess,
   spawnIdentityBoundProcess,
   stripAnsi,
   terminateProcessTree,
@@ -526,6 +527,7 @@ export async function runVerificationCommand(options: VerificationRunOptions): P
         failureBackstop = setTimeout(() => {
           terminationFailed = true;
           appendStderr("\n[Hydra did not observe the verification process close; it may still be running.]\n");
+          releaseUnconfirmedChildProcess(child);
           finish(null);
         }, TERMINATION_CONFIRM_WINDOW_MS);
       }, TERMINATION_FORCE_GRACE_MS);
@@ -626,6 +628,7 @@ export async function captureGitHead(
       : 30_000;
     const timer = setTimeout(() => {
       void terminateProcessTree(child, true).catch(() => undefined);
+      releaseUnconfirmedChildProcess(child);
       finish(undefined);
     }, boundedTimeoutMs);
     const finish = (sha: string | undefined) => {

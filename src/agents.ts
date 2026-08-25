@@ -4,6 +4,7 @@ import { windowsSystemExecutable } from "./executablePath";
 import {
   TERMINATION_CONFIRM_WINDOW_MS,
   TERMINATION_FORCE_GRACE_MS,
+  WINDOWS_PROCESS_TREE_IDENTITY_PROBE_TIMEOUT_MS,
   WINDOWS_PROCESS_TREE_TERMINATION_HELPER_TIMEOUT_MS,
 } from "./processTreeBudgets";
 
@@ -241,6 +242,7 @@ export async function runAgent(
           appendTerminationDiagnostic(
             "[Hydra did not observe the native agent process close; it may still be running. Restart VS Code before starting more Hydra work.]"
           );
+          releaseUnconfirmedChildProcess(child);
           finish(null);
         }, TERMINATION_CONFIRM_WINDOW_MS);
       }, TERMINATION_FORCE_GRACE_MS);
@@ -633,7 +635,7 @@ export async function captureWindowsProcessCreationIdentity(
       probe.stdout?.destroy();
       probe.unref();
       finish(undefined);
-    }, 2_000);
+    }, WINDOWS_PROCESS_TREE_IDENTITY_PROBE_TIMEOUT_MS);
     probe.once("error", () => finish(undefined));
     probe.once("close", (code) => {
       const value = output.trim();
@@ -653,6 +655,43 @@ export async function captureWindowsProcessCreationIdentity(
       finish(value);
     });
   });
+}
+
+/**
+ * @internal Release local native handles after process-tree shutdown could not
+ * be confirmed. This is not termination evidence: callers must preserve their
+ * fail-closed result and diagnostics because descendants may still be alive.
+ */
+export function releaseUnconfirmedChildProcess(child: cp.ChildProcess): void {
+  try {
+    // Node targets the retained native process handle here, so this final
+    // direct-child request cannot be redirected by numeric PID reuse.
+    child.kill("SIGKILL");
+  } catch {
+    // The direct child may already have closed or rejected termination.
+  }
+  for (const entry of child.stdio ?? []) {
+    if (!entry) continue;
+    const stream = entry as {
+      destroy?: () => unknown;
+      unref?: () => unknown;
+    };
+    try {
+      stream.destroy?.call(entry);
+    } catch {
+      // Continue releasing the remaining handles after one stream fails.
+    }
+    try {
+      stream.unref?.call(entry);
+    } catch {
+      // A stream may already have closed or may not expose a live handle.
+    }
+  }
+  try {
+    child.unref();
+  } catch {
+    // Releasing local ownership is best effort and never proves termination.
+  }
 }
 
 export async function terminateProcessTree(child: cp.ChildProcess, force: boolean): Promise<boolean> {

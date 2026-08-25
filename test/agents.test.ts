@@ -8,6 +8,7 @@ import * as path from "node:path";
 import {
   bindProcessTreeIdentity,
   captureWindowsProcessCreationIdentity,
+  releaseUnconfirmedChildProcess,
   runAgent,
   RunResult,
   spawnIdentityBoundProcess,
@@ -19,6 +20,7 @@ import {
   waitForPosixProcessGroupQuiescence,
 } from "../src/agents";
 import {
+  WINDOWS_PROCESS_TREE_IDENTITY_PROBE_TIMEOUT_MS,
   WINDOWS_PROCESS_TREE_JOB_BIND_TIMEOUT_MS,
   WINDOWS_PROCESS_TREE_TERMINATION_HELPER_TIMEOUT_MS,
 } from "../src/processTreeBudgets";
@@ -35,10 +37,51 @@ function spawnBlockedBySandbox(result: RunResult): boolean {
 }
 
 describe("runAgent", () => {
+  test("releases every stdio handle after unconfirmed termination", () => {
+    const calls: string[] = [];
+    const child = new EventEmitter() as cp.ChildProcess;
+    child.kill = ((signal?: NodeJS.Signals | number) => {
+      calls.push(`kill:${String(signal)}`);
+      throw new Error("simulated direct-handle kill failure");
+    }) as cp.ChildProcess["kill"];
+    child.unref = () => {
+      calls.push("child:unref");
+    };
+    const stdio = Array.from({ length: 4 }, (_value, index) => ({
+      destroy(): void {
+        calls.push(`stdio:${index}:destroy`);
+        if (index === 1) throw new Error("simulated stream destroy failure");
+      },
+      unref(): void {
+        calls.push(`stdio:${index}:unref`);
+        if (index === 2) throw new Error("simulated stream unref failure");
+      },
+    }));
+    Object.defineProperty(child, "stdio", { value: stdio });
+
+    releaseUnconfirmedChildProcess(child);
+
+    assert.deepEqual(calls, [
+      "kill:SIGKILL",
+      "stdio:0:destroy",
+      "stdio:0:unref",
+      "stdio:1:destroy",
+      "stdio:1:unref",
+      "stdio:2:destroy",
+      "stdio:2:unref",
+      "stdio:3:destroy",
+      "stdio:3:unref",
+      "child:unref",
+    ]);
+  });
+
   test("keeps Windows cold bootstrap inside the termination confirmation window", () => {
     assert.ok(
       TERMINATION_FORCE_GRACE_MS + TERMINATION_CONFIRM_WINDOW_MS
-        > WINDOWS_PROCESS_TREE_JOB_BIND_TIMEOUT_MS
+        > Math.max(
+          WINDOWS_PROCESS_TREE_JOB_BIND_TIMEOUT_MS,
+          WINDOWS_PROCESS_TREE_IDENTITY_PROBE_TIMEOUT_MS,
+        )
           + WINDOWS_PROCESS_TREE_TERMINATION_HELPER_TIMEOUT_MS,
       "the final lifecycle backstop must outlive cold binding plus identity-bound teardown",
     );
@@ -238,7 +281,7 @@ describe("runAgent", () => {
     assert.match(script, /catch \{\s*exit 1\s*\}/);
   });
 
-  test("Windows snapshot helper directly terminates a real root and descendant", { timeout: 15_000 }, async (t) => {
+  test("Windows snapshot helper directly terminates a real root and descendant", { timeout: HANG_NET_TIMEOUT_MS }, async (t) => {
     if (process.platform !== "win32") {
       t.skip("Windows process snapshot semantics");
       return;
@@ -278,7 +321,7 @@ describe("runAgent", () => {
     assert.equal(await waitForProcessExit(descendantPid), true);
   });
 
-  test("Windows lazily binds a still-live direct child before tree teardown", { timeout: 15_000 }, async (t) => {
+  test("Windows lazily binds a still-live direct child before tree teardown", { timeout: HANG_NET_TIMEOUT_MS }, async (t) => {
     if (process.platform !== "win32") {
       t.skip("Windows lazy process identity semantics");
       return;
@@ -317,7 +360,7 @@ describe("runAgent", () => {
     assert.equal(await waitForProcessExit(descendantPid), true);
   });
 
-  test("Windows identity-bound host kills descendants when the host itself is terminated", { timeout: 20_000 }, async (t) => {
+  test("Windows identity-bound host kills descendants when the host itself is terminated", { timeout: HANG_NET_TIMEOUT_MS }, async (t) => {
     if (process.platform !== "win32") {
       t.skip("Windows kill-on-close job semantics");
       return;
@@ -339,13 +382,13 @@ describe("runAgent", () => {
     );
     let descendantPid = 0;
     t.after(async () => {
-      if (host.exitCode === null && host.signalCode === null) host.kill("SIGKILL");
+      releaseUnconfirmedChildProcess(host);
       if (descendantPid > 0 && processIsAlive(descendantPid)) {
         try { process.kill(descendantPid, "SIGKILL"); } catch { /* already gone */ }
       }
       await fs.rm(dir, { recursive: true, force: true });
     });
-    await waitForFile(pidFile);
+    await waitForFile(pidFile, HANG_NET_TIMEOUT_MS);
     descendantPid = Number(await fs.readFile(pidFile, "utf8"));
     assert.ok(Number.isSafeInteger(descendantPid) && descendantPid > 0);
 
@@ -361,7 +404,7 @@ describe("runAgent", () => {
     );
   });
 
-  test("Windows identity-bound helper leaves a reused PID identity untouched", { timeout: 15_000 }, async (t) => {
+  test("Windows identity-bound helper leaves a reused PID identity untouched", { timeout: HANG_NET_TIMEOUT_MS }, async (t) => {
     if (process.platform !== "win32") {
       t.skip("Windows process creation identity semantics");
       return;

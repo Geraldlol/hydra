@@ -4,6 +4,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
   isWindowsBatchCommand,
+  releaseUnconfirmedChildProcess,
   spawnViaCmdShim,
   terminateProcessTree,
 } from "./agents";
@@ -602,7 +603,7 @@ async function superviseArenaProcessAgainstIntent(
       if (settled || finalizing) return;
       finalizing = true;
       clearLifecycle();
-      destroyPipes();
+      releaseUnconfirmedChildProcess(child);
       // A termination deadline cannot cancel the broker-owned durable
       // submission callback. Keep the supervisor open until that authority
       // boundary settles so the controller cannot close monitoring while a

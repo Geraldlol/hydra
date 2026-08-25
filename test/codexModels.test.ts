@@ -11,6 +11,7 @@ import {
   parseCodexDebugModels,
   runCodexDebugModels,
 } from "../src/codexModels";
+import { WINDOWS_PROCESS_TREE_JOB_BIND_TIMEOUT_MS } from "../src/processTreeBudgets";
 
 describe("parseCodexDebugModels", () => {
   test("extracts slug + display + reasoning + API support, drops base_instructions blob", () => {
@@ -147,7 +148,9 @@ describe("runCodexDebugModels", () => {
       }
       await fs.rm(dir, { recursive: true, force: true });
     });
-    const timeoutMs = 2_000;
+    const timeoutMs = process.platform === "win32"
+      ? WINDOWS_PROCESS_TREE_JOB_BIND_TIMEOUT_MS + 2_000
+      : 2_000;
     const grandchildCode = "setInterval(() => {}, 1000);";
     const command = await fakeCodexCommand(
       dir,

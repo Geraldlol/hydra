@@ -8,6 +8,7 @@ import {
   TERMINATION_FORCE_GRACE_MS,
   appendBoundedStream,
   isWindowsBatchCommand,
+  releaseUnconfirmedChildProcess,
   spawnIdentityBoundProcess,
   spawnViaCmdShim,
   stripAnsi,
@@ -180,6 +181,7 @@ export function startPersistentAgentProcess(
         appendTerminationDiagnostic(
           "[Hydra did not observe the native agent process close; it may still be running. Restart VS Code before starting more Hydra work.]",
         );
+        releaseUnconfirmedChildProcess(child);
         finish(null);
       }, TERMINATION_CONFIRM_WINDOW_MS);
     }, TERMINATION_FORCE_GRACE_MS);

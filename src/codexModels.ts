@@ -2,8 +2,10 @@ import * as cp from "node:child_process";
 import {
   bindProcessTreeIdentity,
   isWindowsBatchCommand,
+  releaseUnconfirmedChildProcess,
   spawnIdentityBoundProcess,
   spawnViaCmdShim,
+  TERMINATION_CONFIRM_WINDOW_MS,
   terminateProcessTree,
   waitForPosixProcessGroupQuiescence,
 } from "./agents";
@@ -173,7 +175,7 @@ export function runCodexDebugModels(command: string, env: NodeJS.ProcessEnv, tim
                 1_000,
               );
         }
-        const wrapperClosed = await waitForChildClose(1_000);
+        const wrapperClosed = await waitForChildClose(TERMINATION_CONFIRM_WINDOW_MS);
         return treeQuiescent && wrapperClosed;
       })();
       void terminationWork.then((confirmed) => {
@@ -182,6 +184,7 @@ export function runCodexDebugModels(command: string, env: NodeJS.ProcessEnv, tim
           finishWithError(error);
           return;
         }
+        releaseUnconfirmedChildProcess(child);
         finishWithError(new CodexModelsTerminationError(
           `${error.message}; Hydra did not observe a confirmed model-discovery process-tree shutdown and it may still be running. Restart VS Code before starting more Hydra work.`
         ));

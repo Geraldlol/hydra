@@ -933,6 +933,7 @@ describe("Arena process supervisor", () => {
         },
         terminateProcess: async () => false,
         terminationGraceMs: 5,
+        terminationConfirmMs: 5,
       },
     );
     await spawnCalled;
@@ -949,6 +950,7 @@ describe("Arena process supervisor", () => {
     assert.equal(result.quiescence, null);
     assert.equal(result.stdout.complete, false);
     assert.equal(result.stderr.complete, false);
+    assertUnconfirmedChildReleased(child);
   });
 
   test("does not resolve unconfirmed termination ahead of the durable submission gate", async (t) => {
@@ -981,6 +983,7 @@ describe("Arena process supervisor", () => {
         },
         terminateProcess: async () => false,
         terminationGraceMs: 5,
+        terminationConfirmMs: 5,
       },
     ).then((result) => {
       settled = true;
@@ -989,12 +992,13 @@ describe("Arena process supervisor", () => {
 
     await submissionObserved;
     controller.abort();
-    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+    await waitForUnconfirmedChildRelease(child);
     assert.equal(
       settled,
       false,
       "the controller must not outlive an uncancellable authority write",
     );
+    assertUnconfirmedChildReleased(child);
 
     releaseSubmission();
     const result = await running;
@@ -1188,15 +1192,71 @@ async function createFixture(t: { after(callback: () => Promise<void>): void }):
   return { root, file };
 }
 
-function fakeNeverClosingChild(): cp.ChildProcess {
-  const child = new EventEmitter() as cp.ChildProcess;
+interface NeverClosingChild extends cp.ChildProcess {
+  readonly releaseState: {
+    readonly killSignals: Array<NodeJS.Signals | number | undefined>;
+    unrefCalls: number;
+    readonly released: Promise<void>;
+  };
+}
+
+function fakeNeverClosingChild(): NeverClosingChild {
+  let markReleased!: () => void;
+  const released = new Promise<void>((resolve) => {
+    markReleased = resolve;
+  });
+  const releaseState: NeverClosingChild["releaseState"] = {
+    killSignals: [],
+    unrefCalls: 0,
+    released,
+  };
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  const fd3 = new PassThrough();
+  const child = new EventEmitter() as NeverClosingChild;
   Object.assign(child, {
-    stdin: new PassThrough(),
-    stdout: new PassThrough(),
-    stderr: new PassThrough(),
-    kill: () => false,
+    stdin,
+    stdout,
+    stderr,
+    stdio: [stdin, stdout, stderr, fd3],
+    kill: (signal?: NodeJS.Signals | number) => {
+      releaseState.killSignals.push(signal);
+      return false;
+    },
+    unref: () => {
+      releaseState.unrefCalls += 1;
+      markReleased();
+    },
+    releaseState,
   });
   return child;
+}
+
+function assertUnconfirmedChildReleased(child: NeverClosingChild): void {
+  assert.deepEqual(child.releaseState.killSignals, ["SIGKILL"]);
+  assert.equal(child.releaseState.unrefCalls, 1);
+  assert.equal(child.stdio.length, 4);
+  for (const stream of child.stdio) assert.equal(stream?.destroyed, true);
+}
+
+async function waitForUnconfirmedChildRelease(
+  child: NeverClosingChild,
+  timeoutMs = 1_000,
+): Promise<void> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      child.releaseState.released,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error(
+          "unconfirmed child handles were not released before the test deadline",
+        )), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 function acceptedMockChild(): {
