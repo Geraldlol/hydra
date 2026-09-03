@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://marketplace.visualstudio.com/items?itemName=geraldlol.vscode-hydra-room">Install from the Visual Studio Marketplace</a>
-  &nbsp;·&nbsp; Preview 0.8.0
+  &nbsp;·&nbsp; Preview 0.8.2
   &nbsp;·&nbsp; <a href="CHANGELOG.md">Changelog</a>
 </p>
 

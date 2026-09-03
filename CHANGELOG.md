@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.2
+
+- Resolves the open Dependabot alerts by pinning the transitive dev dependencies `fast-uri` to 3.1.7 (two high: SSRF via repeated hostname percent-decoding, host confusion via skipped IDN canonicalization) and `qs` to 6.16.0 (two moderate: array-limit bypass, `isBuffer` denial of service). Both reach the repo only through `@vscode/vsce` and `secretlint`; nothing ships in the `.vsix`.
+
+## 0.8.1
+
+- Adds Claude **Fable 5.1** (`claude-fable-5-1`) and **Mythos 5.1** (`claude-mythos-5-1`) to `Hydra: Choose Model`, ahead of Fable 5; the `fable` alias now resolves to Fable 5.1.
+- Mirrors the Codex fallback model list to `codex debug models` on codex-cli 0.144.1: adds `gpt-daybreak-blue-latest` and drops the retired `gpt-5.3-codex` and `gpt-5.2`.
+- Updates the default cost-meter prices (`hydraRoom.modelPrices`): Fable 5.1 / Mythos 5.1 cache reads bill at the reduced $0.25/MTok rate, Sonnet 5 at its now-standard $2/$10, and the GPT-5.6 family at OpenAI's post-cut rates (Sol $4/$20, Terra $2/$12, Luna $0.20/$1.20).
+
 ## 0.8.0
 
 Release candidate. Marketplace and GitHub publication remain separate human-approved actions.

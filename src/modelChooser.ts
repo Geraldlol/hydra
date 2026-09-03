@@ -183,8 +183,10 @@ const CLAUDE_MODEL_PRESETS: Array<{ label: string; description: string }> = [
   { label: "sonnet", description: "Alias — current Sonnet" },
   { label: "opus", description: "Alias — current Opus" },
   { label: "haiku", description: "Alias — current Haiku" },
-  { label: "claude-fable-5", description: "Fable 5 — most capable (Claude 5, Mythos-class tier above Opus)" },
-  { label: "claude-mythos-5", description: "Mythos 5 — same model as Fable 5 (approved Project Glasswing orgs only)" },
+  { label: "claude-fable-5-1", description: "Fable 5.1 — most capable (Claude 5, Mythos-class tier above Opus)" },
+  { label: "claude-mythos-5-1", description: "Mythos 5.1 — same model as Fable 5.1 (approved Project Glasswing orgs only)" },
+  { label: "claude-fable-5", description: "Fable 5 (older)" },
+  { label: "claude-mythos-5", description: "Mythos 5 (older; approved Project Glasswing orgs only)" },
   { label: "claude-sonnet-5", description: "Sonnet 5 — near-Opus quality at Sonnet cost" },
   { label: "claude-opus-5", description: "Opus 5 — latest Opus" },
   { label: "claude-opus-4-8", description: "Opus 4.8 (older)" },
@@ -229,17 +231,17 @@ function codexPresetsForChooser(
   // Fallback when the catalog has never been fetched or the local CLI catalog
   // is stale. `codex debug models` replaces this list with live data when it
   // succeeds; this seeds current documented Codex models before the first
-  // successful refresh.
+  // successful refresh. Mirrors the `visibility: "list"` entries of
+  // `codex debug models` on codex-cli 0.144.1 (2026-09-03).
   return [
     { label: "gpt-5.6-sol", description: "GPT-5.6 Sol - current Codex flagship" },
     { label: "gpt-5.6-terra", description: "GPT-5.6 Terra - balanced capability and cost" },
     { label: "gpt-5.6-luna", description: "GPT-5.6 Luna - fastest / lowest-cost 5.6 model" },
+    { label: "gpt-daybreak-blue-latest", description: "Daybreak Blue - alias of the current flagship (Sol); Daybreak program approval required" },
     { label: "gpt-5.5", description: "GPT-5.5 - previous Codex flagship" },
     { label: "gpt-5.4", description: "GPT-5.4" },
     { label: "gpt-5.4-mini", description: "GPT-5.4-Mini - lighter / cheaper" },
-    { label: "gpt-5.3-codex", description: "Code-tuned 5.3" },
     { label: "gpt-5.3-codex-spark", description: "High-reasoning code variant (interactive only — no API)" },
-    { label: "gpt-5.2", description: "GPT-5.2 — older flagship" },
   ];
 }
 
