@@ -116,14 +116,18 @@ export function seatDefinitionPrices(
  */
 export const DEFAULT_MODEL_PRICES: Record<string, ModelPrices> = {
   // Claude family. Aliases (fable/sonnet/opus/haiku) price at the current build
-  // of that family. Fable 5 / Mythos 5 are the Claude 5 flagship tier ($10/$50);
-  // Mythos 5 is the same model and pricing as Fable 5, for approved orgs. Cache
-  // rates follow Claude's ~0.1x-read / ~1.25x-write convention off input price.
-  fable: { inputPerMTok: 10, outputPerMTok: 50, cacheReadPerMTok: 1, cacheCreatePerMTok: 12.5 },
+  // of that family. Fable 5.1 / Mythos 5.1 are the Claude 5 flagship tier
+  // ($10/$50); Mythos is the same model and pricing as Fable, for approved orgs.
+  // Cache rates follow Claude's 0.1x-read / 1.25x-write convention off input
+  // price, except Fable 5.1 / Mythos 5.1 cache reads, which are 0.025x ($0.25).
+  // Sonnet 5's $2/$10 launch price became the standard price on 2026-09-01.
+  fable: { inputPerMTok: 10, outputPerMTok: 50, cacheReadPerMTok: 0.25, cacheCreatePerMTok: 12.5 },
+  "claude-fable-5-1": { inputPerMTok: 10, outputPerMTok: 50, cacheReadPerMTok: 0.25, cacheCreatePerMTok: 12.5 },
+  "claude-mythos-5-1": { inputPerMTok: 10, outputPerMTok: 50, cacheReadPerMTok: 0.25, cacheCreatePerMTok: 12.5 },
   "claude-fable-5": { inputPerMTok: 10, outputPerMTok: 50, cacheReadPerMTok: 1, cacheCreatePerMTok: 12.5 },
   "claude-mythos-5": { inputPerMTok: 10, outputPerMTok: 50, cacheReadPerMTok: 1, cacheCreatePerMTok: 12.5 },
-  sonnet: { inputPerMTok: 3, outputPerMTok: 15, cacheReadPerMTok: 0.3, cacheCreatePerMTok: 3.75 },
-  "claude-sonnet-5": { inputPerMTok: 3, outputPerMTok: 15, cacheReadPerMTok: 0.3, cacheCreatePerMTok: 3.75 },
+  sonnet: { inputPerMTok: 2, outputPerMTok: 10, cacheReadPerMTok: 0.2, cacheCreatePerMTok: 2.5 },
+  "claude-sonnet-5": { inputPerMTok: 2, outputPerMTok: 10, cacheReadPerMTok: 0.2, cacheCreatePerMTok: 2.5 },
   "claude-sonnet-4-6": { inputPerMTok: 3, outputPerMTok: 15, cacheReadPerMTok: 0.3, cacheCreatePerMTok: 3.75 },
   "claude-sonnet-4-5": { inputPerMTok: 3, outputPerMTok: 15, cacheReadPerMTok: 0.3, cacheCreatePerMTok: 3.75 },
   opus: { inputPerMTok: 5, outputPerMTok: 25, cacheReadPerMTok: 0.5, cacheCreatePerMTok: 6.25 },
@@ -137,10 +141,16 @@ export const DEFAULT_MODEL_PRICES: Record<string, ModelPrices> = {
   "claude-haiku-4-5": { inputPerMTok: 1, outputPerMTok: 5, cacheReadPerMTok: 0.1, cacheCreatePerMTok: 1.25 },
   // Codex / OpenAI family. Set hydraRoom.modelPrices["gpt-5.6-sol"] etc. to
   // pin custom rates. Run `codex debug models` to see what your install offers.
-  "gpt-5.6": { inputPerMTok: 5, outputPerMTok: 30, cacheReadPerMTok: 0.5, cacheCreatePerMTok: 6.25 },
-  "gpt-5.6-sol": { inputPerMTok: 5, outputPerMTok: 30, cacheReadPerMTok: 0.5, cacheCreatePerMTok: 6.25 },
-  "gpt-5.6-terra": { inputPerMTok: 2.5, outputPerMTok: 15, cacheReadPerMTok: 0.25, cacheCreatePerMTok: 3.125 },
-  "gpt-5.6-luna": { inputPerMTok: 1, outputPerMTok: 6, cacheReadPerMTok: 0.1, cacheCreatePerMTok: 1.25 },
+  // Why these numbers: OpenAI cut Terra/Luna on 2026-07-30 and Sol on
+  // 2026-08-21 (Sol's $4/$20 is promotional, guaranteed through 2026-11-21).
+  // Cache reads are 0.1x input, cache writes 1.25x input.
+  // `gpt-daybreak-blue-latest` is a Daybreak-program alias of the current
+  // flagship (Sol today) and is billed at that model's rate.
+  "gpt-5.6": { inputPerMTok: 4, outputPerMTok: 20, cacheReadPerMTok: 0.4, cacheCreatePerMTok: 5 },
+  "gpt-5.6-sol": { inputPerMTok: 4, outputPerMTok: 20, cacheReadPerMTok: 0.4, cacheCreatePerMTok: 5 },
+  "gpt-daybreak-blue-latest": { inputPerMTok: 4, outputPerMTok: 20, cacheReadPerMTok: 0.4, cacheCreatePerMTok: 5 },
+  "gpt-5.6-terra": { inputPerMTok: 2, outputPerMTok: 12, cacheReadPerMTok: 0.2, cacheCreatePerMTok: 2.5 },
+  "gpt-5.6-luna": { inputPerMTok: 0.2, outputPerMTok: 1.2, cacheReadPerMTok: 0.02, cacheCreatePerMTok: 0.25 },
   "gpt-5.5": { inputPerMTok: 1.25, outputPerMTok: 10, cacheReadPerMTok: 0.125, cacheCreatePerMTok: 1.25 },
   "gpt-5.4": { inputPerMTok: 1.25, outputPerMTok: 10, cacheReadPerMTok: 0.125, cacheCreatePerMTok: 1.25 },
   "gpt-5.4-mini": { inputPerMTok: 0.25, outputPerMTok: 2, cacheReadPerMTok: 0.025, cacheCreatePerMTok: 0.25 },

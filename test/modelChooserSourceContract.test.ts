@@ -13,6 +13,8 @@ describe("model chooser source contract", () => {
 
   test("Claude presets include the current flagship models", () => {
     const source = modelChooser();
+    assert.match(source, /label:\s*"claude-fable-5-1"/, "Fable 5.1 missing from Claude presets");
+    assert.match(source, /label:\s*"claude-mythos-5-1"/, "Mythos 5.1 missing from Claude presets");
     assert.match(source, /label:\s*"claude-fable-5"/, "Fable 5 missing from Claude presets");
     assert.match(source, /label:\s*"claude-sonnet-5"/, "Sonnet 5 missing from Claude presets");
     assert.match(source, /label:\s*"claude-opus-5"/, "Opus 5 missing from Claude presets");
@@ -30,6 +32,7 @@ describe("model chooser source contract", () => {
     assert.match(source, /label:\s*"gpt-5\.6-sol"/, "gpt-5.6-sol missing from Codex fallback presets");
     assert.match(source, /label:\s*"gpt-5\.6-terra"/, "gpt-5.6-terra missing from Codex fallback presets");
     assert.match(source, /label:\s*"gpt-5\.6-luna"/, "gpt-5.6-luna missing from Codex fallback presets");
+    assert.match(source, /label:\s*"gpt-daybreak-blue-latest"/, "gpt-daybreak-blue-latest missing from Codex fallback presets");
     assert.match(source, /label:\s*"gpt-5\.5"/, "gpt-5.5 missing from Codex fallback presets");
   });
 

@@ -163,9 +163,9 @@ jobs:
         with:
           name: hydra-vsix-build-output
           path: |
-            vscode-hydra-room-0.8.0.vsix
+            vscode-hydra-room-0.8.1.vsix
             SHA256SUMS.txt
-            vscode-hydra-room-0.8.0.spdx.json
+            vscode-hydra-room-0.8.1.spdx.json
           if-no-files-found: error
           retention-days: 14
 
@@ -241,4 +241,4 @@ jobs:
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-checksums: SHA256SUMS.txt
-          sbom-path: vscode-hydra-room-0.8.0.spdx.json
+          sbom-path: vscode-hydra-room-0.8.1.spdx.json

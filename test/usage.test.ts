@@ -296,9 +296,9 @@ describe("resolveModelPrices", () => {
 
   test("case-insensitive model lookup", () => {
     const lower = resolveModelPrices("claude", "Claude-Sonnet-4-6");
-    const sonnet = DEFAULT_MODEL_PRICES.sonnet;
-    assert.ok(sonnet);
-    assert.equal(lower.inputPerMTok, sonnet.inputPerMTok);
+    const sonnet46 = DEFAULT_MODEL_PRICES["claude-sonnet-4-6"];
+    assert.ok(sonnet46);
+    assert.equal(lower.inputPerMTok, sonnet46.inputPerMTok);
   });
 
   test("prices the documented GPT-5.6 Codex family", () => {
@@ -306,13 +306,37 @@ describe("resolveModelPrices", () => {
     const alias = resolveModelPrices("codex", "gpt-5.6");
     const terra = resolveModelPrices("codex", "gpt-5.6-terra");
     const luna = resolveModelPrices("codex", "gpt-5.6-luna");
-    assert.equal(sol.inputPerMTok, 5);
-    assert.equal(sol.outputPerMTok, 30);
+    const daybreak = resolveModelPrices("codex", "gpt-daybreak-blue-latest");
+    // Post-cut rates: Terra/Luna cut 2026-07-30, Sol cut 2026-08-21.
+    assert.equal(sol.inputPerMTok, 4);
+    assert.equal(sol.outputPerMTok, 20);
+    assert.equal(sol.cacheReadPerMTok, 0.4);
     assert.deepEqual(alias, sol);
-    assert.equal(terra.inputPerMTok, 2.5);
-    assert.equal(terra.outputPerMTok, 15);
-    assert.equal(luna.inputPerMTok, 1);
-    assert.equal(luna.outputPerMTok, 6);
+    assert.deepEqual(daybreak, sol, "Daybreak Blue is an alias of the current flagship");
+    assert.equal(terra.inputPerMTok, 2);
+    assert.equal(terra.outputPerMTok, 12);
+    assert.equal(luna.inputPerMTok, 0.2);
+    assert.equal(luna.outputPerMTok, 1.2);
+  });
+
+  test("prices Fable 5.1 with the reduced cache-read rate and points the fable alias at it", () => {
+    const fable51 = resolveModelPrices("claude", "claude-fable-5-1");
+    assert.equal(fable51.inputPerMTok, 10);
+    assert.equal(fable51.outputPerMTok, 50);
+    assert.equal(fable51.cacheReadPerMTok, 0.25);
+    assert.equal(fable51.cacheCreatePerMTok, 12.5);
+    assert.deepEqual(resolveModelPrices("claude", "fable"), fable51);
+    assert.deepEqual(resolveModelPrices("claude", "claude-mythos-5-1"), fable51);
+    // Fable 5 keeps the standard 0.1x cache-read rate.
+    assert.equal(resolveModelPrices("claude", "claude-fable-5").cacheReadPerMTok, 1);
+  });
+
+  test("prices Sonnet 5 at its standard $2/$10 rate", () => {
+    const sonnet5 = resolveModelPrices("claude", "claude-sonnet-5");
+    assert.equal(sonnet5.inputPerMTok, 2);
+    assert.equal(sonnet5.outputPerMTok, 10);
+    assert.equal(sonnet5.cacheReadPerMTok, 0.2);
+    assert.deepEqual(resolveModelPrices("claude", "sonnet"), sonnet5);
   });
 
   test("prices current Gemini aliases and stable concrete fallbacks", () => {
