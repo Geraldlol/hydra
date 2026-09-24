@@ -52,7 +52,7 @@ describe("CI workflow contracts", () => {
     assert.match(workflow, /actions\/setup-node@[a-f0-9]{40} # v7\.0\.0/);
     assert.match(
       workflow,
-      /pnpm\/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6/,
+      /pnpm\/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6/,
     );
     assert.match(
       release,
@@ -94,7 +94,7 @@ describe("CI workflow contracts", () => {
     assert.match(workflow, /pnpm run test:coverage/);
     assert.match(release, /pnpm run test:coverage/);
     assert.doesNotMatch(release, /uses:\s+[^\s]+@v\d+/);
-    assert.equal((release.match(/pnpm\/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86/g) ?? []).length, 6);
+    assert.equal((release.match(/pnpm\/action-setup@ea17c68df8912ef543352723c149a84f56e3d413/g) ?? []).length, 6);
     assert.doesNotMatch(release, /pnpm\/setup@|install: false/);
     assert.match(release, /actions\/upload-artifact@[a-f0-9]{40} # v7\.0\.1/);
     assert.match(release, /retention-days: 14/);
@@ -153,7 +153,7 @@ describe("CI workflow contracts", () => {
     assert.match(attestJob, /permissions:\s*\n\s+contents: read\s*\n\s+id-token: write\s*\n\s+attestations: write/u);
     assert.match(attestJob, /actions\/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8\.0\.1/u);
     assert.doesNotMatch(attestJob, /(?:^|\n)\s+-?\s*run:|checkout@|pnpm|node /u);
-    assert.equal((attestJob.match(/actions\/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4\.2\.1/g) ?? []).length, 2);
+    assert.equal((attestJob.match(/actions\/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4\.2\.2/g) ?? []).length, 2);
     assert.equal((release.match(/actions\/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c/g) ?? []).length, 2);
     assert.equal((release.match(/actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/g) ?? []).length, 1);
 
