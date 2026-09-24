@@ -15,6 +15,7 @@ import {
   telegramCoordinatorPaths,
 } from "../src/telegramCoordinator";
 import type { TelegramUpdatesResult } from "../src/telegram";
+import { HANG_NET_TIMEOUT_MS } from "./testBudgets";
 
 interface PollableTelegramController {
   inboundGeneration: number;
@@ -22,13 +23,15 @@ interface PollableTelegramController {
 }
 
 describe("TelegramController lifecycle", () => {
-  test("dispose aborts the active poll and its stale completion does not dispatch room work", async () => {
+  test("dispose aborts the active poll and its stale completion does not dispatch room work", { timeout: HANG_NET_TIMEOUT_MS }, async () => {
     const environment = await useTempTelegramEnvironment();
     const restoreSettings = installTelegramSettings(environment.botToken);
     const telegramModule = require("../src/telegram") as Record<string, unknown>;
     const originalGetUpdates = telegramModule.getTelegramUpdates;
     let resolveUpdates: ((result: TelegramUpdatesResult) => void) | undefined;
     let pollSignal: AbortSignal | undefined;
+    let markPollStarted: () => void = () => {};
+    const pollStarted = new Promise<void>((resolve) => { markPollStarted = resolve; });
     telegramModule.getTelegramUpdates = (
       _config: unknown,
       options: { signal?: AbortSignal }
@@ -36,6 +39,7 @@ describe("TelegramController lifecycle", () => {
       pollSignal = options.signal;
       return new Promise<TelegramUpdatesResult>((resolve) => {
         resolveUpdates = resolve;
+        markPollStarted();
       });
     };
 
@@ -48,7 +52,13 @@ describe("TelegramController lifecycle", () => {
     pollable.inboundGeneration = 1;
     try {
       const pending = pollable.pollInboundOnce(1);
-      await waitUntil(() => pollSignal !== undefined);
+      // Coordinator file/lease setup can take longer on loaded CI workers.
+      // Wait for the mocked transport itself, not a wall-clock guess. An early
+      // poll completion or rejection is still a test failure.
+      await Promise.race([
+        pollStarted,
+        pending.then(() => { throw new Error("Telegram poll completed before its transport started"); }),
+      ]);
       controller.dispose();
       assert.equal(pollSignal?.aborted, true);
       resolveUpdates?.({ ok: false, updates: [], error: "aborted" });
@@ -399,12 +409,4 @@ async function useTempTelegramEnvironment(): Promise<TempTelegramEnvironment> {
       else process.env.XDG_CONFIG_HOME = priorXdg;
     },
   };
-}
-
-async function waitUntil(predicate: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    if (predicate()) return;
-    await new Promise<void>((resolve) => setTimeout(resolve, 2));
-  }
-  throw new Error("Timed out waiting for Telegram poll to start");
 }
