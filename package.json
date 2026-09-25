@@ -1718,7 +1718,7 @@
     "install:handoff-skill": "node scripts/install-handoff-skill.js"
   },
   "devDependencies": {
-    "@types/node": "^22.20.2",
+    "@types/node": "^22.20.4",
     "@types/vscode": "1.120.0",
     "@vscode/test-cli": "0.0.15",
     "@vscode/test-electron": "3.1.0",
