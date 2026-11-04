@@ -23,9 +23,26 @@ interface PollableTelegramController {
 }
 
 describe("TelegramController lifecycle", () => {
-  test("dispose aborts the active poll and its stale completion does not dispatch room work", { timeout: HANG_NET_TIMEOUT_MS }, async () => {
+  test("dispose aborts the active poll and its stale completion does not dispatch room work", { timeout: HANG_NET_TIMEOUT_MS }, async (t) => {
     const environment = await useTempTelegramEnvironment();
     const restoreSettings = installTelegramSettings(environment.botToken);
+    const fsModule = require("node:fs/promises") as typeof fs;
+    const originalOpen = fsModule.open;
+    let delayedLeasePublication = false;
+    t.mock.method(fsModule, "open", async (...args: Parameters<typeof fs.open>) => {
+      const handle = await originalOpen(...args);
+      if (path.basename(path.dirname(String(args[0]))) === "poller.lock.json") {
+        const originalSync = handle.sync.bind(handle);
+        t.mock.method(handle, "sync", async () => {
+          // Slow durable publication must not turn this disposal test into a
+          // lease-expiry test before the mocked Telegram transport even starts.
+          await new Promise<void>((resolve) => setTimeout(resolve, 100));
+          delayedLeasePublication = true;
+          await originalSync();
+        });
+      }
+      return handle;
+    });
     const telegramModule = require("../src/telegram") as Record<string, unknown>;
     const originalGetUpdates = telegramModule.getTelegramUpdates;
     let resolveUpdates: ((result: TelegramUpdatesResult) => void) | undefined;
@@ -59,6 +76,8 @@ describe("TelegramController lifecycle", () => {
         pollStarted,
         pending.then(() => { throw new Error("Telegram poll completed before its transport started"); }),
       ]);
+      assert.equal(delayedLeasePublication, true);
+      assert.equal(pollSignal?.aborted, false);
       controller.dispose();
       assert.equal(pollSignal?.aborted, true);
       resolveUpdates?.({ ok: false, updates: [], error: "aborted" });
@@ -369,7 +388,9 @@ function installTelegramSettings(botToken: string): () => void {
     telegramConfig: () => ({ botToken, chatId: "chat" }),
     telegramInboundAllowedSenderIds: () => [],
     telegramInboundEnabled: () => true,
-    telegramInboundPollIntervalMs: () => 25,
+    // The interval also defines the poller lease TTL. Disposal is the event
+    // under test; filesystem latency must not expire the lease first.
+    telegramInboundPollIntervalMs: () => HANG_NET_TIMEOUT_MS,
     telegramInboundPrefix: () => "/hydra",
   };
   const originals = new Map<string, unknown>();
