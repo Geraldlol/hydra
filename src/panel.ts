@@ -376,6 +376,7 @@ import {
   type PendingRoomAttachment,
 } from "./attachments";
 import {
+  isCodexExecArgs,
   shouldCaptureCodexLastMessage,
   shouldUseCodexJson,
   withCodexJsonArgs,
@@ -11148,16 +11149,13 @@ export class HydraRoomPanel {
     if (agentKind === "claude" && shouldUseClaudeStreamJson(spawn)) {
       return { spawn: withClaudeStreamJsonArgs(spawn), outputMode: "claudeStreamJson" };
     }
-    if (agentKind === "codex" && spawn.args.includes("exec")) {
+    if (agentKind === "codex" && isCodexExecArgs(spawn.args)) {
       // Why: users may prefix global codex flags (e.g. `--config sandbox_mode=...`)
       // before `exec`. The previous `args[0] === "exec"` check missed those argv
-      // shapes, so the terminal bridge fell back to plain output and re-leaked the
-      // full prompt transcript into the visible terminal — the exact symptom the
-      // codexJson force-on was added to fix.
+      // shapes. Match the subcommand rather than an option value named `exec`.
+      // Structured output keeps the prompt transcript out of the visible terminal.
       return {
-        spawn: spawn.args.includes("--json") || spawn.args.includes("--experimental-json")
-          ? spawn
-          : withCodexJsonArgs(spawn),
+        spawn: withCodexJsonArgs(spawn),
         outputMode: "codexJson",
       };
     }

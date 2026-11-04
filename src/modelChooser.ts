@@ -171,10 +171,9 @@ export async function chooseModelInteractively(deps: ModelChooserDeps): Promise<
 // Curated Claude model presets for the chooser. Unlike Codex (which has
 // `codex debug models`), the Claude Code CLI exposes no "list models" command,
 // so this list is maintained by hand — keep it current with the Claude model
-// catalog (the claude-api skill's models.md is the canonical source).
-// Why aliases first: `fable`/`sonnet`/`opus`/`haiku` NEVER go stale — each
-// always resolves to the current build of that family, so a user who picks an
-// alias keeps getting the latest model without this list ever being re-edited.
+// catalog: https://platform.claude.com/docs/en/models/overview (2026-11-05).
+// Aliases follow the current model for the CLI's provider and account; exact
+// mappings can differ between the Anthropic API and other providers.
 // Full IDs follow for pinning a specific version. The chooser also offers a
 // free-text "Custom…" entry, so an ID missing here is never a dead end.
 // Drift guard: test/modelChooserSourceContract.test.ts pins the current flagships.
@@ -185,10 +184,13 @@ const CLAUDE_MODEL_PRESETS: Array<{ label: string; description: string }> = [
   { label: "haiku", description: "Alias — current Haiku" },
   { label: "claude-fable-5-1", description: "Fable 5.1 — most capable (Claude 5, Mythos-class tier above Opus)" },
   { label: "claude-mythos-5-1", description: "Mythos 5.1 — same model as Fable 5.1 (approved Project Glasswing orgs only)" },
+  { label: "claude-opus-5-5", description: "Opus 5.5 — latest Opus (Claude Code 2.1.280+)" },
+  { label: "claude-sonnet-5-5", description: "Sonnet 5.5 — latest Sonnet (CLI alias updated in 2.1.284)" },
+  { label: "claude-haiku-5-5", description: "Haiku 5.5 — latest Haiku (CLI alias updated in 2.1.293)" },
+  { label: "claude-sonnet-5", description: "Sonnet 5 (older)" },
   { label: "claude-fable-5", description: "Fable 5 (older)" },
   { label: "claude-mythos-5", description: "Mythos 5 (older; approved Project Glasswing orgs only)" },
-  { label: "claude-sonnet-5", description: "Sonnet 5 — near-Opus quality at Sonnet cost" },
-  { label: "claude-opus-5", description: "Opus 5 — latest Opus" },
+  { label: "claude-opus-5", description: "Opus 5 (older)" },
   { label: "claude-opus-4-8", description: "Opus 4.8 (older)" },
   { label: "claude-opus-4-7", description: "Opus 4.7 (older)" },
   { label: "claude-opus-4-6", description: "Opus 4.6 (older)" },
@@ -217,31 +219,45 @@ const GEMINI_MODEL_PRESETS: Array<{ label: string; description: string }> = [
   { label: "gemini-2.5-flash-lite", description: "Gemini 2.5 Flash-Lite (stable fallback)" },
 ];
 
+// Current general-purpose Codex models, checked against official documentation
+// on 2026-11-05: https://developers.openai.com/codex/models
+// Seed these even when a cached CLI catalog predates their release. An explicit
+// catalog entry still controls visibility and supplies the live description.
+const CODEX_CURRENT_MODEL_PRESETS: Array<{ label: string; description: string }> = [
+  { label: "gpt-6-astra", description: "GPT-6 Astra - most capable for complex work" },
+  { label: "gpt-6.1-sol", description: "GPT-6.1 Sol - current workhorse for coding and everyday work" },
+  { label: "gpt-6.1-terra", description: "GPT-6.1 Terra - efficient writing and visual work (Codex CLI 0.159.0+)" },
+  { label: "gpt-6-sol", description: "GPT-6 Sol - previous-generation workhorse" },
+  { label: "gpt-6-luna", description: "GPT-6 Luna - fast, efficient focused tasks" },
+];
+
 function codexPresetsForChooser(
   snapshot: CodexModelsSnapshot | undefined,
 ): Array<{ label: string; description: string }> {
   if (snapshot && snapshot.models.length) {
+    const knownSlugs = new Set(snapshot.models.map((m) => m.slug));
+    const missingCurrentModels = CODEX_CURRENT_MODEL_PRESETS.filter((p) => !knownSlugs.has(p.label));
     const listable = snapshot.models.filter((m) => m.visibility === "list");
     const sorted = [...listable].sort((a, b) => a.slug.localeCompare(b.slug, "en", { numeric: true }));
-    return sorted.map((m) => ({
-      label: m.slug,
-      description: codexModelDescription(m),
-    }));
+    return [
+      ...missingCurrentModels,
+      ...sorted.map((m) => ({
+        label: m.slug,
+        description: codexModelDescription(m),
+      })),
+    ];
   }
-  // Fallback when the catalog has never been fetched or the local CLI catalog
-  // is stale. `codex debug models` replaces this list with live data when it
-  // succeeds; this seeds current documented Codex models before the first
-  // successful refresh. Mirrors the `visibility: "list"` entries of
-  // `codex debug models` on codex-cli 0.144.1 (2026-09-03).
+  // Older models remain available for existing workflows and API-key users.
+  // Account access still depends on the CLI, provider, and rollout.
   return [
-    { label: "gpt-5.6-sol", description: "GPT-5.6 Sol - current Codex flagship" },
+    ...CODEX_CURRENT_MODEL_PRESETS,
+    { label: "gpt-5.6-sol", description: "GPT-5.6 Sol - previous-generation coding model" },
     { label: "gpt-5.6-terra", description: "GPT-5.6 Terra - balanced capability and cost" },
     { label: "gpt-5.6-luna", description: "GPT-5.6 Luna - fastest / lowest-cost 5.6 model" },
-    { label: "gpt-daybreak-blue-latest", description: "Daybreak Blue - alias of the current flagship (Sol); Daybreak program approval required" },
-    { label: "gpt-5.5", description: "GPT-5.5 - previous Codex flagship" },
-    { label: "gpt-5.4", description: "GPT-5.4" },
-    { label: "gpt-5.4-mini", description: "GPT-5.4-Mini - lighter / cheaper" },
-    { label: "gpt-5.3-codex-spark", description: "High-reasoning code variant (interactive only — no API)" },
+    { label: "gpt-daybreak-blue-latest", description: "Daybreak Blue - restricted model; Daybreak program approval required" },
+    { label: "gpt-5.5", description: "GPT-5.5 - API key only; retired from ChatGPT sign-in on 2026-10-14" },
+    { label: "gpt-5.4", description: "GPT-5.4 - API key only; retired from ChatGPT sign-in" },
+    { label: "gpt-5.4-mini", description: "GPT-5.4 Mini - API key only; retired from ChatGPT sign-in" },
   ];
 }
 

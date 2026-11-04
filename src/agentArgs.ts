@@ -34,12 +34,20 @@ export function isBuiltinAgentId(id: AgentId): boolean {
  * not flags on exec. Used by every with*Args helper that injects a flag
  * into an already-formed argv.
  *
+ * A caller that parses native options can provide the index of the real `--`
+ * terminator. Insert before that boundary, even when its prompt contains `-`.
+ * The caller distinguishes a terminator from a literal option value of `--`.
+ *
  * If there's no trailing dash (Claude or non-`exec` Codex subcommands),
  * fall back to appending. Both behaviors match the previous inline copy
  * that lived in panel.ts.
  */
-export function insertBeforeStdinDash(args: string[], insertion: string[]): string[] {
+export function insertBeforeStdinDash(args: string[], insertion: string[], optionTerminatorIndex = -1): string[] {
   const next = [...args];
+  if (optionTerminatorIndex >= 0) {
+    next.splice(optionTerminatorIndex, 0, ...insertion);
+    return next;
+  }
   const dashIndex = next.lastIndexOf("-");
   if (dashIndex >= 0) {
     next.splice(dashIndex, 0, ...insertion);

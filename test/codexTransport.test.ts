@@ -1,5 +1,6 @@
 import { describe, test } from "node:test";
 import * as assert from "node:assert/strict";
+import * as vscode from "vscode";
 import {
   shouldCaptureCodexLastMessage,
   withCodexLastMessageArgs,
@@ -12,13 +13,14 @@ import {
 // top-level; VS Code provides that module at runtime. For node:test we
 // substitute a stub via scripts/setup-vscode-stub.js (chained from the
 // "test" npm script). The stub returns the `defaultValue` for every config
-// read by default, which is enough to exercise the input-validation
-// early-return branches below. Positive config-driven `should*` branches
-// stay uncovered here.
+// read by default; currentConfig lets explicit flag tests distinguish native
+// output selection from Hydra's automatic flag settings.
 
 function spawn(args: string[]) {
   return { command: "codex", args, cwd: "C:\\repo" };
 }
+
+const currentConfig = (vscode as unknown as { currentConfig: Record<string, unknown> }).currentConfig;
 
 // ---------------------------------------------------------------------------
 // shouldCaptureCodexLastMessage
@@ -107,25 +109,67 @@ describe("withCodexLastMessageArgs", () => {
 // ---------------------------------------------------------------------------
 // shouldUseCodexJson
 // ---------------------------------------------------------------------------
-// Same coverage rationale as shouldCaptureCodexLastMessage above — only the
-// input-validation early returns are unit-testable without a richer config
-// shim.
+// This predicate also selects the reply/usage parser, so explicit native JSON
+// flags must be recognized independently of Hydra's automatic flag setting.
 
 describe("shouldUseCodexJson", () => {
-  test("returns false when args[0] is not 'exec'", () => {
+  test("returns false for a non-exec subcommand", () => {
     // `--json` is only meaningful on `codex exec`; bail before config read.
     assert.equal(shouldUseCodexJson(spawn(["review", "-"])), false);
   });
 
-  test("returns false when args already include --json", () => {
-    // User has already opted into the JSON stream in their ExecArgs.
-    assert.equal(shouldUseCodexJson(spawn(["exec", "--json", "-"])), false);
+  test("selects JSON parsing for an explicit --json even when automatic JSON is disabled", () => {
+    currentConfig.codexJson = false;
+    try {
+      assert.equal(shouldUseCodexJson(spawn(["exec", "--json", "-"])), true);
+    } finally {
+      delete currentConfig.codexJson;
+    }
   });
 
-  test("returns false when args already include --experimental-json", () => {
-    // Older codex builds expose the JSON stream under --experimental-json;
-    // helper must respect either spelling so it doesn't inject a duplicate.
-    assert.equal(shouldUseCodexJson(spawn(["exec", "--experimental-json", "-"])), false);
+  test("selects JSON parsing for the legacy explicit JSON flag", () => {
+    assert.equal(shouldUseCodexJson(spawn(["exec", "--experimental-json", "-"])), true);
+  });
+
+  test("recognizes exec after global flags and keeps the automatic JSON setting", () => {
+    assert.equal(shouldUseCodexJson(spawn(["--profile", "hydra", "exec", "-"])), true);
+    assert.equal(shouldUseCodexJson(spawn(["--profile=hydra", "exec", "-"])), true);
+    currentConfig.codexJson = false;
+    try {
+      assert.equal(shouldUseCodexJson(spawn(["--profile", "hydra", "exec", "-"])), false);
+    } finally {
+      delete currentConfig.codexJson;
+    }
+  });
+
+  test("does not mistake a global option value for the exec subcommand", () => {
+    assert.equal(shouldUseCodexJson(spawn(["--profile", "exec", "review"])), false);
+  });
+
+  test("ignores JSON tokens after -- and JSON-looking option values", () => {
+    currentConfig.codexJson = false;
+    try {
+      for (const args of [
+        ["exec", "--", "--json"],
+        ["exec", "--", "--experimental-json"],
+        ["exec", "--output-last-message", "--json", "-"],
+        ["exec", "--output-last-message", "--experimental-json", "-"],
+      ]) {
+        assert.equal(shouldUseCodexJson(spawn(args)), false, JSON.stringify(args));
+      }
+    } finally {
+      delete currentConfig.codexJson;
+    }
+  });
+});
+
+describe("Codex exec argument recognition", () => {
+  test("recognizes global flags and the exec alias without matching option values", () => {
+    assert.equal(shouldUseCodexJson(spawn(["--profile", "hydra", "exec", "-"])), true);
+    assert.equal(shouldUseCodexJson(spawn(["--enable", "search", "exec", "-"])), true);
+    assert.equal(shouldUseCodexJson(spawn(["--profile=hydra", "e", "-"])), true);
+    assert.equal(shouldUseCodexJson(spawn(["--profile", "exec", "review"])), false);
+    assert.equal(shouldUseCodexJson(spawn(["--", "exec"])), false);
   });
 });
 
@@ -142,6 +186,30 @@ describe("withCodexJsonArgs", () => {
   test("appends --json at end when no '-' is present", () => {
     const out = withCodexJsonArgs(spawn(["exec", "--sandbox", "read-only"]));
     assert.deepEqual(out.args, ["exec", "--sandbox", "read-only", "--json"]);
+  });
+
+  test("preserves explicit JSON flags without injecting duplicates", () => {
+    for (const flag of ["--json", "--experimental-json"]) {
+      const input = spawn(["exec", flag, "-"]);
+      assert.strictEqual(withCodexJsonArgs(input), input);
+    }
+  });
+
+  test("inserts JSON before -- even when the prompt is a JSON flag or stdin dash", () => {
+    for (const prompt of ["--json", "--experimental-json", "-"]) {
+      const input = spawn(["exec", "--", prompt]);
+      const output = withCodexJsonArgs(input);
+      assert.deepEqual(output.args, ["exec", "--json", "--", prompt]);
+      assert.strictEqual(withCodexJsonArgs(output), output);
+      assert.deepEqual(input.args, ["exec", "--", prompt]);
+    }
+  });
+
+  test("ignores a JSON-looking output path when inserting JSON", () => {
+    const input = spawn(["exec", "--output-last-message", "--json", "-"]);
+    const output = withCodexJsonArgs(input);
+    assert.deepEqual(output.args, ["exec", "--output-last-message", "--json", "--json", "-"]);
+    assert.strictEqual(withCodexJsonArgs(output), output);
   });
 });
 

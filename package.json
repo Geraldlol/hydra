@@ -2,7 +2,7 @@
   "name": "vscode-hydra-room",
   "displayName": "Hydra Agents",
   "description": "A multi-head AI collaboration room with evidence-backed decisions, build/review handoffs, and native CLI workflows inside VS Code.",
-  "version": "0.8.2",
+  "version": "0.8.5",
   "packageManager": "pnpm@11.1.3",
   "publisher": "geraldlol",
   "license": "MIT",
@@ -559,8 +559,8 @@
                     "type": "number",
                     "minimum": 0,
                     "description": "USD per million cache-write tokens."
-          }
-        },
+                  }
+                },
                 "additionalProperties": false,
                 "markdownDescription": "Override per-model USD pricing (per million tokens) used for usage-rail cost estimates."
               }
@@ -1252,7 +1252,7 @@
           "type": "number",
           "default": 0,
           "minimum": 0,
-          "markdownDescription": "If greater than 0, Hydra pauses auto-advance once the session's estimated cost reaches this USD value. Cost is computed from `.hydra/usage.jsonl` using `hydraRoom.modelPrices`. Set to 0 to disable. Useful guard rail when running autonomous loops. Codex JSON event accounting is enabled by default. If you disable `hydraRoom.codexJson`, the one-shot plain-text fallback has no per-token usage breakdown, so Hydra estimates conservatively by billing the whole reply at the output rate — the displayed figure (and therefore when this cap trips) runs high."
+          "markdownDescription": "If greater than 0, Hydra pauses auto-advance once the session's estimated cost reaches this USD value. Cost is computed from `.hydra/usage.jsonl` using `hydraRoom.modelPrices`. Set to 0 to disable. Useful guard rail when running autonomous loops. Codex JSON event accounting is enabled by default. If you disable `hydraRoom.codexJson`, the one-shot plain-text fallback has no per-token usage breakdown, so Hydra estimates the reported token total at the input rate. This estimate can differ from actual billing; keep JSON accounting enabled for token-category pricing."
         },
         "hydraRoom.claudeAutomationCreditGuard": {
           "type": "string",
@@ -1393,7 +1393,7 @@
               "description": "Per-phase models for Claude. Missing phases fall back to the CLI default."
             }
           ],
-          "markdownDescription": "Model passed to Claude Code CLI as `--model <id>` on every dispatch. Either a single string (applied to every phase) or an object with per-phase overrides like `{ \"discussion\": \"sonnet\", \"build\": \"opus\", \"review\": \"fable\" }`. Aliases (`fable`, `sonnet`, `opus`, `haiku`) always resolve to the current build of that family; or pin a full ID (`claude-fable-5-1`, `claude-sonnet-5`, `claude-opus-5`, `claude-haiku-4-5-20251001`). Use `Hydra: Choose Model` (Ctrl+Alt+M) to change live."
+          "markdownDescription": "Model passed to Claude Code CLI as `--model <id>` on every dispatch. Either a single string (applied to every phase) or an object with per-phase overrides like `{ \"discussion\": \"sonnet\", \"build\": \"opus\", \"review\": \"fable\" }`. Aliases (`fable`, `sonnet`, `opus`, `haiku`) resolve according to the installed CLI, provider, and account; or pin a full ID (`claude-fable-5-1`, `claude-sonnet-5-5`, `claude-opus-5-5`, `claude-haiku-5-5`). Use `Hydra: Choose Model` (Ctrl+Alt+M) to change live."
         },
         "hydraRoom.codexModel": {
           "scope": "application",
@@ -1718,11 +1718,11 @@
     "install:handoff-skill": "node scripts/install-handoff-skill.js"
   },
   "devDependencies": {
-    "@types/node": "^22.20.2",
+    "@types/node": "^22.20.5",
     "@types/vscode": "1.120.0",
     "@vscode/test-cli": "0.0.15",
     "@vscode/test-electron": "3.1.0",
-    "@vscode/vsce": "^4.0.0",
+    "@vscode/vsce": "^4.1.0",
     "typescript": "^5.9.3"
   }
 }
