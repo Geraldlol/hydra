@@ -312,11 +312,71 @@ describe("resolveModelPrices", () => {
     assert.equal(sol.outputPerMTok, 20);
     assert.equal(sol.cacheReadPerMTok, 0.4);
     assert.deepEqual(alias, sol);
-    assert.deepEqual(daybreak, sol, "Daybreak Blue is an alias of the current flagship");
+    assert.deepEqual(daybreak, sol, "Daybreak's legacy estimate uses GPT-5.6 Sol until a price override is configured");
     assert.equal(terra.inputPerMTok, 2);
     assert.equal(terra.outputPerMTok, 12);
     assert.equal(luna.inputPerMTok, 0.2);
     assert.equal(luna.outputPerMTok, 1.2);
+  });
+
+  test("prices the GPT-6 family at documented Standard short-context API rates", () => {
+    for (const [model, input, output, read, write] of [
+      ["gpt-6-astra", 10, 50, 1, 12.5],
+      ["gpt-6.1-sol", 2, 10, 0.1, 2.5],
+      ["gpt-6.1-terra", 1, 5, 0.05, 1.25],
+      ["gpt-6-sol", 2, 10, 0.2, 2.5],
+      ["gpt-6-luna", 0.1, 0.5, 0.01, 0.125],
+    ] as const) {
+      assert.deepEqual(resolveModelPrices("codex", model), {
+        inputPerMTok: input,
+        outputPerMTok: output,
+        cacheReadPerMTok: read,
+        cacheCreatePerMTok: write,
+      }, model);
+    }
+  });
+
+  test("prices older supported Codex models at their documented Standard API rates", () => {
+    for (const [model, input, output, read] of [
+      ["gpt-5.5", 5, 30, 0.5],
+      ["gpt-5.4", 2.5, 15, 0.25],
+      ["gpt-5.4-mini", 0.75, 4.5, 0.075],
+      ["gpt-5.3-codex", 1.75, 14, 0.175],
+      ["gpt-5.2", 1.75, 14, 0.175],
+    ] as const) {
+      assert.deepEqual(resolveModelPrices("codex", model), {
+        inputPerMTok: input, outputPerMTok: output, cacheReadPerMTok: read, cacheCreatePerMTok: 0,
+      }, model);
+    }
+  });
+
+  test("does not add a cache-write surcharge to pre-GPT-5.6 models", () => {
+    for (const model of [
+      "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.2",
+      "gpt-5", "gpt-5-codex", "gpt-5-pro", "gpt-5-mini", "gpt-5-nano", "o3", "o3-mini", "o4-mini", "codex-mini-latest",
+    ]) {
+      assert.equal(resolveModelPrices("codex", model).cacheCreatePerMTok, 0, model);
+    }
+    assert.equal(resolveModelPrices("codex", "gpt-5-pro").cacheReadPerMTok, 0, "GPT-5 Pro has no cache-read rate");
+  });
+
+  test("partial overrides inherit corrected older Codex rates", () => {
+    assert.deepEqual(resolveModelPrices("codex", "gpt-5.5", { "gpt-5.5": { inputPerMTok: 7 } }), {
+      inputPerMTok: 7, outputPerMTok: 30, cacheReadPerMTok: 0.5, cacheCreatePerMTok: 0,
+    });
+  });
+
+  test("prices Opus 5.5 and the current opus alias without changing pinned Opus 5", () => {
+    const opus55 = resolveModelPrices("claude", "claude-opus-5-5");
+    assert.deepEqual(opus55, {
+      inputPerMTok: 4,
+      outputPerMTok: 20,
+      cacheReadPerMTok: 0.2,
+      cacheCreatePerMTok: 5,
+    });
+    assert.deepEqual(resolveModelPrices("claude", "opus"), opus55);
+    assert.equal(resolveModelPrices("claude", "claude-opus-5").inputPerMTok, 5);
+    assert.equal(resolveModelPrices("claude", "claude-opus-5").cacheReadPerMTok, 0.5);
   });
 
   test("prices Fable 5.1 with the reduced cache-read rate and points the fable alias at it", () => {
@@ -336,7 +396,23 @@ describe("resolveModelPrices", () => {
     assert.equal(sonnet5.inputPerMTok, 2);
     assert.equal(sonnet5.outputPerMTok, 10);
     assert.equal(sonnet5.cacheReadPerMTok, 0.2);
-    assert.deepEqual(resolveModelPrices("claude", "sonnet"), sonnet5);
+  });
+
+  test("prices Sonnet 5.5 and its alias with the reduced cache-read rate", () => {
+    const sonnet55 = resolveModelPrices("claude", "claude-sonnet-5-5");
+    assert.deepEqual(sonnet55, {
+      inputPerMTok: 2, outputPerMTok: 10, cacheReadPerMTok: 0.1, cacheCreatePerMTok: 2.5,
+    });
+    assert.deepEqual(resolveModelPrices("claude", "sonnet"), sonnet55);
+  });
+
+  test("prices Haiku 5.5 and its alias conservatively at the long-context tier", () => {
+    const haiku55 = resolveModelPrices("claude", "claude-haiku-5-5");
+    assert.deepEqual(haiku55, {
+      inputPerMTok: 0.5, outputPerMTok: 2.5, cacheReadPerMTok: 0.05, cacheCreatePerMTok: 0.625,
+    });
+    assert.deepEqual(resolveModelPrices("claude", "haiku"), haiku55);
+    assert.equal(resolveModelPrices("claude", "claude-haiku-4-5").inputPerMTok, 1);
   });
 
   test("prices current Gemini aliases and stable concrete fallbacks", () => {
@@ -358,6 +434,39 @@ describe("resolveModelPrices", () => {
 });
 
 describe("buildUsageRecord stores the model and prices accordingly", () => {
+  test("bills Codex summaries for fresh input, cache reads, and output without a cache-write charge", () => {
+    const tokens = usageFromCodexSummary({
+      input_tokens: 100_000,
+      cached_input_tokens: 60_000,
+      output_tokens: 10_000,
+    });
+    assert.ok(tokens);
+    for (const [model, expectedCost] of [
+      ["gpt-6-astra", 0.96],
+      ["gpt-6.1-sol", 0.186],
+      ["gpt-6.1-terra", 0.093],
+      ["gpt-6-sol", 0.192],
+      ["gpt-6-luna", 0.0096],
+      ["gpt-5.5", 0.53],
+      ["gpt-5.4", 0.265],
+      ["gpt-5.4-mini", 0.0795],
+      ["gpt-5.3-codex", 0.2205],
+      ["gpt-5.2", 0.2205],
+    ] as const) {
+      const record = buildUsageRecord({
+        sessionId: "s",
+        agent: "codex",
+        phase: "build",
+        source: "codexJson",
+        model,
+        tokens,
+      });
+      assert.equal(record.costUsd, expectedCost, model);
+      assert.equal(record.cacheCreateTokens, 0);
+      assert.equal(record.costSource, "computed");
+    }
+  });
+
   test("records the model and bills at that model's rate", () => {
     const r = buildUsageRecord({
       sessionId: "s",

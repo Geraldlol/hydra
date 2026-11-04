@@ -49,14 +49,14 @@ describe("CI workflow contracts", () => {
     const combined = `${workflow}\n${release}`;
 
     assert.match(workflow, /actions\/checkout@[a-f0-9]{40} # v7\.0\.1/);
-    assert.match(workflow, /actions\/setup-node@[a-f0-9]{40} # v7\.0\.0/);
+    assert.match(workflow, /actions\/setup-node@[a-f0-9]{40} # v7\.1\.0/);
     assert.match(
       workflow,
-      /pnpm\/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6/,
+      /pnpm\/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6\.1\.0/,
     );
     assert.match(
       release,
-      /actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7\.0\.1/,
+      /actions\/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7\.0\.2/,
     );
     assert.equal((workflow.match(/pnpm\/action-setup@/g) ?? []).length, 5);
     assert.equal((release.match(/pnpm\/action-setup@/g) ?? []).length, 6);
@@ -94,9 +94,9 @@ describe("CI workflow contracts", () => {
     assert.match(workflow, /pnpm run test:coverage/);
     assert.match(release, /pnpm run test:coverage/);
     assert.doesNotMatch(release, /uses:\s+[^\s]+@v\d+/);
-    assert.equal((release.match(/pnpm\/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86/g) ?? []).length, 6);
+    assert.equal((release.match(/pnpm\/action-setup@ea17c68df8912ef543352723c149a84f56e3d413/g) ?? []).length, 6);
     assert.doesNotMatch(release, /pnpm\/setup@|install: false/);
-    assert.match(release, /actions\/upload-artifact@[a-f0-9]{40} # v7\.0\.1/);
+    assert.match(release, /actions\/upload-artifact@[a-f0-9]{40} # v7\.0\.2/);
     assert.match(release, /retention-days: 14/);
     assert.match(workflow, /timeout-minutes: 25/);
     assert.match(release, /timeout-minutes: 25/);
@@ -140,7 +140,7 @@ describe("CI workflow contracts", () => {
       validateJob,
       /^\s+run: node scripts\/verify-vsix-reproducibility\.js\s*$/mu,
     );
-    assert.match(validateJob, /actions\/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8\.0\.1/u);
+    assert.match(validateJob, /actions\/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8\.0\.2/u);
     assert.match(validateJob, /digest-mismatch: error/u);
     assert.match(
       validateJob,
@@ -151,11 +151,11 @@ describe("CI workflow contracts", () => {
     assert.match(attestJob, /needs:\s*\[package, validate-release-handoff\]/u);
     assert.match(attestJob, /if:\s+github\.ref == 'refs\/heads\/main'/u);
     assert.match(attestJob, /permissions:\s*\n\s+contents: read\s*\n\s+id-token: write\s*\n\s+attestations: write/u);
-    assert.match(attestJob, /actions\/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8\.0\.1/u);
+    assert.match(attestJob, /actions\/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8\.0\.2/u);
     assert.doesNotMatch(attestJob, /(?:^|\n)\s+-?\s*run:|checkout@|pnpm|node /u);
     assert.equal((attestJob.match(/actions\/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4\.2\.1/g) ?? []).length, 2);
-    assert.equal((release.match(/actions\/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c/g) ?? []).length, 2);
-    assert.equal((release.match(/actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/g) ?? []).length, 1);
+    assert.equal((release.match(/actions\/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333/g) ?? []).length, 2);
+    assert.equal((release.match(/actions\/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9/g) ?? []).length, 1);
 
     const provenanceStart = attestJob.indexOf("name: Attest VSIX build provenance");
     const sbomStart = attestJob.indexOf("name: Attest VSIX SBOM", provenanceStart);

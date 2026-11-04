@@ -134,6 +134,72 @@ describe("http transport", () => {
     assert.equal(parsed.usage.prompt_tokens, 5);
   });
 
+  test("an error-only SSE response fails even when HTTP status is 200", async () => {
+    const fetchImpl = (async () => sseResponse([
+      'data: {"error":{"message":"quota exceeded","type":"insufficient_quota"}}\n\n',
+    ])) as unknown as typeof fetch;
+    const res = await runHttpAgent(inv, {
+      timeoutMs: 5000,
+      signal: new AbortController().signal,
+      fetchImpl,
+    });
+
+    assert.equal(res.exitCode, 1);
+    assert.equal(res.stdout, "");
+    assert.match(res.stderr, /quota exceeded/);
+    assert.equal(res.cancelled, false);
+    assert.equal(res.timedOut, false);
+  });
+
+  test("an SSE error fails a partial reply and stops before later content", async () => {
+    const encoder = new TextEncoder();
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(
+          'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n' +
+          'data: {"error":{"message":"provider overloaded"}}\n\n' +
+          'data: {"choices":[{"delta":{"content":"must not appear"}}]}\n\n',
+        ));
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+      },
+      pull(controller) { controller.close(); },
+      cancel() { cancelled = true; },
+    });
+    const fetchImpl = (async () => new Response(stream, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    })) as unknown as typeof fetch;
+    const chunks: string[] = [];
+    const res = await runHttpAgent(inv, {
+      timeoutMs: 5000,
+      signal: new AbortController().signal,
+      fetchImpl,
+      onChunk: (chunk) => chunks.push(chunk),
+    });
+
+    assert.equal(res.exitCode, 1);
+    assert.equal(res.stdout, "partial");
+    assert.equal(chunks.join(""), "partial");
+    assert.match(res.stderr, /provider overloaded/);
+    assert.equal(res.timedOut, false);
+    assert.equal(cancelled, true);
+  });
+
+  test("an SSE error without a trailing blank line is still a failure", async () => {
+    const fetchImpl = (async () => sseResponse([
+      'data: {"error":{"message":"stream failed before completion"}}',
+    ])) as unknown as typeof fetch;
+    const res = await runHttpAgent(inv, {
+      timeoutMs: 5000,
+      signal: new AbortController().signal,
+      fetchImpl,
+    });
+
+    assert.equal(res.exitCode, 1);
+    assert.match(res.stderr, /stream failed before completion/);
+  });
+
   test("streams CRLF-delimited SSE events before the response closes", async () => {
     const encoder = new TextEncoder();
     const chunks: string[] = [];

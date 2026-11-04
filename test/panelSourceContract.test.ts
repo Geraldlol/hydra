@@ -477,15 +477,15 @@ describe("terminal bridge usage source contracts", () => {
     // Why: users sometimes prefix global codex flags (e.g. --config) before exec.
     // The previous `spawn.args[0] === "exec"` check missed those argv shapes and
     // let the bridge fall back to plain output, re-leaking the prompt transcript
-    // into the visible terminal. The broader `args.includes("exec")` check fixes
-    // that bypass.
+    // into the visible terminal. The shared subcommand parser also avoids
+    // mistaking a profile value named `exec` for the subcommand.
     const source = fs.readFileSync(path.join(process.cwd(), "src", "panel.ts"), "utf8");
     const methodStart = source.indexOf("private prepareTerminalBridgeSpawn(");
     const methodEnd = source.indexOf("private async normalizeOneShotResult", methodStart);
     assert.ok(methodStart >= 0 && methodEnd > methodStart);
 
     const method = source.slice(methodStart, methodEnd);
-    assert.match(method, /agentKind === "codex" && spawn\.args\.includes\("exec"\)/);
+    assert.match(method, /agentKind === "codex" && isCodexExecArgs\(spawn\.args\)/);
     assert.doesNotMatch(method, /spawn\.args\[0\] === "exec"/);
     assert.match(method, /withCodexJsonArgs\(spawn\)/);
     assert.match(method, /outputMode: "codexJson"/);

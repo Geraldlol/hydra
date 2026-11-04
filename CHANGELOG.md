@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.8.5 - 2026-11-05
+
+- Adds GPT-6.1 Sol and Terra, Claude Sonnet 5.5 and Haiku 5.5 to the model picker; removes the retired Spark fallback and corrects the GPT-5.5 sign-in retirement label. Preserves live catalog visibility, metadata, and per-phase choices.
+- Refreshes model cost estimates and Claude alias rates against official pricing. Haiku 5.5 uses the conservative long-context tier; provider-reported native costs take precedence.
+- Preserves explicit native JSON output flags so structured responses and usage are parsed correctly, including Codex global options and Claude's `--output-format=value` syntax.
+- Reports provider errors inside HTTP 200 streaming responses as failed calls, stops reading further content, and preserves partial replies with an error diagnostic.
+- Updates VSCE to 4.1.0 and refreshes development dependency security overrides. Updates immutable CI action pins while preserving release verification and attestation boundaries.
+
+## 0.8.4
+
+- Updates `Hydra: Choose Model` with GPT-6 Astra, Sol, and Luna; adds Claude Opus 5.5. Existing Claude Fable 5.1, Sonnet 5, Haiku, and older model choices remain available. Opus 5.5 requires Claude Code 2.1.280 or newer.
+- Keeps current GPT-6 choices visible when a cached Codex catalog predates their release, while honoring explicit hidden entries and using catalog metadata without duplicate presets.
+- Adds current API cost estimates for the GPT-6 family and Opus 5.5, updates the `opus` alias estimate, and labels older Codex choices whose ChatGPT sign-in support has ended or is ending. Model IDs and rates were checked against official provider documentation on 2026-09-24; account availability still depends on the provider and rollout.
+- Updates the build tools' transitive `js-yaml` dependency to 4.3.2 to resolve the dependency audit finding; this development dependency is excluded from the VSIX.
+
 ## 0.8.2
 
 - Resolves the open Dependabot alerts by pinning the transitive dev dependencies `fast-uri` to 3.1.7 (two high: SSRF via repeated hostname percent-decoding, host confusion via skipped IDN canonicalization) and `qs` to 6.16.0 (two moderate: array-limit bypass, `isBuffer` denial of service). Both reach the repo only through `@vscode/vsce` and `secretlint`; nothing ships in the `.vsix`.

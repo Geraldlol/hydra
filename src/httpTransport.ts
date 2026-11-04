@@ -11,6 +11,7 @@ type HttpInvocation = Extract<Invocation, { transport: "http" }>;
 interface OpenAiStreamChunk {
   choices?: Array<{ delta?: { content?: unknown } }>;
   usage?: unknown;
+  error?: unknown;
 }
 
 // SSE permits CRLF, LF, or CR line endings. Matching the raw buffer preserves
@@ -22,9 +23,10 @@ const SSE_EVENT_BOUNDARY = /(?:\r\n|\r|\n){2}/;
  * of whichever chunk carried token usage (if any). Tolerant of blank lines,
  * the terminal `data: [DONE]` sentinel, and non-JSON keep-alive lines.
  */
-export function assembleSseText(sseBody: string): { text: string; usageJson: string | undefined } {
+export function assembleSseText(sseBody: string): { text: string; usageJson: string | undefined; errorMessage?: string } {
   let text = "";
   let usageJson: string | undefined;
+  let errorMessage: string | undefined;
   for (const rawLine of sseBody.split(/\r\n|\r|\n/)) {
     const line = rawLine.trim();
     if (!line.startsWith("data:")) continue;
@@ -35,11 +37,19 @@ export function assembleSseText(sseBody: string): { text: string; usageJson: str
       const delta = obj.choices?.[0]?.delta?.content;
       if (typeof delta === "string") text += delta;
       if (obj.usage) usageJson = payload;
+      if (obj.error !== undefined && obj.error !== null) {
+        const error = obj.error as { message?: unknown };
+        const message = typeof obj.error === "string"
+          ? obj.error
+          : typeof error.message === "string" ? error.message : "Provider returned a streaming error";
+        errorMessage = message.slice(0, 4000) || "Provider returned a streaming error";
+        break;
+      }
     } catch {
       // Non-JSON keep-alive/comment line (e.g. SSE `: ping`) — skip.
     }
   }
-  return { text, usageJson };
+  return { text, usageJson, errorMessage };
 }
 
 function cancelledResult(): HttpAgentResult {
@@ -164,6 +174,7 @@ export async function runHttpAgent(
       const decoder = new TextDecoder();
       let sseBuf = "";
       let usageJson: string | undefined;
+      let streamError: string | undefined;
       let stopped = false;
       const stopReading = () => {
         stopped = true;
@@ -181,10 +192,15 @@ export async function runHttpAgent(
           if (!boundary) break;
           const event = sseBuf.slice(0, boundary.index);
           sseBuf = sseBuf.slice(boundary.index + boundary[0].length);
-          const { text, usageJson: eventUsage } = assembleSseText(event);
+          const { text, usageJson: eventUsage, errorMessage } = assembleSseText(event);
           if (eventUsage) usageJson = eventUsage;
           if (text) {
             appendAndEmitBounded(state, text, MAX_AGENT_STDOUT_BYTES, marker, opts.onChunk);
+          }
+          if (errorMessage) {
+            streamError = errorMessage;
+            stopReading();
+            break;
           }
           if (state.truncated) {
             // Already at the output cap — stop pulling more network data
@@ -199,13 +215,19 @@ export async function runHttpAgent(
         // emits a blank-line delimiter at all — would otherwise grow
         // `sseBuf` without bound while we wait for a "\n\n" that may never
         // arrive. `appendBoundedStream` only caps the *extracted* text, so
-        // this raw-length check is the independent cap for the pre-delimiter
+      // this raw-length check is the independent cap for the pre-delimiter
         // buffer itself.
         if (sseBuf.length > MAX_AGENT_STDOUT_BYTES) {
-          const { text, usageJson: eventUsage } = assembleSseText(sseBuf);
+          const { text, usageJson: eventUsage, errorMessage } = assembleSseText(sseBuf);
           if (eventUsage) usageJson = eventUsage;
           if (text) {
             appendAndEmitBounded(state, text, MAX_AGENT_STDOUT_BYTES, marker, opts.onChunk);
+          }
+          if (errorMessage) {
+            streamError = errorMessage;
+            sseBuf = "";
+            stopReading();
+            break;
           }
           if (!state.truncated) {
             state.truncated = true;
@@ -224,9 +246,10 @@ export async function runHttpAgent(
       sseBuf += decoder.decode();
       // Flush a trailing partial event left in the buffer (server closed the
       // connection without a final blank-line delimiter).
-      if (!state.truncated) {
-        const { text: tailText, usageJson: tailUsage } = assembleSseText(sseBuf);
+      if (!state.truncated && !streamError) {
+        const { text: tailText, usageJson: tailUsage, errorMessage } = assembleSseText(sseBuf);
         if (tailUsage) usageJson = tailUsage;
+        if (errorMessage) streamError = errorMessage;
         if (tailText) {
           appendAndEmitBounded(state, tailText, MAX_AGENT_STDOUT_BYTES, marker, opts.onChunk);
         }
@@ -234,8 +257,16 @@ export async function runHttpAgent(
       const rawBody = JSON.stringify({
         choices: [{ message: { content: state.text } }],
         ...(usageJson ? { usage: (JSON.parse(usageJson) as { usage?: unknown }).usage } : {}),
+        ...(streamError ? { error: { message: streamError } } : {}),
       });
-      return { stdout: state.text, stderr: "", exitCode: 0, timedOut, cancelled: false, rawBody };
+      return {
+        stdout: state.text,
+        stderr: streamError ? `HTTP stream error: ${streamError}` : "",
+        exitCode: streamError ? 1 : 0,
+        timedOut,
+        cancelled: false,
+        rawBody,
+      };
     }
 
     // Non-streaming: single JSON object (or plain text).

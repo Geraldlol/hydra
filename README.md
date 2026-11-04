@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://marketplace.visualstudio.com/items?itemName=geraldlol.vscode-hydra-room">Install from the Visual Studio Marketplace</a>
-  &nbsp;·&nbsp; Preview 0.8.2
+  &nbsp;·&nbsp; Preview 0.8.5
   &nbsp;·&nbsp; <a href="CHANGELOG.md">Changelog</a>
 </p>
 
@@ -75,7 +75,13 @@ For the default room:
 
 If VS Code cannot find a CLI, set `hydraRoom.codexCommand` or `hydraRoom.claudeCommand` to its absolute executable path.
 
+`Hydra: Choose Model` includes GPT-6.1 Sol and Terra, GPT-6 Astra and Luna, and Claude Sonnet 5.5, Opus 5.5, Haiku 5.5, and Fable 5.1. Use `Hydra: Refresh Codex Models` to load your account's catalog. GPT-6.1 Terra requires Codex CLI 0.159.0 or newer; Claude's current `sonnet` and `haiku` alias mappings require Claude Code 2.1.284 and 2.1.293 respectively. Availability also depends on your provider and account. These choices were checked against [OpenAI's model documentation](https://developers.openai.com/codex/models) and [Claude's model documentation](https://platform.claude.com/docs/en/models/overview) on 2026-11-05.
+
+The cost meter estimates public API charges; subscription billing can differ. GPT-6/6.1 estimates use Standard short-context rates. Haiku 5.5 estimates use its conservative >100K input tier because Hydra's price table cannot vary by prompt length; smaller prompts cost less. Provider-reported native costs take precedence. Override rates through `hydraRoom.modelPrices` when needed. See [OpenAI pricing](https://developers.openai.com/api/docs/pricing) and [Claude pricing](https://platform.claude.com/docs/en/about-claude/pricing).
+
 Gemini and custom heads are optional. Gemini dispatch uses the CLI's documented stdin headless mode and single JSON response/SessionMetrics envelope; install and authenticate the `gemini` CLI, then add `gemini` to `hydraRoom.roomRoster`. Hydra preserves raw stdout if an installed CLI returns an incompatible envelope. The release suite validates recorded official contract shapes and adversarial parser cases, but cannot prove that a particular installed/authenticated Gemini CLI or account behaves identically; run a bounded local smoke before relying on it. Registered `openai-compatible` heads are locally read-only text endpoints; registered `cli-template` heads can declare `read-only`, `workspace-write`, or `full-native` authority.
+
+The [upstream Gemini CLI](https://github.com/google-gemini/gemini-cli/blob/main/README.md) now targets enterprise Code Assist and legacy API environments; consumer use has moved to Antigravity. Hydra's Gemini adapter requires the `gemini` CLI contract and has not been validated with Antigravity.
 
 Node.js 22.13 or newer on the 22.x line, or Node.js 24.x, plus pnpm 11.1.3 are required for local extension development. Codex and Claude browser control uses MCP and needs no separate Node install; the optional packaged browser CLI for other head types requires `node` on `PATH`.
 

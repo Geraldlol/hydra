@@ -48,6 +48,13 @@ describe("insertBeforeStdinDash", () => {
     );
   });
 
+  test("uses a caller-parsed option terminator ahead of a literal prompt dash", () => {
+    assert.deepEqual(
+      insertBeforeStdinDash(["exec", "--", "-"], ["--json"], 1),
+      ["exec", "--json", "--", "-"],
+    );
+  });
+
   test("appends to an empty arg list when no '-' is present", () => {
     assert.deepEqual(insertBeforeStdinDash([], ["--x", "1"]), ["--x", "1"]);
   });
